@@ -105,6 +105,7 @@ The intended framework should use these units as first-class artifacts:
 - `agent_dispatch`: structured subagent invocation packet with scope, tools, schema, budget, and stop conditions
 - `agent_result`: structured subagent return packet with status, evidence, changed files or findings, and next action
 - `design_finding`: implementation evidence that requests controlled design escalation without granting write authority to the worker
+- `risk_assessment`: orchestrator-owned classification that chooses the evidence level for an implementation result
 - `repo_index`: derived tool-generated navigation facts with provenance, confidence, and stale conditions
 - `context_pack`: task-local source context selected from the repo index and real files
 
@@ -132,8 +133,9 @@ The framework should combine:
 11. Treat repository indexes as navigation aids, not source-of-truth understanding.
 12. Let implementation workers report design gaps, but route authority changes through orchestrator-gated CR integration.
 13. Separate semantic architecture from implementation structure documents with explicit `authority_class`.
-14. Give workers task-local context packs instead of whole repositories.
-15. Use trace data for future model routing, agent replacement, and workflow optimization.
+14. Default implementation evidence to L1 and escalate only when the Risk Classifier Gate requires L2/L3.
+15. Give workers task-local context packs instead of whole repositories.
+16. Use trace data for future model routing, agent replacement, and workflow optimization.
 
 ## Recommended Next Step
 

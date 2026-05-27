@@ -162,6 +162,102 @@ must record that as a proposed finding linked to `design_findings` and the
 Implementation-to-Design Escalation Gate. It is not authoritative until a
 design CR is integrated.
 
+## Evidence Budget Policy
+
+The implementation workflow should spend most of its time on code and
+verification, not on hand-written audit material. Evidence requirements are
+graded by risk.
+
+Default: use `L1` for normal task cards. Use `L0` only for trivial local edits.
+Escalate to `L2` or `L3` when the Risk Classifier Gate says so.
+
+| Evidence level | Typical trigger | Minimum required evidence |
+|---|---|---|
+| `L0` | One-file or tiny local edit, no public behavior/interface change, verification command available. | `changed_files`, diff summary, verification result, next action. Documentation-only tasks may record a not-applicable verification reason. |
+| `L1` | Default bounded implementation task. | L0 plus key files read, assumptions, verification output summary, and worker result. |
+| `L2` | Cross-module change, internal API change, non-contract schema change, build/test/config change, broad refactor, uncertain scope, skipped required verification, or worker uncertainty. | L1 plus formal risk assessment, task/context/base hashes, patch review or orchestrator review, milestone trace. |
+| `L3` | Semantic contract change, externally visible API/protocol change, registry-owned schema change, security/permission/payment/data migration/concurrency impact, blocking design finding, or runtime probe invalidates approach. | Full implementation-to-design escalation or high-risk integration path: CR/review/trace/versioned evidence as applicable. |
+
+Evidence budget rule: for L0/L1 tasks, manual evidence writing should not
+consume more than 10-20 percent of the task effort. If it does, reduce the
+manual evidence requirement or generate it from `git diff`, command output,
+and result records.
+
+Evidence collection defaults:
+
+- Prefer generated evidence over worker prose: diff stats, command logs,
+  file lists, hashes, and exit codes.
+- Do not require structure docs for ordinary edits.
+- Do not require design findings unless the worker found a semantic
+  contradiction, ambiguity, or impossible acceptance criterion.
+- For L0/L1, one compact worker result plus a milestone trace is enough.
+- For L2/L3, increase evidence before integration, not before every read.
+
+### Risk Classifier Gate
+
+Workers provide risk signals; they do not decide final risk.
+
+Risk classification inputs:
+
+- task card objective and declared `write_scope`;
+- context pack and verification object;
+- changed files and diff summary;
+- worker `risk_signals`, `self_assessed_risk`, assumptions, and
+  `design_findings`;
+- verification status and skipped checks;
+- repository-sensitive paths or configured risk rules.
+
+Risk classification owner:
+
+- The orchestrator owns the decision in M0/M1.
+- A dedicated `risk_classifier` role or rule engine may own it in M2+.
+- Patch reviewers can challenge the level but do not silently lower it.
+
+Rules:
+
+- Worker self-assessment may raise the level; it cannot lower a rule-triggered
+  level.
+- If required verification is unavailable, skipped, or inconclusive, use at
+  least `L2` unless the task is explicitly a discovery or documentation-only
+  task.
+- If `design_findings` is non-empty, use at least `L2`; blocking findings use
+  `L3`.
+- If externally visible API/protocol, registry-owned schema, auth, permission,
+  payment, data migration, concurrency, or semantic-contract artifacts are
+  touched, use `L3` unless the orchestrator pre-classified and recorded a
+  narrower safe case before worker launch.
+- If internal API, non-contract schema, build/test config, or general
+  configuration is touched, use at least `L2`.
+- If more files or modules are touched than the task card expected, reclassify
+  before integration.
+
+The formal assessment must be stored by the orchestrator as an appended
+`risk_assessment` field on the parsed `agent_result` or in the implementation
+trace that references that result. Worker-provided risk fields are inputs, not
+the formal assessment.
+
+Example risk assessment:
+
+```json
+{
+  "risk_assessment": {
+    "formal_level": "L1",
+    "classifier": "orchestrator_rules_v1",
+    "risk_signals": ["local_change", "verification_passed"],
+    "reason": "Single write-scope file changed; no public API/config/security paths touched.",
+    "required_evidence": [
+      "changed_files",
+      "diff_summary",
+      "key_files_read",
+      "assumptions",
+      "verification_output_summary",
+      "worker_result",
+      "next_action"
+    ]
+  }
+}
+```
+
 Minimum `implementation/INDEX.json` fields:
 
 ```json
@@ -275,8 +371,10 @@ M0 passes only if:
 - the task card has one bounded objective and one allowed write scope;
 - the verification object has a concrete command, cwd, expected exit code, and
   acceptance coverage reference;
-- the trace records base revision, read file hashes, edited file hashes,
-  command result, and next action;
+- the trace or compact worker result records base revision or snapshot id,
+  changed files, command result, and next action;
+- per-file read and edited hashes are required only for L2/L3, parallel
+  writing, or when missing hashes would make stale context unsafe;
 - any need to expand scope stops the task and creates a revised task card.
 
 ### M0 Required Artifact Subset
@@ -719,6 +817,8 @@ Minimum dispatch record:
   "write_scope": ["paths"],
   "allowed_tools": ["read", "edit", "verification commands"],
   "delegation_allowed": false,
+  "evidence_level_target": "L1",
+  "risk_classifier": "orchestrator_rules_v1",
   "expected_output_schema": "implementation_agent_result",
   "stop_conditions": ["needs wider scope", "verification unavailable", "design conflict"],
   "budget": {"timeout_minutes": 30}
@@ -748,6 +848,20 @@ Minimum result record:
   ],
   "new_unknowns": [],
   "assumptions": [],
+  "risk_signals": ["local_change | public_api | security_sensitive | verification_skipped | worker_uncertain"],
+  "self_assessed_risk": "low | medium | high",
+  "evidence_summary": {
+    "level_requested": "L0 | L1 | L2 | L3",
+    "key_files_read": ["paths"],
+    "diff_summary": "short summary or generated diff-stat reference",
+    "manual_evidence_minutes": 0
+  },
+  "risk_assessment": {
+    "formal_level": "pending | L0 | L1 | L2 | L3",
+    "classifier": "orchestrator_rules_v1 or null before classification",
+    "reason": "orchestrator-filled after classification",
+    "required_evidence": []
+  },
   "design_findings": [
     {
       "type": "missing_detail | contradiction | ambiguity | better_design_option",
@@ -763,7 +877,9 @@ Minimum result record:
 ```
 
 A subagent result is not accepted unless it matches the dispatch scope and
-schema. Every worker result must be referenced by the implementation trace.
+schema. Every worker result must be captured by the evidence level required for
+the task. For L0/L1, a compact result plus milestone trace is enough; for L2/L3,
+the implementation trace must reference the result directly.
 `design_findings` are evidence and routing requests. They are not permission for
 the worker to modify semantic artifacts or start design-authority agents.
 
@@ -847,6 +963,7 @@ After the platform-native subagent returns, the orchestrator must:
   evidence, and next action as required by the dispatch;
 - compare changed files and generated outputs against `write_scope` and
   `workspace_policy`;
+- run the Risk Classifier Gate before choosing the final evidence level;
 - treat missing, schema-invalid, scope-invalid, or timed-out results as failed,
   even if the host tool reports the job as completed;
 - block integration until required verification objects pass.
@@ -865,11 +982,12 @@ Worker sequence:
 3. Stop if required edits exceed `write_scope`.
 4. Apply the smallest coherent patch.
 5. Run the required verification objects.
-6. Record changed files, command output summary, verification result, failures,
-   and assumptions.
+6. Return changed files, risk signals, command output summary, verification
+   result, failures, and assumptions.
 7. Return result to the orchestrator.
 
-A worker `done` message is not proof. Verification evidence is required.
+A worker `done` message is not proof. Verification evidence is required, but
+for L0/L1 it should be compact and mostly generated.
 
 ### Phase I8: Integration
 
@@ -878,15 +996,25 @@ The orchestrator or Patch Integration Agent reviews the returned patch.
 Integration checks:
 
 - patch changes only allowed files;
+- Risk Classifier Gate assigned a formal evidence level;
+- evidence meets the formal level without over-collecting manual notes for
+  L0/L1 tasks;
 - no unrelated formatting or metadata churn unless required;
 - every required verification object passed: expected exit matched, required
   output was present, zero-test policy was satisfied, acceptance coverage was
   declared, and writes stayed within `allowed_writes`;
-- trace includes read files, edited files, verification object IDs, commands, and output summaries;
+- trace or worker result includes the evidence required by the assigned level:
+  L0/L1 may use compact result fields, while L2/L3 require explicit trace
+  references;
 - worker dispatch and result records exist and match task card scope, context
   pack hash, and workspace policy;
-- context pack hash, base revision, and read/write file hashes still match;
-- repo index stale conditions are evaluated and fail closed on missing hashes;
+- context pack hash and base revision still match for L2/L3, parallel writing,
+  or tasks whose context pack declares stale conditions;
+- read/write file hashes are required for L2/L3 and parallel writing; for
+  L0/L1, generated diff status and changed-file lists are sufficient unless the
+  risk classifier escalates;
+- repo index stale conditions are evaluated for any index slice used as edit
+  rationale; missing hashes fail closed only at the assigned evidence level;
 - next task card is updated from actual results.
 
 If multiple workers return patches, integrate serially. Rebase or reject stale
@@ -954,9 +1082,10 @@ Every nontrivial fact should record:
 ```
 
 For M0, provenance may be recorded at file, manifest, and index-slice level
-instead of every fact. For any authority artifact, missing base revision or file
-hash fails closed: the task must refresh grounding before worker launch or
-integration.
+instead of every fact. Missing base revision or file hashes fail closed only
+when the assigned evidence level or workspace mode requires them; otherwise the
+task may proceed with direct file reads, generated diff status, and compact
+verification evidence.
 
 Trust order:
 
@@ -996,6 +1125,8 @@ Every failure route must declare:
 | Required verification failed | Block integration; classify failure as patch bug, environment issue, unrelated failure, or design conflict; invalidate the failed trace attempt and affected task status. |
 | Repo index stale or wrong | Regenerate affected index slice; invalidate context packs and task cards derived from it. |
 | Missing base revision or file hash | Fail closed; refresh grounding and regenerate affected context packs before worker launch. |
+| Risk level missing or lower than rule-triggered minimum | Block integration; run the Risk Classifier Gate and collect only the evidence required by the assigned level. |
+| Evidence collection exceeds L0/L1 budget | Prefer generated diff/test evidence; downgrade manual note-writing unless risk rules require L2/L3. |
 | Worker requests design escalation with evidence | Run the Implementation-to-Design Escalation Gate; pause affected task cards until the request is routed. |
 | Worker requests design escalation without evidence | Reject or revise the result; do not dispatch a design CR agent. |
 | Worker edits design artifacts or launches authority-writing agents outside dispatch | Reject the result as scope-invalid; invalidate the result record and reissue a constrained dispatch if the task remains valid. |
@@ -1012,6 +1143,7 @@ Stop implementation and return to planning when:
 
 - no verification object can be defined for the change;
 - worker needs write access outside declared scope;
+- formal risk level is `L3` and the required CR/review path has not been opened;
 - worker reports a blocking design finding that has not been routed;
 - repository reality contradicts acceptance criteria;
 - generated code or external dependency must be changed without policy;
@@ -1028,9 +1160,11 @@ An implementation milestone is acceptable only if:
   packs, task cards, verification objects, agent dispatches, agent results,
   progress, traces, versions, and hashes;
 - every subagent result used by the milestone has a matching dispatch record and
-  trace reference;
+  evidence record at the assigned level;
 - platform-native subagent outputs were converted into validated `agent_result`
   artifacts; raw completion messages were not accepted directly;
+- every integrated task has a formal risk assessment and satisfies the
+  corresponding evidence level;
 - task cards and context packs identify exact read/write scopes;
 - implementation structure documents are classified as
   `implementation_authority` and do not silently redefine semantic contract
@@ -1039,9 +1173,16 @@ An implementation milestone is acceptable only if:
 - worker patches stay within declared write scope;
 - every required verification object passed, unless an unrelated failure was
   formally classified with evidence and routed separately;
-- traces record read files, edited files, file hashes, command summaries, and outcomes;
-- repo index stale conditions were checked for touched files;
-- missing hashes or unknown base revisions did not pass integration;
+- traces or compact worker results record read files, edited files, command
+  summaries, outcomes, and file hashes only when required by the assigned
+  evidence level;
+- repo index stale conditions were checked when an index slice was used as edit
+  rationale or the assigned evidence level requires it; L0/L1 tasks based on
+  direct file reads and generated diff status do not need a separate stale-index
+  check;
+- missing hashes or unknown base revisions did not pass integration when the
+  assigned evidence level, stale-index dependency, or workspace mode required
+  them;
 - progress records completed, blocked, and next tasks, or M0 trace/task status
   records the same state;
 - unresolved design conflicts are represented as CRs;

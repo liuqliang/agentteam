@@ -94,6 +94,7 @@ The hierarchy is artifact-centered:
 | Repo Grounding Agent | Builds or refreshes repository inventory, verification contract, test surface, and language-pack facts. | Produces derived repo index artifacts, not semantic authority. |
 | Context Pack Builder | Selects task-local source context from the repo index and real files. | Produces bounded context packs and task cards. |
 | Worker Agent | Implements bounded task cards from an implementation pack and reports implementation evidence. | Writes only within declared scope; may request design escalation but cannot launch authority-writing agents. |
+| Risk Classifier Gate | Classifies implementation risk from the task card, context pack, changed files, worker result, and verification status. | Assigns evidence level and review route; cannot edit code or semantic artifacts. |
 | Patch Integration Agent | Reviews and integrates code patches returned from workers. | May integrate code changes serially; design changes still go through artifact CRs. |
 
 This is deliberately stricter than a free-form multi-agent chat. Subagents can
@@ -136,6 +137,8 @@ structured:
   expected output schema, validation commands, budget, and escalation rules;
 - returned results include status, output payload, assumptions, blockers,
   validation evidence, and trace references;
+- implementation results carry risk signals; the orchestrator or Risk
+  Classifier Gate assigns the formal evidence level;
 - `semantic_contract` changes become change requests before integration;
 - `implementation_authority` changes become task-card, context-pack,
   implementation-pack, or structure-doc updates with trace evidence;
@@ -204,6 +207,23 @@ AgentTeam uses three complementary validation types:
 
 The validator should remain mostly domain-independent. Domain-specific checks
 belong in domain packs unless they reveal a reusable validation pattern.
+
+## Evidence Budget
+
+Evidence is a control surface, not the work product. Implementation work should
+default to lightweight evidence and escalate only when risk justifies it.
+
+| Level | Use when | Evidence shape |
+|---|---|---|
+| `L0` | Trivial local edit with no interface or behavior contract change. | Changed files, diff summary, one verification result; documentation-only tasks may record a not-applicable reason. |
+| `L1` | Default bounded task card. | L0 plus key files read, verification output summary, assumptions, and next action. |
+| `L2` | Cross-module, internal API, non-contract schema, build/test/config, broad refactor, unavailable verification, or uncertain worker result. | L1 plus explicit risk classification, context/task hashes, patch review, and milestone trace. |
+| `L3` | Semantic contract, externally visible API or protocol, registry-owned schema, security, permission, payment, data migration, concurrency, or blocking design finding. | Full CR/review/trace path and serial integration gates. |
+
+The worker may report risk signals and self-assessed risk, but it does not set
+the final evidence level. The orchestrator or Risk Classifier Gate sets the
+level before integration. A worker can raise risk by providing evidence; it
+cannot lower a rule-triggered level.
 
 ## State And Persistence
 
