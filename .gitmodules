@@ -1,0 +1,27 @@
+[submodule "srccode/codex"]
+	path = srccode/codex
+	url = https://github.com/openai/codex.git
+
+[submodule "srccode/claude/claude-agent-sdk-python"]
+	path = srccode/claude/claude-agent-sdk-python
+	url = https://github.com/anthropics/claude-agent-sdk-python.git
+
+[submodule "srccode/claude/claude-agent-sdk-typescript"]
+	path = srccode/claude/claude-agent-sdk-typescript
+	url = https://github.com/anthropics/claude-agent-sdk-typescript.git
+
+[submodule "srccode/claude/claude-code"]
+	path = srccode/claude/claude-code
+	url = https://github.com/anthropics/claude-code.git
+
+[submodule "srccode/claude/claude-code-action"]
+	path = srccode/claude/claude-code-action
+	url = https://github.com/anthropics/claude-code-action.git
+
+[submodule "srccode/claude/claude-code-base-action"]
+	path = srccode/claude/claude-code-base-action
+	url = https://github.com/anthropics/claude-code-base-action.git
+
+[submodule "srccode/claude/claw-code"]
+	path = srccode/claude/claw-code
+	url = https://github.com/ultraworkers/claw-code.git
