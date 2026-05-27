@@ -30,6 +30,11 @@ semantic design
   -> next task card or design CR
 ```
 
+Implementation can discover that the approved semantic design is incomplete or
+wrong. That feedback is valid, but it must not let a worker redefine the
+architecture it was asked to implement. Workers report design gaps; the
+orchestrator decides whether to open the design-change workflow.
+
 ## Non-Goals
 
 The implementation workflow does not try to:
@@ -639,6 +644,7 @@ Implementation subagent roles:
 | `worker_agent` | task-card `write_scope` only | code patch, verification results, unknowns |
 | `patch_reviewer` | none | review verdict on patch, trace, and verification evidence |
 | `patch_integration_agent` | integration workspace only | serially integrated patch or rejection record |
+| `design_cr_agent` | none or non-authoritative CR draft path only | classified design gap and CR draft |
 
 Minimum dispatch record:
 
@@ -660,6 +666,7 @@ Minimum dispatch record:
   "read_scope": ["paths"],
   "write_scope": ["paths"],
   "allowed_tools": ["read", "edit", "verification commands"],
+  "delegation_allowed": false,
   "expected_output_schema": "implementation_agent_result",
   "stop_conditions": ["needs wider scope", "verification unavailable", "design conflict"],
   "budget": {"timeout_minutes": 30}
@@ -689,6 +696,15 @@ Minimum result record:
   ],
   "new_unknowns": [],
   "assumptions": [],
+  "design_findings": [
+    {
+      "type": "missing_detail | contradiction | ambiguity | better_design_option",
+      "severity": "blocking | non_blocking",
+      "evidence": ["file path, command output path, or accepted artifact id"],
+      "affected_artifacts": ["semantic artifact id or implementation artifact id"],
+      "requested_action": "create_design_cr | update_task_card | clarify_context | reject_worker_result"
+    }
+  ],
   "trace_refs": [],
   "recommended_next_action": "integrate_patch | revise_task | create_design_cr | stop"
 }
@@ -696,6 +712,59 @@ Minimum result record:
 
 A subagent result is not accepted unless it matches the dispatch scope and
 schema. Every worker result must be referenced by the implementation trace.
+`design_findings` are evidence and routing requests. They are not permission for
+the worker to modify semantic artifacts or start design-authority agents.
+
+#### Implementation-to-Design Escalation Gate
+
+This gate keeps implementation feedback automated without giving workers
+authority over the semantic contract.
+
+Authority split:
+
+- worker agents have reporting authority only;
+- the orchestrator has escalation and dispatch authority;
+- `design_cr_agent` has proposal authority only;
+- the Integration Agent has serial authority to update current design
+  artifacts through the artifact workflow.
+
+Default worker dispatches set `delegation_allowed` to `false`. A worker may not
+launch a design CR agent, semantic reviewer, or Integration Agent. If the host
+platform technically allows nested agent calls, any nested output is treated as
+untrusted evidence until the orchestrator converts it into a normal
+dispatch/result pair.
+
+Escalation flow:
+
+1. Worker stops before encoding an invented design assumption into code.
+2. Worker returns an `agent_result` with `design_findings`, concrete evidence,
+   affected artifacts, and `recommended_next_action`.
+3. Orchestrator validates the finding for schema, evidence, severity, affected
+   artifacts, and current artifact hashes.
+4. Orchestrator routes non-blocking implementation detail gaps to task-card,
+   context-pack, or implementation-pack revision.
+5. Orchestrator routes blocking semantic contradictions or ambiguities to a
+   recorded `design_cr_agent` dispatch.
+6. `design_cr_agent` produces only a CR draft or classification result.
+7. The artifact workflow accepts, rejects, or integrates the CR through its
+   normal lint, review, trace, and Integration Agent gates.
+8. After integration, affected implementation packs, context packs, task cards,
+   verification objects, and pending worker dispatches are invalidated or
+   rebased before implementation resumes.
+
+Escalation policy:
+
+- Missing repository details are not automatically semantic design defects.
+  Prefer implementation-pack or task-card revision when the semantic contract
+  remains intact.
+- A worker result that changes design files directly is scope-invalid and must
+  be rejected.
+- A worker result that requests escalation without evidence is blocked and must
+  be revised before any design CR agent is dispatched.
+- A blocking design finding pauses dependent task cards until the design CR is
+  rejected, integrated, or downgraded to an implementation-only revision.
+- Every escalation request and routing decision must be recorded in an
+  implementation trace and linked to any resulting artifact CR.
 
 #### Platform Adapter Gate
 
@@ -707,6 +776,8 @@ Before invoking a platform-native subagent tool, the orchestrator must:
 
 - write and index the `agent_dispatch` artifact;
 - confirm the workspace policy can enforce the requested write mode;
+- confirm nested delegation is disabled unless the dispatch explicitly allows
+  it;
 - use read-only mode unless a disjoint workspace or M0 single-writer policy is
   active;
 - include the expected output schema in the prompt or adapter payload;
@@ -870,9 +941,13 @@ Every failure route must declare:
 | Required verification failed | Block integration; classify failure as patch bug, environment issue, unrelated failure, or design conflict; invalidate the failed trace attempt and affected task status. |
 | Repo index stale or wrong | Regenerate affected index slice; invalidate context packs and task cards derived from it. |
 | Missing base revision or file hash | Fail closed; refresh grounding and regenerate affected context packs before worker launch. |
+| Worker requests design escalation with evidence | Run the Implementation-to-Design Escalation Gate; pause affected task cards until the request is routed. |
+| Worker requests design escalation without evidence | Reject or revise the result; do not dispatch a design CR agent. |
+| Worker edits design artifacts or launches authority-writing agents outside dispatch | Reject the result as scope-invalid; invalidate the result record and reissue a constrained dispatch if the task remains valid. |
 | Existing code contradicts semantic design | Create design CR in artifact workflow; cancel implementation tasks depending on the contradicted assumption. |
 | Implementation pack lacks source/build/test detail | Revise implementation pack; regenerate task-card seeds derived from old pack. |
 | Runtime probe invalidates approach | Return to semantic review or design CR; invalidate downstream task cards. |
+| Design CR changes a base semantic artifact | Regenerate affected implementation packs, context packs, task cards, and verification objects before worker relaunch. |
 | Parallel patch conflict | Rebase or integrate serially; cancel or reverify pending workers whose read/write closure was touched. |
 
 ## Stop Conditions
@@ -881,6 +956,7 @@ Stop implementation and return to planning when:
 
 - no verification object can be defined for the change;
 - worker needs write access outside declared scope;
+- worker reports a blocking design finding that has not been routed;
 - repository reality contradicts acceptance criteria;
 - generated code or external dependency must be changed without policy;
 - failing tests are unrelated and cannot be classified;
@@ -910,4 +986,6 @@ An implementation milestone is acceptable only if:
 - progress records completed, blocked, and next tasks, or M0 trace/task status
   records the same state;
 - unresolved design conflicts are represented as CRs;
+- every implementation-originated design finding is routed, closed, or linked
+  to a pending CR before the milestone is accepted;
 - the next milestone is derived from current evidence, not from stale planning.

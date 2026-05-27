@@ -103,6 +103,7 @@ The intended framework should use these units as first-class artifacts:
 - `implementation_pack`: source layout, build contract, test harness, prerequisites, milestone outline, first task-card seed, task-card generation policy, and progress schema
 - `agent_dispatch`: structured subagent invocation packet with scope, tools, schema, budget, and stop conditions
 - `agent_result`: structured subagent return packet with status, evidence, changed files or findings, and next action
+- `design_finding`: implementation evidence that requests controlled design escalation without granting write authority to the worker
 - `repo_index`: derived tool-generated navigation facts with provenance, confidence, and stale conditions
 - `context_pack`: task-local source context selected from the repo index and real files
 
@@ -128,8 +129,9 @@ The framework should combine:
 9. Generate an implementation pack before assigning code work.
 10. Start implementation with a minimal empirical probe before scaling parallel work.
 11. Treat repository indexes as navigation aids, not source-of-truth understanding.
-12. Give workers task-local context packs instead of whole repositories.
-13. Use trace data for future model routing, agent replacement, and workflow optimization.
+12. Let implementation workers report design gaps, but route authority changes through orchestrator-gated CR integration.
+13. Give workers task-local context packs instead of whole repositories.
+14. Use trace data for future model routing, agent replacement, and workflow optimization.
 
 ## Recommended Next Step
 

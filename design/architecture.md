@@ -81,7 +81,7 @@ The hierarchy is artifact-centered:
 
 | Role | Responsibility | Authority |
 |---|---|---|
-| Orchestrator | Controls phases, context bundles, budgets, CR queue, trace logging, and final gate. | May accept/reject transitions and integration results. |
+| Orchestrator | Controls phases, context bundles, budgets, CR queue, implementation-to-design escalation, trace logging, and final gate. | May accept/reject transitions, escalation requests, and integration results. |
 | Constraint Agent | Extracts goals, hard constraints, assumptions, non-goals, and missing dimensions. | Produces draft constraints; does not decide hidden assumptions silently. |
 | Domain Classifier | Selects or drafts the domain pack for the task. | Proposes required artifact classes and domain checks. |
 | Registry Architect | Defines canonical symbols, ownership, dependencies, and shared facts. | Owns registry structure. |
@@ -93,7 +93,7 @@ The hierarchy is artifact-centered:
 | Validation Planner | Converts acceptance criteria into checks and empirical probes. | Owns the validation plan draft. |
 | Repo Grounding Agent | Builds or refreshes repository inventory, verification contract, test surface, and language-pack facts. | Produces derived repo index artifacts, not semantic authority. |
 | Context Pack Builder | Selects task-local source context from the repo index and real files. | Produces bounded context packs and task cards. |
-| Worker Agent | Implements bounded task cards from an implementation pack. | Writes only within declared scope. |
+| Worker Agent | Implements bounded task cards from an implementation pack and reports implementation evidence. | Writes only within declared scope; may request design escalation but cannot launch authority-writing agents. |
 | Patch Integration Agent | Reviews and integrates code patches returned from workers. | May integrate code changes serially; design changes still go through artifact CRs. |
 
 This is deliberately stricter than a free-form multi-agent chat. Subagents can
@@ -111,6 +111,8 @@ structured:
 - returned results include status, output payload, assumptions, blockers,
   validation evidence, and trace references;
 - design changes become change requests before integration;
+- implementation findings that question the design become escalation requests
+  before any design agent is dispatched;
 - implementation changes become task-card updates or code patches with test
   evidence.
 
@@ -146,6 +148,12 @@ Result records define:
 Subagents are read-only by default. A subagent may write only when its dispatch
 record names an explicit write scope and the relevant SOP permits that role to
 write. Authority artifacts are still integrated serially.
+
+Subagent delegation is disabled by default. A worker may report a design gap or
+request escalation in its result packet, but only the orchestrator may dispatch
+a design CR agent, semantic reviewer, or Integration Agent. Any worker-started
+agent output is evidence only until the orchestrator adopts it into a recorded
+dispatch/result pair.
 
 Platform-native agent tools are transport adapters, not authority mechanisms.
 If the host tool cannot enforce read scope, write scope, output schema, or

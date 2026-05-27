@@ -275,6 +275,12 @@ draft specs, or draft CRs, but they must not patch authoritative artifacts
 directly. The Integration Agent is the only role that serially applies accepted
 CRs to `output/current/`.
 
+Implementation-originated design gaps enter this same protocol. An
+implementation worker may be the source of evidence for a CR, but it does not
+gain authority to dispatch design agents or edit semantic artifacts. The
+orchestrator must convert the finding into a recorded design subagent dispatch
+or CR draft before the artifact workflow can integrate it.
+
 Minimum dispatch record:
 
 ```json
@@ -456,6 +462,9 @@ Gate:
 - Subagents may write only non-authoritative local drafts. Any draft that should
   affect `output/current/` must become a CR and be integrated by the Integration
   Agent.
+- CRs originating from implementation evidence must reference the worker
+  `agent_result`, the implementation trace, and the affected implementation
+  artifacts that will need invalidation or rebase.
 - Every cross-artifact change must include `affected_artifacts`.
 - Every change request must declare its base artifact versions and hashes.
 - A change request that touches a stale artifact version must be rebased or rejected before integration.
