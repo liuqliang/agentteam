@@ -32,7 +32,7 @@ semantic design
 
 Implementation can discover that the approved semantic design is incomplete or
 wrong. That feedback is valid, but it must not let a worker redefine the
-architecture it was asked to implement. Workers report design gaps; the
+semantic contract it was asked to implement. Workers report design gaps; the
 orchestrator decides whether to open the design-change workflow.
 
 ## Non-Goals
@@ -76,9 +76,9 @@ output/current/
 │   │   ├── repo_manifest.json
 │   │   ├── file_inventory.jsonl
 │   │   ├── unknowns.json
-│   │   ├── project_detectors.json        (M1 optional)
-│   │   ├── language_packs.json           (M1 optional)
-│   │   ├── test_surface.json             (M1 optional)
+│   │   ├── project_detectors.json        (M1+ required)
+│   │   ├── language_packs.json           (M1+ required)
+│   │   ├── test_surface.json             (M1+ required)
 │   │   ├── symbol_index.jsonl            (M2 optional)
 │   │   ├── dependency_edges.jsonl         (M2 optional)
 │   │   └── module_cards/                 (M2 optional)
@@ -86,6 +86,8 @@ output/current/
 │   │   └── CTX-<N>-<short_name>.json
 │   ├── task_cards/
 │   │   └── TASK-<N>-<short_name>.json
+│   ├── structure_docs/                 (M1 optional)
+│   │   └── ADR-<N>-<short_name>.md
 │   ├── workspace_policy.json
 │   ├── verification/
 │   │   └── VERIFY-<N>-<short_name>.json
@@ -93,7 +95,7 @@ output/current/
 │   │   └── DISPATCH-<N>-<short_name>.json
 │   ├── agent_results/
 │   │   └── RESULT-<N>-<short_name>.json
-│   ├── progress.json                    (M1 optional; M0 may use trace status)
+│   ├── progress.json                    (M1+ required; M0 may use trace status)
 │   └── traces/
 │       └── IMPL-TRACE-<N>-<short_name>.json
 ```
@@ -102,13 +104,14 @@ output/current/
 `output/current/implementation/INDEX.json` after implementation starts.
 Consumers must not infer latest implementation state from filenames alone.
 
-Implementation authority artifacts:
+Possible implementation authority artifacts:
 
 - `implementation/INDEX.json`
 - `implementation/implementation_pack.json`
 - `implementation/workspace_policy.json`
 - `implementation/context_packs/*.json`
 - `implementation/task_cards/*.json`
+- `implementation/structure_docs/*.md`
 - `implementation/verification/*.json`
 - `implementation/agent_dispatches/*.json`
 - `implementation/agent_results/*.json`
@@ -116,12 +119,48 @@ Implementation authority artifacts:
 - `implementation/traces/*.json`
 
 In M0, `progress.json` is optional. If it is omitted, the latest trace and task
-card status are the progress record. In M1 and later, `progress.json` becomes a
+card status are the progress record. `structure_docs/` is also optional in M0
+and may be represented by an empty `structure_docs` list in
+`implementation/INDEX.json`. In M1 and later, `progress.json` becomes a
 required authority artifact.
 
 Repo index files are derived artifacts and may be regenerated. If a task card
 uses a repo index slice, it must record the slice hash, base revision, and stale
 conditions that were used to build the context pack.
+
+## Authority Class Policy
+
+Implementation work uses the same `authority_class` vocabulary as the semantic
+artifact workflow:
+
+| Authority class | Implementation meaning | Worker write permission |
+|---|---|---|
+| `semantic_contract` | Approved design promises, canonical responsibilities, public behavior, acceptance criteria, and shared registry facts. | No direct worker writes. Worker may report `design_findings` only. |
+| `implementation_authority` | Current implementation-run control artifacts and local implementation structure decisions. | Allowed only when the task card or dispatch names the path in `write_scope`. |
+| `derived_observation` | Regenerable repository facts such as file inventories, module cards, language packs, and dependency edges. | Produced by repo grounding or tool tasks; not a basis for semantic changes without evidence. |
+| `evidence_note` | Command output, test summaries, probe results, review findings, and trace attachments. | Appended by the producing worker/tool and linked from traces or results. |
+
+Implementation structure documents are `implementation_authority`, not
+`semantic_contract`. They may describe:
+
+- file and module mapping found during implementation;
+- local ADRs needed for the current slice;
+- why a new helper, adapter, or directory was introduced;
+- verification implications of the implementation choice;
+- follow-up task-card impact.
+
+They must not redefine:
+
+- system-level module responsibility;
+- external behavior or public API contract;
+- acceptance criteria;
+- registry-owned symbols or cross-spec invariants;
+- user-visible non-goals or hard constraints.
+
+If a structure document needs to say "the semantic design should change", it
+must record that as a proposed finding linked to `design_findings` and the
+Implementation-to-Design Escalation Gate. It is not authoritative until a
+design CR is integrated.
 
 Minimum `implementation/INDEX.json` fields:
 
@@ -152,6 +191,16 @@ Minimum `implementation/INDEX.json` fields:
       "path": "task_cards/TASK-001-example.json",
       "version": 1,
       "status": "ready",
+      "content_hash": "sha256:<hash>"
+    }
+  ],
+  "structure_docs": [
+    {
+      "id": "ADR-001-example",
+      "path": "structure_docs/ADR-001-example.md",
+      "authority_class": "implementation_authority",
+      "version": 1,
+      "status": "current",
       "content_hash": "sha256:<hash>"
     }
   ],
@@ -389,10 +438,11 @@ M0 grounding:
 - unknowns: missing commands, ambiguous entrypoints, unrecognized build systems;
 - one verification object if a command is known, otherwise a discovery task card.
 
-M1 grounding may add:
+M1 grounding adds:
 
 - project detection: package managers, workspace roots, and build systems;
 - test surface: test directories, test naming patterns, target-specific commands;
+- one primary language detector recorded in `language_packs.json`;
 - richer verification objects for build, lint, type-check, smoke, and tests.
 
 The first version may use only `rg`, `git ls-files`, manifest parsing, and
@@ -400,8 +450,10 @@ manual configuration. Language-specific symbol indexes are not part of M0.
 
 ### Phase I2: Language Pack Expansion
 
-When useful after M0, run language packs to improve navigation. A language pack
-adapts existing tools to the common repo index model.
+For M1, create at least one primary language detector entry in
+`language_packs.json`. After M1, run richer language packs when useful to
+improve navigation. A language pack adapts existing tools to the common repo
+index model.
 
 Language pack maturity:
 
@@ -641,7 +693,7 @@ Implementation subagent roles:
 |---|---|---|
 | `repo_explorer` | none | localization findings, candidate files, unknowns |
 | `context_pack_builder` | `implementation/context_packs/` and `implementation/task_cards/` only | draft context packs and task cards |
-| `worker_agent` | task-card `write_scope` only | code patch, verification results, unknowns |
+| `worker_agent` | task-card `write_scope` only | code patch, implementation structure docs, verification results, unknowns |
 | `patch_reviewer` | none | review verdict on patch, trace, and verification evidence |
 | `patch_integration_agent` | integration workspace only | serially integrated patch or rejection record |
 | `design_cr_agent` | none or non-authoritative CR draft path only | classified design gap and CR draft |
@@ -759,6 +811,9 @@ Escalation policy:
   remains intact.
 - A worker result that changes design files directly is scope-invalid and must
   be rejected.
+- A worker-created structure document is acceptable only when it is
+  `implementation_authority`, inside write scope, and does not redefine
+  semantic contract facts.
 - A worker result that requests escalation without evidence is blocked and must
   be revised before any design CR agent is dispatched.
 - A blocking design finding pauses dependent task cards until the design CR is
@@ -944,6 +999,7 @@ Every failure route must declare:
 | Worker requests design escalation with evidence | Run the Implementation-to-Design Escalation Gate; pause affected task cards until the request is routed. |
 | Worker requests design escalation without evidence | Reject or revise the result; do not dispatch a design CR agent. |
 | Worker edits design artifacts or launches authority-writing agents outside dispatch | Reject the result as scope-invalid; invalidate the result record and reissue a constrained dispatch if the task remains valid. |
+| Worker writes implementation structure docs that redefine semantic contract | Reject the structure-doc change; route the claim through `design_findings` and the escalation gate. |
 | Existing code contradicts semantic design | Create design CR in artifact workflow; cancel implementation tasks depending on the contradicted assumption. |
 | Implementation pack lacks source/build/test detail | Revise implementation pack; regenerate task-card seeds derived from old pack. |
 | Runtime probe invalidates approach | Return to semantic review or design CR; invalidate downstream task cards. |
@@ -976,6 +1032,9 @@ An implementation milestone is acceptable only if:
 - platform-native subagent outputs were converted into validated `agent_result`
   artifacts; raw completion messages were not accepted directly;
 - task cards and context packs identify exact read/write scopes;
+- implementation structure documents are classified as
+  `implementation_authority` and do not silently redefine semantic contract
+  artifacts;
 - task cards record context pack hashes and base revisions;
 - worker patches stay within declared write scope;
 - every required verification object passed, unless an unrelated failure was

@@ -87,10 +87,13 @@ JSON artifacts should include a `_meta` object:
 {
   "_meta": {
     "artifact_id": "stable_id",
-    "artifact_type": "task_brief | constraints | acceptance_contract | domain_pack | registry | spec | change_request | validation_plan | review | trace | agent_dispatch | agent_result | implementation_pack | verification_object | context_pack | task_card | workspace_policy | progress",
+    "artifact_type": "task_brief | constraints | acceptance_contract | domain_pack | registry | spec | change_request | validation_plan | review | trace | agent_dispatch | agent_result | implementation_pack | verification_object | context_pack | task_card | workspace_policy | progress | repo_index | implementation_structure_doc | evidence_note",
+    "authority_class": "semantic_contract | implementation_authority | derived_observation | evidence_note",
     "version": 1,
     "status": "draft | current | archived | superseded",
-    "owner": "orchestrator | registry_architect | integration_agent | patch_integration_agent | context_pack_builder | validator",
+    "owner": "orchestrator | registry_architect | integration_agent | repo_grounding_agent | patch_integration_agent | context_pack_builder | worker_agent | validator",
+    "allowed_writers": ["roles or agent ids"],
+    "requires_design_cr": true,
     "source_cr": "CR-001-example",
     "created_at": "ISO-8601",
     "updated_at": "ISO-8601",
@@ -104,11 +107,16 @@ Markdown specs may use equivalent frontmatter or a sidecar `.meta.json`, but
 the same fields are still required. `content_hash` should be computed over the
 artifact content excluding the hash field itself.
 
+`requires_design_cr` is true for `semantic_contract` changes. It is normally
+false for `implementation_authority`, `derived_observation`, and
+`evidence_note` updates unless the update changes what the system promises.
+
 `INDEX.json` is the authoritative routing table for the current design set. It
 must identify:
 
 - every current artifact id and path
-- artifact type, owner, status, version, and content hash
+- artifact type, authority class, owner, status, version, and content hash
+- allowed writers and whether a design CR is required
 - registry-owned namespaces
 - latest lint report path
 - latest semantic review path
@@ -129,6 +137,12 @@ Consumers must not infer "latest" from filenames alone. They must read
 The entrypoint for every reviewer, validator, integration pass, and worker
 task. It states which artifacts are authoritative and where their latest
 validated versions live.
+
+It must also state each artifact's `authority_class`. Semantic contract
+artifacts are the only artifacts that define what the system promises.
+Implementation authority artifacts define how an approved implementation run is
+executed. Derived observations and evidence notes may support a CR or task
+decision, but they do not redefine the semantic contract by themselves.
 
 ### `task_brief.json`
 
@@ -465,6 +479,9 @@ Gate:
 - CRs originating from implementation evidence must reference the worker
   `agent_result`, the implementation trace, and the affected implementation
   artifacts that will need invalidation or rebase.
+- CRs are required for `semantic_contract` changes. Implementation authority
+  updates stay in the implementation workflow unless they change what the
+  system promises.
 - Every cross-artifact change must include `affected_artifacts`.
 - Every change request must declare its base artifact versions and hashes.
 - A change request that touches a stale artifact version must be rebased or rejected before integration.

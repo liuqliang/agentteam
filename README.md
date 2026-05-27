@@ -97,6 +97,7 @@ The intended framework should use these units as first-class artifacts:
 - `constraints`: hard constraints, preferences, assumptions, and budget
 - `acceptance_contract`: objective criteria for completion
 - `registry`: stable IDs, paths, owners, versions, and dependencies
+- `authority_class`: semantic contract, implementation authority, derived observation, or evidence note classification for each artifact
 - `validation_plan`: mechanical checks, semantic reviews, and empirical probes
 - `change_request`: the only entry point for design changes
 - `trace`: replayable record of inputs, steps, outputs, validation, and evidence
@@ -130,8 +131,9 @@ The framework should combine:
 10. Start implementation with a minimal empirical probe before scaling parallel work.
 11. Treat repository indexes as navigation aids, not source-of-truth understanding.
 12. Let implementation workers report design gaps, but route authority changes through orchestrator-gated CR integration.
-13. Give workers task-local context packs instead of whole repositories.
-14. Use trace data for future model routing, agent replacement, and workflow optimization.
+13. Separate semantic architecture from implementation structure documents with explicit `authority_class`.
+14. Give workers task-local context packs instead of whole repositories.
+15. Use trace data for future model routing, agent replacement, and workflow optimization.
 
 ## Recommended Next Step
 

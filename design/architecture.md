@@ -100,6 +100,32 @@ This is deliberately stricter than a free-form multi-agent chat. Subagents can
 be parallel only when their read scope, write scope, output schema, and
 escalation path are explicit.
 
+## Authority Classes
+
+Do not use "architecture document" as an authority boundary. It is too broad.
+AgentTeam classifies artifacts by what kind of truth they carry:
+
+| Authority class | Meaning | Typical artifacts | Write path |
+|---|---|---|---|
+| `semantic_contract` | Defines what the system promises: behavior, responsibilities, external contracts, invariants, acceptance criteria, and canonical shared facts. | task brief, constraints, acceptance contract, registry, domain specs, validation plan | Design CR plus serial Integration Agent update. |
+| `implementation_authority` | Defines how the current implementation run realizes the semantic contract: task-local decisions, workspace policy, implementation ADRs, module mapping, verification objects, progress. | implementation pack, task cards, context packs, workspace policy, verification objects, progress, implementation structure docs | Implementation workflow update within declared write scope; design CR only if the semantic contract changes. |
+| `derived_observation` | Records generated or observed repository facts used for navigation. It can become stale and may be regenerated. | repo index, file inventory, module cards, language packs, dependency edges | Tool or grounding agent regeneration with provenance and stale conditions. |
+| `evidence_note` | Records raw or summarized evidence from commands, reviews, worker results, or probes. | command output summaries, test logs, agent findings, trace attachments | Appended by the producing tool or agent; cannot redefine authority by itself. |
+
+The boundary test is simple:
+
+- changing what the system promises requires a design CR;
+- changing how this implementation slice realizes the promise belongs to
+  implementation authority;
+- recording what the repository currently looks like is derived observation;
+- recording why a decision was made is evidence.
+
+Workers may write implementation structure documents only when their dispatch
+or task card grants that write scope. Those documents must describe the current
+implementation or a local ADR. They must not redefine semantic module
+responsibilities, public behavior, acceptance criteria, or registry-owned
+symbols without a design CR.
+
 ## Communication Model
 
 Natural-language summaries are useful for humans, but they are not authoritative
@@ -110,7 +136,11 @@ structured:
   expected output schema, validation commands, budget, and escalation rules;
 - returned results include status, output payload, assumptions, blockers,
   validation evidence, and trace references;
-- design changes become change requests before integration;
+- `semantic_contract` changes become change requests before integration;
+- `implementation_authority` changes become task-card, context-pack,
+  implementation-pack, or structure-doc updates with trace evidence;
+- `derived_observation` changes are regenerated with provenance and stale
+  conditions;
 - implementation findings that question the design become escalation requests
   before any design agent is dispatched;
 - implementation changes become task-card updates or code patches with test
