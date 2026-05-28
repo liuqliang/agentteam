@@ -33,8 +33,13 @@ Build an artifact workflow with validators, bounded agents, change requests, tra
   - Defines the `output/current/` artifact structure, canonical registry, CR queue, integration pass, lint gates, semantic/adversarial review, trace requirements, and implementation handoff.
   - Owns concrete schemas and gates such as versioning, content hashes, `INDEX.json` routing, CR baseline metadata, conflict detection, and domain check schema.
 
+- `design/autonomous_implementation_loop_sop.md`
+  - Current execution SOP for long-running implementation control after semantic design.
+  - Defines backlog generation, autonomous task slicing, compact M0/M1 layout, event log, map freshness, agent role specs, resume behavior, and semantic feedback routing.
+  - Maps the current Codex runtime to one main supervisor session plus ephemeral subagents launched from role specs and dispatch packets.
+
 - `design/implementation_workflow_sop.md`
-  - Current execution SOP for turning an approved semantic design into bounded code changes.
+  - Current execution SOP for executing bounded implementation tasks.
   - Defines repo grounding, language packs, localization, context packs, task cards, workspace sandbox policy, verification, integration, and failure routing.
   - Treats repo indexes as navigation layers, not full project understanding.
 
@@ -102,6 +107,8 @@ The intended framework should use these units as first-class artifacts:
 - `change_request`: the only entry point for design changes
 - `trace`: replayable record of inputs, steps, outputs, validation, and evidence
 - `implementation_pack`: source layout, build contract, test harness, prerequisites, milestone outline, first task-card seed, task-card generation policy, and progress schema
+- `backlog`: implementation objectives, milestones, task status, dependencies, and blockers
+- `events`: append-only durable implementation log for dispatches, results, risk, verification, integration, map invalidation, and progress deltas
 - `agent_dispatch`: structured subagent invocation packet with scope, tools, schema, budget, and stop conditions
 - `agent_result`: structured subagent return packet with status, evidence, changed files or findings, and next action
 - `design_finding`: implementation evidence that requests controlled design escalation without granting write authority to the worker
@@ -134,17 +141,20 @@ The framework should combine:
 12. Let implementation workers report design gaps, but route authority changes through orchestrator-gated CR integration.
 13. Separate semantic architecture from implementation structure documents with explicit `authority_class`.
 14. Default implementation evidence to L1 and escalate only when the Risk Classifier Gate requires L2/L3.
-15. Give workers task-local context packs instead of whole repositories.
-16. Use trace data for future model routing, agent replacement, and workflow optimization.
+15. Keep long-running state in durable artifacts, not in hidden subagent context.
+16. Give workers task-local context packs instead of whole repositories.
+17. Use trace and event data for future model routing, agent replacement, and workflow optimization.
 
 ## Recommended Next Step
 
 The current documents point to one concrete next step: build the minimum
-implementation workflow for the framework itself.
+autonomous implementation loop for the framework itself.
 
 That minimum workflow should define:
 
-- repo inventory and project detection
+- repo inventory, with project detection starting at M1 or when needed
+- backlog and progress state
+- compact M0/M1 event log
 - verification contract
 - source layout contract
 - build contract
@@ -153,7 +163,8 @@ That minimum workflow should define:
 - M0 empirical probe
 - task context pack format
 - first milestone task card
-- implementation progress schema
+- implementation progress schema and map freshness policy
 
 Only after that should implementation be delegated to worker agents, starting
-with a single bounded M0 slice in the current workspace or an isolated worktree.
+with a single bounded M0 slice in the current workspace or an isolated worktree,
+then letting the orchestrator continue from durable events and backlog state.

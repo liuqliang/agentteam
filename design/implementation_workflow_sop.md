@@ -1,12 +1,15 @@
 # Implementation Workflow SOP
 
-Status: current execution authority for turning an approved semantic design into
-bounded code changes.
+Status: current execution authority for executing bounded implementation tasks.
 
-This document starts after `artifact_workflow_sop.md` has produced an acceptable
-semantic design and validation plan. Its job is to make code modification
-safe, incremental, and verifiable in a real repository with limited context
-windows.
+This document starts after `autonomous_implementation_loop_sop.md` has selected
+or created a bounded task. Its job is to make one code modification safe,
+incremental, and verifiable in a real repository with limited context windows.
+
+Long-running control belongs in `autonomous_implementation_loop_sop.md`:
+backlog generation, task slicing, event log, compact layout, map freshness,
+resume behavior, and semantic feedback routing. This document owns the
+execution mechanics of an individual task.
 
 ## Core Principle
 
@@ -20,13 +23,15 @@ only the task-local context it needs.
 ```text
 semantic design
   -> implementation pack
+  -> autonomous implementation loop
+  -> selected task
   -> repo grounding
   -> localization
   -> task context pack
   -> bounded task card
   -> code change
   -> verification
-  -> trace
+  -> evidence event or trace carrier
   -> next task card or design CR
 ```
 
@@ -44,15 +49,17 @@ The implementation workflow does not try to:
 - support every language deeply in the first version;
 - infer business semantics from static indexes alone;
 - produce a complete implementation plan for every future milestone at once;
+- own long-running backlog scheduling or resume behavior;
 - let parallel workers mutate the same authority workspace.
 
 ## Required Inputs
 
-Before implementation starts, the orchestrator must have:
+Before task execution starts, the orchestrator must have:
 
 - semantic design artifacts from `output/current/`;
 - acceptance contract and validation plan;
 - implementation pack draft or task to create one;
+- selected backlog item or current task from the autonomous implementation loop;
 - target repository root;
 - allowed commands and sandbox policy;
 - known build, test, or smoke-check verification objects if available;
@@ -61,10 +68,12 @@ Before implementation starts, the orchestrator must have:
 If build/test commands are unknown, the first task is repository grounding, not
 feature implementation.
 
-## Required Output Structure
+## Logical Output Structure
 
-Use this structure under the current run output. The M0 profile uses only the
-required subset; later maturity levels may add optional indexes.
+This is the expanded logical structure for task execution. M0/M1 may use the
+compact physical layout from `autonomous_implementation_loop_sop.md` as long as
+the same logical records exist in `INDEX.json`, `backlog.json`,
+`current_task.json`, `repo_index.json`, and `events.jsonl`.
 
 ```text
 output/current/
@@ -72,13 +81,14 @@ output/current/
 ├── implementation/
 │   ├── INDEX.json
 │   ├── implementation_pack.json
+│   ├── backlog.json                    (compact/control layout)
 │   ├── repo_index/
 │   │   ├── repo_manifest.json
 │   │   ├── file_inventory.jsonl
 │   │   ├── unknowns.json
-│   │   ├── project_detectors.json        (M1+ required)
-│   │   ├── language_packs.json           (M1+ required)
-│   │   ├── test_surface.json             (M1+ required)
+│   │   ├── project_detectors.json        (expanded layout; M1+ logical record required)
+│   │   ├── language_packs.json           (expanded layout; M1+ logical record required)
+│   │   ├── test_surface.json             (expanded layout; M1+ logical record required)
 │   │   ├── symbol_index.jsonl            (M2 optional)
 │   │   ├── dependency_edges.jsonl         (M2 optional)
 │   │   └── module_cards/                 (M2 optional)
@@ -95,7 +105,7 @@ output/current/
 │   │   └── DISPATCH-<N>-<short_name>.json
 │   ├── agent_results/
 │   │   └── RESULT-<N>-<short_name>.json
-│   ├── progress.json                    (M1+ required; M0 may use trace status)
+│   ├── progress.json                    (expanded layout; M1+ progress logical record required)
 │   └── traces/
 │       └── IMPL-TRACE-<N>-<short_name>.json
 ```
@@ -115,14 +125,15 @@ Possible implementation authority artifacts:
 - `implementation/verification/*.json`
 - `implementation/agent_dispatches/*.json`
 - `implementation/agent_results/*.json`
-- `implementation/progress.json`
+- `implementation/progress.json` or equivalent compact progress record
 - `implementation/traces/*.json`
 
-In M0, `progress.json` is optional. If it is omitted, the latest trace and task
-card status are the progress record. `structure_docs/` is also optional in M0
-and may be represented by an empty `structure_docs` list in
-`implementation/INDEX.json`. In M1 and later, `progress.json` becomes a
-required authority artifact.
+In M0, the progress logical record is optional. If it is omitted, the latest
+event log entry and task status are the progress record. `structure_docs/` is also
+optional in M0 and may be represented by an empty `structure_docs` list in
+`implementation/INDEX.json`. In M1 and later, a progress logical record is
+required. In compact layout it may live in `INDEX.json` and `events.jsonl`; in
+expanded layout it should live in `progress.json`.
 
 Repo index files are derived artifacts and may be regenerated. If a task card
 uses a repo index slice, it must record the slice hash, base revision, and stale
@@ -190,7 +201,8 @@ Evidence collection defaults:
 - Do not require structure docs for ordinary edits.
 - Do not require design findings unless the worker found a semantic
   contradiction, ambiguity, or impossible acceptance criterion.
-- For L0/L1, one compact worker result plus a milestone trace is enough.
+- For L0/L1, one compact worker result plus its `events.jsonl` entry is enough;
+  no separate `IMPL-TRACE-*` or milestone trace is required.
 - For L2/L3, increase evidence before integration, not before every read.
 
 ### Risk Classifier Gate
@@ -286,7 +298,8 @@ Minimum `implementation/INDEX.json` fields:
       "id": "TASK-001-example",
       "path": "task_cards/TASK-001-example.json",
       "version": 1,
-      "status": "ready",
+      "status": "current",
+      "task_status": "ready",
       "content_hash": "sha256:<hash>"
     }
   ],
@@ -314,7 +327,8 @@ Minimum `implementation/INDEX.json` fields:
       "id": "DISPATCH-001-worker",
       "path": "agent_dispatches/DISPATCH-001-worker.json",
       "version": 1,
-      "status": "completed",
+      "status": "current",
+      "dispatch_status": "completed",
       "content_hash": "sha256:<hash>"
     }
   ],
@@ -323,12 +337,13 @@ Minimum `implementation/INDEX.json` fields:
       "id": "RESULT-001-worker",
       "path": "agent_results/RESULT-001-worker.json",
       "version": 1,
-      "status": "completed",
+      "status": "current",
+      "result_status": "completed",
       "content_hash": "sha256:<hash>"
     }
   ],
   "latest_progress": {
-    "path": "progress.json or null for M0",
+    "path": "progress.json, INDEX.json progress field, or null for M0",
     "content_hash": "sha256:<hash> or null"
   },
   "traces": [
@@ -336,7 +351,7 @@ Minimum `implementation/INDEX.json` fields:
       "id": "IMPL-TRACE-001-example",
       "path": "traces/IMPL-TRACE-001-example.json",
       "version": 1,
-      "status": "completed",
+      "status": "current",
       "content_hash": "sha256:<hash>"
     }
   ],
@@ -350,6 +365,10 @@ Minimum `implementation/INDEX.json` fields:
 }
 ```
 
+The `traces` array may be empty for L0/L1 task execution when the compact
+worker result is already captured in `events.jsonl`. L2/L3 tasks must populate
+it or reference an equivalent milestone/semantic trace.
+
 ## Maturity Profiles
 
 The implementation workflow is intentionally staged. Do not build M2 machinery
@@ -357,7 +376,7 @@ to prove M0.
 
 | Profile | Required scope |
 |---|---|
-| M0 | Single repository, single writer, current workspace, one implementation pack, minimal repo manifest, file inventory, unknowns, one context pack, one task card, one verification object, one worker dispatch/result, one trace. |
+| M0 | Single repository, single writer, current workspace, one implementation pack, minimal repo manifest, file inventory, unknowns, one context pack, one task card, one verification object, one worker dispatch/result, one event-log result. |
 | M1 | Separate context packs, progress tracking, optional worktree policy, project detector, test surface, one primary language detector. |
 | M2 | Symbol index, dependency edges, module cards, richer language packs, parallel read-only explorers, container/devcontainer policy. |
 | M3 | Strong sandbox, parallel writing through disjoint worktrees, risk reports, LSP-backed deep indexes, cross-milestone scheduling. |
@@ -369,8 +388,9 @@ M0 passes only if:
 - no parallel writing is used;
 - the worker reads every file in its write scope before editing;
 - the task card has one bounded objective and one allowed write scope;
-- the verification object has a concrete command, cwd, expected exit code, and
-  acceptance coverage reference;
+- the verification object has either a concrete command with cwd, expected exit
+  code, and acceptance coverage reference, or an explicit no-command
+  verification reason for documentation-only/no-runtime tasks;
 - the trace or compact worker result records base revision or snapshot id,
   changed files, command result, and next action;
 - per-file read and edited hashes are required only for L2/L3, parallel
@@ -379,7 +399,7 @@ M0 passes only if:
 
 ### M0 Required Artifact Subset
 
-M0 requires only:
+M0 requires only these logical records:
 
 - `implementation/INDEX.json`
 - `implementation_pack.json`
@@ -392,12 +412,22 @@ M0 requires only:
 - one worker `agent_dispatches/*.json`
 - one worker `agent_results/*.json`
 - `workspace_policy.json`
-- one implementation trace
+- one autonomous-loop `events.jsonl` entry containing the compact worker result.
+  A separate `implementation/traces/*.json` record is required only when the
+  assigned evidence level is L2/L3.
 
-M0 does not require `project_detectors.json`, `language_packs.json`,
-`test_surface.json`, `symbol_index.jsonl`, `dependency_edges.jsonl`,
-`module_cards/`, container policy, parallel workers, or separate
-`progress.json`.
+In the compact layout, these logical records may be stored inside:
+
+- `INDEX.json`
+- `implementation_pack.json`
+- `backlog.json`
+- `repo_index.json`
+- `current_task.json`
+- `events.jsonl`
+
+M0 does not require project detector, language pack, test surface,
+`symbol_index.jsonl`, `dependency_edges.jsonl`, `module_cards/`, container
+policy, parallel workers, or the progress logical record.
 
 ### M0 Field Defaults
 
@@ -412,7 +442,7 @@ For M0, fields that support later parallelism may use strict defaults:
 - `rollback_plan` may be "revert the single task patch";
 - `integration_policy` is `single_workspace`;
 - `workspace_mode` is `current_workspace`;
-- progress is represented by task status and trace outcome.
+- progress is represented by task status and event-log outcome.
 
 ## Implementation Pack Schema
 
@@ -457,7 +487,7 @@ Minimum M0 fields:
   },
   "task_card_generation_policy": {
     "plan_all_tasks_up_front": false,
-    "next_task_depends_on_latest_trace": true
+    "next_task_depends_on_latest_evidence": true
   },
   "progress_state": "not_started | running | blocked | completed"
 }
@@ -478,6 +508,7 @@ not enough evidence by itself.
     "content_hash": "sha256:<hash>"
   },
   "verification_id": "VERIFY-001-example",
+  "verification_mode": "command | no_command",
   "command": "test command",
   "cwd": "repository-relative path",
   "env": {"KEY": "VALUE"},
@@ -485,14 +516,21 @@ not enough evidence by itself.
   "expected_exit": 0,
   "required_output": ["text or regex that proves the intended tests ran"],
   "covers_acceptance_ids": ["AC-001"],
+  "not_applicable_reason": "required when verification_mode is no_command",
   "allowed_writes": ["paths or temp dirs"],
   "allow_zero_tests": false
 }
 ```
 
+For `verification_mode=command`, `command`, `cwd`, `expected_exit`, and
+`covers_acceptance_ids` are required. For `verification_mode=no_command`,
+`not_applicable_reason` and `covers_acceptance_ids` are required, and the
+reason must explain why the task is documentation-only or otherwise has no
+runtime command.
+
 The orchestrator must reject unverifiable success: wrong cwd, missing expected
-output, zero tests when `allow_zero_tests` is false, or writes outside
-`allowed_writes`.
+output, zero tests when `allow_zero_tests` is false, missing no-command reason,
+or writes outside `allowed_writes`.
 
 Verification objects are authority artifacts stored under
 `implementation/verification/` and referenced through `implementation/INDEX.json`.
@@ -540,7 +578,7 @@ M1 grounding adds:
 
 - project detection: package managers, workspace roots, and build systems;
 - test surface: test directories, test naming patterns, target-specific commands;
-- one primary language detector recorded in `language_packs.json`;
+- one primary language detector recorded in the language-pack logical record;
 - richer verification objects for build, lint, type-check, smoke, and tests.
 
 The first version may use only `rg`, `git ls-files`, manifest parsing, and
@@ -548,10 +586,11 @@ manual configuration. Language-specific symbol indexes are not part of M0.
 
 ### Phase I2: Language Pack Expansion
 
-For M1, create at least one primary language detector entry in
-`language_packs.json`. After M1, run richer language packs when useful to
-improve navigation. A language pack adapts existing tools to the common repo
-index model.
+For M1, create at least one primary language detector entry in the language-pack
+logical record. In compact layout this may live inside `repo_index.json`; in
+expanded layout it may live in `language_packs.json`. After M1, run richer
+language packs when useful to improve navigation. A language pack adapts
+existing tools to the common repo index model.
 
 Language pack maturity:
 
@@ -697,11 +736,11 @@ Minimum fields:
     "artifact_id": "TASK-001-example",
     "artifact_type": "task_card",
     "version": 1,
-    "status": "ready",
+    "status": "current",
     "content_hash": "sha256:<hash>"
   },
   "task_id": "TASK-001-example",
-  "status": "ready | running | blocked | completed | failed",
+  "task_status": "ready | running | blocked | completed | failed | cancelled",
   "context_pack_id": "CTX-001-example",
   "context_pack_hash": "sha256:<hash>",
   "objective": "Concrete change to make",
@@ -837,12 +876,12 @@ Minimum result record:
     "content_hash": "sha256:<hash>"
   },
   "dispatch_id": "DISPATCH-001-worker",
-  "status": "completed | blocked | failed | cancelled",
+  "result_status": "completed | blocked | failed | cancelled",
   "changed_files": ["paths"],
   "verification_results": [
     {
       "verification_id": "VERIFY-001-example",
-      "status": "passed | failed | skipped",
+      "verification_status": "passed | failed | skipped",
       "evidence": "trace or command-output path"
     }
   ],
@@ -878,8 +917,9 @@ Minimum result record:
 
 A subagent result is not accepted unless it matches the dispatch scope and
 schema. Every worker result must be captured by the evidence level required for
-the task. For L0/L1, a compact result plus milestone trace is enough; for L2/L3,
-the implementation trace must reference the result directly.
+the task. For L0/L1, the event log entry containing the compact result is the
+trace. For L2/L3, the milestone or semantic trace must reference the result
+directly.
 `design_findings` are evidence and routing requests. They are not permission for
 the worker to modify semantic artifacts or start design-authority agents.
 
@@ -934,8 +974,9 @@ Escalation policy:
   be revised before any design CR agent is dispatched.
 - A blocking design finding pauses dependent task cards until the design CR is
   rejected, integrated, or downgraded to an implementation-only revision.
-- Every escalation request and routing decision must be recorded in an
-  implementation trace and linked to any resulting artifact CR.
+- Every semantic escalation request and routing decision must be recorded in an
+  event-log entry. L2/L3 escalations must also be recorded in an implementation
+  trace and linked to any resulting artifact CR.
 
 #### Platform Adapter Gate
 
@@ -1116,13 +1157,13 @@ Every failure route must declare:
 
 | Failure | Route |
 |---|---|
-| Patch bug inside write scope | Return to same worker with verification output; invalidate only the failed trace attempt. |
+| Patch bug inside write scope | Return to same worker with verification output; invalidate only the failed attempt/result record. |
 | Need to edit outside write scope | Block task; create revised context pack and task card; cancel dependent pending workers. |
 | Missing build/test command | Create repository grounding task; block implementation tasks that rely on that verification. |
 | Subagent result violates dispatch scope or schema | Reject result; invalidate result record; revise dispatch or task card before retrying. |
 | Platform adapter reports success with failed or missing subagent items | Treat the job as failed; invalidate affected results; do not integrate until every required item has a valid result or is explicitly routed as cancelled/failed. |
 | Platform adapter cannot enforce write isolation | Downgrade to read-only dispatch or isolated worktree/container policy; block parallel writing. |
-| Required verification failed | Block integration; classify failure as patch bug, environment issue, unrelated failure, or design conflict; invalidate the failed trace attempt and affected task status. |
+| Required verification failed | Block integration; classify failure as patch bug, environment issue, unrelated failure, or design conflict; invalidate the failed attempt/result record and affected task status. |
 | Repo index stale or wrong | Regenerate affected index slice; invalidate context packs and task cards derived from it. |
 | Missing base revision or file hash | Fail closed; refresh grounding and regenerate affected context packs before worker launch. |
 | Risk level missing or lower than rule-triggered minimum | Block integration; run the Risk Classifier Gate and collect only the evidence required by the assigned level. |
@@ -1183,8 +1224,8 @@ An implementation milestone is acceptable only if:
 - missing hashes or unknown base revisions did not pass integration when the
   assigned evidence level, stale-index dependency, or workspace mode required
   them;
-- progress records completed, blocked, and next tasks, or M0 trace/task status
-  records the same state;
+- progress records completed, blocked, and next tasks, or M0 event-log/task
+  status records the same state;
 - unresolved design conflicts are represented as CRs;
 - every implementation-originated design finding is routed, closed, or linked
   to a pending CR before the milestone is accepted;

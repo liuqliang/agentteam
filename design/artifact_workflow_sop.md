@@ -87,11 +87,11 @@ JSON artifacts should include a `_meta` object:
 {
   "_meta": {
     "artifact_id": "stable_id",
-    "artifact_type": "task_brief | constraints | acceptance_contract | domain_pack | registry | spec | change_request | validation_plan | review | trace | agent_dispatch | agent_result | implementation_pack | verification_object | context_pack | task_card | workspace_policy | progress | repo_index | implementation_structure_doc | evidence_note",
+    "artifact_type": "task_brief | constraints | acceptance_contract | domain_pack | registry | spec | change_request | validation_plan | review | trace | agent_dispatch | agent_result | implementation_pack | verification_object | context_pack | task_card | backlog | milestone | attempt | event_log | event | checkpoint | workspace_policy | progress | repo_index | map_invalidation | risk_assessment | implementation_structure_doc | evidence_note",
     "authority_class": "semantic_contract | implementation_authority | derived_observation | evidence_note",
     "version": 1,
     "status": "draft | current | archived | superseded",
-    "owner": "orchestrator | registry_architect | integration_agent | repo_grounding_agent | patch_integration_agent | context_pack_builder | worker_agent | validator",
+    "owner": "orchestrator | implementation_orchestrator | task_slicer | registry_architect | integration_agent | repo_grounding_agent | repo_map_manager | repo_explorer | patch_integration_agent | patch_reviewer | context_pack_builder | worker_agent | risk_classifier | verification_runner | semantic_feedback_agent | design_cr_agent | validator",
     "allowed_writers": ["roles or agent ids"],
     "requires_design_cr": true,
     "source_cr": "CR-001-example",
@@ -102,6 +102,12 @@ JSON artifacts should include a `_meta` object:
   }
 }
 ```
+
+`_meta.status` is artifact lifecycle status only. Do not store task execution,
+dispatch, attempt, result, verification, or backlog status in `_meta.status`.
+Those states must live in explicit domain fields such as `task_status`,
+`dispatch_status`, `result_status`, `attempt_status`, `integration_status`, or
+`verification_status`.
 
 Markdown specs may use equivalent frontmatter or a sidecar `.meta.json`, but
 the same fields are still required. `content_hash` should be computed over the
@@ -337,7 +343,7 @@ Minimum result record:
     "content_hash": "sha256:<hash>"
   },
   "dispatch_id": "DISPATCH-001-example",
-  "status": "completed | blocked | failed | cancelled",
+  "result_status": "completed | blocked | failed | cancelled",
   "output": {},
   "proposed_change_requests": ["CR draft ids or inline drafts"],
   "findings": [],
@@ -477,8 +483,10 @@ Gate:
   affect `output/current/` must become a CR and be integrated by the Integration
   Agent.
 - CRs originating from implementation evidence must reference the worker
-  `agent_result`, the implementation trace, and the affected implementation
-  artifacts that will need invalidation or rebase.
+  `agent_result`, the trace carrier, and the affected implementation artifacts
+  that will need invalidation or rebase. For L0/L1 implementation evidence the
+  trace carrier may be an event id; L2/L3 design escalation should reference an
+  implementation trace or semantic trace.
 - CRs are required for `semantic_contract` changes. Implementation authority
   updates stay in the implementation workflow unless they change what the
   system promises.
@@ -599,8 +607,9 @@ Gate:
 ### Phase 9: Implementation Handoff
 
 Only after the final deliverable gate below is satisfied, produce an
-implementation handoff package. Code task cards are governed by
-`implementation_workflow_sop.md`, not by this semantic-design SOP.
+implementation handoff package. Long-running implementation control is governed
+by `autonomous_implementation_loop_sop.md`; bounded code task execution is
+governed by `implementation_workflow_sop.md`, not by this semantic-design SOP.
 
 ```
 output/current/implementation/
@@ -618,9 +627,10 @@ The handoff must include:
 - repository-grounding questions
 - rollback or failure handling
 
-After this handoff, follow `implementation_workflow_sop.md` to build repo
-indexes, context packs, bounded task cards, workspace policy, verification
-traces, and integration records.
+After this handoff, follow `autonomous_implementation_loop_sop.md` to create
+backlog, compact event state, task slicing, map freshness, and semantic
+feedback routing. Follow `implementation_workflow_sop.md` for the execution
+mechanics of each selected bounded task.
 
 ## Codex Review Invocation
 
@@ -786,7 +796,7 @@ The final design is acceptable only if:
 - all current artifact hashes match the files on disk
 - all accepted CRs have an integration result and trace id
 - every subagent result used by a CR, review, or validation plan has a matching
-  dispatch record and trace reference
+  dispatch record and semantic trace reference
 - no integrated CR has unresolved baseline or write-conflict issues
 - semantic review is `APPROVE` or `CONDITIONAL_APPROVE` with no unresolved high-severity blockers
 - adversarial review is `PROCEED` or all `REDESIGN` blockers have corresponding change requests

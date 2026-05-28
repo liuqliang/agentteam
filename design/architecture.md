@@ -18,14 +18,17 @@ vague task
   -> serial integration
   -> replayable trace
   -> implementation pack
+  -> autonomous implementation loop
+  -> backlog and task slicing
   -> repo grounding
   -> task context packs
   -> bounded worker tasks
 ```
 
 Exact semantic-design workflow details live in `artifact_workflow_sop.md`.
-Exact code-implementation workflow details live in
-`implementation_workflow_sop.md`.
+Long-running implementation control details live in
+`autonomous_implementation_loop_sop.md`. Exact bounded task execution details
+live in `implementation_workflow_sop.md`.
 
 ## Revision Basis
 
@@ -47,6 +50,8 @@ The resulting architecture separates responsibilities:
 - traces make the path replayable;
 - empirical probes test whether the paper design survives runtime contact;
 - implementation packs convert semantic design into executable worker tasks;
+- the autonomous implementation loop maintains backlog, progress, event log,
+  map freshness, and task selection;
 - repo indexes guide context selection but do not replace reading real source.
 
 ## Layered System
@@ -59,16 +64,18 @@ Layer 0: Infrastructure
 Layer 1: Artifact Knowledge
   Task brief, constraints, acceptance contract, domain pack, canonical
   registry, validation plan, CR queue, traces, implementation pack, repo index,
-  context packs, and task cards.
+  backlog, events, progress, context packs, and task cards.
 
 Layer 2: Orchestration
   Phase control, subagent dispatch, context packaging, agent routing, budget
-  control, CR ordering, integration decisions, and final gatekeeping.
+  control, backlog selection, task slicing, CR ordering, integration decisions,
+  and final gatekeeping.
 
 Layer 3: Specialist Agents
   Constraint extractor, domain classifier, registry architect, domain
-  proposer, semantic reviewer, adversarial reviewer, validation planner, and
-  implementation workers.
+  proposer, semantic reviewer, adversarial reviewer, validation planner, task
+  slicer, repo map manager, context builder, implementation workers, reviewers,
+  and semantic feedback agents.
 ```
 
 The orchestrator owns phase transitions and authority boundaries. Specialist
@@ -91,11 +98,16 @@ The hierarchy is artifact-centered:
 | Semantic Reviewer | Checks implementability, hidden contradictions, readiness, and missing probes. | Produces findings and verdicts. |
 | Adversarial Reviewer | Searches for likely failure modes and brittle assumptions. | Produces blockers or redesign risks. |
 | Validation Planner | Converts acceptance criteria into checks and empirical probes. | Owns the validation plan draft. |
+| Implementation Orchestrator | Runs the autonomous implementation loop after semantic design. | Owns backlog, progress, event log, task selection, and resume behavior; cannot silently change semantic contract. |
+| Task Slicer | Splits semantic objectives and milestones into bounded task cards. | Produces implementation tasks; does not edit code or semantic artifacts. |
+| Repo Map Manager | Maintains repo map freshness and local invalidation. | Produces derived observations, not semantic truth. |
 | Repo Grounding Agent | Builds or refreshes repository inventory, verification contract, test surface, and language-pack facts. | Produces derived repo index artifacts, not semantic authority. |
 | Context Pack Builder | Selects task-local source context from the repo index and real files. | Produces bounded context packs and task cards. |
 | Worker Agent | Implements bounded task cards from an implementation pack and reports implementation evidence. | Writes only within declared scope; may request design escalation but cannot launch authority-writing agents. |
 | Risk Classifier Gate | Classifies implementation risk from the task card, context pack, changed files, worker result, and verification status. | Assigns evidence level and review route; cannot edit code or semantic artifacts. |
+| Verification Runner | Runs deterministic verification objects. | Produces command evidence; does not decide semantic correctness alone. |
 | Patch Integration Agent | Reviews and integrates code patches returned from workers. | May integrate code changes serially; design changes still go through artifact CRs. |
+| Semantic Feedback Agent | Converts implementation-originated design gaps into findings or CR drafts. | Produces proposals only; semantic Integration Agent owns authority updates. |
 
 This is deliberately stricter than a free-form multi-agent chat. Subagents can
 be parallel only when their read scope, write scope, output schema, and
@@ -136,12 +148,12 @@ structured:
 - dispatch packets define role, goal, input artifacts, read scope, write scope,
   expected output schema, validation commands, budget, and escalation rules;
 - returned results include status, output payload, assumptions, blockers,
-  validation evidence, and trace references;
+  validation evidence, and trace carriers;
 - implementation results carry risk signals; the orchestrator or Risk
   Classifier Gate assigns the formal evidence level;
 - `semantic_contract` changes become change requests before integration;
 - `implementation_authority` changes become task-card, context-pack,
-  implementation-pack, or structure-doc updates with trace evidence;
+  implementation-pack, or structure-doc updates with event or trace evidence;
 - `derived_observation` changes are regenerated with provenance and stale
   conditions;
 - implementation findings that question the design become escalation requests
@@ -150,13 +162,17 @@ structured:
   evidence.
 
 Semantic workflow fields belong in `artifact_workflow_sop.md`.
-Implementation workflow fields belong in `implementation_workflow_sop.md`.
+Autonomous implementation control fields belong in
+`autonomous_implementation_loop_sop.md`. Bounded task execution fields belong in
+`implementation_workflow_sop.md`.
 
 ## Subagent Dispatch
 
 Subagent invocation is a first-class workflow event, not an informal chat turn.
 Every subagent run that can affect an authority artifact must have a dispatch
-record, a result record, and a trace reference.
+record, a result record, and a trace carrier. For L0/L1 implementation tasks,
+the trace carrier may be an `events.jsonl` event id. L2/L3 tasks and semantic
+authority changes require an explicit trace artifact or CR trace reference.
 
 Dispatch records define:
 
@@ -307,5 +323,5 @@ The framework is healthy when:
 - implementation workers receive bounded context packs and task cards, not a
   whole repository or pile of documents;
 - repo index facts record provenance, confidence, and stale conditions;
-- progress can be reconstructed from artifacts, CRs, traces, and validation
-  output.
+- progress can be reconstructed from backlog, `events.jsonl`, artifacts, CRs,
+  traces, and validation output.

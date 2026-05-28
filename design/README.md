@@ -8,6 +8,7 @@ design/
 ├── README.md
 ├── architecture.md
 ├── artifact_workflow_sop.md
+├── autonomous_implementation_loop_sop.md
 ├── implementation_workflow_sop.md
 └── archive/
 ```
@@ -19,9 +20,12 @@ design/
 2. Read `artifact_workflow_sop.md` when you need the exact operational process:
    output layout, artifact metadata, registry rules, CR integration, lint gates,
    semantic review, adversarial review, trace requirements, and final acceptance.
-3. Read `implementation_workflow_sop.md` when an approved semantic design must
-   become bounded code changes in a real repository.
-4. Read `archive/` only for historical context.
+3. Read `autonomous_implementation_loop_sop.md` when an approved semantic
+   design must drive long-running implementation without the user manually
+   splitting every task.
+4. Read `implementation_workflow_sop.md` when a selected task must become a
+   bounded code change in a real repository.
+5. Read `archive/` only for historical context.
 
 ## Authority Map
 
@@ -29,7 +33,8 @@ design/
 |---|---|---|
 | `architecture.md` | Current | System positioning, layered architecture, agent-team hierarchy, validation philosophy, model allocation, risks, and success metrics. |
 | `artifact_workflow_sop.md` | Current | Exact workflow, artifact structure, metadata, `INDEX.json`, semantic subagent dispatch, CR schema, integration rules, lint checks, review prompts, trace records, and final gates. |
-| `implementation_workflow_sop.md` | Current | Exact implementation workflow after semantic design: repo grounding, language packs, localization, context packs, task cards, implementation subagent dispatch, workspace sandbox policy, verification, integration, and failure routing. |
+| `autonomous_implementation_loop_sop.md` | Current | Long-running implementation control after semantic design: backlog generation, task slicing, compact layout, event log, map freshness, agent role specs, resume behavior, and semantic feedback routing. |
+| `implementation_workflow_sop.md` | Current | Bounded task execution after the autonomous loop selects a task: repo grounding, language packs, localization, context packs, task cards, implementation subagent dispatch, workspace sandbox policy, verification, integration, and failure routing. |
 | `archive/` | Historical | Early problem framing, original blueprint, and experiment revision notes. These files explain how the current design evolved but are not execution authority. |
 
 ## Maintenance Rule
@@ -40,6 +45,9 @@ Do not duplicate operational schemas across documents.
   `artifact_workflow_sop.md`.
 - If a detail changes code implementation execution, update
   `implementation_workflow_sop.md`.
+- If a detail changes long-running implementation control, backlog selection,
+  task slicing, compact layout, map freshness, or resume behavior, update
+  `autonomous_implementation_loop_sop.md`.
 - If a detail changes the conceptual structure, responsibility boundaries, or
   design rationale, update `architecture.md`.
 - If a detail only explains past decisions, keep it in `archive/` or summarize
