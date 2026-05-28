@@ -847,6 +847,9 @@ Minimum dispatch record:
     "content_hash": "sha256:<hash>"
   },
   "agent_role": "worker_agent",
+  "model_profile": "role-default profile id",
+  "fallback_model_profile": "upgrade or downgrade profile id",
+  "upgrade_reason": "null or evidence-triggered reason",
   "task_card_id": "TASK-001-example",
   "context_pack_id": "CTX-001-example",
   "context_pack_hash": "sha256:<hash>",

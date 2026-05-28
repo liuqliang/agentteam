@@ -115,6 +115,9 @@ Agent roles are persistent templates, not persistent LLM sessions.
 Each role should have an `agent.md` style profile containing:
 
 - role purpose
+- default model profile
+- fallback model profile
+- upgrade triggers
 - allowed inputs
 - output schema
 - read scope rules

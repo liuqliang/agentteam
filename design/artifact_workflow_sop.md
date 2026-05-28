@@ -313,6 +313,9 @@ Minimum dispatch record:
     "content_hash": "sha256:<hash>"
   },
   "agent_role": "constraint_agent | domain_classifier | registry_architect | domain_proposer | semantic_reviewer | adversarial_reviewer | validation_planner",
+  "model_profile": "role-default profile id",
+  "fallback_model_profile": "upgrade or downgrade profile id",
+  "upgrade_reason": "null or evidence-triggered reason",
   "purpose": "bounded reason for invoking this subagent",
   "input_artifacts": [
     {

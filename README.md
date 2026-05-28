@@ -33,6 +33,10 @@ Build an artifact workflow with validators, bounded agents, change requests, tra
   - Defines the `output/current/` artifact structure, canonical registry, CR queue, integration pass, lint gates, semantic/adversarial review, trace requirements, and implementation handoff.
   - Owns concrete schemas and gates such as versioning, content hashes, `INDEX.json` routing, CR baseline metadata, conflict detection, and domain check schema.
 
+- `design/artifact_migration_guide.md`
+  - Current guide for migrating older AgentTeam artifacts into the current model.
+  - Defines authority-class classification, old-to-new artifact mapping, backlog/event reconstruction, and validation checks.
+
 - `design/autonomous_implementation_loop_sop.md`
   - Current execution SOP for long-running implementation control after semantic design.
   - Defines backlog generation, autonomous task slicing, compact M0/M1 layout, event log, map freshness, agent role specs, resume behavior, and semantic feedback routing.

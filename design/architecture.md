@@ -254,19 +254,29 @@ reviewer or worker can reconstruct the path.
 
 ## Model Allocation
 
-Model choice should follow cognitive difficulty, not role prestige:
+Model choice should follow role responsibility, cognitive difficulty, and
+failure risk, not role prestige. Different responsibilities should normally use
+different model profiles so the system can control cost, latency, and review
+diversity.
 
-| Work type | Preferred capability |
-|---|---|
-| Orchestration and system design | strongest reasoning model available |
-| Adversarial review and deep risk analysis | strongest or heterogeneous reviewer |
-| Structured lint, routing, formatting, indexing | programmatic checks or smaller model |
-| Bounded implementation tasks | mid-strength coding model, upgraded on repeated failure |
-| Simple mechanical tasks | small model or script |
+| Role family | Default model profile | Upgrade trigger |
+|---|---|---|
+| Orchestrator, Integration Agent, Implementation Orchestrator, Semantic Feedback Agent | strongest reasoning model available | Any L3 risk, conflicting authority artifacts, repeated failed integration, or semantic-contract ambiguity. |
+| Semantic Reviewer, Adversarial Reviewer, Risk Classifier Gate, Patch Reviewer | strongest or heterogeneous reviewer model | Security/data/protocol/concurrency risk, skipped verification, or disagreement between reviewers. |
+| Task Slicer, Context Pack Builder, Repo Grounding Agent, Repo Map Manager | mid-strength reasoning/coding model plus tool output | Unknown repo layout, stale map conflicts, broad dependency closure, or repeated worker blockage. |
+| Worker Agent for L0/L1 bounded tasks | mid-strength coding model | Cross-module edit, unclear API behavior, failed verification after retry, or worker uncertainty. |
+| Repo Explorer, structured lint, routing, formatting, indexing | small model, script, or deterministic tool | Low confidence extraction, missing manifest facts, or result used as edit rationale. |
+| Simple mechanical artifact updates | script or small model | Any semantic rewrite, authority boundary change, or non-local dependency. |
 
 Escalation should be triggered by evidence: repeated validation failure,
 high-complexity modules, unresolved semantic blockers, or missing empirical
 probe coverage.
+
+Every dispatch packet should record `model_profile`, `fallback_model_profile`,
+and `upgrade_reason` when an upgrade occurs. Subagents may request an upgrade,
+but the orchestrator owns the decision. Model downgrades are allowed only when
+the task is mechanical, the schema is deterministic, and verification does not
+depend on hidden semantic judgment.
 
 ## Implementation Pack Boundary
 
