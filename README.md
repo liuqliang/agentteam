@@ -39,7 +39,7 @@ Build an artifact workflow with validators, bounded agents, change requests, tra
 
 - `design/autonomous_implementation_loop_sop.md`
   - Current execution SOP for long-running implementation control after semantic design.
-  - Defines backlog generation, autonomous task slicing, compact M0/M1 layout, event log, map freshness, agent role specs, resume behavior, and semantic feedback routing.
+  - Defines optional implementation roadmap, backlog generation, autonomous task slicing, compact M0/M1 layout, event log, map freshness, agent role specs, resume behavior, and semantic feedback routing.
   - Maps the current Codex runtime to one main supervisor session plus ephemeral subagents launched from role specs and dispatch packets.
 
 - `design/implementation_workflow_sop.md`
@@ -111,6 +111,7 @@ The intended framework should use these units as first-class artifacts:
 - `change_request`: the only entry point for design changes
 - `trace`: replayable record of inputs, steps, outputs, validation, and evidence
 - `implementation_pack`: source layout, build contract, test harness, prerequisites, milestone outline, first task-card seed, task-card generation policy, and progress schema
+- `roadmap`: optional implementation-stage medium/long-term route across phases and milestones
 - `backlog`: implementation objectives, milestones, task status, dependencies, and blockers
 - `events`: append-only durable implementation log for dispatches, results, risk, verification, integration, map invalidation, and progress deltas
 - `agent_dispatch`: structured subagent invocation packet with scope, tools, schema, budget, and stop conditions

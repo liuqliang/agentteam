@@ -38,6 +38,7 @@ freshness belong to implementation control.
 | Informal review notes | `review` or `evidence_note` | Findings that change authority must become CRs. |
 | Ad hoc change notes | `change_request` | CRs need source artifact ids, baseline hashes, and integration result. |
 | Old implementation handoff | `implementation_pack.json` | Keep only source layout, build/test contract, milestones, and task policy. |
+| Old long-term implementation plan | `project_roadmap.md` | Keep phase direction, deferred work, pause conditions, and milestone horizon; do not treat it as semantic authority. |
 | Manual task list | `backlog.json` | Convert items into backlog records with dependencies, status, risk target, and blockers. |
 | Chat progress summary | `INDEX.json` progress field or `progress.json` logical record | Treat chat as evidence only if copied into an artifact with provenance. |
 | Subagent prompt/result in chat | `agent_dispatch` and `agent_result` | Hidden chat context is not authoritative. |

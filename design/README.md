@@ -37,7 +37,7 @@ design/
 | `architecture.md` | Current | System positioning, layered architecture, agent-team hierarchy, validation philosophy, model allocation, risks, and success metrics. |
 | `artifact_workflow_sop.md` | Current | Exact workflow, artifact structure, metadata, `INDEX.json`, semantic subagent dispatch, CR schema, integration rules, lint checks, review prompts, trace records, and final gates. |
 | `artifact_migration_guide.md` | Current | Migration rules for converting older AgentTeam artifacts into the current authority classes, metadata schema, backlog/event model, and archive/supersession flow. |
-| `autonomous_implementation_loop_sop.md` | Current | Long-running implementation control after semantic design: backlog generation, task slicing, compact layout, event log, map freshness, agent role specs, resume behavior, and semantic feedback routing. |
+| `autonomous_implementation_loop_sop.md` | Current | Long-running implementation control after semantic design: optional implementation roadmap, backlog generation, task slicing, compact layout, event log, map freshness, agent role specs, resume behavior, and semantic feedback routing. |
 | `implementation_workflow_sop.md` | Current | Bounded task execution after the autonomous loop selects a task: repo grounding, language packs, localization, context packs, task cards, implementation subagent dispatch, workspace sandbox policy, verification, integration, and failure routing. |
 | `archive/` | Historical | Early problem framing, original blueprint, and experiment revision notes. These files explain how the current design evolved but are not execution authority. |
 
@@ -52,8 +52,8 @@ Do not duplicate operational schemas across documents.
 - If a detail changes code implementation execution, update
   `implementation_workflow_sop.md`.
 - If a detail changes long-running implementation control, backlog selection,
-  task slicing, compact layout, map freshness, or resume behavior, update
-  `autonomous_implementation_loop_sop.md`.
+  implementation roadmap policy, task slicing, compact layout, map freshness,
+  or resume behavior, update `autonomous_implementation_loop_sop.md`.
 - If a detail changes the conceptual structure, responsibility boundaries, or
   design rationale, update `architecture.md`.
 - If a detail only explains past decisions, keep it in `archive/` or summarize

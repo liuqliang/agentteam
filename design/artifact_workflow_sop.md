@@ -87,7 +87,7 @@ JSON artifacts should include a `_meta` object:
 {
   "_meta": {
     "artifact_id": "stable_id",
-    "artifact_type": "task_brief | constraints | acceptance_contract | domain_pack | registry | spec | change_request | validation_plan | review | trace | agent_dispatch | agent_result | implementation_pack | verification_object | context_pack | task_card | backlog | milestone | attempt | event_log | event | checkpoint | workspace_policy | progress | repo_index | map_invalidation | risk_assessment | implementation_structure_doc | evidence_note",
+    "artifact_type": "task_brief | constraints | acceptance_contract | domain_pack | registry | spec | change_request | validation_plan | review | trace | agent_dispatch | agent_result | implementation_pack | roadmap | verification_object | context_pack | task_card | backlog | milestone | attempt | event_log | event | checkpoint | workspace_policy | progress | repo_index | map_invalidation | risk_assessment | implementation_structure_doc | evidence_note",
     "authority_class": "semantic_contract | implementation_authority | derived_observation | evidence_note",
     "version": 1,
     "status": "draft | current | archived | superseded",

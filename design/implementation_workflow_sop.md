@@ -7,9 +7,9 @@ or created a bounded task. Its job is to make one code modification safe,
 incremental, and verifiable in a real repository with limited context windows.
 
 Long-running control belongs in `autonomous_implementation_loop_sop.md`:
-backlog generation, task slicing, event log, compact layout, map freshness,
-resume behavior, and semantic feedback routing. This document owns the
-execution mechanics of an individual task.
+optional implementation roadmap, backlog generation, task slicing, event log,
+compact layout, map freshness, resume behavior, and semantic feedback routing.
+This document owns the execution mechanics of an individual task.
 
 ## Core Principle
 

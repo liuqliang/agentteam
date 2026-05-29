@@ -23,6 +23,7 @@ runtime supervisor, not as the source of truth.
 
 Long-lived state must live in artifacts:
 
+- implementation roadmap, when the run needs medium/long-term phase guidance
 - backlog
 - progress
 - event log
@@ -60,6 +61,7 @@ freshness, and the latest task/result records.
 ```text
 semantic contract artifacts
   -> implementation intake
+  -> implementation roadmap check
   -> backlog generation
   -> milestone selection
   -> task slicing
@@ -87,6 +89,7 @@ but low-risk runs do not need a separate file for every logical record.
 output/current/implementation/
   INDEX.json
   implementation_pack.json
+  project_roadmap.md        (optional, phase/milestone horizon)
   backlog.json
   repo_index.json
   current_task.json
@@ -97,8 +100,9 @@ Recommended mapping:
 
 | Compact file | Contains |
 |---|---|
-| `INDEX.json` | Current run id, semantic artifact pointers, current pack, current task, progress summary, backlog path, latest checkpoint event, latest event offset, current risk state. |
+| `INDEX.json` | Current run id, semantic artifact pointers, current pack, optional roadmap path, current task, progress summary, backlog path, latest checkpoint event, latest event offset, current risk state. |
 | `implementation_pack.json` | Source layout contract, build/test contract, milestones, task slicing policy, verification strategy. |
+| `project_roadmap.md` | Optional implementation-stage medium/long-term phase and milestone horizon. |
 | `backlog.json` | Authoritative backlog snapshot, milestone/task status, dependencies, blockers, and in-flight attempts. |
 | `repo_index.json` | Repo manifest, file inventory, unknowns, project detectors, language detector summary, dependency index, test surface, freshness markers. |
 | `current_task.json` | Current milestone, current task card, context pack, verification object, write scope, stop conditions. |
@@ -301,6 +305,69 @@ artifacts.
 
 Low-risk workers should spend time changing code and running verification, not
 writing audit logs.
+
+## Roadmap, Milestones, And Backlog
+
+The implementation roadmap is optional. Create it only when the implementation
+run needs medium/long-term guidance beyond the current milestone.
+
+The roadmap belongs to the implementation stage, not the semantic-design stage.
+It is `implementation_authority`: it guides phase sequencing and gate selection
+for implementation, but it cannot define, edit, or override semantic contracts.
+
+Layering:
+
+| Layer | Artifact | Owns |
+|---|---|---|
+| Medium/long-term route | `project_roadmap.md` | Implementation phases, deferred work, pause conditions, next milestone direction. |
+| Stage goal | milestone record in `implementation_pack.json` or `backlog.json` | One coherent capability and its exit criteria. |
+| Task queue | `backlog.json` | Executable tasks, dependencies, blockers, and scheduling state. |
+| Current execution | `current_task.json` | The selected bounded task and its task-local context. |
+| Execution facts | `events.jsonl` | What actually happened: dispatch, result, verification, integration, invalidation, progress. |
+
+Relationship:
+
+```text
+semantic contract
+  -> implementation_pack
+  -> optional project_roadmap
+  -> milestone
+  -> backlog
+  -> current_task
+  -> events
+```
+
+The roadmap answers "what direction should implementation take over the next
+few phases?" A milestone answers "what capability is this phase trying to
+complete?" Backlog answers "which bounded tasks are ready, blocked, done, or
+cancelled?" Events answer "what actually happened?"
+
+### Roadmap Creation And Update Rules
+
+Create or update `project_roadmap.md` only when one of these is true:
+
+- implementation needs more than the current milestone to stay oriented;
+- a milestone closes and the next phase/gate should be restated;
+- the implementation route changes;
+- a probe or verification result invalidates the current route;
+- cross-phase parallel exploration or independent review begins;
+- pause conditions or explicitly deferred work change.
+
+Do not update the roadmap for:
+
+- ordinary L0/L1 local tasks;
+- small probes or logging changes that do not change phase sequencing;
+- compact event, backlog, or progress bookkeeping;
+- evidence generation that only confirms an existing gate;
+- proof-of-work narration.
+
+When the roadmap changes, record a compact `events.jsonl` entry. If the change
+closes or reopens a milestone, include the update in the milestone trace.
+Ordinary L0/L1 task events do not update the roadmap.
+
+Before launching large parallel exploration, independent review, or
+cross-phase implementation, the orchestrator should read the roadmap and copy
+the relevant phase boundaries into the subagent dispatch.
 
 ## Backlog And Progress
 
