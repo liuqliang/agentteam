@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/native_runtime/mailbox_message.schema.json",
+  "title": "AgentTeam Native Runtime Mailbox Message",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "message_id",
+    "from_agent",
+    "to_agent",
+    "message_type",
+    "correlation_id",
+    "created_at",
+    "lease_expires_at",
+    "payload"
+  ],
+  "properties": {
+    "message_id": {
+      "type": "string",
+      "pattern": "^MSG-[0-9]+$"
+    },
+    "from_agent": {
+      "type": "string"
+    },
+    "to_agent": {
+      "type": "string"
+    },
+    "message_type": {
+      "type": "string",
+      "enum": ["dispatch", "result", "question", "cancel", "heartbeat"]
+    },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "lease_expires_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}

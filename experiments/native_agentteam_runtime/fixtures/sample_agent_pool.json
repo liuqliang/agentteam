@@ -1,0 +1,61 @@
+{
+  "pool_id": "native-runtime-m0",
+  "scheduler_agent_id": "agent-scheduler",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "agents": [
+    {
+      "agent_id": "agent-scheduler",
+      "role": "scheduler",
+      "status": "idle",
+      "model_profile": "deterministic-rules",
+      "runtime_adapter": "manual",
+      "subscriptions": ["backlog_updated", "agent_lease_expired", "agent_result"],
+      "inbox_path": "mailboxes/agent-scheduler/inbox.jsonl",
+      "outbox_path": "mailboxes/agent-scheduler/outbox.jsonl",
+      "lease": {
+        "lease_id": null,
+        "task_id": null,
+        "expires_at": null
+      },
+      "owned_artifacts": ["agent_pool.json", "events.jsonl"],
+      "last_event_id": null,
+      "memory_summary_path": null
+    },
+    {
+      "agent_id": "agent-repo-map",
+      "role": "repo_map_agent",
+      "status": "idle",
+      "model_profile": "small-tooling",
+      "runtime_adapter": "manual",
+      "subscriptions": ["repo_index_stale", "context_missing"],
+      "inbox_path": "mailboxes/agent-repo-map/inbox.jsonl",
+      "outbox_path": "mailboxes/agent-repo-map/outbox.jsonl",
+      "lease": {
+        "lease_id": null,
+        "task_id": null,
+        "expires_at": null
+      },
+      "owned_artifacts": ["repo_index.json"],
+      "last_event_id": null,
+      "memory_summary_path": null
+    },
+    {
+      "agent_id": "agent-worker-1",
+      "role": "worker_agent",
+      "status": "idle",
+      "model_profile": "coding-l1",
+      "runtime_adapter": "codex-adapter-future",
+      "subscriptions": ["current_task_ready"],
+      "inbox_path": "mailboxes/agent-worker-1/inbox.jsonl",
+      "outbox_path": "mailboxes/agent-worker-1/outbox.jsonl",
+      "lease": {
+        "lease_id": null,
+        "task_id": null,
+        "expires_at": null
+      },
+      "owned_artifacts": [],
+      "last_event_id": null,
+      "memory_summary_path": null
+    }
+  ]
+}

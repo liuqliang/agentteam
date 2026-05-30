@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/native_runtime/agent_state.schema.json",
+  "title": "AgentTeam Native Runtime Agent State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "agent_id",
+    "role",
+    "status",
+    "model_profile",
+    "subscriptions",
+    "inbox_path",
+    "outbox_path",
+    "lease",
+    "owned_artifacts",
+    "last_event_id"
+  ],
+  "properties": {
+    "agent_id": {
+      "type": "string",
+      "pattern": "^agent-[a-z0-9][a-z0-9_-]*$"
+    },
+    "role": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["idle", "running", "blocked", "stopped", "error"]
+    },
+    "model_profile": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime_adapter": {
+      "type": "string",
+      "default": "manual"
+    },
+    "subscriptions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "inbox_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outbox_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lease_id", "task_id", "expires_at"],
+      "properties": {
+        "lease_id": {
+          "type": ["string", "null"]
+        },
+        "task_id": {
+          "type": ["string", "null"]
+        },
+        "expires_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    },
+    "owned_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "last_event_id": {
+      "type": ["string", "null"]
+    },
+    "memory_summary_path": {
+      "type": ["string", "null"]
+    }
+  }
+}

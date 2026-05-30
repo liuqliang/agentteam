@@ -1,0 +1,29 @@
+{
+  "backlog_id": "BL-NATIVE-M0",
+  "items": [
+    {
+      "task_id": "TASK-001",
+      "milestone_id": "M0",
+      "objective": "Build initial repo index fixture for native runtime experiment.",
+      "backlog_status": "ready",
+      "risk_target": "L0",
+      "depends_on": [],
+      "read_scope": ["experiments/native_agentteam_runtime/"],
+      "write_scope": ["experiments/native_agentteam_runtime/fixtures/"],
+      "required_role": "repo_map_agent",
+      "blockers": []
+    },
+    {
+      "task_id": "TASK-002",
+      "milestone_id": "M0",
+      "objective": "Run a worker task through a future Codex runtime adapter.",
+      "backlog_status": "blocked",
+      "risk_target": "L1",
+      "depends_on": ["TASK-001"],
+      "read_scope": ["experiments/native_agentteam_runtime/fixtures/"],
+      "write_scope": ["experiments/native_agentteam_runtime/tmp/"],
+      "required_role": "worker_agent",
+      "blockers": ["Codex runtime adapter is not implemented in M0 scaffold."]
+    }
+  ]
+}

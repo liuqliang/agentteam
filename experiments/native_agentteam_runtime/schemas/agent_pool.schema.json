@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/native_runtime/agent_pool.schema.json",
+  "title": "AgentTeam Native Runtime Agent Pool",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pool_id", "scheduler_agent_id", "updated_at", "agents"],
+  "properties": {
+    "pool_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scheduler_agent_id": {
+      "type": "string",
+      "pattern": "^agent-[a-z0-9][a-z0-9_-]*$"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "$ref": "agent_state.schema.json"
+      },
+      "minItems": 1
+    }
+  }
+}

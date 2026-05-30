@@ -1,0 +1,16 @@
+{
+  "message_id": "MSG-0001",
+  "from_agent": "agent-scheduler",
+  "to_agent": "agent-repo-map",
+  "message_type": "dispatch",
+  "correlation_id": "TASK-001:ATTEMPT-001",
+  "created_at": "2026-05-30T00:00:00Z",
+  "lease_expires_at": "2026-05-30T00:30:00Z",
+  "payload": {
+    "task_id": "TASK-001",
+    "objective": "Build initial repo index fixture for native runtime experiment.",
+    "read_scope": ["experiments/native_agentteam_runtime/"],
+    "write_scope": ["experiments/native_agentteam_runtime/fixtures/"],
+    "expected_output_schema": "repo_map_result_v0"
+  }
+}
