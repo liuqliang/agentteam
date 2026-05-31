@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_adversarial_review_round_0",
+    "artifact_type": "review",
+    "authority_class": "evidence_note",
+    "version": 1,
+    "status": "current",
+    "owner": "adversarial_reviewer",
+    "allowed_writers": [
+      "adversarial_reviewer",
+      "orchestrator"
+    ],
+    "requires_design_cr": false,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:9e92cf63d89d9cf6963e95f8ceddabf697b2987a32e722c80543ed7128469bac"
+  },
+  "overall_verdict": "PROCEED",
+  "confidence": 0.78,
+  "fatal_flaws": [],
+  "risks": [
+    {
+      "title": "Runtime adapter complexity may be underestimated",
+      "scenario": "Codex and Claude Code expose different session, permission, and transcript mechanics, making a single adapter interface leaky.",
+      "why_current_artifacts_do_not_prevent_it": "The semantic contract defines adapter responsibilities but not backend-specific failure modes.",
+      "probability": "medium",
+      "impact": "medium",
+      "required_probe_or_change": "M1 must start with one backend and treat the second backend as an adapter compatibility test."
+    },
+    {
+      "title": "Manual lint may give false confidence",
+      "scenario": "The artifact set passes current checks, but future edits break INDEX truthfulness or hash consistency if updates remain manual.",
+      "why_current_artifacts_do_not_prevent_it": "The checks are command-backed but not packaged as a repeatable tool yet.",
+      "probability": "medium",
+      "impact": "medium",
+      "required_probe_or_change": "M0 should include a small semantic-artifact lint script before large artifact growth."
+    },
+    {
+      "title": "Semantic roles could drift into process roles",
+      "scenario": "Implementation names modules after roles and accidentally gives each role a permanent process or worktree.",
+      "why_current_artifacts_do_not_prevent_it": "The spec states the boundary, but implementation naming can still blur it.",
+      "probability": "medium",
+      "impact": "high",
+      "required_probe_or_change": "Implementation architecture must include a RoleAgent versus RuntimeSession module boundary."
+    }
+  ],
+  "ambiguities": [
+    {
+      "artifact": "constraints.json",
+      "ambiguous_reference": "First runtime backend",
+      "interpretation_a": "M1 starts with Codex.",
+      "interpretation_b": "M1 starts with Claude Code.",
+      "consequence": "Adapter details and test harnesses diverge.",
+      "required_resolution": "Resolve during implementation_architecture, not before semantic approval."
+    }
+  ],
+  "recommended_next_action": "Proceed, but make adapter selection and executable linting first-class in the next design step."
+}

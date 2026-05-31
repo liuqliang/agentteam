@@ -1,0 +1,81 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_registry_constraints",
+    "artifact_type": "registry",
+    "authority_class": "semantic_contract",
+    "version": 1,
+    "status": "current",
+    "owner": "registry_architect",
+    "allowed_writers": [
+      "registry_architect",
+      "integration_agent"
+    ],
+    "requires_design_cr": true,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:b75c01ec1d94fec22bfa1dcd59130f9b49f7047846f6460f829ebc57decc2696"
+  },
+  "constraint_owners": [
+    {
+      "constraint_id": "HC-001",
+      "canonical_owner": "Scheduler",
+      "validated_by": [
+        "AC-002"
+      ]
+    },
+    {
+      "constraint_id": "HC-002",
+      "canonical_owner": "RoleAgent",
+      "validated_by": [
+        "AC-001"
+      ]
+    },
+    {
+      "constraint_id": "HC-003",
+      "canonical_owner": "Worktree",
+      "validated_by": [
+        "AC-003"
+      ]
+    },
+    {
+      "constraint_id": "HC-004",
+      "canonical_owner": "WorkspacePolicy",
+      "validated_by": [
+        "AC-003"
+      ]
+    },
+    {
+      "constraint_id": "HC-005",
+      "canonical_owner": "AuthorityGate",
+      "validated_by": [
+        "AC-005"
+      ]
+    },
+    {
+      "constraint_id": "HC-006",
+      "canonical_owner": "ProtocolBoundary",
+      "validated_by": [
+        "AC-004",
+        "AC-006"
+      ]
+    },
+    {
+      "constraint_id": "HC-007",
+      "canonical_owner": "ProtocolBoundary",
+      "validated_by": [
+        "AC-006"
+      ]
+    },
+    {
+      "constraint_id": "HC-008",
+      "canonical_owner": "ReusePolicy",
+      "validated_by": [
+        "AC-001",
+        "AC-002",
+        "AC-003"
+      ]
+    }
+  ]
+}

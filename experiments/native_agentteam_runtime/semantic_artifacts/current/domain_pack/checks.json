@@ -1,0 +1,91 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_domain_checks",
+    "artifact_type": "domain_pack",
+    "authority_class": "semantic_contract",
+    "version": 1,
+    "status": "current",
+    "owner": "domain_classifier",
+    "allowed_writers": [
+      "domain_classifier",
+      "integration_agent"
+    ],
+    "requires_design_cr": true,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:395a0e0209210245e2045eeb89493d97248a5f2a16d6a262c9df8fe19061cb06"
+  },
+  "checks": [
+    {
+      "id": "ROLE_RUNTIME_BOUNDARY",
+      "name": "logical roles and runtime sessions are not conflated",
+      "check_type": "required_reference",
+      "target_artifacts": [
+        "specs/runtime_semantics.md"
+      ],
+      "parameters": {
+        "required_terms": [
+          "RoleAgent",
+          "RuntimeSession",
+          "Worktree"
+        ]
+      },
+      "blocking": true,
+      "owner": "validator",
+      "rationale": "The native runtime must not recreate Codex subagent semantics as the authority model."
+    },
+    {
+      "id": "WORKTREE_ATTEMPT_BOUNDARY",
+      "name": "worktrees are bound to writable attempts",
+      "check_type": "required_reference",
+      "target_artifacts": [
+        "specs/runtime_semantics.md"
+      ],
+      "parameters": {
+        "required_phrase": "one writable attempt, one worktree"
+      },
+      "blocking": true,
+      "owner": "validator",
+      "rationale": "The architecture must not allocate worktrees to long-lived role identity by default."
+    },
+    {
+      "id": "AUTHORITY_GATE_PRESENT",
+      "name": "authority updates require validation and integration",
+      "check_type": "required_reference",
+      "target_artifacts": [
+        "specs/runtime_semantics.md",
+        "acceptance_contract.json"
+      ],
+      "parameters": {
+        "required_terms": [
+          "Validator",
+          "Integrator",
+          "authority"
+        ]
+      },
+      "blocking": true,
+      "owner": "validator",
+      "rationale": "Raw model output cannot mutate semantic or implementation authority."
+    },
+    {
+      "id": "A2A_POSTPONED",
+      "name": "A2A is not part of M0 or M1",
+      "check_type": "required_reference",
+      "target_artifacts": [
+        "constraints.json",
+        "specs/runtime_semantics.md"
+      ],
+      "parameters": {
+        "required_terms": [
+          "A2A",
+          "postponed"
+        ]
+      },
+      "blocking": true,
+      "owner": "validator",
+      "rationale": "The user explicitly chose not to use A2A for the initial design."
+    }
+  ]
+}

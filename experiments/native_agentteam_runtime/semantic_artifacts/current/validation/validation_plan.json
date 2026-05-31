@@ -1,0 +1,110 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_validation_plan",
+    "artifact_type": "validation_plan",
+    "authority_class": "semantic_contract",
+    "version": 1,
+    "status": "current",
+    "owner": "validation_planner",
+    "allowed_writers": [
+      "validation_planner",
+      "integration_agent"
+    ],
+    "requires_design_cr": true,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:14d1fef3d23ef02b8039f85fd606bd7c38f469bfe304a9b99d06fd330acae6db"
+  },
+  "validation_scope": "semantic architecture for native AgentTeam runtime",
+  "checks": [
+    {
+      "id": "VAL-001",
+      "name": "JSON artifacts parse",
+      "verification_type": "static_check",
+      "command": "jq empty experiments/native_agentteam_runtime/semantic_artifacts/current/**/*.json",
+      "acceptance_criteria": [
+        "All JSON artifacts parse successfully."
+      ],
+      "covers": [
+        "AC-001",
+        "AC-002",
+        "AC-003",
+        "AC-004",
+        "AC-005",
+        "AC-006",
+        "AC-007"
+      ],
+      "blocking": true
+    },
+    {
+      "id": "VAL-002",
+      "name": "No unresolved placeholders",
+      "verification_type": "static_check",
+      "command": "rg -n \"T[O]DO|T[B]D|F[I]XME|UNC[O]MPUTED|PLACEH[O]LDER\" experiments/native_agentteam_runtime/semantic_artifacts/current",
+      "acceptance_criteria": [
+        "The command exits with no matches."
+      ],
+      "covers": [
+        "AC-001",
+        "AC-002",
+        "AC-003",
+        "AC-004",
+        "AC-005",
+        "AC-006"
+      ],
+      "blocking": true
+    },
+    {
+      "id": "VAL-003",
+      "name": "Core semantic phrases present",
+      "verification_type": "static_check",
+      "command": "rg -n \"long-lived logical agent|short-lived runtime invocation|one writable attempt, one worktree|A2A is postponed\" experiments/native_agentteam_runtime/semantic_artifacts/current/specs/runtime_semantics.md",
+      "acceptance_criteria": [
+        "The required boundary phrases are present in the semantic spec."
+      ],
+      "covers": [
+        "AC-001",
+        "AC-003",
+        "AC-006"
+      ],
+      "blocking": true
+    },
+    {
+      "id": "VAL-004",
+      "name": "Acceptance criteria mapped",
+      "verification_type": "manual_static_review",
+      "command": "Review acceptance_contract.json against validation_plan.json.",
+      "acceptance_criteria": [
+        "Every AC id appears in at least one validation plan check."
+      ],
+      "covers": [
+        "AC-007"
+      ],
+      "blocking": true
+    }
+  ],
+  "early_probe": {
+    "id": "PROBE-001",
+    "name": "File-backed scheduler semantic simulation",
+    "probe_type": "empirical_probe",
+    "goal": "Show the critical semantic path from ready task to validated result without needing real multi-agent execution.",
+    "steps": [
+      "Load a sample backlog item and agent pool.",
+      "Select a ready task using deterministic scheduler rules.",
+      "Create a lease and mailbox dispatch.",
+      "Inject a fake structured worker result.",
+      "Validate result schema and write scope.",
+      "Append accepted or rejected validation event.",
+      "Replay event log to reconstruct task and attempt state."
+    ],
+    "success_criteria": [
+      "Replay reconstructs the same task and attempt state as the snapshot.",
+      "No accepted state update occurs without a validation event.",
+      "A writable attempt has exactly one worktree id.",
+      "A2A is not needed for the probe."
+    ],
+    "required_before": "M1 real runtime backend integration"
+  }
+}

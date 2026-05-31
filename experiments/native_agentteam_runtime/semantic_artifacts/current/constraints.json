@@ -1,0 +1,126 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_constraints",
+    "artifact_type": "constraints",
+    "authority_class": "semantic_contract",
+    "version": 1,
+    "status": "current",
+    "owner": "constraint_agent",
+    "allowed_writers": [
+      "constraint_agent",
+      "integration_agent"
+    ],
+    "requires_design_cr": true,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:930d9238f6a463335fbf2fc2e2798ba7949bcbbd00a80ad2bc24e1abb46e7bff"
+  },
+  "hard_constraints": [
+    {
+      "id": "HC-001",
+      "statement": "AgentTeam must keep the scheduler deterministic and testable without LLM calls.",
+      "rationale": "Lease management, retries, concurrency, and recovery must be reproducible."
+    },
+    {
+      "id": "HC-002",
+      "statement": "Logical role agents must be durable semantic entities independent from runtime process identity.",
+      "rationale": "A role may be executed by Codex, Claude Code, another CLI, an API model, or a script across different attempts."
+    },
+    {
+      "id": "HC-003",
+      "statement": "Writable task attempts must run in isolated worktrees.",
+      "rationale": "Parallel code changes require inspectable diffs, rollback, and controlled integration."
+    },
+    {
+      "id": "HC-004",
+      "statement": "Read-only roles must not receive private worktrees by default.",
+      "rationale": "A worktree is an execution environment for write isolation, not the identity of an agent."
+    },
+    {
+      "id": "HC-005",
+      "statement": "Raw natural-language runtime output must not update authority artifacts directly.",
+      "rationale": "Structured validation and serial integration are required to prevent authority drift."
+    },
+    {
+      "id": "HC-006",
+      "statement": "MCP must be treated as a tool/context access layer, not as the internal scheduler or authority protocol.",
+      "rationale": "Task ownership, leases, mailbox semantics, and artifact authority are AgentTeam responsibilities."
+    },
+    {
+      "id": "HC-007",
+      "statement": "A2A must be excluded from the M0 and M1 native runtime contracts.",
+      "rationale": "The first runtime should remain local, inspectable, and simpler than an external interoperability protocol."
+    },
+    {
+      "id": "HC-008",
+      "statement": "AgentTeam must not directly adopt Agent Orchestrator or Overstory as its core dependency.",
+      "rationale": "They are useful references, but their assumptions are narrower than this framework's intended scope."
+    }
+  ],
+  "soft_preferences": [
+    {
+      "id": "SP-001",
+      "statement": "M0 should use file-backed artifacts before introducing SQLite.",
+      "confidence": "high"
+    },
+    {
+      "id": "SP-002",
+      "statement": "M1 should start with a single real runtime backend before supporting multiple backends.",
+      "confidence": "high"
+    },
+    {
+      "id": "SP-003",
+      "statement": "The default writable concurrency limit should be two attempts.",
+      "confidence": "medium"
+    },
+    {
+      "id": "SP-004",
+      "statement": "The first user interface should be CLI and log files rather than a web dashboard.",
+      "confidence": "high"
+    }
+  ],
+  "inferred_defaults": [
+    {
+      "id": "ID-001",
+      "statement": "The first implementation target is a local developer workstation with git available.",
+      "confidence": "high",
+      "impact": "Controls workspace and recovery assumptions.",
+      "requires_user_confirmation": false
+    },
+    {
+      "id": "ID-002",
+      "statement": "Runtime adapters may initially support headless or one-shot execution before persistent interactive sessions.",
+      "confidence": "medium",
+      "impact": "Simplifies M1 process supervision.",
+      "requires_user_confirmation": false
+    }
+  ],
+  "non_goals": [
+    {
+      "id": "NG-001",
+      "statement": "Do not design a distributed production cluster in the semantic architecture pass."
+    },
+    {
+      "id": "NG-002",
+      "statement": "Do not design a web dashboard before the control-plane semantics are stable."
+    },
+    {
+      "id": "NG-003",
+      "statement": "Do not make external A2A interoperability part of the first executable runtime."
+    },
+    {
+      "id": "NG-004",
+      "statement": "Do not encode Codex subagent limitations as the native AgentTeam agent model."
+    }
+  ],
+  "open_questions": [
+    {
+      "id": "OQ-001",
+      "question": "Should M1 use Codex or Claude Code as the first real runtime backend?",
+      "blocking_for": "implementation_architecture",
+      "default_resolution": "Keep adapter contract backend-neutral until implementation planning."
+    }
+  ]
+}

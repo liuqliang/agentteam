@@ -1,0 +1,54 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_semantic_review_round_0",
+    "artifact_type": "review",
+    "authority_class": "evidence_note",
+    "version": 1,
+    "status": "current",
+    "owner": "semantic_reviewer",
+    "allowed_writers": [
+      "semantic_reviewer",
+      "orchestrator"
+    ],
+    "requires_design_cr": false,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:069c7ae12cc438d885eb83dd3d9d6b4c42abbd97644b0fcd661b8dc7287359a6"
+  },
+  "verdict": "APPROVE",
+  "confidence_percent": 82,
+  "scores": {
+    "completeness": 4,
+    "semantic_consistency": 5,
+    "implementability": 4,
+    "realism": 4,
+    "validation_strength": 4
+  },
+  "blocking_gaps": [],
+  "non_blocking_gaps": [
+    {
+      "id": "G-001",
+      "title": "First real runtime backend remains open",
+      "severity": "LOW",
+      "evidence": "constraints.json keeps OQ-001 open.",
+      "required_change": "Resolve during implementation_architecture or M1 planning, not in this semantic pass."
+    },
+    {
+      "id": "G-002",
+      "title": "Executable linter does not yet exist",
+      "severity": "LOW",
+      "evidence": "spec_lint_round_0.json records manual/static command checks.",
+      "required_change": "Implement a reusable lint command during M0 once storage layout is chosen."
+    }
+  ],
+  "approved_aspects": [
+    "The architecture separates logical role identity, runtime process identity, attempts, and worktrees.",
+    "The deterministic scheduler boundary is clear enough to prevent a top-level LLM from owning queue mechanics.",
+    "Mailbox messages and events have distinct semantic responsibilities.",
+    "Authority artifact updates are gated through validation and integration.",
+    "A2A is explicitly postponed without preventing a future bridge."
+  ],
+  "recommended_next_action": "Proceed to implementation_architecture after user review."
+}

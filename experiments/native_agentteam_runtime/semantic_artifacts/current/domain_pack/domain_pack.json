@@ -1,0 +1,46 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_domain_pack",
+    "artifact_type": "domain_pack",
+    "authority_class": "semantic_contract",
+    "version": 1,
+    "status": "current",
+    "owner": "domain_classifier",
+    "allowed_writers": [
+      "domain_classifier",
+      "integration_agent"
+    ],
+    "requires_design_cr": true,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:500fe79f36a717de2d952f36d38cc15013aa8f7232f673c68685c570cc1546cc"
+  },
+  "primary_pack": "software_system",
+  "secondary_packs": [
+    "agent_runtime_orchestration",
+    "developer_tooling"
+  ],
+  "rationale": "The target is a software framework, but its semantic core is agent runtime orchestration rather than a single application domain.",
+  "required_artifacts": [
+    "task_brief",
+    "constraints",
+    "acceptance_contract",
+    "domain_pack",
+    "registry.artifacts",
+    "registry.canonical_symbols",
+    "registry.constraints",
+    "registry.ownership",
+    "specs.runtime_semantics",
+    "validation.validation_plan"
+  ],
+  "required_lint_checks": [
+    "SCHEMA_VALID",
+    "ACCEPTANCE_COVERAGE",
+    "ROLE_RUNTIME_BOUNDARY",
+    "WORKTREE_ATTEMPT_BOUNDARY",
+    "AUTHORITY_GATE_PRESENT",
+    "A2A_POSTPONED"
+  ]
+}

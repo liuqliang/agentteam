@@ -1,0 +1,106 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_ownership",
+    "artifact_type": "registry",
+    "authority_class": "semantic_contract",
+    "version": 1,
+    "status": "current",
+    "owner": "registry_architect",
+    "allowed_writers": [
+      "registry_architect",
+      "integration_agent"
+    ],
+    "requires_design_cr": true,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:e2a9562393682601b6c19bc4d6e50bb2eb1b449cf72ac9c97156202af6eef2cc"
+  },
+  "component_ownership": [
+    {
+      "component": "Scheduler",
+      "owns": [
+        "dispatch eligibility",
+        "leases",
+        "retry policy",
+        "concurrency limits",
+        "runtime invocation decisions"
+      ],
+      "must_not_own": [
+        "semantic contract rewriting",
+        "raw code edits"
+      ]
+    },
+    {
+      "component": "RoleAgent",
+      "owns": [
+        "role contract",
+        "task-local semantic proposal",
+        "structured result payload"
+      ],
+      "must_not_own": [
+        "lease issuance",
+        "authority artifact mutation",
+        "integration decisions"
+      ]
+    },
+    {
+      "component": "RuntimeAdapter",
+      "owns": [
+        "backend command construction",
+        "runtime session startup",
+        "output capture",
+        "liveness observation"
+      ],
+      "must_not_own": [
+        "task readiness policy",
+        "artifact authority",
+        "semantic acceptance"
+      ]
+    },
+    {
+      "component": "Validator",
+      "owns": [
+        "schema checks",
+        "scope checks",
+        "evidence checks",
+        "risk routing recommendations"
+      ],
+      "must_not_own": [
+        "executing edits",
+        "silently changing artifacts"
+      ]
+    },
+    {
+      "component": "Integrator",
+      "owns": [
+        "accepted patch merge",
+        "accepted artifact update",
+        "backlog state integration"
+      ],
+      "must_not_own": [
+        "unvalidated model output",
+        "parallel authority writes"
+      ]
+    }
+  ],
+  "authority_write_paths": [
+    {
+      "authority_class": "semantic_contract",
+      "allowed_path": "design CR plus serial integration"
+    },
+    {
+      "authority_class": "implementation_authority",
+      "allowed_path": "validated implementation event plus integration"
+    },
+    {
+      "authority_class": "derived_observation",
+      "allowed_path": "regeneration with provenance and stale conditions"
+    },
+    {
+      "authority_class": "evidence_note",
+      "allowed_path": "append-only producing tool or agent result"
+    }
+  ]
+}

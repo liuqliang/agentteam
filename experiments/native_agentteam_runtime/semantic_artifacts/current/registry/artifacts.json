@@ -1,0 +1,82 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_artifact_registry",
+    "artifact_type": "registry",
+    "authority_class": "semantic_contract",
+    "version": 1,
+    "status": "current",
+    "owner": "registry_architect",
+    "allowed_writers": [
+      "registry_architect",
+      "integration_agent"
+    ],
+    "requires_design_cr": true,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:2a9305e61c964b74fa7f7881be0d07b352a3d085a0d203a1ae55588090976417"
+  },
+  "artifacts": [
+    {
+      "artifact_id": "native_runtime_task_brief",
+      "path": "task_brief.json",
+      "authority_class": "semantic_contract",
+      "purpose": "Defines the design task and confirmed scope."
+    },
+    {
+      "artifact_id": "native_runtime_constraints",
+      "path": "constraints.json",
+      "authority_class": "semantic_contract",
+      "purpose": "Defines hard constraints, preferences, defaults, non-goals, and open questions."
+    },
+    {
+      "artifact_id": "native_runtime_acceptance_contract",
+      "path": "acceptance_contract.json",
+      "authority_class": "semantic_contract",
+      "purpose": "Maps acceptance criteria to verification methods."
+    },
+    {
+      "artifact_id": "native_runtime_domain_pack",
+      "path": "domain_pack/domain_pack.json",
+      "authority_class": "semantic_contract",
+      "purpose": "Declares domain pack and required checks."
+    },
+    {
+      "artifact_id": "native_runtime_domain_checks",
+      "path": "domain_pack/checks.json",
+      "authority_class": "semantic_contract",
+      "purpose": "Defines domain-specific lint checks."
+    },
+    {
+      "artifact_id": "native_runtime_canonical_symbols",
+      "path": "registry/canonical_symbols.json",
+      "authority_class": "semantic_contract",
+      "purpose": "Owns canonical names for entities, roles, states, message types, and events."
+    },
+    {
+      "artifact_id": "native_runtime_ownership",
+      "path": "registry/ownership.json",
+      "authority_class": "semantic_contract",
+      "purpose": "Defines writer and authority ownership by component and artifact class."
+    },
+    {
+      "artifact_id": "native_runtime_registry_constraints",
+      "path": "registry/constraints.json",
+      "authority_class": "semantic_contract",
+      "purpose": "Maps named constraints to canonical owners and validation responsibilities."
+    },
+    {
+      "artifact_id": "native_runtime_semantic_spec",
+      "path": "specs/runtime_semantics.md",
+      "authority_class": "semantic_contract",
+      "purpose": "Defines the semantic architecture for the native runtime."
+    },
+    {
+      "artifact_id": "native_runtime_validation_plan",
+      "path": "validation/validation_plan.json",
+      "authority_class": "semantic_contract",
+      "purpose": "Defines checks and early probes for the semantic design."
+    }
+  ]
+}

@@ -1,0 +1,173 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_semantic_index",
+    "artifact_type": "registry",
+    "authority_class": "semantic_contract",
+    "version": 1,
+    "status": "current",
+    "owner": "orchestrator",
+    "allowed_writers": [
+      "orchestrator",
+      "integration_agent"
+    ],
+    "requires_design_cr": true,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:56254ee443464bec1f109ef4fc32fce12f9514d31156250be6066ee5970c1051"
+  },
+  "artifact_set": "native_agentteam_runtime_semantic_architecture",
+  "status": "current",
+  "root": "experiments/native_agentteam_runtime/semantic_artifacts/current",
+  "authority_summary": {
+    "semantic_contract": [
+      "task_brief.json",
+      "constraints.json",
+      "acceptance_contract.json",
+      "domain_pack/domain_pack.json",
+      "domain_pack/checks.json",
+      "registry/artifacts.json",
+      "registry/canonical_symbols.json",
+      "registry/constraints.json",
+      "registry/ownership.json",
+      "specs/runtime_semantics.md",
+      "validation/validation_plan.json"
+    ],
+    "implementation_authority": [],
+    "derived_observation": [],
+    "evidence_note": []
+  },
+  "artifacts": [
+    {
+      "artifact_id": "native_runtime_task_brief",
+      "path": "task_brief.json",
+      "artifact_type": "task_brief",
+      "authority_class": "semantic_contract",
+      "owner": "orchestrator",
+      "version": 1,
+      "status": "current",
+      "requires_design_cr": true,
+      "content_hash": "sha256:b2fa00f65a890f963b36c1e3149246b4918f4c658ef6de5c9eab9e171deecc20"
+    },
+    {
+      "artifact_id": "native_runtime_constraints",
+      "path": "constraints.json",
+      "artifact_type": "constraints",
+      "authority_class": "semantic_contract",
+      "owner": "constraint_agent",
+      "version": 1,
+      "status": "current",
+      "requires_design_cr": true,
+      "content_hash": "sha256:930d9238f6a463335fbf2fc2e2798ba7949bcbbd00a80ad2bc24e1abb46e7bff"
+    },
+    {
+      "artifact_id": "native_runtime_acceptance_contract",
+      "path": "acceptance_contract.json",
+      "artifact_type": "acceptance_contract",
+      "authority_class": "semantic_contract",
+      "owner": "validation_planner",
+      "version": 1,
+      "status": "current",
+      "requires_design_cr": true,
+      "content_hash": "sha256:56ff14f428db82f190d2bb9b8feb603ae24308f33bc7c8232f5719a55b539bb2"
+    },
+    {
+      "artifact_id": "native_runtime_domain_pack",
+      "path": "domain_pack/domain_pack.json",
+      "artifact_type": "domain_pack",
+      "authority_class": "semantic_contract",
+      "owner": "domain_classifier",
+      "version": 1,
+      "status": "current",
+      "requires_design_cr": true,
+      "content_hash": "sha256:500fe79f36a717de2d952f36d38cc15013aa8f7232f673c68685c570cc1546cc"
+    },
+    {
+      "artifact_id": "native_runtime_domain_checks",
+      "path": "domain_pack/checks.json",
+      "artifact_type": "domain_pack",
+      "authority_class": "semantic_contract",
+      "owner": "domain_classifier",
+      "version": 1,
+      "status": "current",
+      "requires_design_cr": true,
+      "content_hash": "sha256:395a0e0209210245e2045eeb89493d97248a5f2a16d6a262c9df8fe19061cb06"
+    },
+    {
+      "artifact_id": "native_runtime_artifact_registry",
+      "path": "registry/artifacts.json",
+      "artifact_type": "registry",
+      "authority_class": "semantic_contract",
+      "owner": "registry_architect",
+      "version": 1,
+      "status": "current",
+      "requires_design_cr": true,
+      "content_hash": "sha256:2a9305e61c964b74fa7f7881be0d07b352a3d085a0d203a1ae55588090976417"
+    },
+    {
+      "artifact_id": "native_runtime_canonical_symbols",
+      "path": "registry/canonical_symbols.json",
+      "artifact_type": "registry",
+      "authority_class": "semantic_contract",
+      "owner": "registry_architect",
+      "version": 1,
+      "status": "current",
+      "requires_design_cr": true,
+      "content_hash": "sha256:153948750edb1dc013f52292190e1b73bb91faf94f5b219fd71259dcadd62762"
+    },
+    {
+      "artifact_id": "native_runtime_registry_constraints",
+      "path": "registry/constraints.json",
+      "artifact_type": "registry",
+      "authority_class": "semantic_contract",
+      "owner": "registry_architect",
+      "version": 1,
+      "status": "current",
+      "requires_design_cr": true,
+      "content_hash": "sha256:b75c01ec1d94fec22bfa1dcd59130f9b49f7047846f6460f829ebc57decc2696"
+    },
+    {
+      "artifact_id": "native_runtime_ownership",
+      "path": "registry/ownership.json",
+      "artifact_type": "registry",
+      "authority_class": "semantic_contract",
+      "owner": "registry_architect",
+      "version": 1,
+      "status": "current",
+      "requires_design_cr": true,
+      "content_hash": "sha256:e2a9562393682601b6c19bc4d6e50bb2eb1b449cf72ac9c97156202af6eef2cc"
+    },
+    {
+      "artifact_id": "native_runtime_semantic_spec",
+      "path": "specs/runtime_semantics.md",
+      "artifact_type": "spec",
+      "authority_class": "semantic_contract",
+      "owner": "orchestrator",
+      "version": 1,
+      "status": "current",
+      "requires_design_cr": true,
+      "content_hash": "sha256:689fc578091b193cf788b34a6e3116a0ce1f811748beea974ed648d13a349878"
+    },
+    {
+      "artifact_id": "native_runtime_validation_plan",
+      "path": "validation/validation_plan.json",
+      "artifact_type": "validation_plan",
+      "authority_class": "semantic_contract",
+      "owner": "validation_planner",
+      "version": 1,
+      "status": "current",
+      "requires_design_cr": true,
+      "content_hash": "sha256:14d1fef3d23ef02b8039f85fd606bd7c38f469bfe304a9b99d06fd330acae6db"
+    }
+  ],
+  "latest_lint_report": "../lint/spec_lint_round_0.json",
+  "latest_semantic_review": "../reviews/semantic_review_round_0.json",
+  "latest_adversarial_review": "../reviews/adversarial_review_round_0.json",
+  "latest_validation_plan": "validation/validation_plan.json",
+  "current_archive_version": null,
+  "notes": [
+    "This artifact set is scoped to the native runtime experiment and does not replace design/ authority documents.",
+    "A2A is intentionally excluded from the M0/M1 semantic contract."
+  ]
+}

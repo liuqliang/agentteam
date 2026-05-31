@@ -1,0 +1,118 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_canonical_symbols",
+    "artifact_type": "registry",
+    "authority_class": "semantic_contract",
+    "version": 1,
+    "status": "current",
+    "owner": "registry_architect",
+    "allowed_writers": [
+      "registry_architect",
+      "integration_agent"
+    ],
+    "requires_design_cr": true,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:153948750edb1dc013f52292190e1b73bb91faf94f5b219fd71259dcadd62762"
+  },
+  "entities": {
+    "Project": "A repository or workspace governed by one AgentTeam runtime configuration.",
+    "Artifact": "A durable file or record with authority class, owner, version, and lifecycle.",
+    "RoleAgent": "A long-lived logical responsibility boundary with identity, role contract, state, mailbox subscriptions, and permission profile.",
+    "RuntimeSession": "A short-lived execution incarnation of a role agent on a concrete backend such as Codex or Claude Code.",
+    "RuntimeAdapter": "A backend-normalizing boundary that starts, observes, stops, and parses RuntimeSession output.",
+    "Scheduler": "The deterministic control-plane process that selects work, issues leases, invokes adapters, and records events.",
+    "MailboxMessage": "A durable request or result envelope used to coordinate work.",
+    "Event": "An append-only fact emitted after a state transition or observation.",
+    "Task": "A backlog unit with semantic refs, scopes, risk target, verification policy, and scheduling status.",
+    "Attempt": "A concrete try to execute a task by one assigned role and runtime backend.",
+    "Lease": "A time-bounded claim that prevents duplicate execution of the same attempt or agent assignment.",
+    "Worktree": "A git workspace assigned to one writable attempt.",
+    "ContextPack": "A bounded context bundle assembled for one task attempt.",
+    "Validator": "A gate that checks output schema, scope, evidence, risk, and authority implications.",
+    "Integrator": "A serial gate that applies accepted code, backlog, or artifact changes."
+  },
+  "roles": {
+    "scheduler": "Deterministic software role that owns control-plane mechanics.",
+    "repo_map_agent": "Read-only semantic role that maintains repository navigation observations.",
+    "context_builder_agent": "Read-only role that builds task-local context packs.",
+    "risk_classifier_agent": "Semantic role or rule gate that assigns evidence and review depth.",
+    "worker_agent": "Writable role that executes bounded task attempts.",
+    "verification_agent": "Read-mostly role that runs or designs verification and interprets failures.",
+    "patch_integrator": "Controlled write role that serially integrates accepted patches.",
+    "semantic_feedback_agent": "Semantic role that converts implementation-discovered design gaps into proposals.",
+    "watchdog": "Deterministic liveness monitor with optional semantic diagnosis."
+  },
+  "authority_classes": {
+    "semantic_contract": "Defines what the system promises.",
+    "implementation_authority": "Defines how one approved implementation run realizes the semantic contract.",
+    "derived_observation": "Records generated or observed facts that may become stale.",
+    "evidence_note": "Records evidence and rationale without redefining authority."
+  },
+  "message_types": [
+    "dispatch_task",
+    "request_context_pack",
+    "request_verification",
+    "request_semantic_feedback",
+    "cancel_attempt",
+    "worker_result",
+    "validation_result",
+    "integration_result"
+  ],
+  "event_types": [
+    "task_selected",
+    "lease_acquired",
+    "worktree_created",
+    "runtime_session_started",
+    "runtime_output_received",
+    "validation_accepted",
+    "validation_rejected",
+    "patch_integrated",
+    "artifact_update_proposed",
+    "artifact_update_integrated",
+    "attempt_timed_out",
+    "attempt_cancelled",
+    "recovery_routed"
+  ],
+  "states": {
+    "agent_status": [
+      "idle",
+      "leased",
+      "running",
+      "blocked",
+      "failed",
+      "disabled"
+    ],
+    "task_status": [
+      "ready",
+      "running",
+      "blocked",
+      "done",
+      "cancelled",
+      "rebase_required"
+    ],
+    "attempt_status": [
+      "created",
+      "dispatched",
+      "running",
+      "completed",
+      "failed",
+      "cancelled",
+      "timed_out"
+    ],
+    "integration_status": [
+      "not_integrated",
+      "integrated",
+      "rejected",
+      "rebase_required"
+    ],
+    "lease_status": [
+      "active",
+      "expired",
+      "released",
+      "cancelled"
+    ]
+  }
+}

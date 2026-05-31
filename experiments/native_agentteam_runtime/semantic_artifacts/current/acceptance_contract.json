@@ -1,0 +1,78 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_acceptance_contract",
+    "artifact_type": "acceptance_contract",
+    "authority_class": "semantic_contract",
+    "version": 1,
+    "status": "current",
+    "owner": "validation_planner",
+    "allowed_writers": [
+      "validation_planner",
+      "integration_agent"
+    ],
+    "requires_design_cr": true,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:56ff14f428db82f190d2bb9b8feb603ae24308f33bc7c8232f5719a55b539bb2"
+  },
+  "criteria": [
+    {
+      "id": "AC-001",
+      "statement": "The semantic architecture distinguishes logical role agents from runtime sessions and from worktrees.",
+      "verification_type": "static_check",
+      "verification_artifact": "specs/runtime_semantics.md#identity-and-lifecycle-boundaries",
+      "owner": "validator",
+      "blocking": true
+    },
+    {
+      "id": "AC-002",
+      "statement": "The scheduler's deterministic responsibilities are explicitly separated from LLM semantic judgment.",
+      "verification_type": "static_check",
+      "verification_artifact": "specs/runtime_semantics.md#decision-boundaries",
+      "owner": "validator",
+      "blocking": true
+    },
+    {
+      "id": "AC-003",
+      "statement": "Writable attempts, leases, and worktrees have a bounded lifecycle and cannot silently mutate the authority checkout.",
+      "verification_type": "static_check",
+      "verification_artifact": "specs/runtime_semantics.md#writable-attempt-lifecycle",
+      "owner": "validator",
+      "blocking": true
+    },
+    {
+      "id": "AC-004",
+      "statement": "Mailbox messages and events are semantically distinct: messages request work, events record facts.",
+      "verification_type": "static_check",
+      "verification_artifact": "specs/runtime_semantics.md#communication-semantics",
+      "owner": "validator",
+      "blocking": true
+    },
+    {
+      "id": "AC-005",
+      "statement": "Authority artifacts can be changed only through validation and integration gates.",
+      "verification_type": "static_check",
+      "verification_artifact": "specs/runtime_semantics.md#authority-and-artifact-governance",
+      "owner": "validator",
+      "blocking": true
+    },
+    {
+      "id": "AC-006",
+      "statement": "The design postpones A2A while preserving an explicit future bridge boundary.",
+      "verification_type": "static_check",
+      "verification_artifact": "specs/runtime_semantics.md#external-protocol-boundaries",
+      "owner": "validator",
+      "blocking": true
+    },
+    {
+      "id": "AC-007",
+      "statement": "The M0 validation plan includes an early end-to-end probe from task selection to validated result.",
+      "verification_type": "empirical_probe",
+      "verification_artifact": "validation/validation_plan.json",
+      "owner": "validator",
+      "blocking": true
+    }
+  ]
+}

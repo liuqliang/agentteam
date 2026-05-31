@@ -1,0 +1,66 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_spec_lint_round_0",
+    "artifact_type": "review",
+    "authority_class": "evidence_note",
+    "version": 1,
+    "status": "current",
+    "owner": "validator",
+    "allowed_writers": [
+      "validator",
+      "orchestrator"
+    ],
+    "requires_design_cr": false,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "validator",
+    "content_hash": "sha256:2399123e25f6028415faab5022d25583ef87d77828b5a55189458ee1288a2c92"
+  },
+  "artifact_set": "native_agentteam_runtime_semantic_architecture",
+  "round": 0,
+  "overall_status": "passed",
+  "checks": [
+    {
+      "id": "SCHEMA_VALID",
+      "status": "passed",
+      "command": "find experiments/native_agentteam_runtime/semantic_artifacts/current -name '*.json' -print0 | xargs -0 jq empty",
+      "evidence": "Command exited 0; all JSON artifacts parse."
+    },
+    {
+      "id": "NO_UNRESOLVED_MARKERS",
+      "status": "passed",
+      "command": "rg -n \"T[O]DO|T[B]D|F[I]XME|UNC[O]MPUTED|PLACEH[O]LDER\" experiments/native_agentteam_runtime/semantic_artifacts/current",
+      "evidence": "Command exited 1 with no matches."
+    },
+    {
+      "id": "SEMANTIC_BOUNDARY_PHRASES",
+      "status": "passed",
+      "command": "rg -n \"long-lived logical agent|short-lived runtime invocation|one writable attempt, one worktree|A2A is postponed\" experiments/native_agentteam_runtime/semantic_artifacts/current/specs/runtime_semantics.md",
+      "evidence": "All required phrases were found in runtime_semantics.md."
+    },
+    {
+      "id": "ACCEPTANCE_COVERAGE",
+      "status": "passed",
+      "command": "Compare acceptance_contract.json criteria ids against validation_plan.json check coverage.",
+      "evidence": "No unmapped AC ids were reported."
+    },
+    {
+      "id": "ARTIFACT_HASH_VALID",
+      "status": "passed",
+      "command": "Recompute JSON _meta.content_hash values excluding _meta.content_hash and compare INDEX artifact hashes.",
+      "evidence": "No HASH_MISMATCH or INDEX_HASH_MISMATCH lines were reported."
+    },
+    {
+      "id": "DIFF_FORMAT_VALID",
+      "status": "passed",
+      "command": "git --git-dir=.git-real --work-tree=. diff --check",
+      "evidence": "Command exited 0."
+    }
+  ],
+  "blocking_failures": [],
+  "notes": [
+    "This lint report is an evidence note for the experimental semantic artifact set.",
+    "No executable domain linter exists yet; M0 implementation should make these checks scriptable."
+  ]
+}

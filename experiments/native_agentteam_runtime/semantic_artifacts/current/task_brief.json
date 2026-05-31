@@ -1,0 +1,56 @@
+{
+  "_meta": {
+    "artifact_id": "native_runtime_task_brief",
+    "artifact_type": "task_brief",
+    "authority_class": "semantic_contract",
+    "version": 1,
+    "status": "current",
+    "owner": "orchestrator",
+    "allowed_writers": [
+      "orchestrator",
+      "integration_agent"
+    ],
+    "requires_design_cr": true,
+    "source_cr": null,
+    "created_at": "2026-05-31T00:00:00+08:00",
+    "updated_at": "2026-05-31T00:00:00+08:00",
+    "last_modified_by": "orchestrator",
+    "content_hash": "sha256:b2fa00f65a890f963b36c1e3149246b4918f4c658ef6de5c9eab9e171deecc20"
+  },
+  "title": "Native AgentTeam runtime semantic architecture",
+  "summary": "Define the semantic contract for a lightweight, general-purpose AgentTeam runtime that orchestrates mature agent CLIs through adapters while preserving deterministic scheduling, durable communication, authority control, and workspace isolation.",
+  "project_intent": [
+    "Support long-running multi-role agent collaboration without equating logical agents with Codex subagents.",
+    "Reuse mature agent tools such as Codex, Claude Code, Aider, OpenCode, and Gemini CLI as runtime backends.",
+    "Keep AgentTeam responsible for control-plane semantics: scheduling, leases, mailbox, events, artifact authority, validation, and integration.",
+    "Remain general-purpose rather than specializing the framework only for GitHub issue-to-PR coding workflows."
+  ],
+  "confirmed_decisions": [
+    "The scheduler is a deterministic software process, not an LLM role agent.",
+    "A role agent is a long-lived logical responsibility boundary, not a permanent CLI process.",
+    "A runtime session is a short-lived invocation used for one bounded attempt.",
+    "A writable attempt gets its own worktree; read-only roles do not get private worktrees by default.",
+    "MCP is used as tool and context plumbing, not as AgentTeam's internal control plane.",
+    "A2A is postponed and is not part of the M0/M1 native runtime contract.",
+    "Raw agent output is not authoritative until accepted by validation and integration gates."
+  ],
+  "scope": {
+    "included": [
+      "semantic object model",
+      "authority classes",
+      "role and runtime boundaries",
+      "mailbox and event semantics",
+      "task, attempt, lease, and worktree lifecycle",
+      "validation and integration boundaries",
+      "M0/M1 acceptance criteria"
+    ],
+    "excluded": [
+      "concrete code module layout",
+      "CLI command syntax",
+      "database schema migrations",
+      "web dashboard design",
+      "A2A bridge design",
+      "production distributed execution"
+    ]
+  }
+}
