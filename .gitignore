@@ -2,3 +2,5 @@
 .agents/
 .codex/
 .worktrees/
+__pycache__/
+*.py[cod]

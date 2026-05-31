@@ -38,7 +38,20 @@
         "result_validated",
         "result_rejected",
         "backlog_updated",
-        "checkpoint"
+        "checkpoint",
+        "task_selected",
+        "lease_acquired",
+        "worktree_created",
+        "runtime_session_started",
+        "runtime_output_received",
+        "validation_accepted",
+        "validation_rejected",
+        "patch_integrated",
+        "artifact_update_proposed",
+        "artifact_update_integrated",
+        "attempt_timed_out",
+        "attempt_cancelled",
+        "recovery_routed"
       ]
     },
     "actor": {

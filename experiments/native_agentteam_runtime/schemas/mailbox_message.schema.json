@@ -27,7 +27,21 @@
     },
     "message_type": {
       "type": "string",
-      "enum": ["dispatch", "result", "question", "cancel", "heartbeat"]
+      "enum": [
+        "dispatch",
+        "result",
+        "question",
+        "cancel",
+        "heartbeat",
+        "dispatch_task",
+        "request_context_pack",
+        "request_verification",
+        "request_semantic_feedback",
+        "cancel_attempt",
+        "worker_result",
+        "validation_result",
+        "integration_result"
+      ]
     },
     "correlation_id": {
       "type": "string",
