@@ -1,7 +1,7 @@
 import argparse
 import json
 
-from .m0_runtime import ShellRuntimeAdapter, replay_events, run_simulation
+from .m0_runtime import CodexRuntimeAdapter, ShellRuntimeAdapter, replay_events, run_simulation
 
 
 def main(argv=None):
@@ -15,8 +15,20 @@ def main(argv=None):
         nargs=argparse.REMAINDER,
         help="Optional command to execute through ShellRuntimeAdapter. Must appear last.",
     )
+    parser.add_argument(
+        "--codex-command",
+        nargs=argparse.REMAINDER,
+        help="Optional command prefix to execute through CodexRuntimeAdapter. Must appear last.",
+    )
     args = parser.parse_args(argv)
-    runtime_adapter = ShellRuntimeAdapter(args.shell_command) if args.shell_command else None
+    if args.shell_command and args.codex_command:
+        parser.error("--shell-command and --codex-command are mutually exclusive")
+    if args.shell_command:
+        runtime_adapter = ShellRuntimeAdapter(args.shell_command)
+    elif args.codex_command:
+        runtime_adapter = CodexRuntimeAdapter(command=args.codex_command)
+    else:
+        runtime_adapter = None
 
     result = run_simulation(
         args.agent_pool,

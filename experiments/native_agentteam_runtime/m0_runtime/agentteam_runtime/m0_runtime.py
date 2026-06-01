@@ -94,6 +94,135 @@ class ShellRuntimeAdapter:
         return _normalize_runtime_result(result, adapter="shell", stderr=completed.stderr)
 
 
+class CodexRuntimeAdapter:
+    def __init__(
+        self,
+        command=None,
+        model=None,
+        sandbox="workspace-write",
+        approval_policy="never",
+        timeout_seconds=300,
+        extra_args=None,
+    ):
+        self.command = list(command or ["codex", "exec"])
+        self.model = model
+        self.sandbox = sandbox
+        self.approval_policy = approval_policy
+        self.timeout_seconds = timeout_seconds
+        self.extra_args = list(extra_args or [])
+
+    def run(self, message, worktree_path=None):
+        if not worktree_path:
+            return {
+                "result_status": "failed",
+                "changed_files": [],
+                "output": {"adapter": "codex", "error": "missing_worktree_path"},
+            }
+
+        result_path = (
+            Path(worktree_path)
+            / ".agentteam"
+            / f"codex_result_{message['payload']['attempt_id']}.json"
+        )
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+
+        command = self._build_command(worktree_path, result_path)
+        prompt = self._build_prompt(message)
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=worktree_path,
+                input=prompt,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "result_status": "timed_out",
+                "changed_files": [],
+                "output": {
+                    "adapter": "codex",
+                    "error": "timeout",
+                    "timeout_seconds": self.timeout_seconds,
+                    "stdout": exc.stdout or "",
+                    "stderr": exc.stderr or "",
+                },
+            }
+
+        if completed.returncode != 0:
+            return {
+                "result_status": "failed",
+                "changed_files": [],
+                "output": {
+                    "adapter": "codex",
+                    "exit_code": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                },
+            }
+
+        if not result_path.exists():
+            return {
+                "result_status": "failed",
+                "changed_files": [],
+                "output": {
+                    "adapter": "codex",
+                    "error": "missing_output_last_message",
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                },
+            }
+
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {
+                "result_status": "failed",
+                "changed_files": [],
+                "output": {
+                    "adapter": "codex",
+                    "error": "invalid_output_last_message_json",
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                },
+            }
+
+        return _normalize_runtime_result(result, adapter="codex", stderr=completed.stderr)
+
+    def _build_command(self, worktree_path, result_path):
+        command = [
+            *self.command,
+            "-C",
+            str(worktree_path),
+            "-s",
+            self.sandbox,
+            "-a",
+            self.approval_policy,
+        ]
+        if self.model:
+            command.extend(["-m", self.model])
+        command.extend(self.extra_args)
+        command.extend(["--output-last-message", str(result_path), "-"])
+        return command
+
+    def _build_prompt(self, message):
+        return "\n".join(
+            [
+                "You are an AgentTeam runtime worker.",
+                "Execute only the bounded task described by this mailbox message.",
+                "Return exactly one JSON object as the final response.",
+                "The JSON object must have this shape:",
+                '{"result_status":"completed|blocked|failed|cancelled","changed_files":["path"],"output":{}}',
+                "All changed_files entries must be relative paths inside the declared write_scope.",
+                "Mailbox message:",
+                json.dumps(message, sort_keys=True),
+            ]
+        )
+
+
 def run_simulation(
     agent_pool_path,
     backlog_path,

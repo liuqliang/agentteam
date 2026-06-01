@@ -6,7 +6,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentteam_runtime import FakeRuntimeAdapter, ShellRuntimeAdapter, replay_events, run_simulation
+from agentteam_runtime import (
+    CodexRuntimeAdapter,
+    FakeRuntimeAdapter,
+    ShellRuntimeAdapter,
+    replay_events,
+    run_simulation,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -324,6 +330,94 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(snapshot["attempts"]["ATTEMPT-001"]["attempt_status"], "failed")
             self.assertEqual(snapshot["attempts"]["ATTEMPT-001"]["validation_status"], "rejected")
 
+    def test_codex_runtime_adapter_reads_last_message_result_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            fake_codex = tmp_path / "fake_codex.py"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_fake_codex(fake_codex, changed_file="generated/codex_result.json")
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=CodexRuntimeAdapter(command=[sys.executable, str(fake_codex)]),
+            )
+
+            worktree_path = Path(result["worktree_path"])
+            self.assertEqual(result["validation_status"], "accepted")
+            self.assertTrue((worktree_path / "generated" / "codex_result.json").exists())
+
+    def test_codex_runtime_adapter_missing_last_message_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            fake_codex = tmp_path / "fake_codex_no_result.py"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            fake_codex.write_text("import sys\nsys.stdin.read()\nprint('no result file')\n", encoding="utf-8")
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=CodexRuntimeAdapter(command=[sys.executable, str(fake_codex)]),
+            )
+
+            snapshot = replay_events(output_dir / "events.jsonl")
+            self.assertEqual(result["validation_status"], "rejected")
+            self.assertEqual(snapshot["attempts"]["ATTEMPT-001"]["attempt_status"], "failed")
+
+    def test_cli_can_run_codex_runtime_adapter_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            fake_codex = tmp_path / "fake_codex_cli.py"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_fake_codex(fake_codex, changed_file="generated/codex_cli_result.json")
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--project-root",
+                    str(repo),
+                    "--codex-command",
+                    sys.executable,
+                    str(fake_codex),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["validation_status"], "accepted")
+            self.assertTrue(
+                (Path(summary["worktree_path"]) / "generated" / "codex_cli_result.json").exists()
+            )
+
 
 def _init_git_repo(path):
     path.mkdir(parents=True)
@@ -384,6 +478,33 @@ def _write_success_worker(path, changed_file):
                 f"    'changed_files': [{changed_file!r}],",
                 "    'output': {'adapter': 'shell'}",
                 "}))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_fake_codex(path, changed_file):
+    path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                "import sys",
+                "args = sys.argv[1:]",
+                "prompt = sys.stdin.read()",
+                "output_path = pathlib.Path(args[args.index('--output-last-message') + 1])",
+                "worktree = pathlib.Path(args[args.index('-C') + 1])",
+                f"target = worktree / {changed_file!r}",
+                "target.parent.mkdir(parents=True, exist_ok=True)",
+                "target.write_text(json.dumps({'saw_prompt': 'dispatch_task' in prompt}), encoding='utf-8')",
+                "output_path.parent.mkdir(parents=True, exist_ok=True)",
+                "output_path.write_text(json.dumps({",
+                "    'result_status': 'completed',",
+                f"    'changed_files': [{changed_file!r}],",
+                "    'output': {'adapter': 'codex', 'prompt_contains_contract': 'changed_files' in prompt}",
+                "}), encoding='utf-8')",
+                "print(json.dumps({'event': 'fake_codex_done'}))",
             ]
         ),
         encoding="utf-8",
