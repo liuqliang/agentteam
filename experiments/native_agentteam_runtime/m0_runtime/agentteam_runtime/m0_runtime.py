@@ -33,6 +33,67 @@ class FakeRuntimeAdapter:
         }
 
 
+class ShellRuntimeAdapter:
+    def __init__(self, command, timeout_seconds=60):
+        if not command:
+            raise ValueError("ShellRuntimeAdapter command must not be empty")
+        self.command = list(command)
+        self.timeout_seconds = timeout_seconds
+
+    def run(self, message, worktree_path=None):
+        try:
+            completed = subprocess.run(
+                self.command,
+                cwd=worktree_path,
+                input=json.dumps(message, sort_keys=True),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "result_status": "timed_out",
+                "changed_files": [],
+                "output": {
+                    "adapter": "shell",
+                    "error": "timeout",
+                    "timeout_seconds": self.timeout_seconds,
+                    "stdout": exc.stdout or "",
+                    "stderr": exc.stderr or "",
+                },
+            }
+
+        if completed.returncode != 0:
+            return {
+                "result_status": "failed",
+                "changed_files": [],
+                "output": {
+                    "adapter": "shell",
+                    "exit_code": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                },
+            }
+
+        try:
+            result = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            return {
+                "result_status": "failed",
+                "changed_files": [],
+                "output": {
+                    "adapter": "shell",
+                    "error": "invalid_json_stdout",
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                },
+            }
+
+        return _normalize_runtime_result(result, adapter="shell", stderr=completed.stderr)
+
+
 def run_simulation(
     agent_pool_path,
     backlog_path,
@@ -173,9 +234,7 @@ def run_simulation(
         ]
     )
 
-    validation_status = (
-        "accepted" if _changed_files_in_scope(runtime_result["changed_files"], task) else "rejected"
-    )
+    validation_status = _validate_runtime_result(runtime_result, task)
     events.append(
         _event(
             6,
@@ -292,6 +351,31 @@ def _fake_changed_files(write_scope):
 def _changed_files_in_scope(changed_files, task):
     write_scope = [scope.rstrip("/") + "/" for scope in task.get("write_scope", [])]
     return all(any(path.startswith(scope) for scope in write_scope) for path in changed_files)
+
+
+def _validate_runtime_result(runtime_result, task):
+    if runtime_result["result_status"] != "completed":
+        return "rejected"
+    return "accepted" if _changed_files_in_scope(runtime_result["changed_files"], task) else "rejected"
+
+
+def _normalize_runtime_result(result, adapter, stderr=""):
+    changed_files = result.get("changed_files", [])
+    if not isinstance(changed_files, list) or not all(isinstance(path, str) for path in changed_files):
+        return {
+            "result_status": "failed",
+            "changed_files": [],
+            "output": {
+                "adapter": adapter,
+                "error": "invalid_changed_files",
+                "stderr": stderr,
+            },
+        }
+    return {
+        "result_status": result.get("result_status", "failed"),
+        "changed_files": changed_files,
+        "output": result.get("output", {}),
+    }
 
 
 def _event(

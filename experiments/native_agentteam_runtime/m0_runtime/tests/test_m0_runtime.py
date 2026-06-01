@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentteam_runtime import FakeRuntimeAdapter, replay_events, run_simulation
+from agentteam_runtime import FakeRuntimeAdapter, ShellRuntimeAdapter, replay_events, run_simulation
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -169,6 +169,48 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue(Path(summary["worktree_path"]).exists())
             self.assertTrue((Path(summary["worktree_path"]) / "generated").is_dir())
 
+    def test_cli_can_run_shell_runtime_adapter_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            script = tmp_path / "cli_worker.py"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_success_worker(script, "generated/cli_shell_result.json")
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--project-root",
+                    str(repo),
+                    "--shell-command",
+                    sys.executable,
+                    str(script),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["validation_status"], "accepted")
+            self.assertTrue(
+                (Path(summary["worktree_path"]) / "generated" / "cli_shell_result.json").exists()
+            )
+
     def test_project_root_creates_real_git_worktree_for_writable_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -232,6 +274,56 @@ class M0RuntimeTests(unittest.TestCase):
                 "rejected",
             )
 
+    def test_shell_runtime_adapter_executes_command_in_worktree_and_parses_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            script = tmp_path / "worker.py"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_success_worker(script, "generated/shell_result.json")
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=ShellRuntimeAdapter([sys.executable, str(script)]),
+            )
+
+            worktree_path = Path(result["worktree_path"])
+            self.assertEqual(result["validation_status"], "accepted")
+            self.assertTrue((worktree_path / "generated" / "shell_result.json").exists())
+
+    def test_shell_runtime_adapter_failure_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            script = tmp_path / "fail_worker.py"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            script.write_text(
+                "import sys\nsys.stderr.write('worker failed intentionally')\nsys.exit(17)\n",
+                encoding="utf-8",
+            )
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=ShellRuntimeAdapter([sys.executable, str(script)]),
+            )
+
+            snapshot = replay_events(output_dir / "events.jsonl")
+            self.assertEqual(result["validation_status"], "rejected")
+            self.assertEqual(snapshot["attempts"]["ATTEMPT-001"]["attempt_status"], "failed")
+            self.assertEqual(snapshot["attempts"]["ATTEMPT-001"]["validation_status"], "rejected")
+
 
 def _init_git_repo(path):
     path.mkdir(parents=True)
@@ -274,6 +366,28 @@ def _write_backlog(tmp_path, write_scope):
     path = tmp_path / "backlog.json"
     path.write_text(json.dumps(backlog), encoding="utf-8")
     return path
+
+
+def _write_success_worker(path, changed_file):
+    path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                "import sys",
+                "message = json.load(sys.stdin)",
+                f"target = pathlib.Path({changed_file!r})",
+                "target.parent.mkdir(parents=True, exist_ok=True)",
+                "target.write_text(json.dumps({'attempt_id': message['payload']['attempt_id']}), encoding='utf-8')",
+                "print(json.dumps({",
+                "    'result_status': 'completed',",
+                f"    'changed_files': [{changed_file!r}],",
+                "    'output': {'adapter': 'shell'}",
+                "}))",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":
