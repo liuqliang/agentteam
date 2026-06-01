@@ -1,4 +1,5 @@
 import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,8 +9,40 @@ class SystemClock:
         return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def run_simulation(agent_pool_path, backlog_path, output_dir, clock=None):
+class FakeRuntimeAdapter:
+    def run(self, message, worktree_path=None):
+        changed_files = _fake_changed_files(message["payload"]["write_scope"])
+        if worktree_path and changed_files:
+            target = Path(worktree_path) / changed_files[0]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps(
+                    {
+                        "task_id": message["payload"]["task_id"],
+                        "attempt_id": message["payload"]["attempt_id"],
+                        "generated_by": "FakeRuntimeAdapter",
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+        return {
+            "result_status": "completed",
+            "changed_files": changed_files,
+            "output": {"adapter": "fake"},
+        }
+
+
+def run_simulation(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    clock=None,
+    project_root=None,
+    runtime_adapter=None,
+):
     clock = clock or SystemClock()
+    runtime_adapter = runtime_adapter or FakeRuntimeAdapter()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -23,11 +56,14 @@ def run_simulation(agent_pool_path, backlog_path, output_dir, clock=None):
     lease_id = "LEASE-001"
     message_id = "MSG-0001"
     worktree_id = f"WT-{attempt_id}" if task.get("write_scope") else None
+    worktree_path = None
+    branch = None
     correlation_id = f"{task['task_id']}:{attempt_id}"
 
     inbox_path = output_dir / agent["inbox_path"]
     events_path = output_dir / "events.jsonl"
-    fake_changed_files = _fake_changed_files(task)
+    if project_root and worktree_id:
+        worktree_path, branch = _create_git_worktree(project_root, output_dir, attempt_id, worktree_id)
 
     message = {
         "message_id": message_id,
@@ -42,6 +78,8 @@ def run_simulation(agent_pool_path, backlog_path, output_dir, clock=None):
             "attempt_id": attempt_id,
             "lease_id": lease_id,
             "worktree_id": worktree_id,
+            "worktree_path": str(worktree_path) if worktree_path else None,
+            "branch": branch,
             "objective": task["objective"],
             "read_scope": task["read_scope"],
             "write_scope": task["write_scope"],
@@ -91,11 +129,14 @@ def run_simulation(agent_pool_path, backlog_path, output_dir, clock=None):
                     "task_id": task["task_id"],
                     "attempt_id": attempt_id,
                     "worktree_id": worktree_id,
+                    "worktree_path": str(worktree_path) if worktree_path else None,
+                    "branch": branch,
                     "write_scope": task["write_scope"],
                 },
             )
         )
 
+    runtime_result = runtime_adapter.run(message, worktree_path=worktree_path)
     events.extend(
         [
             _event(
@@ -124,14 +165,17 @@ def run_simulation(agent_pool_path, backlog_path, output_dir, clock=None):
                 {
                     "task_id": task["task_id"],
                     "attempt_id": attempt_id,
-                    "result_status": "completed",
-                    "changed_files": fake_changed_files,
+                    "result_status": runtime_result["result_status"],
+                    "changed_files": runtime_result["changed_files"],
+                    "output": runtime_result.get("output", {}),
                 },
             ),
         ]
     )
 
-    validation_status = "accepted" if _changed_files_in_scope(fake_changed_files, task) else "rejected"
+    validation_status = (
+        "accepted" if _changed_files_in_scope(runtime_result["changed_files"], task) else "rejected"
+    )
     events.append(
         _event(
             6,
@@ -177,6 +221,8 @@ def run_simulation(agent_pool_path, backlog_path, output_dir, clock=None):
         "lease_id": lease_id,
         "message_id": message_id,
         "worktree_id": worktree_id,
+        "worktree_path": str(worktree_path) if worktree_path else None,
+        "branch": branch,
         "validation_status": validation_status,
         "events_path": str(events_path),
         "mailbox_path": str(inbox_path),
@@ -203,6 +249,10 @@ def replay_events(events_path):
             snapshot["attempts"].setdefault(attempt_id, {})["attempt_status"] = "dispatched"
         elif event["event_type"] == "worktree_created":
             snapshot["attempts"].setdefault(attempt_id, {})["worktree_id"] = payload["worktree_id"]
+            snapshot["attempts"].setdefault(attempt_id, {})["worktree_path"] = payload[
+                "worktree_path"
+            ]
+            snapshot["attempts"].setdefault(attempt_id, {})["branch"] = payload["branch"]
         elif event["event_type"] == "runtime_output_received":
             snapshot["attempts"].setdefault(attempt_id, {})["attempt_status"] = payload[
                 "result_status"
@@ -233,8 +283,7 @@ def _find_idle_agent(agent_pool, role):
     raise ValueError(f"no idle agent found for role {role}")
 
 
-def _fake_changed_files(task):
-    write_scope = task.get("write_scope") or []
+def _fake_changed_files(write_scope):
     if not write_scope:
         return []
     return [f"{write_scope[0].rstrip('/')}/m0_generated_repo_index.json"]
@@ -266,6 +315,21 @@ def _event(
         "correlation_id": correlation_id,
         "payload": payload,
     }
+
+
+def _create_git_worktree(project_root, output_dir, attempt_id, worktree_id):
+    project_root = Path(project_root)
+    worktree_path = Path(output_dir) / "worktrees" / worktree_id
+    branch = f"agentteam/{attempt_id}"
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "-C", str(project_root), "worktree", "add", "-b", branch, str(worktree_path), "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return worktree_path, branch
 
 
 def _read_json(path):

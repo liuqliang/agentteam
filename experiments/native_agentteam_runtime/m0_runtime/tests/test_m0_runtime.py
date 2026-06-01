@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentteam_runtime import replay_events, run_simulation
+from agentteam_runtime import FakeRuntimeAdapter, replay_events, run_simulation
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -132,6 +132,148 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["validation_status"], "accepted")
             self.assertEqual(summary["task_id"], "TASK-001")
             self.assertTrue((output_dir / "events.jsonl").exists())
+
+    def test_cli_can_create_git_worktree_when_project_root_is_supplied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--project-root",
+                    str(repo),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["validation_status"], "accepted")
+            self.assertTrue(Path(summary["worktree_path"]).exists())
+            self.assertTrue((Path(summary["worktree_path"]) / "generated").is_dir())
+
+    def test_project_root_creates_real_git_worktree_for_writable_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            worktree_path = Path(result["worktree_path"])
+            self.assertTrue(worktree_path.exists())
+            completed = subprocess.run(
+                ["git", "-C", str(worktree_path), "rev-parse", "--is-inside-work-tree"],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.stdout.strip(), "true")
+            self.assertTrue((worktree_path / "generated" / "m0_generated_repo_index.json").exists())
+
+            snapshot = replay_events(output_dir / "events.jsonl")
+            self.assertEqual(
+                snapshot["attempts"]["ATTEMPT-001"]["worktree_path"],
+                str(worktree_path),
+            )
+
+    def test_out_of_scope_runtime_result_is_rejected(self):
+        class OutOfScopeRuntimeAdapter:
+            def run(self, message, worktree_path=None):
+                return {
+                    "result_status": "completed",
+                    "changed_files": ["outside/generated.txt"],
+                    "output": {"note": "intentionally outside write scope"},
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                tmp_path / "run",
+                clock=FixedClock(),
+                runtime_adapter=OutOfScopeRuntimeAdapter(),
+            )
+
+            self.assertEqual(result["validation_status"], "rejected")
+            snapshot = replay_events(tmp_path / "run" / "events.jsonl")
+            self.assertNotEqual(snapshot["tasks"]["TASK-001"]["task_status"], "done")
+            self.assertEqual(
+                snapshot["attempts"]["ATTEMPT-001"]["validation_status"],
+                "rejected",
+            )
+
+
+def _init_git_repo(path):
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=path, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(
+        ["git", "config", "user.email", "agentteam@example.invalid"],
+        cwd=path,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "AgentTeam Test"], cwd=path, check=True)
+    (path / "README.md").write_text("# fixture repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial fixture"],
+        cwd=path,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def _write_backlog(tmp_path, write_scope):
+    backlog = {
+        "backlog_id": "BL-TEST",
+        "items": [
+            {
+                "task_id": "TASK-001",
+                "milestone_id": "M0",
+                "objective": "Create generated repo index.",
+                "backlog_status": "ready",
+                "risk_target": "L0",
+                "depends_on": [],
+                "read_scope": ["."],
+                "write_scope": write_scope,
+                "required_role": "repo_map_agent",
+                "blockers": [],
+            }
+        ],
+    }
+    path = tmp_path / "backlog.json"
+    path.write_text(json.dumps(backlog), encoding="utf-8")
+    return path
 
 
 if __name__ == "__main__":
