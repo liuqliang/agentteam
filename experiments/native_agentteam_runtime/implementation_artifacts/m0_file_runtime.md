@@ -162,7 +162,7 @@ python3 -m agentteam_runtime.cli \
 `CodexRuntimeAdapter` invokes the command as:
 
 ```text
-<command> -C <worktree> -s workspace-write -a never --output-last-message <result.json> -
+<command> -C <worktree> -s workspace-write --output-last-message <result.json> -
 ```
 
 The prompt is passed on stdin through the final `-`. Codex must write its final
@@ -179,9 +179,59 @@ answer to the `--output-last-message` file as one JSON object:
 The unit tests use a fake Codex command that implements this CLI contract. They
 do not perform a live model invocation.
 
+## Live Codex Smoke
+
+M1c adds a gated smoke-test entrypoint for one real Codex invocation:
+
+```bash
+AGENTTEAM_RUN_LIVE_CODEX=1 \
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.live_codex_smoke \
+  --output-dir /tmp/agentteam-live-codex-smoke
+```
+
+By default, without `AGENTTEAM_RUN_LIVE_CODEX=1`, the command exits
+successfully with:
+
+```json
+{"reason": "set AGENTTEAM_RUN_LIVE_CODEX=1", "status": "skipped"}
+```
+
+When enabled, it creates a temporary git repository, writes a minimal L0 backlog
+item, runs `CodexRuntimeAdapter`, and requires Codex to create:
+
+```text
+generated/live_codex_smoke.json
+```
+
+The smoke command exits non-zero unless the scheduler validation is accepted,
+the runtime result reports that exact file in `changed_files`, and the file
+exists in the attempt worktree.
+
+Local verification on 2026-06-01 with `codex-cli 0.132.0` completed this path:
+
+```json
+{
+  "changed_files": ["generated/live_codex_smoke.json"],
+  "expected_file_exists": true,
+  "status": "completed",
+  "validation_status": "accepted"
+}
+```
+
+For deterministic local tests, the same entrypoint accepts a fake command:
+
+```bash
+AGENTTEAM_RUN_LIVE_CODEX=1 \
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.live_codex_smoke \
+  --output-dir /tmp/agentteam-live-codex-smoke \
+  --codex-command python3 /path/to/fake_codex.py
+```
+
 ## Intentional Fakes
 
-M0/M1b intentionally fakes or simplifies:
+M0/M1c intentionally fakes or simplifies:
 
 - transcript parsing;
 - real code patch integration;
@@ -193,9 +243,9 @@ M0 now performs actual git worktree creation when `project_root` is provided.
 If `project_root` is omitted, it still emits a logical worktree id without
 creating a filesystem worktree. M0 also includes a real process adapter through
 `ShellRuntimeAdapter`. M1b adds `CodexRuntimeAdapter` for `codex exec` result
-extraction through `--output-last-message`, but the committed verification still
-uses a fake Codex command rather than spending live model calls. Claude Code is
-not integrated yet.
+extraction through `--output-last-message`. M1c adds a live smoke entrypoint,
+but normal committed verification still uses skip/fake paths rather than
+spending live model calls. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -203,7 +253,7 @@ These are not semantic omissions. They are deferred implementation mechanics.
 
 Before the next backend milestone, the next design/code step should define:
 
-- live Codex smoke-test policy and cost guardrails;
+- decide when live Codex smoke should run outside local opt-in;
 - Claude Code adapter feasibility and result extraction contract;
 - worktree cleanup policy;
 - runtime session start/observe/stop interface for long-running workers;

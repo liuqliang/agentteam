@@ -42,11 +42,11 @@ Expected: fail because `CodexRuntimeAdapter` is not implemented/exported.
 - [x] **Step 3: Implement adapter**
 
 Add `CodexRuntimeAdapter(command=None, model=None, sandbox="workspace-write",
-approval_policy="never", timeout_seconds=300, extra_args=None)` with:
+timeout_seconds=300, extra_args=None)` with:
 
 - command prefix defaulting to `["codex", "exec"]`;
 - `-C <worktree>` so Codex operates in the attempt worktree;
-- `-s workspace-write` and `-a never` as conservative defaults;
+- `-s workspace-write` as the conservative sandbox default;
 - stdin prompt containing the mailbox message and final JSON contract;
 - `--output-last-message <file>` as the result extraction path;
 - failed results for timeout, non-zero exit, missing result file, and invalid

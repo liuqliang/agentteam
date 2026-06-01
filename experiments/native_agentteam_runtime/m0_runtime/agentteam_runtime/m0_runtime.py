@@ -100,14 +100,12 @@ class CodexRuntimeAdapter:
         command=None,
         model=None,
         sandbox="workspace-write",
-        approval_policy="never",
         timeout_seconds=300,
         extra_args=None,
     ):
         self.command = list(command or ["codex", "exec"])
         self.model = model
         self.sandbox = sandbox
-        self.approval_policy = approval_policy
         self.timeout_seconds = timeout_seconds
         self.extra_args = list(extra_args or [])
 
@@ -199,8 +197,6 @@ class CodexRuntimeAdapter:
             str(worktree_path),
             "-s",
             self.sandbox,
-            "-a",
-            self.approval_policy,
         ]
         if self.model:
             command.extend(["-m", self.model])

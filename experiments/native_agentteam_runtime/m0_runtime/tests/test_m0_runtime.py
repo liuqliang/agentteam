@@ -376,6 +376,18 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(result["validation_status"], "rejected")
             self.assertEqual(snapshot["attempts"]["ATTEMPT-001"]["attempt_status"], "failed")
 
+    def test_codex_runtime_adapter_default_exec_flags_match_current_cli(self):
+        command = CodexRuntimeAdapter(command=["codex", "exec"])._build_command(
+            "/tmp/worktree",
+            "/tmp/result.json",
+        )
+
+        self.assertIn("-C", command)
+        self.assertIn("-s", command)
+        self.assertIn("--output-last-message", command)
+        self.assertNotIn("-a", command)
+        self.assertNotIn("--ask-for-approval", command)
+
     def test_cli_can_run_codex_runtime_adapter_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
