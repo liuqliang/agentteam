@@ -1797,6 +1797,60 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 2)
             self.assertIn("--project-root is required when --runtime codex is set", completed.stderr)
 
+    def test_cli_passes_codex_runtime_options_to_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            fake_codex = tmp_path / "fake_codex_options.py"
+            target_file = "generated/codex_runtime_options.json"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_fake_codex_arg_recorder(fake_codex, changed_file=target_file)
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--project-root",
+                    str(repo),
+                    "--runtime",
+                    "codex",
+                    "--codex-model",
+                    "gpt-test-model",
+                    "--codex-sandbox",
+                    "read-only",
+                    "--codex-timeout-seconds",
+                    "30",
+                    "--codex-command",
+                    sys.executable,
+                    str(fake_codex),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            recorded = json.loads(
+                (Path(summary["worktree_path"]) / target_file).read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(summary["validation_status"], "accepted")
+            self.assertEqual(recorded["model"], "gpt-test-model")
+            self.assertEqual(recorded["sandbox"], "read-only")
+
 
 def _init_git_repo(path):
     path.mkdir(parents=True)
@@ -1932,6 +1986,37 @@ def _write_fake_codex(path, changed_file):
                 "    'output': {'adapter': 'codex', 'prompt_contains_contract': 'changed_files' in prompt}",
                 "}), encoding='utf-8')",
                 "print(json.dumps({'event': 'fake_codex_done'}))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_fake_codex_arg_recorder(path, changed_file):
+    path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                "import sys",
+                "args = sys.argv[1:]",
+                "output_path = pathlib.Path(args[args.index('--output-last-message') + 1])",
+                "worktree = pathlib.Path(args[args.index('-C') + 1])",
+                "sandbox = args[args.index('-s') + 1]",
+                "model = args[args.index('-m') + 1] if '-m' in args else None",
+                f"target = worktree / {changed_file!r}",
+                "target.parent.mkdir(parents=True, exist_ok=True)",
+                "target.write_text(json.dumps({",
+                "    'argv': args,",
+                "    'model': model,",
+                "    'sandbox': sandbox,",
+                "}), encoding='utf-8')",
+                "output_path.parent.mkdir(parents=True, exist_ok=True)",
+                "output_path.write_text(json.dumps({",
+                "    'result_status': 'completed',",
+                f"    'changed_files': [{changed_file!r}],",
+                "    'output': {'adapter': 'codex', 'mode': 'fake-options'}",
+                "}), encoding='utf-8')",
             ]
         ),
         encoding="utf-8",

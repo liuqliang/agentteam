@@ -52,8 +52,18 @@ def main(argv=None):
         choices=["fake", "shell", "codex"],
         help=(
             "Runtime adapter to use. Defaults to fake unless --shell-command "
-            "or --codex-command is supplied."
+            "or a Codex-specific runtime option is supplied."
         ),
+    )
+    parser.add_argument("--codex-model", help="Optional model passed to CodexRuntimeAdapter.")
+    parser.add_argument(
+        "--codex-sandbox",
+        help="Optional sandbox mode passed to CodexRuntimeAdapter. Defaults to workspace-write.",
+    )
+    parser.add_argument(
+        "--codex-timeout-seconds",
+        type=int,
+        help="Optional CodexRuntimeAdapter timeout in seconds. Defaults to 300.",
     )
     parser.add_argument(
         "--shell-command",
@@ -117,21 +127,24 @@ def _require_execution_arg(parser, value, flag):
 
 def _build_runtime_adapter(parser, args):
     runtime = args.runtime
+    has_codex_options = _has_codex_runtime_options(args)
     if runtime is None:
         if args.shell_command:
             runtime = "shell"
-        elif args.codex_command:
+        elif args.codex_command or has_codex_options:
             runtime = "codex"
         else:
             runtime = "fake"
 
     if runtime == "fake":
-        if args.shell_command or args.codex_command:
-            parser.error("--runtime fake cannot be combined with runtime command overrides")
+        if args.shell_command or args.codex_command or has_codex_options:
+            parser.error("--runtime fake cannot be combined with runtime command overrides or Codex options")
         return None
     if runtime == "shell":
         if args.codex_command:
             parser.error("--codex-command cannot be combined with --runtime shell")
+        if has_codex_options:
+            parser.error("Codex runtime options require --runtime codex")
         if not args.shell_command:
             parser.error("--shell-command is required when --runtime shell is set")
         return ShellRuntimeAdapter(args.shell_command)
@@ -140,8 +153,19 @@ def _build_runtime_adapter(parser, args):
             parser.error("--shell-command cannot be combined with --runtime codex")
         if not args.project_root:
             parser.error("--project-root is required when --runtime codex is set")
-        return CodexRuntimeAdapter(command=args.codex_command or None)
+        if args.codex_timeout_seconds is not None and args.codex_timeout_seconds < 1:
+            parser.error("--codex-timeout-seconds must be at least 1")
+        return CodexRuntimeAdapter(
+            command=args.codex_command or None,
+            model=args.codex_model,
+            sandbox=args.codex_sandbox or "workspace-write",
+            timeout_seconds=args.codex_timeout_seconds or 300,
+        )
     raise AssertionError(f"unhandled runtime: {runtime}")
+
+
+def _has_codex_runtime_options(args):
+    return bool(args.codex_model or args.codex_sandbox or args.codex_timeout_seconds is not None)
 
 
 def _parse_command_json(parser, raw_command):

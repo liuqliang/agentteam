@@ -291,7 +291,10 @@ python3 -m agentteam_runtime.cli \
   --backlog /path/to/backlog.json \
   --output-dir /tmp/agentteam-m0-run \
   --project-root /path/to/git/repo \
-  --runtime codex
+  --runtime codex \
+  --codex-model gpt-5.4 \
+  --codex-sandbox workspace-write \
+  --codex-timeout-seconds 300
 ```
 
 `--codex-command` remains available as a command-prefix override for tests and
@@ -299,6 +302,13 @@ experiments. When no `--runtime` is supplied, the CLI preserves the old
 inference behavior: `--shell-command` selects `ShellRuntimeAdapter`,
 `--codex-command` selects `CodexRuntimeAdapter`, and no command override selects
 the fake adapter. The inferred Codex path also requires `--project-root`.
+
+M12c exposes three Codex runtime controls:
+
+- `--codex-model`: passes `-m <model>` to `codex exec`;
+- `--codex-sandbox`: passes `-s <sandbox>`, defaulting to `workspace-write`;
+- `--codex-timeout-seconds`: sets the adapter subprocess timeout, defaulting to
+  `300`.
 
 `CodexRuntimeAdapter` invokes the command as:
 
@@ -984,7 +994,8 @@ runtime sessions to the SQLite state index. M12a adds a gated live Codex
 scheduler smoke that exercises scheduler, state index, and runtime session
 mechanics through `CodexRuntimeAdapter`. M12b makes Codex a first-class CLI
 runtime selector through `--runtime codex`, while retaining `--codex-command`
-as a test/experiment override. Claude Code is not integrated yet.
+as a test/experiment override. M12c exposes Codex model, sandbox, and timeout
+controls through the CLI. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
