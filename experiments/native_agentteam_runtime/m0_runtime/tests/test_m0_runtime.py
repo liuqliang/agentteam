@@ -694,16 +694,52 @@ class M0RuntimeTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (tmp_path / "events.jsonl").write_text(
-                json.dumps({"event_type": "unknown_event"}) + "\n",
-                encoding="utf-8",
-            )
+            event = _event_record("EVT-0001", 1)
+            event["event_type"] = "unknown_event"
+            (tmp_path / "events.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
 
             summary = lint_artifacts(tmp_path)
 
             self.assertEqual(summary["status"], "failed")
             self.assertEqual(summary["errors"][0]["kind"], "invalid_event_type")
             self.assertEqual(summary["errors"][0]["event_type"], "unknown_event")
+
+    def test_artifact_lint_reports_missing_event_fields(self):
+        from agentteam_runtime.artifact_lint import lint_artifacts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "events.jsonl").write_text(
+                json.dumps({"event_type": "scheduler_started", "sequence": 1}) + "\n",
+                encoding="utf-8",
+            )
+
+            summary = lint_artifacts(tmp_path)
+
+            self.assertEqual(summary["status"], "failed")
+            self.assertEqual(summary["errors"][0]["kind"], "missing_event_fields")
+            self.assertIn("event_id", summary["errors"][0]["missing_fields"])
+
+    def test_artifact_lint_reports_non_monotonic_event_sequence(self):
+        from agentteam_runtime.artifact_lint import lint_artifacts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            events = [
+                _event_record("EVT-0001", 1),
+                _event_record("EVT-0003", 3),
+            ]
+            (tmp_path / "events.jsonl").write_text(
+                "\n".join(json.dumps(event) for event in events) + "\n",
+                encoding="utf-8",
+            )
+
+            summary = lint_artifacts(tmp_path)
+
+            self.assertEqual(summary["status"], "failed")
+            self.assertEqual(summary["errors"][0]["kind"], "non_monotonic_event_sequence")
+            self.assertEqual(summary["errors"][0]["expected_sequence"], 2)
+            self.assertEqual(summary["errors"][0]["actual_sequence"], 3)
 
     def test_artifact_lint_cli_prints_summary(self):
         env = os.environ.copy()
@@ -1754,6 +1790,20 @@ def _backlog_task(
         "write_scope": write_scope,
         "required_role": "repo_map_agent",
         "blockers": list(blockers or []),
+    }
+
+
+def _event_record(event_id, sequence):
+    return {
+        "actor": "agent-scheduler",
+        "correlation_id": "RUN-TEST",
+        "event_id": event_id,
+        "event_type": "scheduler_started",
+        "idempotency_key": f"scheduler-start:{sequence}",
+        "payload": {"pool_id": "test"},
+        "sequence": sequence,
+        "target_agent_id": None,
+        "time": f"2026-05-31T00:00:{sequence:02d}Z",
     }
 
 

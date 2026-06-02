@@ -3,6 +3,18 @@ import json
 from pathlib import Path
 
 
+EVENT_REQUIRED_FIELDS = {
+    "event_id",
+    "sequence",
+    "time",
+    "event_type",
+    "actor",
+    "idempotency_key",
+    "correlation_id",
+    "payload",
+}
+
+
 def lint_artifacts(root_path):
     root_path = Path(root_path)
     errors = []
@@ -49,6 +61,7 @@ def _read_json(path, root_path, errors):
 
 
 def _lint_jsonl(path, root_path, errors, event_type_enum):
+    expected_sequence = 1
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
@@ -64,7 +77,59 @@ def _lint_jsonl(path, root_path, errors, event_type_enum):
                 }
             )
             continue
+        if _is_event_record(path, record):
+            expected_sequence = _lint_event_record(
+                path,
+                root_path,
+                errors,
+                event_type_enum,
+                line_number,
+                record,
+                expected_sequence,
+            )
+            continue
         _lint_event_type(path, root_path, errors, event_type_enum, line_number, record)
+
+
+def _lint_event_record(path, root_path, errors, event_type_enum, line_number, record, expected_sequence):
+    missing_fields = sorted(EVENT_REQUIRED_FIELDS - set(record.keys()))
+    if missing_fields:
+        errors.append(
+            {
+                "kind": "missing_event_fields",
+                "path": _relative_path(path, root_path),
+                "line": line_number,
+                "missing_fields": missing_fields,
+            }
+        )
+    _lint_event_sequence(path, root_path, errors, line_number, record, expected_sequence)
+    _lint_event_type(path, root_path, errors, event_type_enum, line_number, record)
+    sequence = record.get("sequence")
+    return sequence + 1 if isinstance(sequence, int) else expected_sequence
+
+
+def _is_event_record(path, record):
+    return (
+        path.name == "events.jsonl"
+        or isinstance(record, dict)
+        and ("event_type" in record or "event_id" in record or "sequence" in record)
+    )
+
+
+def _lint_event_sequence(path, root_path, errors, line_number, record, expected_sequence):
+    sequence = record.get("sequence")
+    if not isinstance(sequence, int):
+        return
+    if sequence != expected_sequence:
+        errors.append(
+            {
+                "kind": "non_monotonic_event_sequence",
+                "path": _relative_path(path, root_path),
+                "line": line_number,
+                "expected_sequence": expected_sequence,
+                "actual_sequence": sequence,
+            }
+        )
 
 
 def _lint_event_type(path, root_path, errors, event_type_enum, line_number, record):

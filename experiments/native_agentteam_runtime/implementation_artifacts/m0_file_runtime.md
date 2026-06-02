@@ -751,10 +751,11 @@ python3 -m agentteam_runtime.artifact_lint \
   --root experiments/native_agentteam_runtime
 ```
 
-The command scans the root for JSON and JSONL files, parses every file, and
-checks JSONL `event_type` values against
-`schemas/event.schema.json` when that schema is available. It prints a JSON
-summary:
+The command scans the root for JSON and JSONL files, parses every file, checks
+JSONL `event_type` values against `schemas/event.schema.json` when that schema
+is available, verifies event records have the required event fields, and checks
+that event `sequence` values increase by 1 within each event JSONL file. It
+prints a JSON summary:
 
 ```json
 {
@@ -769,6 +770,16 @@ summary:
 This is a lightweight executable lint, not a full JSON Schema validator. It
 exists so implementation loops have a cheap artifact sanity check before a
 larger schema-validation engine is introduced.
+
+M10b strengthens this lint for event logs. It reports:
+
+```text
+missing_event_fields
+non_monotonic_event_sequence
+```
+
+These checks are intentionally local and mechanical. They catch broken event
+logs before replay or SQLite indexing has to interpret them.
 
 ## Runtime Sessions
 
