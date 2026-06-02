@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -189,6 +190,62 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(first_message["payload"]["lease_id"], "TASK-001-LEASE-001")
             self.assertEqual(second_message["message_id"], "TASK-002-MSG-0001")
             self.assertEqual(second_message["payload"]["lease_id"], "TASK-002-LEASE-001")
+
+    def test_scheduler_loop_writes_sqlite_state_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            db_path = Path(summary["state_db_path"])
+            root_event_count = len(
+                Path(summary["events_path"]).read_text(encoding="utf-8").splitlines()
+            )
+
+            with sqlite3.connect(db_path) as connection:
+                tasks = connection.execute(
+                    "select task_id, task_status from tasks order by task_id"
+                ).fetchall()
+                attempts = connection.execute(
+                    "select attempt_id, task_id, attempt_status from attempts order by attempt_id"
+                ).fetchall()
+                leases = connection.execute(
+                    "select lease_id, lease_status from leases order by lease_id"
+                ).fetchall()
+                event_count = connection.execute("select count(*) from events").fetchone()[0]
+
+            self.assertTrue(db_path.exists())
+            self.assertEqual(tasks, [("TASK-001", "done"), ("TASK-002", "done")])
+            self.assertEqual(
+                attempts,
+                [
+                    ("TASK-001-ATTEMPT-001", "TASK-001", "completed"),
+                    ("TASK-002-ATTEMPT-001", "TASK-002", "completed"),
+                ],
+            )
+            self.assertEqual(
+                leases,
+                [
+                    ("TASK-001-LEASE-001", "released"),
+                    ("TASK-002-LEASE-001", "released"),
+                ],
+            )
+            self.assertEqual(event_count, root_event_count)
 
     def test_scheduler_loop_respects_done_dependencies(self):
         with tempfile.TemporaryDirectory() as tmp:

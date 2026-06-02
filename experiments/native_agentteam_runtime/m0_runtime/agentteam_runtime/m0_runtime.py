@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -625,6 +626,7 @@ class FileScheduler:
         self.integration_verification_command = integration_verification_command
         self.commit_verified_integration = commit_verified_integration
         self.state_path = Path(state_path or self.output_dir / "state" / "scheduler_state.json")
+        self.state_db_path = self.output_dir / "state" / "scheduler_state.sqlite"
         self.events_path = self.output_dir / "events.jsonl"
         self.run_id = "RUN-FILE-SCHEDULER"
         self.state = self._load_or_create_state()
@@ -682,6 +684,7 @@ class FileScheduler:
         self.state["steps"].append(step_summary)
         self.state["scheduler_status"] = "running"
         self._append_step_events_to_canonical_log(step_id, result["events_path"])
+        rebuild_sqlite_state_index(self.state_db_path, self.events_path)
         self._write_state()
         return step_summary
 
@@ -746,6 +749,7 @@ class FileScheduler:
             "steps": self.state["steps"],
             "events_path": str(self.events_path),
             "state_path": str(self.state_path),
+            "state_db_path": str(self.state_db_path),
         }
 
     def _write_state(self):
@@ -813,6 +817,130 @@ def run_scheduler_loop(
     return scheduler.run_until_idle(max_steps=max_steps)
 
 
+def rebuild_sqlite_state_index(db_path, events_path):
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot = replay_events(events_path)
+    events = list(_read_jsonl(events_path))
+    with sqlite3.connect(db_path) as connection:
+        _create_sqlite_state_schema(connection)
+        connection.execute("delete from tasks")
+        connection.execute("delete from attempts")
+        connection.execute("delete from leases")
+        connection.execute("delete from events")
+        connection.executemany(
+            "insert into tasks(task_id, task_status) values(?, ?)",
+            [
+                (task_id, task_state.get("task_status"))
+                for task_id, task_state in sorted(snapshot["tasks"].items())
+            ],
+        )
+        connection.executemany(
+            """
+            insert into attempts(
+                attempt_id,
+                task_id,
+                attempt_status,
+                validation_status
+            ) values(?, ?, ?, ?)
+            """,
+            [
+                (
+                    attempt_id,
+                    attempt_state.get("task_id"),
+                    attempt_state.get("attempt_status"),
+                    attempt_state.get("validation_status"),
+                )
+                for attempt_id, attempt_state in sorted(snapshot["attempts"].items())
+            ],
+        )
+        connection.executemany(
+            "insert into leases(lease_id, task_id, attempt_id, lease_status) values(?, ?, ?, ?)",
+            [
+                (
+                    lease_id,
+                    lease_state.get("task_id"),
+                    lease_state.get("attempt_id"),
+                    lease_state.get("lease_status"),
+                )
+                for lease_id, lease_state in sorted(snapshot["leases"].items())
+            ],
+        )
+        connection.executemany(
+            """
+            insert into events(
+                sequence,
+                event_id,
+                event_type,
+                task_id,
+                attempt_id,
+                lease_id,
+                step_id,
+                time
+            ) values(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    event["sequence"],
+                    event["event_id"],
+                    event["event_type"],
+                    event["payload"].get("task_id"),
+                    event["payload"].get("attempt_id"),
+                    event["payload"].get("lease_id"),
+                    event.get("step_id"),
+                    event["time"],
+                )
+                for event in events
+            ],
+        )
+    return str(db_path)
+
+
+def _create_sqlite_state_schema(connection):
+    connection.execute(
+        """
+        create table if not exists tasks(
+            task_id text primary key,
+            task_status text not null
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table if not exists attempts(
+            attempt_id text primary key,
+            task_id text,
+            attempt_status text,
+            validation_status text
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table if not exists leases(
+            lease_id text primary key,
+            task_id text,
+            attempt_id text,
+            lease_status text
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table if not exists events(
+            sequence integer primary key,
+            event_id text not null,
+            event_type text not null,
+            task_id text,
+            attempt_id text,
+            lease_id text,
+            step_id text,
+            time text not null
+        )
+        """
+    )
+
+
 def replay_events(events_path):
     snapshot = {"tasks": {}, "attempts": {}, "leases": {}}
     for event in _read_jsonl(events_path):
@@ -823,14 +951,19 @@ def replay_events(events_path):
 
         if event["event_type"] == "task_selected":
             snapshot["tasks"][task_id] = {"task_status": "running"}
-            snapshot["attempts"][attempt_id] = {"attempt_status": "created"}
+            snapshot["attempts"][attempt_id] = {
+                "attempt_status": "created",
+                "task_id": task_id,
+            }
         elif event["event_type"] == "lease_acquired":
             snapshot["leases"][lease_id] = {
                 "lease_status": "active",
                 "attempt_id": attempt_id,
                 "task_id": task_id,
             }
-            snapshot["attempts"].setdefault(attempt_id, {})["attempt_status"] = "dispatched"
+            attempt_state = snapshot["attempts"].setdefault(attempt_id, {})
+            attempt_state["attempt_status"] = "dispatched"
+            attempt_state.setdefault("task_id", task_id)
         elif event["event_type"] == "worktree_created":
             snapshot["attempts"].setdefault(attempt_id, {})["worktree_id"] = payload["worktree_id"]
             snapshot["attempts"].setdefault(attempt_id, {})["worktree_path"] = payload[

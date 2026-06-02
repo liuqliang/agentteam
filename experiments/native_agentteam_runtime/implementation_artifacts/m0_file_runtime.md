@@ -8,9 +8,9 @@ runtime experiment.
 ## What M0 Proves
 
 The M0 runtime proves the local control-plane path without requiring Codex,
-Claude Code, A2A, MCP, SQLite, or a persistent agent process. The current M1b
-slice also includes a Codex process adapter so the same control-plane contract
-can be exercised through `codex exec`.
+Claude Code, A2A, MCP, an external database service, or a persistent agent
+process. The current M1b slice also includes a Codex process adapter so the same
+control-plane contract can be exercised through `codex exec`.
 
 Implemented path:
 
@@ -169,6 +169,7 @@ The loop CLI prints the scheduler summary:
   "step_count": 2,
   "events_path": "/tmp/agentteam-m7c-run/events.jsonl",
   "state_path": "/tmp/agentteam-m7c-run/state/scheduler_state.json",
+  "state_db_path": "/tmp/agentteam-m7c-run/state/scheduler_state.sqlite",
   "snapshot": {
     "tasks": {
       "TASK-001": {"task_status": "done"},
@@ -657,9 +658,40 @@ source_event_sequence
 The original step event payload is unchanged, so `replay_events(...)` can read
 the root log and reconstruct multi-task scheduler loop state from one file.
 
-M7a is still intentionally sequential. It does not add concurrent workers,
-database storage, a daemon process, long-lived Codex/Claude sessions, or
-merge-to-main.
+M9a adds a SQLite query index for scheduler-loop runs:
+
+```text
+<output-dir>/state/scheduler_state.sqlite
+```
+
+The SQLite database is not an authority. It is rebuilt from the canonical root
+`events.jsonl` after each processed scheduler step, so the JSONL event stream
+remains the audit log and replay source. The index exists to make routine state
+queries cheap without forcing callers to parse the whole JSONL file every time.
+
+Current index tables:
+
+```text
+tasks(task_id, task_status)
+attempts(attempt_id, task_id, attempt_status, validation_status)
+leases(lease_id, task_id, attempt_id, lease_status)
+events(sequence, event_id, event_type, task_id, attempt_id, lease_id, step_id, time)
+```
+
+The scheduler summary includes both state paths:
+
+```json
+{
+  "events_path": "<output-dir>/events.jsonl",
+  "state_path": "<output-dir>/state/scheduler_state.json",
+  "state_db_path": "<output-dir>/state/scheduler_state.sqlite"
+}
+```
+
+The scheduler loop is still intentionally sequential. Even with M9a's SQLite
+query index, JSONL remains the authority; the loop does not add concurrent
+workers, authoritative database storage, a daemon process, long-lived
+Codex/Claude sessions, or merge-to-main.
 
 ## Intentional Fakes
 
@@ -687,8 +719,9 @@ attempt/worktree ids task-scoped so worktree-backed loops can process more than
 one task in a run. M7c exposes that loop through `--run-until-idle`. M8a adds a
 canonical root event log for scheduler-loop replay. M8b scopes scheduler-loop
 lease and message ids by task id so canonical replay can preserve per-step lease
-state. M8c makes the loop CLI include a replayed snapshot. Claude Code is not
-integrated yet.
+state. M8c makes the loop CLI include a replayed snapshot. M9a adds a
+rebuildable SQLite query index for scheduler-loop state while keeping JSONL as
+the authority. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
