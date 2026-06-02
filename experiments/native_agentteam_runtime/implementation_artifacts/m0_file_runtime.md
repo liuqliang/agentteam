@@ -111,6 +111,7 @@ The returned summary includes:
 - `failure_category`
 - `retryable`
 - `diff_audit`
+- `patch_path`
 - `attempt_count`
 - `attempts`
 - `worktree_removed`
@@ -336,6 +337,29 @@ artifacts rather than user patch content.
 M3a does not integrate patches back into the source repository. It only records
 whether the worktree diff is internally consistent with the runtime result.
 
+## M3b Patch Artifact Capture
+
+M3b persists the audited worktree diff as a patch artifact:
+
+```text
+<output-dir>/attempts/<attempt-id>/worktree.patch
+```
+
+The path is returned as `patch_path` on both the final result and the individual
+attempt entry. It is also included in validation replay state.
+
+Patch capture is intentionally separate from patch integration:
+
+- tracked modifications and deletions come from
+  `git diff --binary --no-ext-diff HEAD -- <paths>`;
+- untracked additions come from
+  `git diff --binary --no-ext-diff --no-index -- /dev/null <path>`;
+- `.agentteam/` runtime-private files remain excluded;
+- the patch is not applied, committed, or merged back to the source repository.
+
+This gives the scheduler an auditable artifact for later review without
+choosing an automatic integration policy yet.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -353,8 +377,9 @@ creating a filesystem worktree. M0 also includes a real process adapter through
 extraction through `--output-last-message`. M1c adds a live smoke entrypoint,
 but normal committed verification still uses skip/fake paths rather than
 spending live model calls. M2 adds bounded retry, outcome classification, and
-opt-in accepted-worktree cleanup. M3a adds git diff auditing without automatic
-patch integration. Claude Code is not integrated yet.
+opt-in accepted-worktree cleanup. M3a adds git diff auditing, and M3b writes a
+patch artifact without automatic patch integration. Claude Code is not
+integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

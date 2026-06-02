@@ -350,6 +350,31 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(result["validation_status"], "accepted")
             self.assertTrue((worktree_path / "generated" / "shell_result.json").exists())
 
+    def test_worktree_attempt_writes_patch_artifact_for_actual_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            script = tmp_path / "patch_worker.py"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_success_worker(script, "generated/patch_result.json")
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=ShellRuntimeAdapter([sys.executable, str(script)]),
+            )
+
+            patch_path = Path(result["patch_path"])
+
+            self.assertTrue(patch_path.exists())
+            self.assertEqual(result["attempts"][0]["patch_path"], str(patch_path))
+            self.assertIn("generated/patch_result.json", patch_path.read_text(encoding="utf-8"))
+
     def test_shell_runtime_adapter_failure_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -362,6 +362,15 @@ def run_simulation(
             if worktree_path
             else None
         )
+        patch_path = (
+            write_patch_artifact(
+                worktree_path,
+                output_dir / "attempts" / attempt_id,
+                diff_audit["actual_changed_files"],
+            )
+            if worktree_path and diff_audit and diff_audit["actual_changed_files"]
+            else None
+        )
         append_event(
             "runtime_output_received",
             agent["agent_id"],
@@ -375,6 +384,7 @@ def run_simulation(
                 "changed_files": runtime_result["changed_files"],
                 "output": runtime_result.get("output", {}),
                 "diff_audit": diff_audit,
+                "patch_path": str(patch_path) if patch_path else None,
             },
         )
 
@@ -395,6 +405,7 @@ def run_simulation(
                 "retryable": outcome["retryable"],
                 "lease_id": lease_id,
                 "diff_audit": diff_audit,
+                "patch_path": str(patch_path) if patch_path else None,
             },
         )
 
@@ -410,6 +421,7 @@ def run_simulation(
             "failure_category": outcome["failure_category"],
             "retryable": outcome["retryable"],
             "diff_audit": diff_audit,
+            "patch_path": str(patch_path) if patch_path else None,
             "worktree_removed": False,
         }
         attempts.append(final_attempt)
@@ -480,6 +492,7 @@ def run_simulation(
         "failure_category": final_attempt["failure_category"],
         "retryable": final_attempt["retryable"],
         "diff_audit": final_attempt["diff_audit"],
+        "patch_path": final_attempt["patch_path"],
         "attempt_count": len(attempts),
         "attempts": attempts,
         "worktree_removed": final_attempt["worktree_removed"],
@@ -535,6 +548,9 @@ def replay_events(events_path):
             )
             snapshot["attempts"].setdefault(attempt_id, {})["diff_audit"] = payload.get(
                 "diff_audit"
+            )
+            snapshot["attempts"].setdefault(attempt_id, {})["patch_path"] = payload.get(
+                "patch_path"
             )
             if lease_id in snapshot["leases"]:
                 snapshot["leases"][lease_id]["lease_status"] = "released"
@@ -628,7 +644,77 @@ def audit_worktree_diff(worktree_path, declared_changed_files):
     }
 
 
+def write_patch_artifact(worktree_path, artifact_dir, actual_changed_files):
+    artifact_dir = Path(artifact_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    patch_path = artifact_dir / "worktree.patch"
+    status_entries = _git_status_entries(worktree_path)
+    untracked = {
+        entry["path"]
+        for entry in status_entries
+        if entry["status"] == "??"
+    }
+    tracked_paths = [path for path in actual_changed_files if path not in untracked]
+    chunks = []
+    if tracked_paths:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                "HEAD",
+                "--",
+                *tracked_paths,
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if completed.stdout:
+            chunks.append(completed.stdout)
+    for path in actual_changed_files:
+        if path not in untracked:
+            continue
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                path,
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if completed.returncode not in {0, 1}:
+            raise subprocess.CalledProcessError(
+                completed.returncode,
+                completed.args,
+                output=completed.stdout,
+                stderr=completed.stderr,
+            )
+        if completed.stdout:
+            chunks.append(completed.stdout)
+    patch_path.write_text("\n".join(chunks), encoding="utf-8")
+    return patch_path
+
+
 def _git_changed_files(worktree_path):
+    return [entry["path"] for entry in _git_status_entries(worktree_path)]
+
+
+def _git_status_entries(worktree_path):
     completed = subprocess.run(
         ["git", "-C", str(worktree_path), "status", "--porcelain=v1", "--untracked-files=all"],
         check=True,
@@ -636,17 +722,18 @@ def _git_changed_files(worktree_path):
         stderr=subprocess.PIPE,
         text=True,
     )
-    paths = []
+    entries = []
     for line in completed.stdout.splitlines():
         if not line:
             continue
+        status = line[:2]
         path = line[3:]
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
         if path.startswith(".agentteam/"):
             continue
-        paths.append(path)
-    return paths
+        entries.append({"status": status, "path": path})
+    return entries
 
 
 def _normalize_runtime_result(result, adapter, stderr=""):
