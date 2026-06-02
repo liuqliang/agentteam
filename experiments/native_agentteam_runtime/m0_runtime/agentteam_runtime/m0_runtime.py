@@ -880,6 +880,7 @@ def rebuild_sqlite_state_index(db_path, events_path):
         connection.execute("delete from tasks")
         connection.execute("delete from attempts")
         connection.execute("delete from leases")
+        connection.execute("delete from runtime_sessions")
         connection.execute("delete from events")
         connection.executemany(
             "insert into tasks(task_id, task_status) values(?, ?)",
@@ -917,6 +918,35 @@ def rebuild_sqlite_state_index(db_path, events_path):
                     lease_state.get("lease_status"),
                 )
                 for lease_id, lease_state in sorted(snapshot["leases"].items())
+            ],
+        )
+        connection.executemany(
+            """
+            insert into runtime_sessions(
+                runtime_session_id,
+                task_id,
+                attempt_id,
+                lease_id,
+                session_status,
+                result_status,
+                runtime_adapter,
+                changed_file_count
+            ) values(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    runtime_session_id,
+                    session_state.get("task_id"),
+                    session_state.get("attempt_id"),
+                    session_state.get("lease_id"),
+                    session_state.get("session_status"),
+                    session_state.get("result_status"),
+                    session_state.get("runtime_adapter"),
+                    session_state.get("changed_file_count"),
+                )
+                for runtime_session_id, session_state in sorted(
+                    snapshot["runtime_sessions"].items()
+                )
             ],
         )
         connection.executemany(
@@ -986,6 +1016,22 @@ def read_sqlite_state_index(db_path, events_path=None):
             order by lease_id
             """,
         )
+        runtime_sessions = _fetch_sqlite_dicts(
+            connection,
+            """
+            select
+                runtime_session_id,
+                task_id,
+                attempt_id,
+                lease_id,
+                session_status,
+                result_status,
+                runtime_adapter,
+                changed_file_count
+            from runtime_sessions
+            order by runtime_session_id
+            """,
+        )
         event_count = connection.execute("select count(*) from events").fetchone()[0]
         latest_event = connection.execute(
             """
@@ -1001,6 +1047,7 @@ def read_sqlite_state_index(db_path, events_path=None):
         "tasks": tasks,
         "attempts": attempts,
         "leases": leases,
+        "runtime_sessions": runtime_sessions,
         "event_count": event_count,
         "latest_event": dict(latest_event) if latest_event else None,
     }
@@ -1012,6 +1059,8 @@ def _fetch_sqlite_dicts(connection, query):
 
 def _sqlite_state_index_is_stale(db_path, events_path):
     try:
+        if _sqlite_missing_required_tables(db_path):
+            return True
         indexed_event_count = _sqlite_event_count(db_path)
     except sqlite3.DatabaseError:
         return True
@@ -1022,6 +1071,16 @@ def _sqlite_state_index_is_stale(db_path, events_path):
 def _sqlite_event_count(db_path):
     with sqlite3.connect(db_path) as connection:
         return connection.execute("select count(*) from events").fetchone()[0]
+
+
+def _sqlite_missing_required_tables(db_path):
+    required_tables = {"tasks", "attempts", "leases", "runtime_sessions", "events"}
+    with sqlite3.connect(db_path) as connection:
+        table_rows = connection.execute(
+            "select name from sqlite_master where type = 'table'"
+        ).fetchall()
+    actual_tables = {row[0] for row in table_rows}
+    return not required_tables.issubset(actual_tables)
 
 
 def _create_sqlite_state_schema(connection):
@@ -1050,6 +1109,20 @@ def _create_sqlite_state_schema(connection):
             task_id text,
             attempt_id text,
             lease_status text
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table if not exists runtime_sessions(
+            runtime_session_id text primary key,
+            task_id text,
+            attempt_id text,
+            lease_id text,
+            session_status text,
+            result_status text,
+            runtime_adapter text,
+            changed_file_count integer
         )
         """
     )

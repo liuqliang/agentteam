@@ -228,6 +228,13 @@ class M0RuntimeTests(unittest.TestCase):
                 leases = connection.execute(
                     "select lease_id, lease_status from leases order by lease_id"
                 ).fetchall()
+                runtime_sessions = connection.execute(
+                    """
+                    select runtime_session_id, task_id, attempt_id, session_status, result_status
+                    from runtime_sessions
+                    order by runtime_session_id
+                    """
+                ).fetchall()
                 event_count = connection.execute("select count(*) from events").fetchone()[0]
 
             self.assertTrue(db_path.exists())
@@ -244,6 +251,25 @@ class M0RuntimeTests(unittest.TestCase):
                 [
                     ("TASK-001-LEASE-001", "released"),
                     ("TASK-002-LEASE-001", "released"),
+                ],
+            )
+            self.assertEqual(
+                runtime_sessions,
+                [
+                    (
+                        "SESSION-TASK-001-ATTEMPT-001",
+                        "TASK-001",
+                        "TASK-001-ATTEMPT-001",
+                        "stopped",
+                        "completed",
+                    ),
+                    (
+                        "SESSION-TASK-002-ATTEMPT-001",
+                        "TASK-002",
+                        "TASK-002-ATTEMPT-001",
+                        "stopped",
+                        "completed",
+                    ),
                 ],
             )
             self.assertEqual(event_count, root_event_count)
@@ -300,6 +326,31 @@ class M0RuntimeTests(unittest.TestCase):
                     },
                 ],
             )
+            self.assertEqual(
+                state["runtime_sessions"],
+                [
+                    {
+                        "attempt_id": "TASK-001-ATTEMPT-001",
+                        "changed_file_count": 1,
+                        "lease_id": "TASK-001-LEASE-001",
+                        "result_status": "completed",
+                        "runtime_adapter": "FakeRuntimeAdapter",
+                        "runtime_session_id": "SESSION-TASK-001-ATTEMPT-001",
+                        "session_status": "stopped",
+                        "task_id": "TASK-001",
+                    },
+                    {
+                        "attempt_id": "TASK-002-ATTEMPT-001",
+                        "changed_file_count": 1,
+                        "lease_id": "TASK-002-LEASE-001",
+                        "result_status": "completed",
+                        "runtime_adapter": "FakeRuntimeAdapter",
+                        "runtime_session_id": "SESSION-TASK-002-ATTEMPT-001",
+                        "session_status": "stopped",
+                        "task_id": "TASK-002",
+                    },
+                ],
+            )
             self.assertEqual(state["event_count"], root_event_count)
             self.assertEqual(state["latest_event"]["event_type"], "backlog_updated")
             self.assertEqual(state["latest_event"]["task_id"], "TASK-002")
@@ -345,6 +396,38 @@ class M0RuntimeTests(unittest.TestCase):
             )
             self.assertEqual(state["event_count"], root_event_count)
             self.assertEqual(state["latest_event"]["task_id"], "TASK-002")
+
+    def test_read_scheduler_state_index_rebuilds_missing_runtime_session_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+            db_path = output_dir / "state" / "scheduler_state.sqlite"
+            with sqlite3.connect(db_path) as connection:
+                connection.execute("drop table runtime_sessions")
+
+            state = read_scheduler_state_index(output_dir)
+
+            self.assertEqual(len(state["runtime_sessions"]), 2)
+            self.assertEqual(
+                state["runtime_sessions"][0]["runtime_session_id"],
+                "SESSION-TASK-001-ATTEMPT-001",
+            )
 
     def test_scheduler_loop_respects_done_dependencies(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -710,6 +710,7 @@ Current index tables:
 tasks(task_id, task_status)
 attempts(attempt_id, task_id, attempt_status, validation_status)
 leases(lease_id, task_id, attempt_id, lease_status)
+runtime_sessions(runtime_session_id, task_id, attempt_id, lease_id, session_status, result_status, runtime_adapter, changed_file_count)
 events(sequence, event_id, event_type, task_id, attempt_id, lease_id, step_id, time)
 ```
 
@@ -730,10 +731,11 @@ state = read_scheduler_state_index(output_dir)
 ```
 
 It returns sorted `tasks`, `attempts`, and `leases`, plus `event_count` and
-`latest_event`. If the SQLite index is missing, or if its indexed event count
-does not match the canonical root `events.jsonl`, it is rebuilt from JSONL
-before the summary is returned. This is an observability path only; callers
-still treat JSONL as the source of truth.
+`runtime_sessions`, `event_count`, and `latest_event`. If the SQLite index is
+missing, if required tables are missing, or if its indexed event count does not
+match the canonical root `events.jsonl`, it is rebuilt from JSONL before the
+summary is returned. This is an observability path only; callers still treat
+JSONL as the source of truth.
 
 M9c makes that repair behavior explicit for stale indexes. This covers the
 crash-recovery case where the scheduler appended canonical events but stopped
@@ -806,6 +808,26 @@ The returned attempt summary includes:
 still a synchronous logical lifecycle. It does not yet keep Codex, Claude Code,
 or another worker process alive across multiple tasks.
 
+M11b stores those replayed runtime sessions in the SQLite state index. The
+state-index query output includes one row per runtime session:
+
+```json
+{
+  "runtime_session_id": "SESSION-TASK-001-ATTEMPT-001",
+  "task_id": "TASK-001",
+  "attempt_id": "TASK-001-ATTEMPT-001",
+  "lease_id": "TASK-001-LEASE-001",
+  "session_status": "stopped",
+  "result_status": "completed",
+  "runtime_adapter": "FakeRuntimeAdapter",
+  "changed_file_count": 1
+}
+```
+
+If an older SQLite index has matching event counts but lacks the
+`runtime_sessions` table, the read path treats it as stale and rebuilds it from
+canonical JSONL.
+
 The scheduler loop is still intentionally sequential. Even with M9a's SQLite
 query index, JSONL remains the authority; the loop does not add concurrent
 workers, authoritative database storage, a daemon process, long-lived
@@ -842,8 +864,8 @@ rebuildable SQLite query index for scheduler-loop state while keeping JSONL as
 the authority. M9b adds a read-only state-index API and CLI inspection mode.
 M9c repairs missing or stale state indexes from canonical JSONL during reads.
 M10a adds a lightweight executable artifact lint command. M11a records logical
-runtime session lifecycle events around synchronous adapter calls. Claude Code
-is not integrated yet.
+runtime session lifecycle events around synchronous adapter calls. M11b adds
+runtime sessions to the SQLite state index. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
