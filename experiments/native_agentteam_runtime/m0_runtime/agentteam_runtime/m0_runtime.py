@@ -625,6 +625,8 @@ class FileScheduler:
         self.integration_verification_command = integration_verification_command
         self.commit_verified_integration = commit_verified_integration
         self.state_path = Path(state_path or self.output_dir / "state" / "scheduler_state.json")
+        self.events_path = self.output_dir / "events.jsonl"
+        self.run_id = "RUN-FILE-SCHEDULER"
         self.state = self._load_or_create_state()
 
     def step_once(self):
@@ -679,6 +681,7 @@ class FileScheduler:
         }
         self.state["steps"].append(step_summary)
         self.state["scheduler_status"] = "running"
+        self._append_step_events_to_canonical_log(step_id, result["events_path"])
         self._write_state()
         return step_summary
 
@@ -741,12 +744,43 @@ class FileScheduler:
             "processed_task_ids": processed_task_ids,
             "step_count": len(self.state["steps"]),
             "steps": self.state["steps"],
+            "events_path": str(self.events_path),
             "state_path": str(self.state_path),
         }
 
     def _write_state(self):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(json.dumps(self.state, sort_keys=True), encoding="utf-8")
+
+    def _append_step_events_to_canonical_log(self, step_id, step_events_path):
+        sequence = self._next_canonical_sequence()
+        canonical_events = []
+        for step_event in _read_jsonl(step_events_path):
+            source_event_id = step_event["event_id"]
+            source_sequence = step_event["sequence"]
+            canonical_event = {
+                **step_event,
+                "event_id": f"EVT-{sequence:04d}",
+                "sequence": sequence,
+                "run_id": self.run_id,
+                "step_id": step_id,
+                "source_event_id": source_event_id,
+                "source_event_sequence": source_sequence,
+            }
+            canonical_events.append(canonical_event)
+            sequence += 1
+        _append_jsonl(self.events_path, canonical_events)
+
+    def _next_canonical_sequence(self):
+        if not self.events_path.exists():
+            return 1
+        existing_sequences = [
+            event["sequence"]
+            for event in _read_jsonl(self.events_path)
+        ]
+        if not existing_sequences:
+            return 1
+        return max(existing_sequences) + 1
 
 
 def run_scheduler_loop(

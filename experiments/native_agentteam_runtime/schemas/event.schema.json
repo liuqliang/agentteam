@@ -19,6 +19,18 @@
       "type": "string",
       "pattern": "^EVT-[0-9]+$"
     },
+    "run_id": {
+      "type": ["string", "null"]
+    },
+    "step_id": {
+      "type": ["string", "null"]
+    },
+    "source_event_id": {
+      "type": ["string", "null"]
+    },
+    "source_event_sequence": {
+      "type": ["integer", "null"]
+    },
     "sequence": {
       "type": "integer",
       "minimum": 1

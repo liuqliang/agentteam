@@ -95,6 +95,53 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue((output_dir / "steps" / "STEP-0001-TASK-001").exists())
             self.assertTrue((output_dir / "steps" / "STEP-0002-TASK-002").exists())
 
+    def test_scheduler_loop_writes_canonical_event_log_for_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            events_path = Path(summary["events_path"])
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+            event_schema = json.loads((SCHEMAS / "event.schema.json").read_text(encoding="utf-8"))
+            allowed_event_keys = set(event_schema["properties"].keys())
+            snapshot = replay_events(events_path)
+
+            self.assertEqual(events_path, output_dir / "events.jsonl")
+            self.assertTrue(all(set(event.keys()).issubset(allowed_event_keys) for event in events))
+            self.assertEqual(
+                [event["sequence"] for event in events],
+                list(range(1, len(events) + 1)),
+            )
+            self.assertEqual(events[0]["event_id"], "EVT-0001")
+            self.assertEqual(
+                {event["step_id"] for event in events},
+                {"STEP-0001-TASK-001", "STEP-0002-TASK-002"},
+            )
+            self.assertTrue(
+                all(event["source_event_id"].startswith("EVT-") for event in events)
+            )
+            self.assertEqual(snapshot["tasks"]["TASK-001"]["task_status"], "done")
+            self.assertEqual(snapshot["tasks"]["TASK-002"]["task_status"], "done")
+
     def test_scheduler_loop_respects_done_dependencies(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

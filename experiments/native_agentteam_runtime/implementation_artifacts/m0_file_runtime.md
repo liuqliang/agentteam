@@ -167,14 +167,15 @@ The loop CLI prints the scheduler summary:
   "scheduler_status": "idle",
   "processed_task_ids": ["TASK-001", "TASK-002"],
   "step_count": 2,
+  "events_path": "/tmp/agentteam-m7c-run/events.jsonl",
   "state_path": "/tmp/agentteam-m7c-run/state/scheduler_state.json"
 }
 ```
 
 Use `--max-steps <n>` with `--run-until-idle` to cap the number of scheduler
 steps. The default CLI path remains single-task and still prints the replayed
-snapshot. The loop path does not attach a unified replay snapshot yet because
-M7a/M7b still keep per-step event logs.
+snapshot. The loop path prints the canonical root `events.jsonl` path; callers
+can replay that file with `replay_events(...)`.
 
 To run a real local process through the shell adapter, put `--shell-command`
 last:
@@ -587,6 +588,7 @@ the existing `run_simulation(...)` path, updates backlog state, and writes:
 
 ```text
 <output-dir>/state/scheduler_state.json
+<output-dir>/events.jsonl
 <output-dir>/steps/STEP-0001-<task-id>/
 <output-dir>/steps/STEP-0002-<task-id>/
 ```
@@ -598,6 +600,7 @@ The summary shape is:
   "scheduler_status": "idle",
   "processed_task_ids": ["TASK-001", "TASK-002"],
   "step_count": 2,
+  "events_path": "<output-dir>/events.jsonl",
   "state_path": "<output-dir>/state/scheduler_state.json"
 }
 ```
@@ -627,9 +630,24 @@ TASK-002-ATTEMPT-001 -> agentteam/TASK-002-ATTEMPT-001
 Plain `run_simulation(...)` keeps the existing default ids such as
 `ATTEMPT-001`, `WT-ATTEMPT-001`, and `agentteam/ATTEMPT-001`.
 
+M8a makes `<output-dir>/events.jsonl` the canonical replay source for scheduler
+loop runs. Each processed step still keeps its local event log, but the
+scheduler copies those events into the root log with global `sequence` and
+`event_id` values. Canonical events also carry:
+
+```text
+run_id
+step_id
+source_event_id
+source_event_sequence
+```
+
+The original step event payload is unchanged, so `replay_events(...)` can read
+the root log and reconstruct multi-task scheduler loop state from one file.
+
 M7a is still intentionally sequential. It does not add concurrent workers,
-database storage, a daemon process, long-lived Codex/Claude sessions, unified
-multi-step event logs, or merge-to-main.
+database storage, a daemon process, long-lived Codex/Claude sessions, or
+merge-to-main.
 
 ## Intentional Fakes
 
@@ -654,8 +672,9 @@ runs opt-in integration verification, and M6 can commit only a verified
 integration worktree checkpoint. M7a adds a sequential file-backed scheduler
 loop that can process multiple ready tasks until idle. M7b makes scheduler-loop
 attempt/worktree ids task-scoped so worktree-backed loops can process more than
-one task in a run. M7c exposes that loop through `--run-until-idle`. Claude Code
-is not integrated yet.
+one task in a run. M7c exposes that loop through `--run-until-idle`. M8a adds a
+canonical root event log for scheduler-loop replay. Claude Code is not
+integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -666,7 +685,7 @@ Before the next backend milestone, the next design/code step should define:
 - decide when live Codex smoke should run outside local opt-in;
 - Claude Code adapter feasibility and result extraction contract;
 - runtime session start/observe/stop interface for long-running workers;
-- unified event log and globally unique attempt ids for multi-step loops;
+- globally unique lease/message ids for multi-step loops;
 - executable artifact/schema lint command;
 - retry backoff, retry budget, and failure escalation policy;
 - merge strategy and result diff review policy for complete task/system gates.
