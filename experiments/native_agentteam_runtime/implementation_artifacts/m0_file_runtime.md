@@ -44,6 +44,7 @@ experiments/native_agentteam_runtime/m0_runtime/
   agentteam_runtime/
     __init__.py
     cli.py
+    daemon.py
     m0_runtime.py
   tests/
     test_m0_runtime.py
@@ -55,11 +56,13 @@ experiments/native_agentteam_runtime/m0_runtime/
 from agentteam_runtime import (
     CodexRuntimeAdapter,
     FakeRuntimeAdapter,
+    FileSchedulerDaemon,
     FileScheduler,
     ShellRuntimeAdapter,
     classify_attempt_outcome,
     read_scheduler_state_index,
     replay_events,
+    run_file_daemon,
     run_scheduler_loop,
     run_simulation,
 )
@@ -68,7 +71,11 @@ result = run_simulation(agent_pool_path, backlog_path, output_dir)
 snapshot = replay_events(result["events_path"])
 
 loop_summary = run_scheduler_loop(agent_pool_path, backlog_path, output_dir)
+daemon_summary = run_file_daemon(agent_pool_path, backlog_path, output_dir)
 state_index = read_scheduler_state_index(output_dir)
+
+daemon = FileSchedulerDaemon(agent_pool_path, backlog_path, output_dir)
+tick_summary = daemon.tick()
 
 result_with_worktree = run_simulation(
     agent_pool_path,
@@ -188,6 +195,33 @@ Use `--max-steps <n>` with `--run-until-idle` to cap the number of scheduler
 steps. The default CLI path remains single-task and still prints the replayed
 snapshot. The loop path also prints a snapshot replayed from the canonical root
 `events.jsonl`.
+
+To run through the file daemon facade, pass `--daemon-run-until-idle`:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool experiments/native_agentteam_runtime/fixtures/sample_agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m14a-daemon-run \
+  --daemon-run-until-idle
+```
+
+The daemon path prints the same replayed scheduler snapshot plus a worker
+registry path:
+
+```json
+{
+  "daemon_status": "idle",
+  "processed_task_ids": ["TASK-001", "TASK-002"],
+  "step_count": 2,
+  "tick_count": 3,
+  "worker_registry_path": "/tmp/agentteam-m14a-daemon-run/state/worker_registry.json"
+}
+```
+
+`--daemon-run-until-idle` and `--run-until-idle` are mutually exclusive. The
+daemon path currently reuses `--max-steps` as its tick budget.
 
 To inspect a completed or partially completed scheduler run without re-running
 the scheduler, pass `--show-state-index` with only the output directory:
@@ -1001,8 +1035,58 @@ path treats it as stale and rebuilds it from canonical JSONL.
 
 The scheduler loop is still intentionally sequential. Even with M9a's SQLite
 query index, JSONL remains the authority; the loop does not add concurrent
-workers, authoritative database storage, a daemon process, long-lived
-Codex/Claude sessions, or merge-to-main.
+workers, authoritative database storage, a supervised daemon process,
+long-lived Codex/Claude sessions, or merge-to-main.
+
+## M14a File Daemon Worker Registry
+
+M14a adds a file-backed daemon facade:
+
+```python
+daemon = FileSchedulerDaemon(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    runtime_adapter=FakeRuntimeAdapter(),
+)
+tick_summary = daemon.tick()
+summary = daemon.run_until_idle()
+```
+
+The daemon owns:
+
+```text
+<output-dir>/state/worker_registry.json
+```
+
+Each tick refreshes the registry heartbeat for every non-scheduler agent from
+`agent_pool`, then delegates one scheduler step through `FileScheduler.step_once()`.
+The registry shape is intentionally compact:
+
+```json
+{
+  "registry_status": "active",
+  "tick_count": 1,
+  "workers": [
+    {
+      "worker_id": "WORKER-agent-repo-map",
+      "agent_id": "agent-repo-map",
+      "role": "repo_map_agent",
+      "worker_status": "idle",
+      "runtime_adapter": "manual",
+      "runtime_profile": null,
+      "active_task_id": null,
+      "last_heartbeat": "2026-05-31T00:00:00Z"
+    }
+  ]
+}
+```
+
+This is the first daemon-shaped control-plane experiment, not a worker process
+supervisor. It does not fork or keep Codex, Claude Code, or shell workers alive.
+The registry is durable state for observing intended long-lived agents while the
+actual runtime invocation remains the existing short adapter call inside each
+scheduler step.
 
 ## Intentional Fakes
 
@@ -1010,7 +1094,7 @@ M0/M3a intentionally fakes or simplifies:
 
 - transcript parsing;
 - real code patch integration;
-- persistent daemon loop;
+- supervised daemon process and concurrent worker execution;
 - advanced retry backoff, queues, and cross-process recovery;
 - schema validation through a JSON Schema engine.
 
@@ -1046,7 +1130,9 @@ different role agents can carry different Codex runtime settings in
 `agent_pool`. M13b records the effective runtime config on each runtime session
 and exposes it through replay and the SQLite state index. M13c moves the
 runtime profile resolver from CLI code into runtime core so daemon/API runners
-can reuse it. Claude Code is not integrated yet.
+can reuse it. M14a adds a file-backed daemon facade and durable worker registry
+while keeping execution sequential and adapter invocations short-lived. Claude
+Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

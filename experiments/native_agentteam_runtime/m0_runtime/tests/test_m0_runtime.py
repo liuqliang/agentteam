@@ -10,11 +10,13 @@ from pathlib import Path
 from agentteam_runtime import (
     CodexRuntimeAdapter,
     FakeRuntimeAdapter,
+    FileSchedulerDaemon,
     ShellRuntimeAdapter,
     audit_worktree_diff,
     classify_attempt_outcome,
     read_scheduler_state_index,
     replay_events,
+    run_file_daemon,
     run_scheduler_loop,
     run_simulation,
 )
@@ -96,6 +98,82 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(statuses["TASK-002"], "done")
             self.assertTrue((output_dir / "steps" / "STEP-0001-TASK-001").exists())
             self.assertTrue((output_dir / "steps" / "STEP-0002-TASK-002").exists())
+
+    def test_file_daemon_tick_records_worker_registry_and_processes_one_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            daemon = FileSchedulerDaemon(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+            summary = daemon.tick()
+
+            registry = json.loads(
+                (output_dir / "state" / "worker_registry.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(summary["daemon_status"], "running")
+            self.assertEqual(summary["tick_status"], "processed")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001"])
+            self.assertEqual(
+                summary["worker_registry_path"],
+                str(output_dir / "state" / "worker_registry.json"),
+            )
+            self.assertEqual(registry["tick_count"], 1)
+            self.assertEqual(registry["registry_status"], "active")
+            self.assertEqual(
+                [worker["agent_id"] for worker in registry["workers"]],
+                ["agent-repo-map", "agent-worker-1"],
+            )
+            self.assertEqual(
+                {worker["worker_status"] for worker in registry["workers"]},
+                {"idle"},
+            )
+            self.assertTrue((output_dir / "steps" / "STEP-0001-TASK-001").exists())
+
+    def test_file_daemon_run_until_idle_reuses_worker_registry_across_ticks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            summary = run_file_daemon(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+            registry = json.loads(
+                (output_dir / "state" / "worker_registry.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(summary["daemon_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertEqual(summary["step_count"], 2)
+            self.assertEqual(summary["tick_count"], 3)
+            self.assertEqual(registry["tick_count"], 3)
+            self.assertEqual(registry["registry_status"], "active")
 
     def test_scheduler_loop_writes_canonical_event_log_for_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -938,6 +1016,47 @@ class M0RuntimeTests(unittest.TestCase):
                 set(summary["snapshot"]["leases"].keys()),
                 {"TASK-001-LEASE-001", "TASK-002-LEASE-001"},
             )
+
+    def test_cli_can_run_file_daemon_until_idle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--daemon-run-until-idle",
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+
+            self.assertEqual(summary["daemon_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertTrue((output_dir / "state" / "worker_registry.json").exists())
 
     def test_cli_can_show_state_index_without_agent_pool_or_backlog(self):
         with tempfile.TemporaryDirectory() as tmp:

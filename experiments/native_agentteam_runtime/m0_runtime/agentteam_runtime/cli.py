@@ -1,6 +1,7 @@
 import argparse
 import json
 
+from .daemon import run_file_daemon
 from .m0_runtime import (
     read_scheduler_state_index,
     replay_events,
@@ -24,6 +25,11 @@ def main(argv=None):
         "--run-until-idle",
         action="store_true",
         help="Run the file scheduler loop until no ready tasks remain.",
+    )
+    parser.add_argument(
+        "--daemon-run-until-idle",
+        action="store_true",
+        help="Run the file daemon facade until no ready tasks remain.",
     )
     parser.add_argument(
         "--max-steps",
@@ -76,6 +82,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.shell_command and args.codex_command:
         parser.error("--shell-command and --codex-command are mutually exclusive")
+    if args.run_until_idle and args.daemon_run_until_idle:
+        parser.error("--run-until-idle and --daemon-run-until-idle are mutually exclusive")
     if args.show_state_index:
         result = read_scheduler_state_index(args.output_dir)
         print(json.dumps(result, sort_keys=True))
@@ -99,6 +107,22 @@ def main(argv=None):
             integration_verification_command=integration_verification_command,
             commit_verified_integration=args.commit_verified_integration,
             max_steps=args.max_steps,
+        )
+        snapshot = replay_events(result["events_path"])
+        print(json.dumps({**result, "snapshot": snapshot}, sort_keys=True))
+        return
+
+    if args.daemon_run_until_idle:
+        result = run_file_daemon(
+            args.agent_pool,
+            args.backlog,
+            args.output_dir,
+            project_root=args.project_root,
+            runtime_profile_defaults=runtime_profile_defaults,
+            integrate_accepted_patch=args.integrate_accepted_patch,
+            integration_verification_command=integration_verification_command,
+            commit_verified_integration=args.commit_verified_integration,
+            max_ticks=args.max_steps,
         )
         snapshot = replay_events(result["events_path"])
         print(json.dumps({**result, "snapshot": snapshot}, sort_keys=True))
