@@ -493,6 +493,55 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(snapshot["attempts"]["ATTEMPT-001"]["worktree_id"], "WT-ATTEMPT-001")
             self.assertEqual(snapshot["leases"]["LEASE-001"]["lease_status"], "released")
 
+    def test_run_simulation_records_runtime_session_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                FIXTURES / "sample_backlog.json",
+                output_dir,
+                clock=FixedClock(),
+            )
+            events = [
+                json.loads(line)
+                for line in Path(result["events_path"]).read_text(encoding="utf-8").splitlines()
+            ]
+            session_events = [
+                event
+                for event in events
+                if event["event_type"].startswith("runtime_session_")
+            ]
+            snapshot = replay_events(result["events_path"])
+
+            self.assertEqual(result["runtime_session_id"], "SESSION-ATTEMPT-001")
+            self.assertEqual(result["runtime_session_status"], "stopped")
+            self.assertEqual(
+                [event["event_type"] for event in session_events],
+                [
+                    "runtime_session_started",
+                    "runtime_session_observed",
+                    "runtime_session_stopped",
+                ],
+            )
+            self.assertTrue(
+                all(
+                    event["payload"]["runtime_session_id"] == "SESSION-ATTEMPT-001"
+                    and event["payload"]["task_id"] == "TASK-001"
+                    and event["payload"]["attempt_id"] == "ATTEMPT-001"
+                    and event["payload"]["lease_id"] == "LEASE-001"
+                    for event in session_events
+                )
+            )
+            self.assertEqual(
+                snapshot["runtime_sessions"]["SESSION-ATTEMPT-001"]["session_status"],
+                "stopped",
+            )
+            self.assertEqual(
+                snapshot["runtime_sessions"]["SESSION-ATTEMPT-001"]["result_status"],
+                "completed",
+            )
+
     def test_emitted_types_are_allowed_by_schemas(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)

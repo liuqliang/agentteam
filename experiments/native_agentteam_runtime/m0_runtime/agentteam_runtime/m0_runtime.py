@@ -276,6 +276,7 @@ def run_simulation(
         lease_id = _scoped_id("LEASE", attempt_number, attempt_id_prefix)
         message_id = _scoped_id("MSG", attempt_number, attempt_id_prefix, width=4)
         worktree_id = f"WT-{attempt_id}" if task.get("write_scope") else None
+        runtime_session_id = f"SESSION-{attempt_id}"
         worktree_path = None
         branch = None
         correlation_id = f"{task['task_id']}:{attempt_id}"
@@ -362,7 +363,40 @@ def run_simulation(
                 "lease_id": lease_id,
             },
         )
+        append_event(
+            "runtime_session_started",
+            agent_pool["scheduler_agent_id"],
+            agent["agent_id"],
+            f"runtime-session-started:{runtime_session_id}",
+            correlation_id,
+            {
+                "task_id": task["task_id"],
+                "attempt_id": attempt_id,
+                "lease_id": lease_id,
+                "runtime_session_id": runtime_session_id,
+                "runtime_adapter": runtime_adapter.__class__.__name__,
+                "worktree_id": worktree_id,
+                "worktree_path": str(worktree_path) if worktree_path else None,
+                "session_status": "started",
+            },
+        )
         runtime_result = runtime_adapter.run(message, worktree_path=worktree_path)
+        append_event(
+            "runtime_session_observed",
+            agent["agent_id"],
+            agent_pool["scheduler_agent_id"],
+            f"runtime-session-observed:{runtime_session_id}",
+            correlation_id,
+            {
+                "task_id": task["task_id"],
+                "attempt_id": attempt_id,
+                "lease_id": lease_id,
+                "runtime_session_id": runtime_session_id,
+                "result_status": runtime_result["result_status"],
+                "changed_file_count": len(runtime_result["changed_files"]),
+                "session_status": "observed",
+            },
+        )
         diff_audit = (
             audit_worktree_diff(worktree_path, runtime_result["changed_files"])
             if worktree_path
@@ -393,6 +427,21 @@ def run_simulation(
                 "patch_path": str(patch_path) if patch_path else None,
             },
         )
+        append_event(
+            "runtime_session_stopped",
+            agent_pool["scheduler_agent_id"],
+            agent["agent_id"],
+            f"runtime-session-stopped:{runtime_session_id}",
+            correlation_id,
+            {
+                "task_id": task["task_id"],
+                "attempt_id": attempt_id,
+                "lease_id": lease_id,
+                "runtime_session_id": runtime_session_id,
+                "result_status": runtime_result["result_status"],
+                "session_status": "stopped",
+            },
+        )
 
         outcome = classify_attempt_outcome(runtime_result, task, diff_audit=diff_audit)
         append_event(
@@ -420,6 +469,8 @@ def run_simulation(
             "attempt_id": attempt_id,
             "lease_id": lease_id,
             "message_id": message_id,
+            "runtime_session_id": runtime_session_id,
+            "runtime_session_status": "stopped",
             "worktree_id": worktree_id,
             "worktree_path": str(worktree_path) if worktree_path else None,
             "branch": branch,
@@ -568,6 +619,8 @@ def run_simulation(
         "attempt_id": final_attempt["attempt_id"],
         "lease_id": final_attempt["lease_id"],
         "message_id": final_attempt["message_id"],
+        "runtime_session_id": final_attempt["runtime_session_id"],
+        "runtime_session_status": final_attempt["runtime_session_status"],
         "worktree_id": final_attempt["worktree_id"],
         "worktree_path": final_attempt["worktree_path"],
         "branch": final_attempt["branch"],
@@ -1017,7 +1070,7 @@ def _create_sqlite_state_schema(connection):
 
 
 def replay_events(events_path):
-    snapshot = {"tasks": {}, "attempts": {}, "leases": {}}
+    snapshot = {"tasks": {}, "attempts": {}, "leases": {}, "runtime_sessions": {}}
     for event in _read_jsonl(events_path):
         payload = event["payload"]
         task_id = payload.get("task_id")
@@ -1052,6 +1105,34 @@ def replay_events(events_path):
                 "worktree_path"
             ]
             snapshot["attempts"].setdefault(attempt_id, {})["worktree_status"] = "removed"
+        elif event["event_type"] == "runtime_session_started":
+            runtime_session_id = payload["runtime_session_id"]
+            snapshot["runtime_sessions"][runtime_session_id] = {
+                "session_status": "started",
+                "task_id": task_id,
+                "attempt_id": attempt_id,
+                "lease_id": lease_id,
+                "runtime_adapter": payload["runtime_adapter"],
+                "worktree_id": payload.get("worktree_id"),
+                "worktree_path": payload.get("worktree_path"),
+            }
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "runtime_session_id"
+            ] = runtime_session_id
+        elif event["event_type"] == "runtime_session_observed":
+            runtime_session_id = payload["runtime_session_id"]
+            session_state = snapshot["runtime_sessions"].setdefault(runtime_session_id, {})
+            session_state["session_status"] = "observed"
+            session_state["result_status"] = payload["result_status"]
+            session_state["changed_file_count"] = payload["changed_file_count"]
+        elif event["event_type"] == "runtime_session_stopped":
+            runtime_session_id = payload["runtime_session_id"]
+            session_state = snapshot["runtime_sessions"].setdefault(runtime_session_id, {})
+            session_state["session_status"] = "stopped"
+            session_state["result_status"] = payload["result_status"]
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "runtime_session_status"
+            ] = "stopped"
         elif event["event_type"] == "runtime_output_received":
             snapshot["attempts"].setdefault(attempt_id, {})["attempt_status"] = payload[
                 "result_status"

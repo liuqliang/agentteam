@@ -22,10 +22,11 @@ sample backlog
   -> optional real git worktree creation
   -> mailbox dispatch JSONL
   -> append-only event JSONL
+  -> logical runtime session start / observe / stop events
   -> fake, shell, or Codex runtime adapter result
   -> write-scope validation
   -> backlog completion event
-  -> replay to task / attempt / lease snapshot
+  -> replay to task / attempt / lease / runtime session snapshot
 ```
 
 The core semantic boundary is preserved:
@@ -110,6 +111,8 @@ The returned summary includes:
 - `attempt_id`
 - `lease_id`
 - `message_id`
+- `runtime_session_id`
+- `runtime_session_status`
 - `worktree_id`
 - `worktree_path`, when `project_root` is provided
 - `branch`, when `project_root` is provided
@@ -765,6 +768,44 @@ This is a lightweight executable lint, not a full JSON Schema validator. It
 exists so implementation loops have a cheap artifact sanity check before a
 larger schema-validation engine is introduced.
 
+## Runtime Sessions
+
+M11a adds logical runtime session lifecycle tracking around each runtime adapter
+invocation. Every attempt receives a deterministic session id:
+
+```text
+SESSION-ATTEMPT-001
+SESSION-TASK-001-ATTEMPT-001
+```
+
+The event log records:
+
+```text
+runtime_session_started
+runtime_session_observed
+runtime_session_stopped
+runtime_output_received
+```
+
+`runtime_session_started` is emitted before the adapter is invoked,
+`runtime_session_observed` records the adapter result status and changed-file
+count, and `runtime_session_stopped` marks the logical session as stopped before
+validation. The existing `runtime_output_received` event still carries the full
+runtime result payload used by validation.
+
+The returned attempt summary includes:
+
+```json
+{
+  "runtime_session_id": "SESSION-ATTEMPT-001",
+  "runtime_session_status": "stopped"
+}
+```
+
+`replay_events(...)` now reconstructs a `runtime_sessions` snapshot. This is
+still a synchronous logical lifecycle. It does not yet keep Codex, Claude Code,
+or another worker process alive across multiple tasks.
+
 The scheduler loop is still intentionally sequential. Even with M9a's SQLite
 query index, JSONL remains the authority; the loop does not add concurrent
 workers, authoritative database storage, a daemon process, long-lived
@@ -800,8 +841,9 @@ state. M8c makes the loop CLI include a replayed snapshot. M9a adds a
 rebuildable SQLite query index for scheduler-loop state while keeping JSONL as
 the authority. M9b adds a read-only state-index API and CLI inspection mode.
 M9c repairs missing or stale state indexes from canonical JSONL during reads.
-M10a adds a lightweight executable artifact lint command. Claude Code is not
-integrated yet.
+M10a adds a lightweight executable artifact lint command. M11a records logical
+runtime session lifecycle events around synchronous adapter calls. Claude Code
+is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -811,7 +853,8 @@ Before the next backend milestone, the next design/code step should define:
 
 - decide when live Codex smoke should run outside local opt-in;
 - Claude Code adapter feasibility and result extraction contract;
-- runtime session start/observe/stop interface for long-running workers;
+- decide when logical runtime sessions should become real long-running worker
+  processes;
 - decide whether lightweight artifact lint should grow into full JSON Schema
   validation;
 - retry backoff, retry budget, and failure escalation policy;

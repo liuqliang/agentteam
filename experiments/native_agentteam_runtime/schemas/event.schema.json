@@ -56,6 +56,8 @@
         "worktree_created",
         "worktree_removed",
         "runtime_session_started",
+        "runtime_session_observed",
+        "runtime_session_stopped",
         "runtime_output_received",
         "validation_accepted",
         "validation_rejected",
