@@ -380,7 +380,7 @@ def run_simulation(
                 "attempt_id": attempt_id,
                 "lease_id": lease_id,
                 "runtime_session_id": runtime_session_id,
-                "runtime_adapter": runtime_adapter.__class__.__name__,
+                **_runtime_adapter_metadata(runtime_adapter),
                 "worktree_id": worktree_id,
                 "worktree_path": str(worktree_path) if worktree_path else None,
                 "session_status": "started",
@@ -941,8 +941,11 @@ def rebuild_sqlite_state_index(db_path, events_path):
                 session_status,
                 result_status,
                 runtime_adapter,
-                changed_file_count
-            ) values(?, ?, ?, ?, ?, ?, ?, ?)
+                changed_file_count,
+                runtime_model,
+                runtime_sandbox,
+                runtime_timeout_seconds
+            ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -954,6 +957,9 @@ def rebuild_sqlite_state_index(db_path, events_path):
                     session_state.get("result_status"),
                     session_state.get("runtime_adapter"),
                     session_state.get("changed_file_count"),
+                    session_state.get("runtime_model"),
+                    session_state.get("runtime_sandbox"),
+                    session_state.get("runtime_timeout_seconds"),
                 )
                 for runtime_session_id, session_state in sorted(
                     snapshot["runtime_sessions"].items()
@@ -1038,7 +1044,10 @@ def read_sqlite_state_index(db_path, events_path=None):
                 session_status,
                 result_status,
                 runtime_adapter,
-                changed_file_count
+                changed_file_count,
+                runtime_model,
+                runtime_sandbox,
+                runtime_timeout_seconds
             from runtime_sessions
             order by runtime_session_id
             """,
@@ -1091,7 +1100,19 @@ def _sqlite_missing_required_tables(db_path):
             "select name from sqlite_master where type = 'table'"
         ).fetchall()
     actual_tables = {row[0] for row in table_rows}
-    return not required_tables.issubset(actual_tables)
+    if not required_tables.issubset(actual_tables):
+        return True
+    with sqlite3.connect(db_path) as connection:
+        runtime_session_columns = {
+            row[1]
+            for row in connection.execute("pragma table_info(runtime_sessions)").fetchall()
+        }
+    required_runtime_session_columns = {
+        "runtime_model",
+        "runtime_sandbox",
+        "runtime_timeout_seconds",
+    }
+    return not required_runtime_session_columns.issubset(runtime_session_columns)
 
 
 def _create_sqlite_state_schema(connection):
@@ -1133,7 +1154,10 @@ def _create_sqlite_state_schema(connection):
             session_status text,
             result_status text,
             runtime_adapter text,
-            changed_file_count integer
+            changed_file_count integer,
+            runtime_model text,
+            runtime_sandbox text,
+            runtime_timeout_seconds integer
         )
         """
     )
@@ -1197,6 +1221,9 @@ def replay_events(events_path):
                 "attempt_id": attempt_id,
                 "lease_id": lease_id,
                 "runtime_adapter": payload["runtime_adapter"],
+                "runtime_model": payload.get("runtime_model"),
+                "runtime_sandbox": payload.get("runtime_sandbox"),
+                "runtime_timeout_seconds": payload.get("runtime_timeout_seconds"),
                 "worktree_id": payload.get("worktree_id"),
                 "worktree_path": payload.get("worktree_path"),
             }
@@ -1299,6 +1326,15 @@ def _resolve_runtime_adapter(runtime_adapter, runtime_adapter_factory, agent, ta
     if runtime_adapter_factory:
         return runtime_adapter_factory(agent, task) or FakeRuntimeAdapter()
     return runtime_adapter or FakeRuntimeAdapter()
+
+
+def _runtime_adapter_metadata(runtime_adapter):
+    return {
+        "runtime_adapter": runtime_adapter.__class__.__name__,
+        "runtime_model": getattr(runtime_adapter, "model", None),
+        "runtime_sandbox": getattr(runtime_adapter, "sandbox", None),
+        "runtime_timeout_seconds": getattr(runtime_adapter, "timeout_seconds", None),
+    }
 
 
 def _fake_changed_files(write_scope):

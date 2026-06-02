@@ -858,6 +858,14 @@ runtime_sessions(runtime_session_id, task_id, attempt_id, lease_id, session_stat
 events(sequence, event_id, event_type, task_id, attempt_id, lease_id, step_id, time)
 ```
 
+M13b extends `runtime_sessions` with effective runtime config metadata:
+
+```text
+runtime_model
+runtime_sandbox
+runtime_timeout_seconds
+```
+
 The scheduler summary includes both state paths:
 
 ```json
@@ -975,13 +983,16 @@ state-index query output includes one row per runtime session:
   "session_status": "stopped",
   "result_status": "completed",
   "runtime_adapter": "FakeRuntimeAdapter",
-  "changed_file_count": 1
+  "changed_file_count": 1,
+  "runtime_model": null,
+  "runtime_sandbox": null,
+  "runtime_timeout_seconds": null
 }
 ```
 
 If an older SQLite index has matching event counts but lacks the
-`runtime_sessions` table, the read path treats it as stale and rebuilds it from
-canonical JSONL.
+`runtime_sessions` table, or if it lacks M13b runtime config columns, the read
+path treats it as stale and rebuilds it from canonical JSONL.
 
 The scheduler loop is still intentionally sequential. Even with M9a's SQLite
 query index, JSONL remains the authority; the loop does not add concurrent
@@ -1027,7 +1038,9 @@ runtime selector through `--runtime codex`, while retaining `--codex-command`
 as a test/experiment override. M12c exposes Codex model, sandbox, and timeout
 controls through the CLI. M13a adds agent-level `runtime_profile` resolution so
 different role agents can carry different Codex runtime settings in
-`agent_pool`. Claude Code is not integrated yet.
+`agent_pool`. M13b records the effective runtime config on each runtime session
+and exposes it through replay and the SQLite state index. Claude Code is not
+integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

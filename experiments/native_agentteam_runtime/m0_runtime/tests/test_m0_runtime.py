@@ -335,7 +335,10 @@ class M0RuntimeTests(unittest.TestCase):
                         "lease_id": "TASK-001-LEASE-001",
                         "result_status": "completed",
                         "runtime_adapter": "FakeRuntimeAdapter",
+                        "runtime_model": None,
+                        "runtime_sandbox": None,
                         "runtime_session_id": "SESSION-TASK-001-ATTEMPT-001",
+                        "runtime_timeout_seconds": None,
                         "session_status": "stopped",
                         "task_id": "TASK-001",
                     },
@@ -345,7 +348,10 @@ class M0RuntimeTests(unittest.TestCase):
                         "lease_id": "TASK-002-LEASE-001",
                         "result_status": "completed",
                         "runtime_adapter": "FakeRuntimeAdapter",
+                        "runtime_model": None,
+                        "runtime_sandbox": None,
                         "runtime_session_id": "SESSION-TASK-002-ATTEMPT-001",
+                        "runtime_timeout_seconds": None,
                         "session_status": "stopped",
                         "task_id": "TASK-002",
                     },
@@ -354,6 +360,41 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(state["event_count"], root_event_count)
             self.assertEqual(state["latest_event"]["event_type"], "backlog_updated")
             self.assertEqual(state["latest_event"]["task_id"], "TASK-002")
+
+    def test_scheduler_state_index_records_runtime_session_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            fake_codex = tmp_path / "fake_codex_runtime_config.py"
+            _init_git_repo(repo)
+            _write_fake_codex_arg_recorder(
+                fake_codex,
+                changed_file="generated/runtime_config.json",
+            )
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+
+            run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=CodexRuntimeAdapter(
+                    command=[sys.executable, str(fake_codex)],
+                    model="gpt-runtime-config",
+                    sandbox="read-only",
+                    timeout_seconds=30,
+                ),
+            )
+
+            state = read_scheduler_state_index(output_dir)
+            session = state["runtime_sessions"][0]
+
+            self.assertEqual(session["runtime_adapter"], "CodexRuntimeAdapter")
+            self.assertEqual(session["runtime_model"], "gpt-runtime-config")
+            self.assertEqual(session["runtime_sandbox"], "read-only")
+            self.assertEqual(session["runtime_timeout_seconds"], 30)
 
     def test_read_scheduler_state_index_rebuilds_stale_sqlite_index(self):
         with tempfile.TemporaryDirectory() as tmp:
