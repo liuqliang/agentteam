@@ -896,6 +896,65 @@ def rebuild_sqlite_state_index(db_path, events_path):
     return str(db_path)
 
 
+def read_scheduler_state_index(output_dir):
+    output_dir = Path(output_dir)
+    db_path = output_dir / "state" / "scheduler_state.sqlite"
+    events_path = output_dir / "events.jsonl"
+    if not db_path.exists():
+        if not events_path.exists():
+            raise FileNotFoundError(f"missing scheduler state index: {db_path}")
+        rebuild_sqlite_state_index(db_path, events_path)
+    return read_sqlite_state_index(db_path, events_path=events_path)
+
+
+def read_sqlite_state_index(db_path, events_path=None):
+    db_path = Path(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        tasks = _fetch_sqlite_dicts(
+            connection,
+            "select task_id, task_status from tasks order by task_id",
+        )
+        attempts = _fetch_sqlite_dicts(
+            connection,
+            """
+            select attempt_id, task_id, attempt_status, validation_status
+            from attempts
+            order by attempt_id
+            """,
+        )
+        leases = _fetch_sqlite_dicts(
+            connection,
+            """
+            select lease_id, task_id, attempt_id, lease_status
+            from leases
+            order by lease_id
+            """,
+        )
+        event_count = connection.execute("select count(*) from events").fetchone()[0]
+        latest_event = connection.execute(
+            """
+            select sequence, event_id, event_type, task_id, attempt_id, lease_id, step_id, time
+            from events
+            order by sequence desc
+            limit 1
+            """
+        ).fetchone()
+    return {
+        "state_db_path": str(db_path),
+        "events_path": str(events_path) if events_path is not None else None,
+        "tasks": tasks,
+        "attempts": attempts,
+        "leases": leases,
+        "event_count": event_count,
+        "latest_event": dict(latest_event) if latest_event else None,
+    }
+
+
+def _fetch_sqlite_dicts(connection, query):
+    return [dict(row) for row in connection.execute(query)]
+
+
 def _create_sqlite_state_schema(connection):
     connection.execute(
         """

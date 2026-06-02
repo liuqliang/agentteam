@@ -4,6 +4,7 @@ import json
 from .m0_runtime import (
     CodexRuntimeAdapter,
     ShellRuntimeAdapter,
+    read_scheduler_state_index,
     replay_events,
     run_scheduler_loop,
     run_simulation,
@@ -12,10 +13,15 @@ from .m0_runtime import (
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run the AgentTeam native runtime M0 simulation.")
-    parser.add_argument("--agent-pool", required=True, help="Path to agent pool JSON.")
-    parser.add_argument("--backlog", required=True, help="Path to backlog JSON.")
+    parser.add_argument("--agent-pool", help="Path to agent pool JSON.")
+    parser.add_argument("--backlog", help="Path to backlog JSON.")
     parser.add_argument("--output-dir", required=True, help="Directory for mailbox and event output.")
     parser.add_argument("--project-root", help="Optional git repository root for real worktree creation.")
+    parser.add_argument(
+        "--show-state-index",
+        action="store_true",
+        help="Print a read-only summary from the scheduler SQLite state index.",
+    )
     parser.add_argument(
         "--run-until-idle",
         action="store_true",
@@ -54,6 +60,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.shell_command and args.codex_command:
         parser.error("--shell-command and --codex-command are mutually exclusive")
+    if args.show_state_index:
+        result = read_scheduler_state_index(args.output_dir)
+        print(json.dumps(result, sort_keys=True))
+        return
+    _require_execution_arg(parser, args.agent_pool, "--agent-pool")
+    _require_execution_arg(parser, args.backlog, "--backlog")
     if args.shell_command:
         runtime_adapter = ShellRuntimeAdapter(args.shell_command)
     elif args.codex_command:
@@ -93,6 +105,11 @@ def main(argv=None):
     )
     snapshot = replay_events(result["events_path"])
     print(json.dumps({**result, "snapshot": snapshot}, sort_keys=True))
+
+
+def _require_execution_arg(parser, value, flag):
+    if not value:
+        parser.error(f"{flag} is required unless --show-state-index is set")
 
 
 def _parse_command_json(parser, raw_command):

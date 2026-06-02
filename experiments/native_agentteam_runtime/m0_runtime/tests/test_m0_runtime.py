@@ -13,6 +13,7 @@ from agentteam_runtime import (
     ShellRuntimeAdapter,
     audit_worktree_diff,
     classify_attempt_outcome,
+    read_scheduler_state_index,
     replay_events,
     run_scheduler_loop,
     run_simulation,
@@ -246,6 +247,62 @@ class M0RuntimeTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(event_count, root_event_count)
+
+    def test_read_scheduler_state_index_returns_query_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            state = read_scheduler_state_index(output_dir)
+            root_event_count = len(
+                Path(summary["events_path"]).read_text(encoding="utf-8").splitlines()
+            )
+
+            self.assertEqual(state["state_db_path"], summary["state_db_path"])
+            self.assertEqual(state["events_path"], summary["events_path"])
+            self.assertEqual(
+                state["tasks"],
+                [
+                    {"task_id": "TASK-001", "task_status": "done"},
+                    {"task_id": "TASK-002", "task_status": "done"},
+                ],
+            )
+            self.assertEqual(
+                state["attempts"],
+                [
+                    {
+                        "attempt_id": "TASK-001-ATTEMPT-001",
+                        "attempt_status": "completed",
+                        "task_id": "TASK-001",
+                        "validation_status": "accepted",
+                    },
+                    {
+                        "attempt_id": "TASK-002-ATTEMPT-001",
+                        "attempt_status": "completed",
+                        "task_id": "TASK-002",
+                        "validation_status": "accepted",
+                    },
+                ],
+            )
+            self.assertEqual(state["event_count"], root_event_count)
+            self.assertEqual(state["latest_event"]["event_type"], "backlog_updated")
+            self.assertEqual(state["latest_event"]["task_id"], "TASK-002")
 
     def test_scheduler_loop_respects_done_dependencies(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -503,6 +560,56 @@ class M0RuntimeTests(unittest.TestCase):
                 set(summary["snapshot"]["leases"].keys()),
                 {"TASK-001-LEASE-001", "TASK-002-LEASE-001"},
             )
+
+    def test_cli_can_show_state_index_without_agent_pool_or_backlog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            run_summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+            state_db_path = output_dir / "state" / "scheduler_state.sqlite"
+            state_db_path.unlink()
+            root_event_count = len(
+                Path(run_summary["events_path"]).read_text(encoding="utf-8").splitlines()
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--output-dir",
+                    str(output_dir),
+                    "--show-state-index",
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["event_count"], root_event_count)
+            self.assertEqual(summary["tasks"][0]["task_id"], "TASK-001")
+            self.assertEqual(summary["tasks"][1]["task_status"], "done")
+            self.assertTrue(state_db_path.exists())
 
     def test_cli_can_create_git_worktree_when_project_root_is_supplied(self):
         with tempfile.TemporaryDirectory() as tmp:

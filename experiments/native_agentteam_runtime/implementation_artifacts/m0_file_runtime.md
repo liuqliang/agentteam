@@ -57,6 +57,7 @@ from agentteam_runtime import (
     FileScheduler,
     ShellRuntimeAdapter,
     classify_attempt_outcome,
+    read_scheduler_state_index,
     replay_events,
     run_scheduler_loop,
     run_simulation,
@@ -66,6 +67,7 @@ result = run_simulation(agent_pool_path, backlog_path, output_dir)
 snapshot = replay_events(result["events_path"])
 
 loop_summary = run_scheduler_loop(agent_pool_path, backlog_path, output_dir)
+state_index = read_scheduler_state_index(output_dir)
 
 result_with_worktree = run_simulation(
     agent_pool_path,
@@ -183,6 +185,36 @@ Use `--max-steps <n>` with `--run-until-idle` to cap the number of scheduler
 steps. The default CLI path remains single-task and still prints the replayed
 snapshot. The loop path also prints a snapshot replayed from the canonical root
 `events.jsonl`.
+
+To inspect a completed or partially completed scheduler run without re-running
+the scheduler, pass `--show-state-index` with only the output directory:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --output-dir /tmp/agentteam-m7c-run \
+  --show-state-index
+```
+
+This prints a JSON summary read from
+`<output-dir>/state/scheduler_state.sqlite`:
+
+```json
+{
+  "event_count": 18,
+  "events_path": "/tmp/agentteam-m7c-run/events.jsonl",
+  "latest_event": {"event_type": "backlog_updated", "task_id": "TASK-002"},
+  "state_db_path": "/tmp/agentteam-m7c-run/state/scheduler_state.sqlite",
+  "tasks": [
+    {"task_id": "TASK-001", "task_status": "done"},
+    {"task_id": "TASK-002", "task_status": "done"}
+  ]
+}
+```
+
+If the SQLite file is missing but the canonical root `events.jsonl` exists, the
+CLI rebuilds the index from JSONL before printing the summary. `--agent-pool`
+and `--backlog` are not required for this inspection mode.
 
 To run a real local process through the shell adapter, put `--shell-command`
 last:
@@ -688,6 +720,17 @@ The scheduler summary includes both state paths:
 }
 ```
 
+M9b adds a read-only query path over this index:
+
+```python
+state = read_scheduler_state_index(output_dir)
+```
+
+It returns sorted `tasks`, `attempts`, and `leases`, plus `event_count` and
+`latest_event`. If the SQLite index is missing, it is rebuilt from the canonical
+root `events.jsonl`. This is an observability path only; callers still treat
+JSONL as the source of truth.
+
 The scheduler loop is still intentionally sequential. Even with M9a's SQLite
 query index, JSONL remains the authority; the loop does not add concurrent
 workers, authoritative database storage, a daemon process, long-lived
@@ -721,7 +764,8 @@ canonical root event log for scheduler-loop replay. M8b scopes scheduler-loop
 lease and message ids by task id so canonical replay can preserve per-step lease
 state. M8c makes the loop CLI include a replayed snapshot. M9a adds a
 rebuildable SQLite query index for scheduler-loop state while keeping JSONL as
-the authority. Claude Code is not integrated yet.
+the authority. M9b adds a read-only state-index API and CLI inspection mode.
+Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
