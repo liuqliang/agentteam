@@ -212,9 +212,9 @@ This prints a JSON summary read from
 }
 ```
 
-If the SQLite file is missing but the canonical root `events.jsonl` exists, the
-CLI rebuilds the index from JSONL before printing the summary. `--agent-pool`
-and `--backlog` are not required for this inspection mode.
+If the SQLite file is missing or stale but the canonical root `events.jsonl`
+exists, the CLI rebuilds the index from JSONL before printing the summary.
+`--agent-pool` and `--backlog` are not required for this inspection mode.
 
 To run a real local process through the shell adapter, put `--shell-command`
 last:
@@ -727,9 +727,14 @@ state = read_scheduler_state_index(output_dir)
 ```
 
 It returns sorted `tasks`, `attempts`, and `leases`, plus `event_count` and
-`latest_event`. If the SQLite index is missing, it is rebuilt from the canonical
-root `events.jsonl`. This is an observability path only; callers still treat
-JSONL as the source of truth.
+`latest_event`. If the SQLite index is missing, or if its indexed event count
+does not match the canonical root `events.jsonl`, it is rebuilt from JSONL
+before the summary is returned. This is an observability path only; callers
+still treat JSONL as the source of truth.
+
+M9c makes that repair behavior explicit for stale indexes. This covers the
+crash-recovery case where the scheduler appended canonical events but stopped
+before the SQLite query index was refreshed.
 
 The scheduler loop is still intentionally sequential. Even with M9a's SQLite
 query index, JSONL remains the authority; the loop does not add concurrent
@@ -765,6 +770,7 @@ lease and message ids by task id so canonical replay can preserve per-step lease
 state. M8c makes the loop CLI include a replayed snapshot. M9a adds a
 rebuildable SQLite query index for scheduler-loop state while keeping JSONL as
 the authority. M9b adds a read-only state-index API and CLI inspection mode.
+M9c repairs missing or stale state indexes from canonical JSONL during reads.
 Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.

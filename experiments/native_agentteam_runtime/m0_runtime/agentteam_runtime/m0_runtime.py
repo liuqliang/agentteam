@@ -900,7 +900,9 @@ def read_scheduler_state_index(output_dir):
     output_dir = Path(output_dir)
     db_path = output_dir / "state" / "scheduler_state.sqlite"
     events_path = output_dir / "events.jsonl"
-    if not db_path.exists():
+    if not db_path.exists() or (
+        events_path.exists() and _sqlite_state_index_is_stale(db_path, events_path)
+    ):
         if not events_path.exists():
             raise FileNotFoundError(f"missing scheduler state index: {db_path}")
         rebuild_sqlite_state_index(db_path, events_path)
@@ -953,6 +955,20 @@ def read_sqlite_state_index(db_path, events_path=None):
 
 def _fetch_sqlite_dicts(connection, query):
     return [dict(row) for row in connection.execute(query)]
+
+
+def _sqlite_state_index_is_stale(db_path, events_path):
+    try:
+        indexed_event_count = _sqlite_event_count(db_path)
+    except sqlite3.DatabaseError:
+        return True
+    canonical_event_count = sum(1 for _ in _read_jsonl(events_path))
+    return indexed_event_count != canonical_event_count
+
+
+def _sqlite_event_count(db_path):
+    with sqlite3.connect(db_path) as connection:
+        return connection.execute("select count(*) from events").fetchone()[0]
 
 
 def _create_sqlite_state_schema(connection):

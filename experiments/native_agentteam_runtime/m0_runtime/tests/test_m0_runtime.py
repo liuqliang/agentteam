@@ -304,6 +304,48 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(state["latest_event"]["event_type"], "backlog_updated")
             self.assertEqual(state["latest_event"]["task_id"], "TASK-002")
 
+    def test_read_scheduler_state_index_rebuilds_stale_sqlite_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+            root_event_count = len(
+                Path(summary["events_path"]).read_text(encoding="utf-8").splitlines()
+            )
+
+            with sqlite3.connect(summary["state_db_path"]) as connection:
+                connection.execute("delete from tasks where task_id = ?", ("TASK-002",))
+                connection.execute(
+                    "delete from events where sequence = (select max(sequence) from events)"
+                )
+
+            state = read_scheduler_state_index(output_dir)
+
+            self.assertEqual(
+                state["tasks"],
+                [
+                    {"task_id": "TASK-001", "task_status": "done"},
+                    {"task_id": "TASK-002", "task_status": "done"},
+                ],
+            )
+            self.assertEqual(state["event_count"], root_event_count)
+            self.assertEqual(state["latest_event"]["task_id"], "TASK-002")
+
     def test_scheduler_loop_respects_done_dependencies(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
