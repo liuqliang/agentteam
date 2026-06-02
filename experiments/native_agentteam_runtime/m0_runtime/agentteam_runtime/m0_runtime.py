@@ -229,6 +229,7 @@ def run_simulation(
     project_root=None,
     runtime_adapter=None,
     runtime_adapter_factory=None,
+    runtime_profile_defaults=None,
     max_attempts=1,
     cleanup_accepted_worktrees=False,
     integrate_accepted_patch=False,
@@ -252,6 +253,8 @@ def run_simulation(
         runtime_adapter_factory,
         agent,
         task,
+        project_root=project_root,
+        runtime_profile_defaults=runtime_profile_defaults,
     )
 
     inbox_path = output_dir / agent["inbox_path"]
@@ -672,6 +675,7 @@ class FileScheduler:
         commit_verified_integration=False,
         state_path=None,
         runtime_adapter_factory=None,
+        runtime_profile_defaults=None,
     ):
         self.agent_pool_path = agent_pool_path
         self.backlog_path = backlog_path
@@ -679,8 +683,9 @@ class FileScheduler:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.clock = clock or SystemClock()
         self.project_root = project_root
-        self.runtime_adapter = runtime_adapter or FakeRuntimeAdapter()
+        self.runtime_adapter = runtime_adapter
         self.runtime_adapter_factory = runtime_adapter_factory
+        self.runtime_profile_defaults = runtime_profile_defaults
         self.max_attempts = max_attempts
         self.cleanup_accepted_worktrees = cleanup_accepted_worktrees
         self.integrate_accepted_patch = integrate_accepted_patch
@@ -727,6 +732,7 @@ class FileScheduler:
             project_root=self.project_root,
             runtime_adapter=self.runtime_adapter,
             runtime_adapter_factory=self.runtime_adapter_factory,
+            runtime_profile_defaults=self.runtime_profile_defaults,
             max_attempts=self.max_attempts,
             cleanup_accepted_worktrees=self.cleanup_accepted_worktrees,
             integrate_accepted_patch=self.integrate_accepted_patch,
@@ -857,6 +863,7 @@ def run_scheduler_loop(
     project_root=None,
     runtime_adapter=None,
     runtime_adapter_factory=None,
+    runtime_profile_defaults=None,
     max_attempts=1,
     cleanup_accepted_worktrees=False,
     integrate_accepted_patch=False,
@@ -872,6 +879,7 @@ def run_scheduler_loop(
         project_root=project_root,
         runtime_adapter=runtime_adapter,
         runtime_adapter_factory=runtime_adapter_factory,
+        runtime_profile_defaults=runtime_profile_defaults,
         max_attempts=max_attempts,
         cleanup_accepted_worktrees=cleanup_accepted_worktrees,
         integrate_accepted_patch=integrate_accepted_patch,
@@ -1322,10 +1330,75 @@ def _find_idle_agent(agent_pool, role):
     raise ValueError(f"no idle agent found for role {role}")
 
 
-def _resolve_runtime_adapter(runtime_adapter, runtime_adapter_factory, agent, task):
+def _resolve_runtime_adapter(
+    runtime_adapter,
+    runtime_adapter_factory,
+    agent,
+    task,
+    project_root=None,
+    runtime_profile_defaults=None,
+):
     if runtime_adapter_factory:
         return runtime_adapter_factory(agent, task) or FakeRuntimeAdapter()
-    return runtime_adapter or FakeRuntimeAdapter()
+    if runtime_adapter:
+        return runtime_adapter
+    profile = agent.get("runtime_profile")
+    if profile:
+        return (
+            _runtime_adapter_from_profile(
+                profile,
+                defaults=runtime_profile_defaults,
+                project_root=project_root,
+            )
+            or FakeRuntimeAdapter()
+        )
+    if runtime_profile_defaults:
+        return (
+            _runtime_adapter_from_profile(
+                runtime_profile_defaults,
+                defaults={},
+                project_root=project_root,
+            )
+            or FakeRuntimeAdapter()
+        )
+    return FakeRuntimeAdapter()
+
+
+def _runtime_adapter_from_profile(profile, defaults=None, project_root=None):
+    defaults = defaults or {}
+    if not isinstance(profile, dict):
+        raise ValueError("runtime_profile must be an object")
+    adapter = profile.get("adapter", "fake")
+    if adapter == "fake":
+        return None
+    if adapter == "shell":
+        command = profile.get("command") or defaults.get("command")
+        if not _is_string_list(command):
+            raise ValueError("shell runtime_profile requires command as a string array")
+        return ShellRuntimeAdapter(command)
+    if adapter == "codex":
+        if not project_root:
+            raise ValueError("project_root is required for Codex runtime_profile")
+        command = defaults.get("command") or profile.get("command")
+        if command is not None and not _is_string_list(command):
+            raise ValueError("codex runtime_profile command must be a string array")
+        timeout_seconds = profile.get(
+            "timeout_seconds",
+            defaults.get("timeout_seconds", 300),
+        )
+        if not isinstance(timeout_seconds, int) or timeout_seconds < 1:
+            raise ValueError("codex runtime_profile timeout_seconds must be an integer >= 1")
+        return CodexRuntimeAdapter(
+            command=command or None,
+            model=profile.get("model", defaults.get("model")),
+            sandbox=profile.get("sandbox", defaults.get("sandbox", "workspace-write")),
+            timeout_seconds=timeout_seconds,
+        )
+    raise ValueError(f"unsupported runtime_profile adapter: {adapter}")
+
+
+def _is_string_list(value):
+    return isinstance(value, list) and value and all(isinstance(part, str) for part in value)
 
 
 def _runtime_adapter_metadata(runtime_adapter):

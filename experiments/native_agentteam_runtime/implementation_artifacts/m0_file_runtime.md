@@ -329,16 +329,21 @@ M13a lets the selected agent override those CLI fallback values through
 }
 ```
 
-The dispatch-time precedence is:
+M13c moves this resolution into runtime core instead of the CLI. The
+dispatch-time precedence is:
 
-1. the selected agent's `runtime_profile`;
-2. CLI runtime flags as fallback;
-3. `FakeRuntimeAdapter` when neither profile nor CLI runtime is supplied.
+1. explicit `runtime_adapter_factory`;
+2. explicit Python `runtime_adapter`;
+3. the selected agent's `runtime_profile`;
+4. caller/CLI runtime defaults as fallback;
+5. `FakeRuntimeAdapter` when neither profile nor fallback is supplied.
 
 For tests and local experiments, `--codex-command` remains a command override
 even when the selected agent has a Codex profile. This allows fake Codex
 commands to verify profile model/sandbox forwarding without making a live model
-call.
+call. The CLI now only converts global flags into fallback defaults and passes
+them to `run_simulation(...)` or `run_scheduler_loop(...)`; it does not interpret
+the selected agent profile itself.
 
 `CodexRuntimeAdapter` invokes the command as:
 
@@ -1039,8 +1044,9 @@ as a test/experiment override. M12c exposes Codex model, sandbox, and timeout
 controls through the CLI. M13a adds agent-level `runtime_profile` resolution so
 different role agents can carry different Codex runtime settings in
 `agent_pool`. M13b records the effective runtime config on each runtime session
-and exposes it through replay and the SQLite state index. Claude Code is not
-integrated yet.
+and exposes it through replay and the SQLite state index. M13c moves the
+runtime profile resolver from CLI code into runtime core so daemon/API runners
+can reuse it. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

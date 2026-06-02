@@ -396,6 +396,56 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(session["runtime_sandbox"], "read-only")
             self.assertEqual(session["runtime_timeout_seconds"], 30)
 
+    def test_scheduler_core_uses_agent_runtime_profile_without_cli_factory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            fake_codex = tmp_path / "fake_codex_core_profile.py"
+            target_file = "generated/core_profile.json"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_agent_pool_with_runtime_profile(
+                agent_pool_path,
+                runtime_profile={
+                    "adapter": "codex",
+                    "command": [sys.executable, str(fake_codex)],
+                    "model": "core-profile-model",
+                    "sandbox": "read-only",
+                    "timeout_seconds": 30,
+                },
+            )
+            _write_fake_codex_arg_recorder(fake_codex, changed_file=target_file)
+
+            run_scheduler_loop(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+            )
+
+            state = read_scheduler_state_index(output_dir)
+            session = state["runtime_sessions"][0]
+            recorded = json.loads(
+                (
+                    output_dir
+                    / "steps"
+                    / "STEP-0001-TASK-001"
+                    / "worktrees"
+                    / "WT-TASK-001-ATTEMPT-001"
+                    / target_file
+                ).read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(session["runtime_adapter"], "CodexRuntimeAdapter")
+            self.assertEqual(session["runtime_model"], "core-profile-model")
+            self.assertEqual(session["runtime_sandbox"], "read-only")
+            self.assertEqual(session["runtime_timeout_seconds"], 30)
+            self.assertEqual(recorded["model"], "core-profile-model")
+            self.assertEqual(recorded["sandbox"], "read-only")
+
     def test_read_scheduler_state_index_rebuilds_stale_sqlite_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
