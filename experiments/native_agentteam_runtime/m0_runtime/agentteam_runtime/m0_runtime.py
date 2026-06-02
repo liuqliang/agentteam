@@ -230,6 +230,7 @@ def run_simulation(
     cleanup_accepted_worktrees=False,
     integrate_accepted_patch=False,
     integration_verification_command=None,
+    commit_verified_integration=False,
 ):
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
@@ -431,6 +432,12 @@ def run_simulation(
             "integration_verification_exit_code": None,
             "integration_verification_stdout": "",
             "integration_verification_stderr": "",
+            "integration_commit_status": "not_requested",
+            "integration_commit_sha": None,
+            "integration_commit_message": None,
+            "integration_commit_reason": None,
+            "integration_commit_stdout": "",
+            "integration_commit_stderr": "",
             "worktree_removed": False,
         }
         attempts.append(final_attempt)
@@ -477,6 +484,26 @@ def run_simulation(
                             **verification,
                         },
                     )
+            if commit_verified_integration:
+                integration_commit = evaluate_integration_commit(
+                    final_attempt,
+                    task["task_id"],
+                    attempt_id,
+                )
+                final_attempt.update(integration_commit)
+                append_event(
+                    "integration_commit_evaluated",
+                    agent_pool["scheduler_agent_id"],
+                    agent["agent_id"],
+                    f"integration-commit:{attempt_id}",
+                    correlation_id,
+                    {
+                        "task_id": task["task_id"],
+                        "attempt_id": attempt_id,
+                        "lease_id": lease_id,
+                        **integration_commit,
+                    },
+                )
             if cleanup_accepted_worktrees and project_root and worktree_path:
                 _remove_git_worktree(project_root, worktree_path)
                 final_attempt["worktree_removed"] = True
@@ -550,6 +577,12 @@ def run_simulation(
         "integration_verification_exit_code": final_attempt["integration_verification_exit_code"],
         "integration_verification_stdout": final_attempt["integration_verification_stdout"],
         "integration_verification_stderr": final_attempt["integration_verification_stderr"],
+        "integration_commit_status": final_attempt["integration_commit_status"],
+        "integration_commit_sha": final_attempt["integration_commit_sha"],
+        "integration_commit_message": final_attempt["integration_commit_message"],
+        "integration_commit_reason": final_attempt["integration_commit_reason"],
+        "integration_commit_stdout": final_attempt["integration_commit_stdout"],
+        "integration_commit_stderr": final_attempt["integration_commit_stderr"],
         "attempt_count": len(attempts),
         "attempts": attempts,
         "worktree_removed": final_attempt["worktree_removed"],
@@ -634,6 +667,19 @@ def replay_events(events_path):
             snapshot["attempts"].setdefault(attempt_id, {})[
                 "integration_verification_stderr"
             ] = payload["integration_verification_stderr"]
+        elif event["event_type"] == "integration_commit_evaluated":
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "integration_commit_status"
+            ] = payload["integration_commit_status"]
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "integration_commit_sha"
+            ] = payload["integration_commit_sha"]
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "integration_commit_message"
+            ] = payload["integration_commit_message"]
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "integration_commit_reason"
+            ] = payload["integration_commit_reason"]
         elif event["event_type"] == "backlog_updated":
             snapshot["tasks"].setdefault(task_id, {})["task_status"] = payload["task_status"]
 
@@ -839,6 +885,85 @@ def run_integration_verification(command, integration_worktree_path):
         "integration_verification_exit_code": completed.returncode,
         "integration_verification_stdout": completed.stdout,
         "integration_verification_stderr": completed.stderr,
+    }
+
+
+def evaluate_integration_commit(attempt, task_id, attempt_id):
+    if attempt["integration_status"] != "applied" or not attempt["integration_worktree_path"]:
+        return _integration_commit_result("skipped", reason="integration_not_applied")
+
+    verification_status = attempt["integration_verification_status"]
+    if verification_status == "not_requested":
+        return _integration_commit_result("skipped", reason="verification_not_requested")
+    if verification_status != "passed":
+        return _integration_commit_result("skipped", reason="verification_failed")
+
+    return commit_integration_worktree(
+        attempt["integration_worktree_path"],
+        task_id,
+        attempt_id,
+    )
+
+
+def commit_integration_worktree(integration_worktree_path, task_id, attempt_id):
+    if not _git_changed_files(integration_worktree_path):
+        return _integration_commit_result("skipped", reason="no_changes")
+
+    message = f"AgentTeam integration {task_id} {attempt_id}"
+    subprocess.run(
+        ["git", "-C", str(integration_worktree_path), "add", "--all"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    completed = subprocess.run(
+        ["git", "-C", str(integration_worktree_path), "commit", "-m", message],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return _integration_commit_result(
+            "failed",
+            reason="git_commit_failed",
+            message=message,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+
+    rev_parse = subprocess.run(
+        ["git", "-C", str(integration_worktree_path), "rev-parse", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return _integration_commit_result(
+        "committed",
+        sha=rev_parse.stdout.strip(),
+        message=message,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+    )
+
+
+def _integration_commit_result(
+    status,
+    sha=None,
+    reason=None,
+    message=None,
+    stdout="",
+    stderr="",
+):
+    return {
+        "integration_commit_status": status,
+        "integration_commit_sha": sha,
+        "integration_commit_message": message,
+        "integration_commit_reason": reason,
+        "integration_commit_stdout": stdout,
+        "integration_commit_stderr": stderr,
     }
 
 

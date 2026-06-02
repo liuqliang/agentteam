@@ -16,6 +16,15 @@ def main(argv=None):
         help="Apply accepted patch artifacts to an integration worktree without committing.",
     )
     parser.add_argument(
+        "--integration-verification-command-json",
+        help="JSON array command to run in the integration worktree after patch application.",
+    )
+    parser.add_argument(
+        "--commit-verified-integration",
+        action="store_true",
+        help="Commit the integration worktree only after the verification command passes.",
+    )
+    parser.add_argument(
         "--shell-command",
         nargs=argparse.REMAINDER,
         help="Optional command to execute through ShellRuntimeAdapter. Must appear last.",
@@ -34,6 +43,10 @@ def main(argv=None):
         runtime_adapter = CodexRuntimeAdapter(command=args.codex_command)
     else:
         runtime_adapter = None
+    integration_verification_command = _parse_command_json(
+        parser,
+        args.integration_verification_command_json,
+    )
 
     result = run_simulation(
         args.agent_pool,
@@ -42,9 +55,27 @@ def main(argv=None):
         project_root=args.project_root,
         runtime_adapter=runtime_adapter,
         integrate_accepted_patch=args.integrate_accepted_patch,
+        integration_verification_command=integration_verification_command,
+        commit_verified_integration=args.commit_verified_integration,
     )
     snapshot = replay_events(result["events_path"])
     print(json.dumps({**result, "snapshot": snapshot}, sort_keys=True))
+
+
+def _parse_command_json(parser, raw_command):
+    if not raw_command:
+        return None
+    try:
+        command = json.loads(raw_command)
+    except json.JSONDecodeError as exc:
+        parser.error(f"--integration-verification-command-json must be valid JSON: {exc}")
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(part, str) for part in command)
+    ):
+        parser.error("--integration-verification-command-json must be a non-empty JSON string array")
+    return command
 
 
 if __name__ == "__main__":

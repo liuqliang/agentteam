@@ -119,6 +119,12 @@ The returned summary includes:
 - `integration_verification_exit_code`
 - `integration_verification_stdout`
 - `integration_verification_stderr`
+- `integration_commit_status`
+- `integration_commit_sha`
+- `integration_commit_message`
+- `integration_commit_reason`
+- `integration_commit_stdout`
+- `integration_commit_stderr`
 - `attempt_count`
 - `attempts`
 - `worktree_removed`
@@ -164,6 +170,26 @@ python3 -m agentteam_runtime.cli \
   --integrate-accepted-patch \
   --shell-command python3 /path/to/worker.py
 ```
+
+To verify and then commit the integration worktree as a checkpoint, pass the
+verification command as a JSON string array before the final runtime command:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool experiments/native_agentteam_runtime/fixtures/sample_agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m6-run \
+  --project-root /path/to/git/repo \
+  --integrate-accepted-patch \
+  --integration-verification-command-json '["python3","-m","unittest","discover"]' \
+  --commit-verified-integration \
+  --shell-command python3 /path/to/worker.py
+```
+
+`--commit-verified-integration` never merges the source branch. It commits only
+inside `agentteam/integration/<task-id>` after the integration verification
+command exits 0.
 
 The shell command receives the mailbox message as JSON on stdin. It must print
 one JSON result to stdout:
@@ -450,6 +476,60 @@ future merge controller.
 
 M5 still does not commit, push, or merge.
 
+## M6 Verified Integration Commit Gate
+
+M6 adds an opt-in checkpoint after M5 verification:
+
+```python
+result = run_simulation(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    project_root="/path/to/git/repo",
+    runtime_adapter=ShellRuntimeAdapter(["python3", "/path/to/worker.py"]),
+    integrate_accepted_patch=True,
+    integration_verification_command=["python3", "-m", "unittest", "discover"],
+    commit_verified_integration=True,
+)
+```
+
+The scheduler commits only when all of these are true:
+
+- the implementation attempt was accepted;
+- a patch artifact was applied to an integration worktree;
+- an integration verification command was requested;
+- that verification command exited 0;
+- `commit_verified_integration=True`.
+
+The result includes:
+
+```json
+{
+  "integration_commit_status": "committed",
+  "integration_commit_sha": "<sha>",
+  "integration_commit_message": "AgentTeam integration TASK-001 ATTEMPT-001",
+  "integration_commit_reason": null,
+  "integration_commit_stdout": "",
+  "integration_commit_stderr": ""
+}
+```
+
+If the gate is requested but verification is missing or failed, the commit is
+skipped:
+
+```json
+{
+  "integration_commit_status": "skipped",
+  "integration_commit_sha": null,
+  "integration_commit_reason": "verification_failed"
+}
+```
+
+This is intentionally not a merge policy. The commit is a local, auditable
+checkpoint on the integration branch. Merging back to the source branch remains
+a later full-task/system gate after all parts of the functional change have
+been integrated and verified.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -468,9 +548,9 @@ extraction through `--output-last-message`. M1c adds a live smoke entrypoint,
 but normal committed verification still uses skip/fake paths rather than
 spending live model calls. M2 adds bounded retry, outcome classification, and
 opt-in accepted-worktree cleanup. M3a adds git diff auditing, M3b writes a patch
-artifact, M4 applies accepted patches into an isolated integration worktree, and
-M5 runs opt-in integration verification without committing. Claude Code is not
-integrated yet.
+artifact, M4 applies accepted patches into an isolated integration worktree, M5
+runs opt-in integration verification, and M6 can commit only a verified
+integration worktree checkpoint. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -483,4 +563,4 @@ Before the next backend milestone, the next design/code step should define:
 - runtime session start/observe/stop interface for long-running workers;
 - executable artifact/schema lint command;
 - retry backoff, retry budget, and failure escalation policy;
-- commit strategy, merge strategy, and result diff review policy.
+- merge strategy and result diff review policy for complete task/system gates.
