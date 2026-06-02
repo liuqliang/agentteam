@@ -226,7 +226,11 @@ def run_simulation(
     clock=None,
     project_root=None,
     runtime_adapter=None,
+    max_attempts=1,
+    cleanup_accepted_worktrees=False,
 ):
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
     clock = clock or SystemClock()
     runtime_adapter = runtime_adapter or FakeRuntimeAdapter()
     output_dir = Path(output_dir)
@@ -238,55 +242,77 @@ def run_simulation(
     task = _select_ready_task(backlog)
     agent = _find_idle_agent(agent_pool, task["required_role"])
 
-    attempt_id = "ATTEMPT-001"
-    lease_id = "LEASE-001"
-    message_id = "MSG-0001"
-    worktree_id = f"WT-{attempt_id}" if task.get("write_scope") else None
-    worktree_path = None
-    branch = None
-    correlation_id = f"{task['task_id']}:{attempt_id}"
-
     inbox_path = output_dir / agent["inbox_path"]
     events_path = output_dir / "events.jsonl"
-    if project_root and worktree_id:
-        worktree_path, branch = _create_git_worktree(project_root, output_dir, attempt_id, worktree_id)
+    events = []
+    attempts = []
+    sequence = 1
 
-    message = {
-        "message_id": message_id,
-        "from_agent": agent_pool["scheduler_agent_id"],
-        "to_agent": agent["agent_id"],
-        "message_type": "dispatch_task",
-        "correlation_id": correlation_id,
-        "created_at": clock.now(),
-        "lease_expires_at": "2026-05-31T00:15:00Z",
-        "payload": {
-            "task_id": task["task_id"],
-            "attempt_id": attempt_id,
-            "lease_id": lease_id,
-            "worktree_id": worktree_id,
-            "worktree_path": str(worktree_path) if worktree_path else None,
-            "branch": branch,
-            "objective": task["objective"],
-            "read_scope": task["read_scope"],
-            "write_scope": task["write_scope"],
-        },
-    }
-    _append_jsonl(inbox_path, [message])
+    def append_event(event_type, actor, target_agent_id, idempotency_key, correlation_id, payload):
+        nonlocal sequence
+        events.append(
+            _event(
+                sequence,
+                clock.now(),
+                event_type,
+                actor,
+                target_agent_id,
+                idempotency_key,
+                correlation_id,
+                payload,
+            )
+        )
+        sequence += 1
 
-    events = [
-        _event(
-            1,
-            clock.now(),
+    final_attempt = None
+    for attempt_number in range(1, max_attempts + 1):
+        attempt_id = f"ATTEMPT-{attempt_number:03d}"
+        lease_id = f"LEASE-{attempt_number:03d}"
+        message_id = f"MSG-{attempt_number:04d}"
+        worktree_id = f"WT-{attempt_id}" if task.get("write_scope") else None
+        worktree_path = None
+        branch = None
+        correlation_id = f"{task['task_id']}:{attempt_id}"
+
+        if project_root and worktree_id:
+            worktree_path, branch = _create_git_worktree(
+                project_root,
+                output_dir,
+                attempt_id,
+                worktree_id,
+            )
+
+        message = {
+            "message_id": message_id,
+            "from_agent": agent_pool["scheduler_agent_id"],
+            "to_agent": agent["agent_id"],
+            "message_type": "dispatch_task",
+            "correlation_id": correlation_id,
+            "created_at": clock.now(),
+            "lease_expires_at": "2026-05-31T00:15:00Z",
+            "payload": {
+                "task_id": task["task_id"],
+                "attempt_id": attempt_id,
+                "lease_id": lease_id,
+                "worktree_id": worktree_id,
+                "worktree_path": str(worktree_path) if worktree_path else None,
+                "branch": branch,
+                "objective": task["objective"],
+                "read_scope": task["read_scope"],
+                "write_scope": task["write_scope"],
+            },
+        }
+        _append_jsonl(inbox_path, [message])
+
+        append_event(
             "task_selected",
             agent_pool["scheduler_agent_id"],
             None,
-            f"select:{task['task_id']}",
+            f"select:{task['task_id']}:{attempt_id}",
             correlation_id,
             {"task_id": task["task_id"], "attempt_id": attempt_id},
-        ),
-        _event(
-            2,
-            clock.now(),
+        )
+        append_event(
             "lease_acquired",
             agent_pool["scheduler_agent_id"],
             agent["agent_id"],
@@ -298,14 +324,10 @@ def run_simulation(
                 "lease_id": lease_id,
                 "lease_status": "active",
             },
-        ),
-    ]
+        )
 
-    if worktree_id:
-        events.append(
-            _event(
-                3,
-                clock.now(),
+        if worktree_id:
+            append_event(
                 "worktree_created",
                 agent_pool["scheduler_agent_id"],
                 agent["agent_id"],
@@ -320,51 +342,41 @@ def run_simulation(
                     "write_scope": task["write_scope"],
                 },
             )
+
+        append_event(
+            "message_dispatched",
+            agent_pool["scheduler_agent_id"],
+            agent["agent_id"],
+            f"dispatch:{message_id}",
+            correlation_id,
+            {
+                "message_id": message_id,
+                "task_id": task["task_id"],
+                "attempt_id": attempt_id,
+                "lease_id": lease_id,
+            },
+        )
+        runtime_result = runtime_adapter.run(message, worktree_path=worktree_path)
+        append_event(
+            "runtime_output_received",
+            agent["agent_id"],
+            agent_pool["scheduler_agent_id"],
+            f"runtime-result:{attempt_id}",
+            correlation_id,
+            {
+                "task_id": task["task_id"],
+                "attempt_id": attempt_id,
+                "result_status": runtime_result["result_status"],
+                "changed_files": runtime_result["changed_files"],
+                "output": runtime_result.get("output", {}),
+            },
         )
 
-    runtime_result = runtime_adapter.run(message, worktree_path=worktree_path)
-    events.extend(
-        [
-            _event(
-                4,
-                clock.now(),
-                "message_dispatched",
-                agent_pool["scheduler_agent_id"],
-                agent["agent_id"],
-                f"dispatch:{message_id}",
-                correlation_id,
-                {
-                    "message_id": message_id,
-                    "task_id": task["task_id"],
-                    "attempt_id": attempt_id,
-                    "lease_id": lease_id,
-                },
-            ),
-            _event(
-                5,
-                clock.now(),
-                "runtime_output_received",
-                agent["agent_id"],
-                agent_pool["scheduler_agent_id"],
-                f"runtime-result:{attempt_id}",
-                correlation_id,
-                {
-                    "task_id": task["task_id"],
-                    "attempt_id": attempt_id,
-                    "result_status": runtime_result["result_status"],
-                    "changed_files": runtime_result["changed_files"],
-                    "output": runtime_result.get("output", {}),
-                },
-            ),
-        ]
-    )
-
-    validation_status = _validate_runtime_result(runtime_result, task)
-    events.append(
-        _event(
-            6,
-            clock.now(),
-            "validation_accepted" if validation_status == "accepted" else "validation_rejected",
+        outcome = classify_attempt_outcome(runtime_result, task)
+        append_event(
+            "validation_accepted"
+            if outcome["validation_status"] == "accepted"
+            else "validation_rejected",
             agent_pool["scheduler_agent_id"],
             agent["agent_id"],
             f"validate:{attempt_id}",
@@ -372,17 +384,47 @@ def run_simulation(
             {
                 "task_id": task["task_id"],
                 "attempt_id": attempt_id,
-                "validation_status": validation_status,
+                "validation_status": outcome["validation_status"],
+                "failure_category": outcome["failure_category"],
+                "retryable": outcome["retryable"],
                 "lease_id": lease_id,
             },
         )
-    )
 
-    if validation_status == "accepted":
-        events.append(
-            _event(
-                7,
-                clock.now(),
+        final_attempt = {
+            "task_id": task["task_id"],
+            "attempt_id": attempt_id,
+            "lease_id": lease_id,
+            "message_id": message_id,
+            "worktree_id": worktree_id,
+            "worktree_path": str(worktree_path) if worktree_path else None,
+            "branch": branch,
+            "validation_status": outcome["validation_status"],
+            "failure_category": outcome["failure_category"],
+            "retryable": outcome["retryable"],
+            "worktree_removed": False,
+        }
+        attempts.append(final_attempt)
+
+        if outcome["validation_status"] == "accepted":
+            if cleanup_accepted_worktrees and project_root and worktree_path:
+                _remove_git_worktree(project_root, worktree_path)
+                final_attempt["worktree_removed"] = True
+                append_event(
+                    "worktree_removed",
+                    agent_pool["scheduler_agent_id"],
+                    agent["agent_id"],
+                    f"worktree-removed:{worktree_id}",
+                    correlation_id,
+                    {
+                        "task_id": task["task_id"],
+                        "attempt_id": attempt_id,
+                        "worktree_id": worktree_id,
+                        "worktree_path": str(worktree_path),
+                        "cleanup_status": "removed",
+                    },
+                )
+            append_event(
                 "backlog_updated",
                 agent_pool["scheduler_agent_id"],
                 None,
@@ -395,19 +437,43 @@ def run_simulation(
                     "lease_id": lease_id,
                 },
             )
-        )
+            break
+
+        if outcome["retryable"] and attempt_number < max_attempts:
+            append_event(
+                "recovery_routed",
+                agent_pool["scheduler_agent_id"],
+                agent["agent_id"],
+                f"recovery:{attempt_id}",
+                correlation_id,
+                {
+                    "task_id": task["task_id"],
+                    "attempt_id": attempt_id,
+                    "lease_id": lease_id,
+                    "failure_category": outcome["failure_category"],
+                    "next_attempt_id": f"ATTEMPT-{attempt_number + 1:03d}",
+                    "recovery_action": "retry",
+                },
+            )
+            continue
+        break
 
     _append_jsonl(events_path, events)
 
     return {
         "task_id": task["task_id"],
-        "attempt_id": attempt_id,
-        "lease_id": lease_id,
-        "message_id": message_id,
-        "worktree_id": worktree_id,
-        "worktree_path": str(worktree_path) if worktree_path else None,
-        "branch": branch,
-        "validation_status": validation_status,
+        "attempt_id": final_attempt["attempt_id"],
+        "lease_id": final_attempt["lease_id"],
+        "message_id": final_attempt["message_id"],
+        "worktree_id": final_attempt["worktree_id"],
+        "worktree_path": final_attempt["worktree_path"],
+        "branch": final_attempt["branch"],
+        "validation_status": final_attempt["validation_status"],
+        "failure_category": final_attempt["failure_category"],
+        "retryable": final_attempt["retryable"],
+        "attempt_count": len(attempts),
+        "attempts": attempts,
+        "worktree_removed": final_attempt["worktree_removed"],
         "events_path": str(events_path),
         "mailbox_path": str(inbox_path),
     }
@@ -437,6 +503,13 @@ def replay_events(events_path):
                 "worktree_path"
             ]
             snapshot["attempts"].setdefault(attempt_id, {})["branch"] = payload["branch"]
+            snapshot["attempts"].setdefault(attempt_id, {})["worktree_status"] = "created"
+        elif event["event_type"] == "worktree_removed":
+            snapshot["attempts"].setdefault(attempt_id, {})["worktree_id"] = payload["worktree_id"]
+            snapshot["attempts"].setdefault(attempt_id, {})["worktree_path"] = payload[
+                "worktree_path"
+            ]
+            snapshot["attempts"].setdefault(attempt_id, {})["worktree_status"] = "removed"
         elif event["event_type"] == "runtime_output_received":
             snapshot["attempts"].setdefault(attempt_id, {})["attempt_status"] = payload[
                 "result_status"
@@ -482,6 +555,39 @@ def _validate_runtime_result(runtime_result, task):
     if runtime_result["result_status"] != "completed":
         return "rejected"
     return "accepted" if _changed_files_in_scope(runtime_result["changed_files"], task) else "rejected"
+
+
+def classify_attempt_outcome(runtime_result, task):
+    validation_status = _validate_runtime_result(runtime_result, task)
+    if validation_status == "accepted":
+        return {
+            "validation_status": "accepted",
+            "failure_category": None,
+            "retryable": False,
+        }
+    if runtime_result["result_status"] == "timed_out":
+        return {
+            "validation_status": "rejected",
+            "failure_category": "timeout",
+            "retryable": True,
+        }
+    if runtime_result["result_status"] == "completed":
+        return {
+            "validation_status": "rejected",
+            "failure_category": "scope_violation",
+            "retryable": False,
+        }
+    if runtime_result["result_status"] in {"blocked", "cancelled"}:
+        return {
+            "validation_status": "rejected",
+            "failure_category": runtime_result["result_status"],
+            "retryable": False,
+        }
+    return {
+        "validation_status": "rejected",
+        "failure_category": "runtime_error",
+        "retryable": True,
+    }
 
 
 def _normalize_runtime_result(result, adapter, stderr=""):
@@ -539,6 +645,24 @@ def _create_git_worktree(project_root, output_dir, attempt_id, worktree_id):
         text=True,
     )
     return worktree_path, branch
+
+
+def _remove_git_worktree(project_root, worktree_path):
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project_root),
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree_path),
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
 
 def _read_json(path):

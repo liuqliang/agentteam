@@ -55,6 +55,7 @@ from agentteam_runtime import (
     CodexRuntimeAdapter,
     FakeRuntimeAdapter,
     ShellRuntimeAdapter,
+    classify_attempt_outcome,
     replay_events,
     run_simulation,
 )
@@ -85,6 +86,11 @@ result_with_codex = run_simulation(
     project_root="/path/to/git/repo",
     runtime_adapter=CodexRuntimeAdapter(),
 )
+
+outcome = classify_attempt_outcome(
+    {"result_status": "timed_out", "changed_files": [], "output": {}},
+    {"write_scope": ["generated/"]},
+)
 ```
 
 `run_simulation` writes:
@@ -102,6 +108,11 @@ The returned summary includes:
 - `worktree_path`, when `project_root` is provided
 - `branch`, when `project_root` is provided
 - `validation_status`
+- `failure_category`
+- `retryable`
+- `attempt_count`
+- `attempts`
+- `worktree_removed`
 - output file paths
 
 ## CLI
@@ -229,14 +240,64 @@ python3 -m agentteam_runtime.live_codex_smoke \
   --codex-command python3 /path/to/fake_codex.py
 ```
 
+## M2 Attempt Management
+
+M2 adds the first managed execution-attempt mechanics while preserving the
+default one-attempt behavior:
+
+```python
+result = run_simulation(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    project_root="/path/to/git/repo",
+    runtime_adapter=CodexRuntimeAdapter(),
+    max_attempts=2,
+    cleanup_accepted_worktrees=True,
+)
+```
+
+`classify_attempt_outcome(runtime_result, task)` returns:
+
+```json
+{
+  "validation_status": "accepted",
+  "failure_category": null,
+  "retryable": false
+}
+```
+
+Current classification rules:
+
+- accepted: `result_status == "completed"` and all `changed_files` are inside
+  `write_scope`;
+- `scope_violation`: completed result with out-of-scope files, not retryable;
+- `timeout`: `result_status == "timed_out"`, retryable;
+- `blocked` or `cancelled`: not retryable;
+- `runtime_error`: all other failed results, retryable.
+
+When `max_attempts > 1`, retryable rejected attempts emit `recovery_routed` and
+the next attempt receives a new attempt/lease/message/worktree id:
+
+```text
+ATTEMPT-001, LEASE-001, MSG-0001, WT-ATTEMPT-001
+ATTEMPT-002, LEASE-002, MSG-0002, WT-ATTEMPT-002
+```
+
+Accepted worktrees are kept by default for inspection. If
+`cleanup_accepted_worktrees=True`, the scheduler removes only the accepted
+attempt worktree with `git worktree remove --force` and emits
+`worktree_removed`. Rejected attempt worktrees are still retained so failures
+can be inspected.
+
 ## Intentional Fakes
 
-M0/M1c intentionally fakes or simplifies:
+M0/M2 intentionally fakes or simplifies:
 
 - transcript parsing;
 - real code patch integration;
 - persistent daemon loop;
-- retry handling;
+- advanced retry backoff, queues, and cross-process recovery;
 - schema validation through a JSON Schema engine.
 
 M0 now performs actual git worktree creation when `project_root` is provided.
@@ -245,17 +306,18 @@ creating a filesystem worktree. M0 also includes a real process adapter through
 `ShellRuntimeAdapter`. M1b adds `CodexRuntimeAdapter` for `codex exec` result
 extraction through `--output-last-message`. M1c adds a live smoke entrypoint,
 but normal committed verification still uses skip/fake paths rather than
-spending live model calls. Claude Code is not integrated yet.
+spending live model calls. M2 adds bounded retry, outcome classification, and
+opt-in accepted-worktree cleanup. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
-## M1 Preconditions
+## Next Preconditions
 
 Before the next backend milestone, the next design/code step should define:
 
 - decide when live Codex smoke should run outside local opt-in;
 - Claude Code adapter feasibility and result extraction contract;
-- worktree cleanup policy;
 - runtime session start/observe/stop interface for long-running workers;
 - executable artifact/schema lint command;
-- retry event handling.
+- retry backoff, retry budget, and failure escalation policy;
+- patch integration and result diff review policy.

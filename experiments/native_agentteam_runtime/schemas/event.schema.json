@@ -42,6 +42,7 @@
         "task_selected",
         "lease_acquired",
         "worktree_created",
+        "worktree_removed",
         "runtime_session_started",
         "runtime_output_received",
         "validation_accepted",

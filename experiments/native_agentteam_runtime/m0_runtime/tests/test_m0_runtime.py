@@ -10,6 +10,7 @@ from agentteam_runtime import (
     CodexRuntimeAdapter,
     FakeRuntimeAdapter,
     ShellRuntimeAdapter,
+    classify_attempt_outcome,
     replay_events,
     run_simulation,
 )
@@ -23,16 +24,8 @@ SCHEMAS = ROOT / "schemas"
 class FixedClock:
     def __init__(self):
         self._ticks = iter(
-            [
-                "2026-05-31T00:00:00Z",
-                "2026-05-31T00:00:01Z",
-                "2026-05-31T00:00:02Z",
-                "2026-05-31T00:00:03Z",
-                "2026-05-31T00:00:04Z",
-                "2026-05-31T00:00:05Z",
-                "2026-05-31T00:00:06Z",
-                "2026-05-31T00:00:07Z",
-            ]
+            f"2026-05-31T00:00:{second:02d}Z"
+            for second in range(60)
         )
 
     def now(self):
@@ -280,6 +273,30 @@ class M0RuntimeTests(unittest.TestCase):
                 "rejected",
             )
 
+    def test_attempt_outcome_classifies_scope_violation_as_non_retryable(self):
+        task = {"write_scope": ["generated/"]}
+        result = {
+            "result_status": "completed",
+            "changed_files": ["outside.txt"],
+            "output": {},
+        }
+
+        outcome = classify_attempt_outcome(result, task)
+
+        self.assertEqual(outcome["validation_status"], "rejected")
+        self.assertEqual(outcome["failure_category"], "scope_violation")
+        self.assertFalse(outcome["retryable"])
+
+    def test_attempt_outcome_classifies_timeout_as_retryable(self):
+        task = {"write_scope": ["generated/"]}
+        result = {"result_status": "timed_out", "changed_files": [], "output": {}}
+
+        outcome = classify_attempt_outcome(result, task)
+
+        self.assertEqual(outcome["validation_status"], "rejected")
+        self.assertEqual(outcome["failure_category"], "timeout")
+        self.assertTrue(outcome["retryable"])
+
     def test_shell_runtime_adapter_executes_command_in_worktree_and_parses_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -329,6 +346,100 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(result["validation_status"], "rejected")
             self.assertEqual(snapshot["attempts"]["ATTEMPT-001"]["attempt_status"], "failed")
             self.assertEqual(snapshot["attempts"]["ATTEMPT-001"]["validation_status"], "rejected")
+
+    def test_retryable_runtime_failure_can_be_retried_and_accepted(self):
+        class RetryOnceRuntimeAdapter:
+            def __init__(self):
+                self.attempt_ids = []
+
+            def run(self, message, worktree_path=None):
+                self.attempt_ids.append(message["payload"]["attempt_id"])
+                if len(self.attempt_ids) == 1:
+                    return {
+                        "result_status": "failed",
+                        "changed_files": [],
+                        "output": {"error": "transient"},
+                    }
+                target = Path(worktree_path) / "generated" / "retry_result.json"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(
+                    json.dumps({"attempt_id": message["payload"]["attempt_id"]}),
+                    encoding="utf-8",
+                )
+                return {
+                    "result_status": "completed",
+                    "changed_files": ["generated/retry_result.json"],
+                    "output": {"adapter": "retry-once"},
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            adapter = RetryOnceRuntimeAdapter()
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=adapter,
+                max_attempts=2,
+            )
+
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertEqual(adapter.attempt_ids, ["ATTEMPT-001", "ATTEMPT-002"])
+            self.assertEqual(result["attempt_id"], "ATTEMPT-002")
+            self.assertEqual(result["attempt_count"], 2)
+            self.assertEqual(result["validation_status"], "accepted")
+            self.assertEqual(result["failure_category"], None)
+            self.assertEqual(result["attempts"][0]["failure_category"], "runtime_error")
+            self.assertIn("recovery_routed", {event["event_type"] for event in events})
+            self.assertEqual(
+                snapshot["attempts"]["ATTEMPT-001"]["validation_status"],
+                "rejected",
+            )
+            self.assertEqual(
+                snapshot["attempts"]["ATTEMPT-002"]["validation_status"],
+                "accepted",
+            )
+            self.assertTrue((Path(result["worktree_path"]) / "generated" / "retry_result.json").exists())
+
+    def test_accepted_attempt_can_remove_git_worktree_when_cleanup_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=FakeRuntimeAdapter(),
+                cleanup_accepted_worktrees=True,
+            )
+
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertEqual(result["validation_status"], "accepted")
+            self.assertTrue(result["worktree_removed"])
+            self.assertFalse(Path(result["worktree_path"]).exists())
+            self.assertEqual(
+                snapshot["attempts"]["ATTEMPT-001"]["worktree_status"],
+                "removed",
+            )
 
     def test_codex_runtime_adapter_reads_last_message_result_json(self):
         with tempfile.TemporaryDirectory() as tmp:
