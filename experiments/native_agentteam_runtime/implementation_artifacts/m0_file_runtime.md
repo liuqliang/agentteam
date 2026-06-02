@@ -736,6 +736,35 @@ M9c makes that repair behavior explicit for stale indexes. This covers the
 crash-recovery case where the scheduler appended canonical events but stopped
 before the SQLite query index was refreshed.
 
+## Artifact Lint
+
+M10a adds a local artifact lint command:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.artifact_lint \
+  --root experiments/native_agentteam_runtime
+```
+
+The command scans the root for JSON and JSONL files, parses every file, and
+checks JSONL `event_type` values against
+`schemas/event.schema.json` when that schema is available. It prints a JSON
+summary:
+
+```json
+{
+  "checked_json_files": 21,
+  "checked_jsonl_files": 1,
+  "errors": [],
+  "root_path": "experiments/native_agentteam_runtime",
+  "status": "passed"
+}
+```
+
+This is a lightweight executable lint, not a full JSON Schema validator. It
+exists so implementation loops have a cheap artifact sanity check before a
+larger schema-validation engine is introduced.
+
 The scheduler loop is still intentionally sequential. Even with M9a's SQLite
 query index, JSONL remains the authority; the loop does not add concurrent
 workers, authoritative database storage, a daemon process, long-lived
@@ -771,7 +800,8 @@ state. M8c makes the loop CLI include a replayed snapshot. M9a adds a
 rebuildable SQLite query index for scheduler-loop state while keeping JSONL as
 the authority. M9b adds a read-only state-index API and CLI inspection mode.
 M9c repairs missing or stale state indexes from canonical JSONL during reads.
-Claude Code is not integrated yet.
+M10a adds a lightweight executable artifact lint command. Claude Code is not
+integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -782,6 +812,7 @@ Before the next backend milestone, the next design/code step should define:
 - decide when live Codex smoke should run outside local opt-in;
 - Claude Code adapter feasibility and result extraction contract;
 - runtime session start/observe/stop interface for long-running workers;
-- executable artifact/schema lint command;
+- decide whether lightweight artifact lint should grow into full JSON Schema
+  validation;
 - retry backoff, retry budget, and failure escalation policy;
 - merge strategy and result diff review policy for complete task/system gates.

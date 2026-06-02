@@ -519,6 +519,83 @@ class M0RuntimeTests(unittest.TestCase):
             messages = [json.loads(line) for line in inbox.read_text(encoding="utf-8").splitlines()]
             self.assertTrue({message["message_type"] for message in messages}.issubset(allowed_messages))
 
+    def test_artifact_lint_passes_native_runtime_tree(self):
+        from agentteam_runtime.artifact_lint import lint_artifacts
+
+        summary = lint_artifacts(ROOT)
+
+        self.assertEqual(summary["status"], "passed")
+        self.assertGreaterEqual(summary["checked_json_files"], 1)
+        self.assertGreaterEqual(summary["checked_jsonl_files"], 1)
+        self.assertEqual(summary["errors"], [])
+
+    def test_artifact_lint_reports_invalid_json(self):
+        from agentteam_runtime.artifact_lint import lint_artifacts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bad_path = tmp_path / "broken.json"
+            bad_path.write_text("{bad", encoding="utf-8")
+
+            summary = lint_artifacts(tmp_path)
+
+            self.assertEqual(summary["status"], "failed")
+            self.assertEqual(summary["errors"][0]["kind"], "invalid_json")
+            self.assertEqual(summary["errors"][0]["path"], "broken.json")
+
+    def test_artifact_lint_reports_invalid_event_type(self):
+        from agentteam_runtime.artifact_lint import lint_artifacts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            schema_dir = tmp_path / "schemas"
+            schema_dir.mkdir()
+            (schema_dir / "event.schema.json").write_text(
+                json.dumps(
+                    {
+                        "properties": {
+                            "event_type": {
+                                "enum": ["known_event"],
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (tmp_path / "events.jsonl").write_text(
+                json.dumps({"event_type": "unknown_event"}) + "\n",
+                encoding="utf-8",
+            )
+
+            summary = lint_artifacts(tmp_path)
+
+            self.assertEqual(summary["status"], "failed")
+            self.assertEqual(summary["errors"][0]["kind"], "invalid_event_type")
+            self.assertEqual(summary["errors"][0]["event_type"], "unknown_event")
+
+    def test_artifact_lint_cli_prints_summary(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agentteam_runtime.artifact_lint",
+                "--root",
+                str(ROOT),
+            ],
+            check=True,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        summary = json.loads(completed.stdout)
+        self.assertEqual(summary["status"], "passed")
+        self.assertGreaterEqual(summary["checked_json_files"], 1)
+
     def test_cli_runs_simulation_and_prints_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
