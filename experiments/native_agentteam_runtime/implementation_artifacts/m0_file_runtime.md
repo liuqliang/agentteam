@@ -112,6 +112,9 @@ The returned summary includes:
 - `retryable`
 - `diff_audit`
 - `patch_path`
+- `integration_status`
+- `integration_branch`
+- `integration_worktree_path`
 - `attempt_count`
 - `attempts`
 - `worktree_removed`
@@ -141,6 +144,20 @@ python3 -m agentteam_runtime.cli \
   --backlog /path/to/backlog.json \
   --output-dir /tmp/agentteam-m0-run \
   --project-root /path/to/git/repo \
+  --shell-command python3 /path/to/worker.py
+```
+
+To apply an accepted patch artifact into an isolated integration worktree, pass
+`--integrate-accepted-patch` before the final runtime command:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool experiments/native_agentteam_runtime/fixtures/sample_agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m4-run \
+  --project-root /path/to/git/repo \
+  --integrate-accepted-patch \
   --shell-command python3 /path/to/worker.py
 ```
 
@@ -360,6 +377,35 @@ Patch capture is intentionally separate from patch integration:
 This gives the scheduler an auditable artifact for later review without
 choosing an automatic integration policy yet.
 
+## M4 Integration Branch Apply
+
+M4 adds an explicit integration worktree step:
+
+```python
+result = run_simulation(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    project_root="/path/to/git/repo",
+    runtime_adapter=ShellRuntimeAdapter(["python3", "/path/to/worker.py"]),
+    integrate_accepted_patch=True,
+)
+```
+
+When an accepted attempt has a patch artifact, the scheduler:
+
+- creates `output_dir/integration/<task-id>`;
+- creates branch `agentteam/integration/<task-id>`;
+- runs `git apply <patch_path>` inside the integration worktree;
+- emits `patch_integrated`;
+- returns `integration_status`, `integration_branch`, and
+  `integration_worktree_path`.
+
+M4 deliberately does not commit, push, merge, or update the source repository's
+main branch. The integration worktree HEAD remains equal to source `HEAD`; the
+patch exists as unstaged working-tree changes for later verification and merge
+policy.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -377,9 +423,9 @@ creating a filesystem worktree. M0 also includes a real process adapter through
 extraction through `--output-last-message`. M1c adds a live smoke entrypoint,
 but normal committed verification still uses skip/fake paths rather than
 spending live model calls. M2 adds bounded retry, outcome classification, and
-opt-in accepted-worktree cleanup. M3a adds git diff auditing, and M3b writes a
-patch artifact without automatic patch integration. Claude Code is not
-integrated yet.
+opt-in accepted-worktree cleanup. M3a adds git diff auditing, M3b writes a patch
+artifact, and M4 applies accepted patches into an isolated integration worktree
+without committing. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -392,4 +438,5 @@ Before the next backend milestone, the next design/code step should define:
 - runtime session start/observe/stop interface for long-running workers;
 - executable artifact/schema lint command;
 - retry backoff, retry budget, and failure escalation policy;
-- patch integration, commit strategy, and result diff review policy.
+- verification commands for integration worktrees;
+- commit strategy, merge strategy, and result diff review policy.

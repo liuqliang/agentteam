@@ -211,6 +211,51 @@ class M0RuntimeTests(unittest.TestCase):
                 (Path(summary["worktree_path"]) / "generated" / "cli_shell_result.json").exists()
             )
 
+    def test_cli_can_apply_accepted_patch_to_integration_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            script = tmp_path / "cli_integration_worker.py"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_success_worker(script, "generated/cli_integration_result.json")
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--project-root",
+                    str(repo),
+                    "--integrate-accepted-patch",
+                    "--shell-command",
+                    sys.executable,
+                    str(script),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            integration_worktree = Path(summary["integration_worktree_path"])
+
+            self.assertEqual(summary["integration_status"], "applied")
+            self.assertTrue(
+                (integration_worktree / "generated" / "cli_integration_result.json").exists()
+            )
+
     def test_project_root_creates_real_git_worktree_for_writable_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -374,6 +419,41 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue(patch_path.exists())
             self.assertEqual(result["attempts"][0]["patch_path"], str(patch_path))
             self.assertIn("generated/patch_result.json", patch_path.read_text(encoding="utf-8"))
+
+    def test_accepted_patch_applies_to_integration_worktree_without_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            script = tmp_path / "integration_worker.py"
+            _init_git_repo(repo)
+            source_head = _git_rev_parse(repo, "HEAD")
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_success_worker(script, "generated/integration_result.json")
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=ShellRuntimeAdapter([sys.executable, str(script)]),
+                integrate_accepted_patch=True,
+            )
+
+            integration_worktree = Path(result["integration_worktree_path"])
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertEqual(result["integration_status"], "applied")
+            self.assertEqual(result["integration_branch"], "agentteam/integration/TASK-001")
+            self.assertTrue(
+                (integration_worktree / "generated" / "integration_result.json").exists()
+            )
+            self.assertEqual(_git_rev_parse(integration_worktree, "HEAD"), source_head)
+            self.assertEqual(
+                snapshot["attempts"]["ATTEMPT-001"]["integration_status"],
+                "applied",
+            )
 
     def test_shell_runtime_adapter_failure_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -653,6 +733,17 @@ def _init_git_repo(path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+
+
+def _git_rev_parse(repo, ref):
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", ref],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return completed.stdout.strip()
 
 
 def _write_backlog(tmp_path, write_scope):

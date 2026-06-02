@@ -228,6 +228,7 @@ def run_simulation(
     runtime_adapter=None,
     max_attempts=1,
     cleanup_accepted_worktrees=False,
+    integrate_accepted_patch=False,
 ):
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
@@ -422,11 +423,36 @@ def run_simulation(
             "retryable": outcome["retryable"],
             "diff_audit": diff_audit,
             "patch_path": str(patch_path) if patch_path else None,
+            "integration_status": "not_requested",
+            "integration_branch": None,
+            "integration_worktree_path": None,
             "worktree_removed": False,
         }
         attempts.append(final_attempt)
 
         if outcome["validation_status"] == "accepted":
+            if integrate_accepted_patch and project_root and patch_path:
+                integration = apply_patch_to_integration_worktree(
+                    project_root,
+                    output_dir,
+                    task["task_id"],
+                    patch_path,
+                )
+                final_attempt.update(integration)
+                append_event(
+                    "patch_integrated",
+                    agent_pool["scheduler_agent_id"],
+                    agent["agent_id"],
+                    f"patch-integrated:{attempt_id}",
+                    correlation_id,
+                    {
+                        "task_id": task["task_id"],
+                        "attempt_id": attempt_id,
+                        "lease_id": lease_id,
+                        "patch_path": str(patch_path),
+                        **integration,
+                    },
+                )
             if cleanup_accepted_worktrees and project_root and worktree_path:
                 _remove_git_worktree(project_root, worktree_path)
                 final_attempt["worktree_removed"] = True
@@ -493,6 +519,9 @@ def run_simulation(
         "retryable": final_attempt["retryable"],
         "diff_audit": final_attempt["diff_audit"],
         "patch_path": final_attempt["patch_path"],
+        "integration_status": final_attempt["integration_status"],
+        "integration_branch": final_attempt["integration_branch"],
+        "integration_worktree_path": final_attempt["integration_worktree_path"],
         "attempt_count": len(attempts),
         "attempts": attempts,
         "worktree_removed": final_attempt["worktree_removed"],
@@ -554,6 +583,16 @@ def replay_events(events_path):
             )
             if lease_id in snapshot["leases"]:
                 snapshot["leases"][lease_id]["lease_status"] = "released"
+        elif event["event_type"] == "patch_integrated":
+            snapshot["attempts"].setdefault(attempt_id, {})["integration_status"] = payload[
+                "integration_status"
+            ]
+            snapshot["attempts"].setdefault(attempt_id, {})["integration_branch"] = payload[
+                "integration_branch"
+            ]
+            snapshot["attempts"].setdefault(attempt_id, {})["integration_worktree_path"] = payload[
+                "integration_worktree_path"
+            ]
         elif event["event_type"] == "backlog_updated":
             snapshot["tasks"].setdefault(task_id, {})["task_status"] = payload["task_status"]
 
@@ -708,6 +747,41 @@ def write_patch_artifact(worktree_path, artifact_dir, actual_changed_files):
             chunks.append(completed.stdout)
     patch_path.write_text("\n".join(chunks), encoding="utf-8")
     return patch_path
+
+
+def apply_patch_to_integration_worktree(project_root, output_dir, task_id, patch_path):
+    integration_branch = f"agentteam/integration/{task_id}"
+    integration_worktree = Path(output_dir) / "integration" / task_id
+    integration_worktree.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project_root),
+            "worktree",
+            "add",
+            "-b",
+            integration_branch,
+            str(integration_worktree),
+            "HEAD",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(integration_worktree), "apply", str(patch_path)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return {
+        "integration_status": "applied",
+        "integration_branch": integration_branch,
+        "integration_worktree_path": str(integration_worktree),
+    }
 
 
 def _git_changed_files(worktree_path):

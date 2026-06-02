@@ -11,6 +11,11 @@ def main(argv=None):
     parser.add_argument("--output-dir", required=True, help="Directory for mailbox and event output.")
     parser.add_argument("--project-root", help="Optional git repository root for real worktree creation.")
     parser.add_argument(
+        "--integrate-accepted-patch",
+        action="store_true",
+        help="Apply accepted patch artifacts to an integration worktree without committing.",
+    )
+    parser.add_argument(
         "--shell-command",
         nargs=argparse.REMAINDER,
         help="Optional command to execute through ShellRuntimeAdapter. Must appear last.",
@@ -36,6 +41,7 @@ def main(argv=None):
         args.output_dir,
         project_root=args.project_root,
         runtime_adapter=runtime_adapter,
+        integrate_accepted_patch=args.integrate_accepted_patch,
     )
     snapshot = replay_events(result["events_path"])
     print(json.dumps({**result, "snapshot": snapshot}, sort_keys=True))
