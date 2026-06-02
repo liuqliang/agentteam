@@ -619,16 +619,22 @@ loads it and resumes from the persisted backlog/step state. Re-running the loop
 with the same output directory does not repeat tasks already marked `done`.
 
 When `FileScheduler` delegates a task to `run_simulation(...)`, it namespaces
-attempt ids by task id. This keeps worktree-backed multi-step runs from reusing
-the same git branch:
+attempt, worktree, lease, and mailbox message ids by task id. This keeps
+worktree-backed multi-step runs from reusing the same git branch and keeps
+canonical replay from collapsing multiple steps into one lease key:
 
 ```text
 TASK-001-ATTEMPT-001 -> agentteam/TASK-001-ATTEMPT-001
+TASK-001-LEASE-001
+TASK-001-MSG-0001
 TASK-002-ATTEMPT-001 -> agentteam/TASK-002-ATTEMPT-001
+TASK-002-LEASE-001
+TASK-002-MSG-0001
 ```
 
 Plain `run_simulation(...)` keeps the existing default ids such as
-`ATTEMPT-001`, `WT-ATTEMPT-001`, and `agentteam/ATTEMPT-001`.
+`ATTEMPT-001`, `WT-ATTEMPT-001`, `LEASE-001`, `MSG-0001`, and
+`agentteam/ATTEMPT-001`.
 
 M8a makes `<output-dir>/events.jsonl` the canonical replay source for scheduler
 loop runs. Each processed step still keeps its local event log, but the
@@ -673,8 +679,9 @@ integration worktree checkpoint. M7a adds a sequential file-backed scheduler
 loop that can process multiple ready tasks until idle. M7b makes scheduler-loop
 attempt/worktree ids task-scoped so worktree-backed loops can process more than
 one task in a run. M7c exposes that loop through `--run-until-idle`. M8a adds a
-canonical root event log for scheduler-loop replay. Claude Code is not
-integrated yet.
+canonical root event log for scheduler-loop replay. M8b scopes scheduler-loop
+lease and message ids by task id so canonical replay can preserve per-step lease
+state. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -685,7 +692,6 @@ Before the next backend milestone, the next design/code step should define:
 - decide when live Codex smoke should run outside local opt-in;
 - Claude Code adapter feasibility and result extraction contract;
 - runtime session start/observe/stop interface for long-running workers;
-- globally unique lease/message ids for multi-step loops;
 - executable artifact/schema lint command;
 - retry backoff, retry budget, and failure escalation policy;
 - merge strategy and result diff review policy for complete task/system gates.

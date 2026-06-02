@@ -272,8 +272,8 @@ def run_simulation(
     final_attempt = None
     for attempt_number in range(1, max_attempts + 1):
         attempt_id = _scoped_attempt_id(attempt_number, attempt_id_prefix)
-        lease_id = f"LEASE-{attempt_number:03d}"
-        message_id = f"MSG-{attempt_number:04d}"
+        lease_id = _scoped_id("LEASE", attempt_number, attempt_id_prefix)
+        message_id = _scoped_id("MSG", attempt_number, attempt_id_prefix, width=4)
         worktree_id = f"WT-{attempt_id}" if task.get("write_scope") else None
         worktree_path = None
         branch = None
@@ -929,11 +929,15 @@ def _fake_changed_files(write_scope):
 
 
 def _scoped_attempt_id(attempt_number, attempt_id_prefix=None):
-    attempt_id = f"ATTEMPT-{attempt_number:03d}"
-    if not attempt_id_prefix:
-        return attempt_id
-    safe_prefix = str(attempt_id_prefix).replace("/", "-")
-    return f"{safe_prefix}-{attempt_id}"
+    return _scoped_id("ATTEMPT", attempt_number, attempt_id_prefix)
+
+
+def _scoped_id(kind, number, id_prefix=None, width=3):
+    local_id = f"{kind}-{number:0{width}d}"
+    if not id_prefix:
+        return local_id
+    safe_prefix = str(id_prefix).replace("/", "-")
+    return f"{safe_prefix}-{local_id}"
 
 
 def _changed_files_in_scope(changed_files, task):

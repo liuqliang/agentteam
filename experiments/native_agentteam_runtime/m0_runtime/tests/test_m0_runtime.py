@@ -142,6 +142,54 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(snapshot["tasks"]["TASK-001"]["task_status"], "done")
             self.assertEqual(snapshot["tasks"]["TASK-002"]["task_status"], "done")
 
+    def test_scheduler_loop_uses_task_scoped_lease_and_message_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            snapshot = replay_events(summary["events_path"])
+            first_message = _read_first_jsonl(
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-001"
+                / "mailboxes"
+                / "agent-repo-map"
+                / "inbox.jsonl"
+            )
+            second_message = _read_first_jsonl(
+                output_dir
+                / "steps"
+                / "STEP-0002-TASK-002"
+                / "mailboxes"
+                / "agent-repo-map"
+                / "inbox.jsonl"
+            )
+
+            self.assertEqual(
+                set(snapshot["leases"].keys()),
+                {"TASK-001-LEASE-001", "TASK-002-LEASE-001"},
+            )
+            self.assertEqual(first_message["message_id"], "TASK-001-MSG-0001")
+            self.assertEqual(first_message["payload"]["lease_id"], "TASK-001-LEASE-001")
+            self.assertEqual(second_message["message_id"], "TASK-002-MSG-0001")
+            self.assertEqual(second_message["payload"]["lease_id"], "TASK-002-LEASE-001")
+
     def test_scheduler_loop_respects_done_dependencies(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1251,6 +1299,10 @@ def _git_status_short(repo):
         text=True,
     )
     return completed.stdout.strip()
+
+
+def _read_first_jsonl(path):
+    return json.loads(Path(path).read_text(encoding="utf-8").splitlines()[0])
 
 
 def _write_backlog(tmp_path, write_scope, tasks=None):
