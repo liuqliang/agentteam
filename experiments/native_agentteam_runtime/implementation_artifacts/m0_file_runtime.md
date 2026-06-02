@@ -364,6 +364,57 @@ python3 -m agentteam_runtime.live_codex_smoke \
   --codex-command python3 /path/to/fake_codex.py
 ```
 
+M12a adds a scheduler-level live Codex smoke. It uses the same
+`AGENTTEAM_RUN_LIVE_CODEX=1` gate, but exercises the current scheduler loop,
+canonical root event log, SQLite state index, and runtime session tracking:
+
+```bash
+AGENTTEAM_RUN_LIVE_CODEX=1 \
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.live_codex_scheduler_smoke \
+  --output-dir /tmp/agentteam-live-codex-scheduler-smoke
+```
+
+When enabled, it creates a temporary git repository, writes one L0 scheduler
+backlog item, runs `run_scheduler_loop(...)` through `CodexRuntimeAdapter`, and
+requires Codex to create:
+
+```text
+generated/live_codex_scheduler_smoke.json
+```
+
+The command exits non-zero unless:
+
+- the scheduler reaches `idle`;
+- the processed task id is `TASK-LIVE-CODEX-SCHEDULER-SMOKE`;
+- validation is accepted;
+- the expected file exists in the attempt worktree;
+- the SQLite state index reports the task as `done`;
+- the runtime session row is `stopped`.
+
+For deterministic tests, it also accepts a fake command:
+
+```bash
+AGENTTEAM_RUN_LIVE_CODEX=1 \
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.live_codex_scheduler_smoke \
+  --output-dir /tmp/agentteam-live-codex-scheduler-smoke \
+  --codex-command python3 /path/to/fake_codex.py
+```
+
+Local verification on 2026-06-02 with `codex-cli 0.132.0` completed this
+scheduler path:
+
+```json
+{
+  "changed_files": ["generated/live_codex_scheduler_smoke.json"],
+  "expected_file_exists": true,
+  "processed_task_ids": ["TASK-LIVE-CODEX-SCHEDULER-SMOKE"],
+  "scheduler_status": "idle",
+  "status": "completed"
+}
+```
+
 ## M2 Attempt Management
 
 M2 adds the first managed execution-attempt mechanics while preserving the
@@ -876,7 +927,9 @@ the authority. M9b adds a read-only state-index API and CLI inspection mode.
 M9c repairs missing or stale state indexes from canonical JSONL during reads.
 M10a adds a lightweight executable artifact lint command. M11a records logical
 runtime session lifecycle events around synchronous adapter calls. M11b adds
-runtime sessions to the SQLite state index. Claude Code is not integrated yet.
+runtime sessions to the SQLite state index. M12a adds a gated live Codex
+scheduler smoke that exercises scheduler, state index, and runtime session
+mechanics through `CodexRuntimeAdapter`. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -884,7 +937,8 @@ These are not semantic omissions. They are deferred implementation mechanics.
 
 Before the next backend milestone, the next design/code step should define:
 
-- decide when live Codex smoke should run outside local opt-in;
+- decide when live Codex smoke should run outside local opt-in, such as nightly
+  or pre-release only;
 - Claude Code adapter feasibility and result extraction contract;
 - decide when logical runtime sessions should become real long-running worker
   processes;

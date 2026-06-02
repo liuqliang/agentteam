@@ -74,9 +74,77 @@ class LiveCodexSmokeTests(unittest.TestCase):
                 (Path(summary["worktree_path"]) / "generated" / "live_codex_smoke.json").exists()
             )
 
+    def test_live_codex_scheduler_smoke_skips_without_env_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "scheduler-smoke"
+            env = os.environ.copy()
+            env.pop("AGENTTEAM_RUN_LIVE_CODEX", None)
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
 
-def _write_fake_codex(path):
-    changed_file = "generated/live_codex_smoke.json"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.live_codex_scheduler_smoke",
+                    "--output-dir",
+                    str(output_dir),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["status"], "skipped")
+            self.assertEqual(summary["reason"], "set AGENTTEAM_RUN_LIVE_CODEX=1")
+            self.assertFalse(output_dir.exists())
+
+    def test_live_codex_scheduler_smoke_runs_with_fake_codex_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "scheduler-smoke"
+            fake_codex = tmp_path / "fake_codex.py"
+            _write_fake_codex(fake_codex, changed_file="generated/live_codex_scheduler_smoke.json")
+            env = os.environ.copy()
+            env["AGENTTEAM_RUN_LIVE_CODEX"] = "1"
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.live_codex_scheduler_smoke",
+                    "--output-dir",
+                    str(output_dir),
+                    "--codex-command",
+                    sys.executable,
+                    str(fake_codex),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["scheduler_status"], "idle")
+            self.assertEqual(
+                summary["processed_task_ids"],
+                ["TASK-LIVE-CODEX-SCHEDULER-SMOKE"],
+            )
+            self.assertTrue(summary["expected_file_exists"])
+            self.assertEqual(summary["state_index"]["tasks"][0]["task_status"], "done")
+            self.assertEqual(
+                summary["state_index"]["runtime_sessions"][0]["session_status"],
+                "stopped",
+            )
+
+
+def _write_fake_codex(path, changed_file="generated/live_codex_smoke.json"):
     path.write_text(
         "\n".join(
             [
