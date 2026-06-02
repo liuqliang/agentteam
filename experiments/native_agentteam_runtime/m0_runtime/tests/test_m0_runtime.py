@@ -10,6 +10,7 @@ from agentteam_runtime import (
     CodexRuntimeAdapter,
     FakeRuntimeAdapter,
     ShellRuntimeAdapter,
+    audit_worktree_diff,
     classify_attempt_outcome,
     replay_events,
     run_simulation,
@@ -297,6 +298,35 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertEqual(outcome["failure_category"], "timeout")
         self.assertTrue(outcome["retryable"])
 
+    def test_worktree_diff_audit_detects_declared_file_missing_from_git_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            _init_git_repo(repo)
+
+            audit = audit_worktree_diff(repo, ["generated/missing.json"])
+
+            self.assertEqual(audit["diff_status"], "mismatch")
+            self.assertEqual(audit["declared_changed_files"], ["generated/missing.json"])
+            self.assertEqual(audit["actual_changed_files"], [])
+            self.assertEqual(audit["missing_declared_files"], ["generated/missing.json"])
+            self.assertEqual(audit["undeclared_changed_files"], [])
+
+    def test_worktree_diff_audit_matches_declared_file_in_git_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            _init_git_repo(repo)
+            target = repo / "generated" / "actual.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"created": True}), encoding="utf-8")
+
+            audit = audit_worktree_diff(repo, ["generated/actual.json"])
+
+            self.assertEqual(audit["diff_status"], "matched")
+            self.assertEqual(audit["declared_changed_files"], ["generated/actual.json"])
+            self.assertEqual(audit["actual_changed_files"], ["generated/actual.json"])
+            self.assertEqual(audit["missing_declared_files"], [])
+            self.assertEqual(audit["undeclared_changed_files"], [])
+
     def test_shell_runtime_adapter_executes_command_in_worktree_and_parses_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -412,6 +442,44 @@ class M0RuntimeTests(unittest.TestCase):
                 "accepted",
             )
             self.assertTrue((Path(result["worktree_path"]) / "generated" / "retry_result.json").exists())
+
+    def test_declared_changed_file_without_worktree_diff_is_rejected(self):
+        class PhantomRuntimeAdapter:
+            def run(self, message, worktree_path=None):
+                return {
+                    "result_status": "completed",
+                    "changed_files": ["generated/phantom.json"],
+                    "output": {"adapter": "phantom"},
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=PhantomRuntimeAdapter(),
+            )
+
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertEqual(result["validation_status"], "rejected")
+            self.assertEqual(result["failure_category"], "diff_mismatch")
+            self.assertEqual(
+                result["diff_audit"]["missing_declared_files"],
+                ["generated/phantom.json"],
+            )
+            self.assertEqual(
+                snapshot["attempts"]["ATTEMPT-001"]["failure_category"],
+                "diff_mismatch",
+            )
 
     def test_accepted_attempt_can_remove_git_worktree_when_cleanup_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:

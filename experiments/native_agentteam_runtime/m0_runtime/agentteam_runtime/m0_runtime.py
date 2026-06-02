@@ -357,6 +357,11 @@ def run_simulation(
             },
         )
         runtime_result = runtime_adapter.run(message, worktree_path=worktree_path)
+        diff_audit = (
+            audit_worktree_diff(worktree_path, runtime_result["changed_files"])
+            if worktree_path
+            else None
+        )
         append_event(
             "runtime_output_received",
             agent["agent_id"],
@@ -369,10 +374,11 @@ def run_simulation(
                 "result_status": runtime_result["result_status"],
                 "changed_files": runtime_result["changed_files"],
                 "output": runtime_result.get("output", {}),
+                "diff_audit": diff_audit,
             },
         )
 
-        outcome = classify_attempt_outcome(runtime_result, task)
+        outcome = classify_attempt_outcome(runtime_result, task, diff_audit=diff_audit)
         append_event(
             "validation_accepted"
             if outcome["validation_status"] == "accepted"
@@ -388,6 +394,7 @@ def run_simulation(
                 "failure_category": outcome["failure_category"],
                 "retryable": outcome["retryable"],
                 "lease_id": lease_id,
+                "diff_audit": diff_audit,
             },
         )
 
@@ -402,6 +409,7 @@ def run_simulation(
             "validation_status": outcome["validation_status"],
             "failure_category": outcome["failure_category"],
             "retryable": outcome["retryable"],
+            "diff_audit": diff_audit,
             "worktree_removed": False,
         }
         attempts.append(final_attempt)
@@ -471,6 +479,7 @@ def run_simulation(
         "validation_status": final_attempt["validation_status"],
         "failure_category": final_attempt["failure_category"],
         "retryable": final_attempt["retryable"],
+        "diff_audit": final_attempt["diff_audit"],
         "attempt_count": len(attempts),
         "attempts": attempts,
         "worktree_removed": final_attempt["worktree_removed"],
@@ -518,6 +527,15 @@ def replay_events(events_path):
             snapshot["attempts"].setdefault(attempt_id, {})["validation_status"] = payload[
                 "validation_status"
             ]
+            snapshot["attempts"].setdefault(attempt_id, {})["failure_category"] = payload.get(
+                "failure_category"
+            )
+            snapshot["attempts"].setdefault(attempt_id, {})["retryable"] = payload.get(
+                "retryable"
+            )
+            snapshot["attempts"].setdefault(attempt_id, {})["diff_audit"] = payload.get(
+                "diff_audit"
+            )
             if lease_id in snapshot["leases"]:
                 snapshot["leases"][lease_id]["lease_status"] = "released"
         elif event["event_type"] == "backlog_updated":
@@ -557,8 +575,14 @@ def _validate_runtime_result(runtime_result, task):
     return "accepted" if _changed_files_in_scope(runtime_result["changed_files"], task) else "rejected"
 
 
-def classify_attempt_outcome(runtime_result, task):
+def classify_attempt_outcome(runtime_result, task, diff_audit=None):
     validation_status = _validate_runtime_result(runtime_result, task)
+    if validation_status == "accepted" and diff_audit and diff_audit["diff_status"] != "matched":
+        return {
+            "validation_status": "rejected",
+            "failure_category": "diff_mismatch",
+            "retryable": False,
+        }
     if validation_status == "accepted":
         return {
             "validation_status": "accepted",
@@ -588,6 +612,41 @@ def classify_attempt_outcome(runtime_result, task):
         "failure_category": "runtime_error",
         "retryable": True,
     }
+
+
+def audit_worktree_diff(worktree_path, declared_changed_files):
+    declared = sorted(set(declared_changed_files))
+    actual = sorted(set(_git_changed_files(worktree_path)))
+    missing = sorted(path for path in declared if path not in actual)
+    undeclared = sorted(path for path in actual if path not in declared)
+    return {
+        "diff_status": "matched" if not missing and not undeclared else "mismatch",
+        "declared_changed_files": declared,
+        "actual_changed_files": actual,
+        "missing_declared_files": missing,
+        "undeclared_changed_files": undeclared,
+    }
+
+
+def _git_changed_files(worktree_path):
+    completed = subprocess.run(
+        ["git", "-C", str(worktree_path), "status", "--porcelain=v1", "--untracked-files=all"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    paths = []
+    for line in completed.stdout.splitlines():
+        if not line:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if path.startswith(".agentteam/"):
+            continue
+        paths.append(path)
+    return paths
 
 
 def _normalize_runtime_result(result, adapter, stderr=""):

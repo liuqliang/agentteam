@@ -110,6 +110,7 @@ The returned summary includes:
 - `validation_status`
 - `failure_category`
 - `retryable`
+- `diff_audit`
 - `attempt_count`
 - `attempts`
 - `worktree_removed`
@@ -290,9 +291,54 @@ attempt worktree with `git worktree remove --force` and emits
 `worktree_removed`. Rejected attempt worktrees are still retained so failures
 can be inspected.
 
+## M3a Worktree Diff Audit
+
+M3a adds a compact git diff audit before accepting worktree-backed attempts.
+The runtime no longer accepts a successful JSON result solely because
+`changed_files` is syntactically inside `write_scope`; it also checks that the
+attempt worktree really contains the declared changes.
+
+```python
+audit = audit_worktree_diff(
+    worktree_path,
+    ["generated/result.json"],
+)
+```
+
+The audit has this shape:
+
+```json
+{
+  "diff_status": "matched",
+  "declared_changed_files": ["generated/result.json"],
+  "actual_changed_files": ["generated/result.json"],
+  "missing_declared_files": [],
+  "undeclared_changed_files": []
+}
+```
+
+If ordinary validation would accept but `diff_status == "mismatch"`, the
+attempt is rejected with:
+
+```json
+{
+  "failure_category": "diff_mismatch",
+  "retryable": false,
+  "validation_status": "rejected"
+}
+```
+
+The audit reads `git status --porcelain=v1 --untracked-files=all` in the attempt
+worktree. Runtime-private files under `.agentteam/`, such as Codex
+`--output-last-message` result files, are ignored because they are control-plane
+artifacts rather than user patch content.
+
+M3a does not integrate patches back into the source repository. It only records
+whether the worktree diff is internally consistent with the runtime result.
+
 ## Intentional Fakes
 
-M0/M2 intentionally fakes or simplifies:
+M0/M3a intentionally fakes or simplifies:
 
 - transcript parsing;
 - real code patch integration;
@@ -307,7 +353,8 @@ creating a filesystem worktree. M0 also includes a real process adapter through
 extraction through `--output-last-message`. M1c adds a live smoke entrypoint,
 but normal committed verification still uses skip/fake paths rather than
 spending live model calls. M2 adds bounded retry, outcome classification, and
-opt-in accepted-worktree cleanup. Claude Code is not integrated yet.
+opt-in accepted-worktree cleanup. M3a adds git diff auditing without automatic
+patch integration. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -320,4 +367,4 @@ Before the next backend milestone, the next design/code step should define:
 - runtime session start/observe/stop interface for long-running workers;
 - executable artifact/schema lint command;
 - retry backoff, retry budget, and failure escalation policy;
-- patch integration and result diff review policy.
+- patch integration, commit strategy, and result diff review policy.
