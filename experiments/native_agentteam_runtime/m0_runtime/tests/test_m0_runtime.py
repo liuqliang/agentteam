@@ -1715,6 +1715,88 @@ class M0RuntimeTests(unittest.TestCase):
                 (Path(summary["worktree_path"]) / "generated" / "codex_cli_result.json").exists()
             )
 
+    def test_cli_can_select_codex_runtime_with_command_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            fake_codex = tmp_path / "fake_codex_runtime.py"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_fake_codex(fake_codex, changed_file="generated/codex_runtime_result.json")
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--project-root",
+                    str(repo),
+                    "--runtime",
+                    "codex",
+                    "--codex-command",
+                    sys.executable,
+                    str(fake_codex),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["validation_status"], "accepted")
+            self.assertEqual(
+                summary["snapshot"]["runtime_sessions"]["SESSION-ATTEMPT-001"][
+                    "runtime_adapter"
+                ],
+                "CodexRuntimeAdapter",
+            )
+            self.assertTrue(
+                (Path(summary["worktree_path"]) / "generated" / "codex_runtime_result.json").exists()
+            )
+
+    def test_cli_rejects_codex_runtime_without_project_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--runtime",
+                    "codex",
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("--project-root is required when --runtime codex is set", completed.stderr)
+
 
 def _init_git_repo(path):
     path.mkdir(parents=True)

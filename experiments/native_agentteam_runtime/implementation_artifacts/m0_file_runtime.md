@@ -280,9 +280,9 @@ one JSON result to stdout:
 Non-zero exit codes, invalid stdout JSON, timeouts, and changed files outside
 the task `write_scope` produce rejected results.
 
-To run through the Codex adapter, put `--codex-command` last. The default API
-command is `codex exec`; the CLI flag exists so tests and experiments can pass a
-custom command prefix:
+To run through the Codex adapter, use `--runtime codex`. The default API
+command is `codex exec`. In M12b this selector requires `--project-root`
+because `CodexRuntimeAdapter` must run inside a git worktree:
 
 ```bash
 PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
@@ -291,8 +291,14 @@ python3 -m agentteam_runtime.cli \
   --backlog /path/to/backlog.json \
   --output-dir /tmp/agentteam-m0-run \
   --project-root /path/to/git/repo \
-  --codex-command codex exec
+  --runtime codex
 ```
+
+`--codex-command` remains available as a command-prefix override for tests and
+experiments. When no `--runtime` is supplied, the CLI preserves the old
+inference behavior: `--shell-command` selects `ShellRuntimeAdapter`,
+`--codex-command` selects `CodexRuntimeAdapter`, and no command override selects
+the fake adapter. The inferred Codex path also requires `--project-root`.
 
 `CodexRuntimeAdapter` invokes the command as:
 
@@ -410,6 +416,53 @@ scheduler path:
   "changed_files": ["generated/live_codex_scheduler_smoke.json"],
   "expected_file_exists": true,
   "processed_task_ids": ["TASK-LIVE-CODEX-SCHEDULER-SMOKE"],
+  "scheduler_status": "idle",
+  "status": "completed"
+}
+```
+
+M12b adds a CLI-level live Codex smoke for the preferred runtime selector. This
+entrypoint uses the same gate, but calls the public CLI in a subprocess:
+
+```bash
+AGENTTEAM_RUN_LIVE_CODEX=1 \
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.live_codex_cli_smoke \
+  --output-dir /tmp/agentteam-live-codex-cli-smoke
+```
+
+Internally it runs:
+
+```bash
+python3 -m agentteam_runtime.cli \
+  --agent-pool <generated-agent-pool.json> \
+  --backlog <generated-backlog.json> \
+  --output-dir <run-dir> \
+  --project-root <temporary-git-repo> \
+  --run-until-idle \
+  --runtime codex
+```
+
+Then it queries:
+
+```bash
+python3 -m agentteam_runtime.cli \
+  --output-dir <run-dir> \
+  --show-state-index
+```
+
+The command exits non-zero unless the scheduler accepts the task, Codex creates
+`generated/live_codex_cli_smoke.json`, the state index reports the task as
+`done`, and the runtime session row records `CodexRuntimeAdapter` as `stopped`.
+
+Local verification on 2026-06-02 with `codex-cli 0.132.0` completed this CLI
+path:
+
+```json
+{
+  "changed_files": ["generated/live_codex_cli_smoke.json"],
+  "expected_file_exists": true,
+  "processed_task_ids": ["TASK-LIVE-CODEX-CLI-SMOKE"],
   "scheduler_status": "idle",
   "status": "completed"
 }
@@ -929,7 +982,9 @@ M10a adds a lightweight executable artifact lint command. M11a records logical
 runtime session lifecycle events around synchronous adapter calls. M11b adds
 runtime sessions to the SQLite state index. M12a adds a gated live Codex
 scheduler smoke that exercises scheduler, state index, and runtime session
-mechanics through `CodexRuntimeAdapter`. Claude Code is not integrated yet.
+mechanics through `CodexRuntimeAdapter`. M12b makes Codex a first-class CLI
+runtime selector through `--runtime codex`, while retaining `--codex-command`
+as a test/experiment override. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

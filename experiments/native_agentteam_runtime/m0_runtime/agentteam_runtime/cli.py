@@ -48,6 +48,14 @@ def main(argv=None):
         help="Commit the integration worktree only after the verification command passes.",
     )
     parser.add_argument(
+        "--runtime",
+        choices=["fake", "shell", "codex"],
+        help=(
+            "Runtime adapter to use. Defaults to fake unless --shell-command "
+            "or --codex-command is supplied."
+        ),
+    )
+    parser.add_argument(
         "--shell-command",
         nargs=argparse.REMAINDER,
         help="Optional command to execute through ShellRuntimeAdapter. Must appear last.",
@@ -66,12 +74,7 @@ def main(argv=None):
         return
     _require_execution_arg(parser, args.agent_pool, "--agent-pool")
     _require_execution_arg(parser, args.backlog, "--backlog")
-    if args.shell_command:
-        runtime_adapter = ShellRuntimeAdapter(args.shell_command)
-    elif args.codex_command:
-        runtime_adapter = CodexRuntimeAdapter(command=args.codex_command)
-    else:
-        runtime_adapter = None
+    runtime_adapter = _build_runtime_adapter(parser, args)
     integration_verification_command = _parse_command_json(
         parser,
         args.integration_verification_command_json,
@@ -110,6 +113,35 @@ def main(argv=None):
 def _require_execution_arg(parser, value, flag):
     if not value:
         parser.error(f"{flag} is required unless --show-state-index is set")
+
+
+def _build_runtime_adapter(parser, args):
+    runtime = args.runtime
+    if runtime is None:
+        if args.shell_command:
+            runtime = "shell"
+        elif args.codex_command:
+            runtime = "codex"
+        else:
+            runtime = "fake"
+
+    if runtime == "fake":
+        if args.shell_command or args.codex_command:
+            parser.error("--runtime fake cannot be combined with runtime command overrides")
+        return None
+    if runtime == "shell":
+        if args.codex_command:
+            parser.error("--codex-command cannot be combined with --runtime shell")
+        if not args.shell_command:
+            parser.error("--shell-command is required when --runtime shell is set")
+        return ShellRuntimeAdapter(args.shell_command)
+    if runtime == "codex":
+        if args.shell_command:
+            parser.error("--shell-command cannot be combined with --runtime codex")
+        if not args.project_root:
+            parser.error("--project-root is required when --runtime codex is set")
+        return CodexRuntimeAdapter(command=args.codex_command or None)
+    raise AssertionError(f"unhandled runtime: {runtime}")
 
 
 def _parse_command_json(parser, raw_command):
