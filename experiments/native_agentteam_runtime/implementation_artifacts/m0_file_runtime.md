@@ -115,6 +115,10 @@ The returned summary includes:
 - `integration_status`
 - `integration_branch`
 - `integration_worktree_path`
+- `integration_verification_status`
+- `integration_verification_exit_code`
+- `integration_verification_stdout`
+- `integration_verification_stderr`
 - `attempt_count`
 - `attempts`
 - `worktree_removed`
@@ -406,6 +410,46 @@ main branch. The integration worktree HEAD remains equal to source `HEAD`; the
 patch exists as unstaged working-tree changes for later verification and merge
 policy.
 
+## M5 Integration Verification
+
+M5 adds an explicit verification command for the integration worktree:
+
+```python
+result = run_simulation(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    project_root="/path/to/git/repo",
+    runtime_adapter=ShellRuntimeAdapter(["python3", "/path/to/worker.py"]),
+    integrate_accepted_patch=True,
+    integration_verification_command=[
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+    ],
+)
+```
+
+The command runs only after an accepted patch has been applied to the integration
+worktree. It returns:
+
+```json
+{
+  "integration_verification_status": "passed",
+  "integration_verification_exit_code": 0,
+  "integration_verification_stdout": "",
+  "integration_verification_stderr": ""
+}
+```
+
+If the command exits non-zero, the status is `failed`, but the underlying
+implementation attempt remains `accepted`. This keeps code validation,
+integration application, and integration verification as separate gates for a
+future merge controller.
+
+M5 still does not commit, push, or merge.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -424,8 +468,9 @@ extraction through `--output-last-message`. M1c adds a live smoke entrypoint,
 but normal committed verification still uses skip/fake paths rather than
 spending live model calls. M2 adds bounded retry, outcome classification, and
 opt-in accepted-worktree cleanup. M3a adds git diff auditing, M3b writes a patch
-artifact, and M4 applies accepted patches into an isolated integration worktree
-without committing. Claude Code is not integrated yet.
+artifact, M4 applies accepted patches into an isolated integration worktree, and
+M5 runs opt-in integration verification without committing. Claude Code is not
+integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -438,5 +483,4 @@ Before the next backend milestone, the next design/code step should define:
 - runtime session start/observe/stop interface for long-running workers;
 - executable artifact/schema lint command;
 - retry backoff, retry budget, and failure escalation policy;
-- verification commands for integration worktrees;
 - commit strategy, merge strategy, and result diff review policy.

@@ -229,6 +229,7 @@ def run_simulation(
     max_attempts=1,
     cleanup_accepted_worktrees=False,
     integrate_accepted_patch=False,
+    integration_verification_command=None,
 ):
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
@@ -426,6 +427,10 @@ def run_simulation(
             "integration_status": "not_requested",
             "integration_branch": None,
             "integration_worktree_path": None,
+            "integration_verification_status": "not_requested",
+            "integration_verification_exit_code": None,
+            "integration_verification_stdout": "",
+            "integration_verification_stderr": "",
             "worktree_removed": False,
         }
         attempts.append(final_attempt)
@@ -453,6 +458,25 @@ def run_simulation(
                         **integration,
                     },
                 )
+                if integration_verification_command:
+                    verification = run_integration_verification(
+                        integration_verification_command,
+                        integration["integration_worktree_path"],
+                    )
+                    final_attempt.update(verification)
+                    append_event(
+                        "integration_verified",
+                        agent_pool["scheduler_agent_id"],
+                        agent["agent_id"],
+                        f"integration-verified:{attempt_id}",
+                        correlation_id,
+                        {
+                            "task_id": task["task_id"],
+                            "attempt_id": attempt_id,
+                            "lease_id": lease_id,
+                            **verification,
+                        },
+                    )
             if cleanup_accepted_worktrees and project_root and worktree_path:
                 _remove_git_worktree(project_root, worktree_path)
                 final_attempt["worktree_removed"] = True
@@ -522,6 +546,10 @@ def run_simulation(
         "integration_status": final_attempt["integration_status"],
         "integration_branch": final_attempt["integration_branch"],
         "integration_worktree_path": final_attempt["integration_worktree_path"],
+        "integration_verification_status": final_attempt["integration_verification_status"],
+        "integration_verification_exit_code": final_attempt["integration_verification_exit_code"],
+        "integration_verification_stdout": final_attempt["integration_verification_stdout"],
+        "integration_verification_stderr": final_attempt["integration_verification_stderr"],
         "attempt_count": len(attempts),
         "attempts": attempts,
         "worktree_removed": final_attempt["worktree_removed"],
@@ -593,6 +621,19 @@ def replay_events(events_path):
             snapshot["attempts"].setdefault(attempt_id, {})["integration_worktree_path"] = payload[
                 "integration_worktree_path"
             ]
+        elif event["event_type"] == "integration_verified":
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "integration_verification_status"
+            ] = payload["integration_verification_status"]
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "integration_verification_exit_code"
+            ] = payload["integration_verification_exit_code"]
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "integration_verification_stdout"
+            ] = payload["integration_verification_stdout"]
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "integration_verification_stderr"
+            ] = payload["integration_verification_stderr"]
         elif event["event_type"] == "backlog_updated":
             snapshot["tasks"].setdefault(task_id, {})["task_status"] = payload["task_status"]
 
@@ -781,6 +822,23 @@ def apply_patch_to_integration_worktree(project_root, output_dir, task_id, patch
         "integration_status": "applied",
         "integration_branch": integration_branch,
         "integration_worktree_path": str(integration_worktree),
+    }
+
+
+def run_integration_verification(command, integration_worktree_path):
+    completed = subprocess.run(
+        list(command),
+        cwd=integration_worktree_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    return {
+        "integration_verification_status": "passed" if completed.returncode == 0 else "failed",
+        "integration_verification_exit_code": completed.returncode,
+        "integration_verification_stdout": completed.stdout,
+        "integration_verification_stderr": completed.stderr,
     }
 
 

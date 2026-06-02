@@ -455,6 +455,76 @@ class M0RuntimeTests(unittest.TestCase):
                 "applied",
             )
 
+    def test_integration_verification_command_passes_in_integration_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            script = tmp_path / "verify_worker.py"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_success_worker(script, "generated/integration_result.json")
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=ShellRuntimeAdapter([sys.executable, str(script)]),
+                integrate_accepted_patch=True,
+                integration_verification_command=[
+                    sys.executable,
+                    "-c",
+                    "import pathlib; assert pathlib.Path('generated/integration_result.json').exists()",
+                ],
+            )
+
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertEqual(result["integration_verification_status"], "passed")
+            self.assertEqual(result["integration_verification_exit_code"], 0)
+            self.assertEqual(
+                snapshot["attempts"]["ATTEMPT-001"]["integration_verification_status"],
+                "passed",
+            )
+
+    def test_integration_verification_command_failure_is_recorded_without_rejecting_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            script = tmp_path / "verify_fail_worker.py"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_success_worker(script, "generated/integration_result.json")
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=ShellRuntimeAdapter([sys.executable, str(script)]),
+                integrate_accepted_patch=True,
+                integration_verification_command=[
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.exit(7)",
+                ],
+            )
+
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertEqual(result["validation_status"], "accepted")
+            self.assertEqual(result["integration_status"], "applied")
+            self.assertEqual(result["integration_verification_status"], "failed")
+            self.assertEqual(result["integration_verification_exit_code"], 7)
+            self.assertEqual(
+                snapshot["attempts"]["ATTEMPT-001"]["integration_verification_status"],
+                "failed",
+            )
+
     def test_shell_runtime_adapter_failure_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

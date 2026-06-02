@@ -48,6 +48,7 @@
         "validation_accepted",
         "validation_rejected",
         "patch_integrated",
+        "integration_verified",
         "artifact_update_proposed",
         "artifact_update_integrated",
         "attempt_timed_out",
