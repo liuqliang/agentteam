@@ -13,6 +13,7 @@ from agentteam_runtime import (
     audit_worktree_diff,
     classify_attempt_outcome,
     replay_events,
+    run_scheduler_loop,
     run_simulation,
 )
 
@@ -58,6 +59,133 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(message["message_type"], "dispatch_task")
             self.assertEqual(message["payload"]["attempt_id"], "ATTEMPT-001")
             self.assertEqual(message["payload"]["worktree_id"], "WT-ATTEMPT-001")
+
+    def test_scheduler_loop_runs_ready_tasks_until_idle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            state = json.loads(Path(summary["state_path"]).read_text(encoding="utf-8"))
+            statuses = {
+                item["task_id"]: item["backlog_status"]
+                for item in state["backlog"]["items"]
+            }
+
+            self.assertEqual(summary["scheduler_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertEqual(summary["step_count"], 2)
+            self.assertEqual(statuses["TASK-001"], "done")
+            self.assertEqual(statuses["TASK-002"], "done")
+            self.assertTrue((output_dir / "steps" / "STEP-0001-TASK-001").exists())
+            self.assertTrue((output_dir / "steps" / "STEP-0002-TASK-002").exists())
+
+    def test_scheduler_loop_respects_done_dependencies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task(
+                        "TASK-001",
+                        write_scope=["generated/task-001/"],
+                        status="done",
+                    ),
+                    _backlog_task(
+                        "TASK-002",
+                        write_scope=["generated/task-002/"],
+                        depends_on=["TASK-001"],
+                    ),
+                    _backlog_task(
+                        "TASK-003",
+                        write_scope=["generated/task-003/"],
+                        depends_on=["TASK-MISSING"],
+                    ),
+                ],
+            )
+
+            summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            state = json.loads(Path(summary["state_path"]).read_text(encoding="utf-8"))
+            statuses = {
+                item["task_id"]: item["backlog_status"]
+                for item in state["backlog"]["items"]
+            }
+
+            self.assertEqual(summary["processed_task_ids"], ["TASK-002"])
+            self.assertEqual(statuses["TASK-001"], "done")
+            self.assertEqual(statuses["TASK-002"], "done")
+            self.assertEqual(statuses["TASK-003"], "ready")
+
+    def test_scheduler_loop_resumes_from_persisted_state(self):
+        class RecordingRuntimeAdapter:
+            def __init__(self):
+                self.task_ids = []
+
+            def run(self, message, worktree_path=None):
+                self.task_ids.append(message["payload"]["task_id"])
+                return {
+                    "result_status": "completed",
+                    "changed_files": message["payload"]["write_scope"],
+                    "output": {"adapter": "recording"},
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            adapter = RecordingRuntimeAdapter()
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            first_summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=adapter,
+                max_steps=1,
+            )
+            second_summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=adapter,
+            )
+
+            self.assertEqual(first_summary["scheduler_status"], "max_steps_reached")
+            self.assertEqual(second_summary["scheduler_status"], "idle")
+            self.assertEqual(second_summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertEqual(adapter.task_ids, ["TASK-001", "TASK-002"])
 
     def test_replay_reconstructs_done_task_only_after_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -993,27 +1121,35 @@ def _git_status_short(repo):
     return completed.stdout.strip()
 
 
-def _write_backlog(tmp_path, write_scope):
+def _write_backlog(tmp_path, write_scope, tasks=None):
     backlog = {
         "backlog_id": "BL-TEST",
-        "items": [
-            {
-                "task_id": "TASK-001",
-                "milestone_id": "M0",
-                "objective": "Create generated repo index.",
-                "backlog_status": "ready",
-                "risk_target": "L0",
-                "depends_on": [],
-                "read_scope": ["."],
-                "write_scope": write_scope,
-                "required_role": "repo_map_agent",
-                "blockers": [],
-            }
-        ],
+        "items": tasks or [_backlog_task("TASK-001", write_scope=write_scope)],
     }
     path = tmp_path / "backlog.json"
     path.write_text(json.dumps(backlog), encoding="utf-8")
     return path
+
+
+def _backlog_task(
+    task_id,
+    write_scope,
+    status="ready",
+    depends_on=None,
+    blockers=None,
+):
+    return {
+        "task_id": task_id,
+        "milestone_id": "M0",
+        "objective": f"Create generated repo index for {task_id}.",
+        "backlog_status": status,
+        "risk_target": "L0",
+        "depends_on": list(depends_on or []),
+        "read_scope": ["."],
+        "write_scope": write_scope,
+        "required_role": "repo_map_agent",
+        "blockers": list(blockers or []),
+    }
 
 
 def _write_success_worker(path, changed_file):

@@ -1,5 +1,6 @@
 import json
 import subprocess
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -589,6 +590,188 @@ def run_simulation(
         "events_path": str(events_path),
         "mailbox_path": str(inbox_path),
     }
+
+
+class FileScheduler:
+    def __init__(
+        self,
+        agent_pool_path,
+        backlog_path,
+        output_dir,
+        clock=None,
+        project_root=None,
+        runtime_adapter=None,
+        max_attempts=1,
+        cleanup_accepted_worktrees=False,
+        integrate_accepted_patch=False,
+        integration_verification_command=None,
+        commit_verified_integration=False,
+        state_path=None,
+    ):
+        self.agent_pool_path = agent_pool_path
+        self.backlog_path = backlog_path
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.clock = clock or SystemClock()
+        self.project_root = project_root
+        self.runtime_adapter = runtime_adapter or FakeRuntimeAdapter()
+        self.max_attempts = max_attempts
+        self.cleanup_accepted_worktrees = cleanup_accepted_worktrees
+        self.integrate_accepted_patch = integrate_accepted_patch
+        self.integration_verification_command = integration_verification_command
+        self.commit_verified_integration = commit_verified_integration
+        self.state_path = Path(state_path or self.output_dir / "state" / "scheduler_state.json")
+        self.state = self._load_or_create_state()
+
+    def step_once(self):
+        task = self._select_ready_task()
+        if not task:
+            self.state["scheduler_status"] = "idle"
+            self._write_state()
+            return {
+                "step_status": "idle",
+                "reason": "no_ready_task",
+                "state_path": str(self.state_path),
+            }
+
+        step_number = len(self.state["steps"]) + 1
+        step_id = f"STEP-{step_number:04d}-{task['task_id']}"
+        step_dir = self.output_dir / "steps" / step_id
+        step_dir.mkdir(parents=True, exist_ok=True)
+        step_backlog_path = step_dir / "backlog.json"
+        step_backlog_path.write_text(
+            json.dumps(
+                {
+                    "backlog_id": self.state["backlog"].get("backlog_id", "BL-SCHEDULER-STEP"),
+                    "items": [deepcopy(task)],
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
+        result = run_simulation(
+            self.agent_pool_path,
+            step_backlog_path,
+            step_dir,
+            clock=self.clock,
+            project_root=self.project_root,
+            runtime_adapter=self.runtime_adapter,
+            max_attempts=self.max_attempts,
+            cleanup_accepted_worktrees=self.cleanup_accepted_worktrees,
+            integrate_accepted_patch=self.integrate_accepted_patch,
+            integration_verification_command=self.integration_verification_command,
+            commit_verified_integration=self.commit_verified_integration,
+        )
+        self._update_task_from_result(task["task_id"], result)
+        step_summary = {
+            "step_id": step_id,
+            "step_status": "processed",
+            "task_id": task["task_id"],
+            "validation_status": result["validation_status"],
+            "failure_category": result["failure_category"],
+            "result": result,
+        }
+        self.state["steps"].append(step_summary)
+        self.state["scheduler_status"] = "running"
+        self._write_state()
+        return step_summary
+
+    def run_until_idle(self, max_steps=100):
+        if max_steps < 1:
+            raise ValueError("max_steps must be at least 1")
+        for _ in range(max_steps):
+            step = self.step_once()
+            if step["step_status"] == "idle":
+                return self._summary("idle")
+        self.state["scheduler_status"] = "max_steps_reached"
+        self._write_state()
+        return self._summary("max_steps_reached")
+
+    def _load_or_create_state(self):
+        if self.state_path.exists():
+            return _read_json(self.state_path)
+        return {
+            "scheduler_status": "initialized",
+            "backlog": _read_json(self.backlog_path),
+            "steps": [],
+        }
+
+    def _select_ready_task(self):
+        done_by_id = {
+            item["task_id"]: item.get("backlog_status") == "done"
+            for item in self.state["backlog"]["items"]
+        }
+        for task in self.state["backlog"]["items"]:
+            if task.get("backlog_status") != "ready":
+                continue
+            if task.get("blockers"):
+                continue
+            if not all(done_by_id.get(dep_id, False) for dep_id in task.get("depends_on", [])):
+                continue
+            return task
+        return None
+
+    def _update_task_from_result(self, task_id, result):
+        for task in self.state["backlog"]["items"]:
+            if task["task_id"] != task_id:
+                continue
+            if result["validation_status"] == "accepted":
+                task["backlog_status"] = "done"
+                task["blockers"] = []
+            else:
+                task["backlog_status"] = "blocked"
+                task["blockers"] = [result["failure_category"] or "validation_rejected"]
+            return
+        raise ValueError(f"task not found in scheduler state: {task_id}")
+
+    def _summary(self, scheduler_status):
+        processed_task_ids = [
+            step["task_id"]
+            for step in self.state["steps"]
+            if step["step_status"] == "processed"
+        ]
+        return {
+            "scheduler_status": scheduler_status,
+            "processed_task_ids": processed_task_ids,
+            "step_count": len(self.state["steps"]),
+            "steps": self.state["steps"],
+            "state_path": str(self.state_path),
+        }
+
+    def _write_state(self):
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.write_text(json.dumps(self.state, sort_keys=True), encoding="utf-8")
+
+
+def run_scheduler_loop(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    clock=None,
+    project_root=None,
+    runtime_adapter=None,
+    max_attempts=1,
+    cleanup_accepted_worktrees=False,
+    integrate_accepted_patch=False,
+    integration_verification_command=None,
+    commit_verified_integration=False,
+    max_steps=100,
+):
+    scheduler = FileScheduler(
+        agent_pool_path,
+        backlog_path,
+        output_dir,
+        clock=clock,
+        project_root=project_root,
+        runtime_adapter=runtime_adapter,
+        max_attempts=max_attempts,
+        cleanup_accepted_worktrees=cleanup_accepted_worktrees,
+        integrate_accepted_patch=integrate_accepted_patch,
+        integration_verification_command=integration_verification_command,
+        commit_verified_integration=commit_verified_integration,
+    )
+    return scheduler.run_until_idle(max_steps=max_steps)
 
 
 def replay_events(events_path):

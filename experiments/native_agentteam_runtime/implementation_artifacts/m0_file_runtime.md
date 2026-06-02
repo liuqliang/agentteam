@@ -54,14 +54,18 @@ experiments/native_agentteam_runtime/m0_runtime/
 from agentteam_runtime import (
     CodexRuntimeAdapter,
     FakeRuntimeAdapter,
+    FileScheduler,
     ShellRuntimeAdapter,
     classify_attempt_outcome,
     replay_events,
+    run_scheduler_loop,
     run_simulation,
 )
 
 result = run_simulation(agent_pool_path, backlog_path, output_dir)
 snapshot = replay_events(result["events_path"])
+
+loop_summary = run_scheduler_loop(agent_pool_path, backlog_path, output_dir)
 
 result_with_worktree = run_simulation(
     agent_pool_path,
@@ -530,6 +534,63 @@ checkpoint on the integration branch. Merging back to the source branch remains
 a later full-task/system gate after all parts of the functional change have
 been integrated and verified.
 
+## M7a File Scheduler Loop
+
+M7a adds the first persistent scheduler loop facade:
+
+```python
+summary = run_scheduler_loop(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    runtime_adapter=FakeRuntimeAdapter(),
+)
+```
+
+It is equivalent to:
+
+```python
+scheduler = FileScheduler(agent_pool_path, backlog_path, output_dir)
+summary = scheduler.run_until_idle()
+```
+
+The loop repeatedly selects the next ready task, delegates that single task to
+the existing `run_simulation(...)` path, updates backlog state, and writes:
+
+```text
+<output-dir>/state/scheduler_state.json
+<output-dir>/steps/STEP-0001-<task-id>/
+<output-dir>/steps/STEP-0002-<task-id>/
+```
+
+The summary shape is:
+
+```json
+{
+  "scheduler_status": "idle",
+  "processed_task_ids": ["TASK-001", "TASK-002"],
+  "step_count": 2,
+  "state_path": "<output-dir>/state/scheduler_state.json"
+}
+```
+
+Task readiness is deterministic. A task is selectable only when:
+
+- `backlog_status == "ready"`;
+- it has no `blockers`;
+- every task in `depends_on` is already `done`.
+
+Accepted task results set the persisted backlog item to `done`. Rejected
+results set it to `blocked` with a compact blocker reason.
+
+If `<output-dir>/state/scheduler_state.json` already exists, `FileScheduler`
+loads it and resumes from the persisted backlog/step state. Re-running the loop
+with the same output directory does not repeat tasks already marked `done`.
+
+M7a is still intentionally sequential. It does not add concurrent workers,
+database storage, a daemon process, long-lived Codex/Claude sessions, unified
+multi-step event logs, or merge-to-main.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -550,7 +611,9 @@ spending live model calls. M2 adds bounded retry, outcome classification, and
 opt-in accepted-worktree cleanup. M3a adds git diff auditing, M3b writes a patch
 artifact, M4 applies accepted patches into an isolated integration worktree, M5
 runs opt-in integration verification, and M6 can commit only a verified
-integration worktree checkpoint. Claude Code is not integrated yet.
+integration worktree checkpoint. M7a adds a sequential file-backed scheduler
+loop that can process multiple ready tasks until idle. Claude Code is not
+integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -561,6 +624,7 @@ Before the next backend milestone, the next design/code step should define:
 - decide when live Codex smoke should run outside local opt-in;
 - Claude Code adapter feasibility and result extraction contract;
 - runtime session start/observe/stop interface for long-running workers;
+- unified event log and globally unique attempt ids for multi-step loops;
 - executable artifact/schema lint command;
 - retry backoff, retry budget, and failure escalation policy;
 - merge strategy and result diff review policy for complete task/system gates.
