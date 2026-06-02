@@ -77,7 +77,8 @@ def main(argv=None):
             commit_verified_integration=args.commit_verified_integration,
             max_steps=args.max_steps,
         )
-        print(json.dumps(result, sort_keys=True))
+        snapshot = replay_events(result["events_path"])
+        print(json.dumps({**result, "snapshot": snapshot}, sort_keys=True))
         return
 
     result = run_simulation(

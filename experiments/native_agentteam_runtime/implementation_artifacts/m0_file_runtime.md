@@ -168,14 +168,20 @@ The loop CLI prints the scheduler summary:
   "processed_task_ids": ["TASK-001", "TASK-002"],
   "step_count": 2,
   "events_path": "/tmp/agentteam-m7c-run/events.jsonl",
-  "state_path": "/tmp/agentteam-m7c-run/state/scheduler_state.json"
+  "state_path": "/tmp/agentteam-m7c-run/state/scheduler_state.json",
+  "snapshot": {
+    "tasks": {
+      "TASK-001": {"task_status": "done"},
+      "TASK-002": {"task_status": "done"}
+    }
+  }
 }
 ```
 
 Use `--max-steps <n>` with `--run-until-idle` to cap the number of scheduler
 steps. The default CLI path remains single-task and still prints the replayed
-snapshot. The loop path prints the canonical root `events.jsonl` path; callers
-can replay that file with `replay_events(...)`.
+snapshot. The loop path also prints a snapshot replayed from the canonical root
+`events.jsonl`.
 
 To run a real local process through the shell adapter, put `--shell-command`
 last:
@@ -681,7 +687,8 @@ attempt/worktree ids task-scoped so worktree-backed loops can process more than
 one task in a run. M7c exposes that loop through `--run-until-idle`. M8a adds a
 canonical root event log for scheduler-loop replay. M8b scopes scheduler-loop
 lease and message ids by task id so canonical replay can preserve per-step lease
-state. Claude Code is not integrated yet.
+state. M8c makes the loop CLI include a replayed snapshot. Claude Code is not
+integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

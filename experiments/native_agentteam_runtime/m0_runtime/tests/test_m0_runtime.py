@@ -440,6 +440,12 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["step_count"], 2)
             self.assertEqual(statuses["TASK-001"], "done")
             self.assertEqual(statuses["TASK-002"], "done")
+            self.assertEqual(summary["snapshot"]["tasks"]["TASK-001"]["task_status"], "done")
+            self.assertEqual(summary["snapshot"]["tasks"]["TASK-002"]["task_status"], "done")
+            self.assertEqual(
+                set(summary["snapshot"]["leases"].keys()),
+                {"TASK-001-LEASE-001", "TASK-002-LEASE-001"},
+            )
 
     def test_cli_can_create_git_worktree_when_project_root_is_supplied(self):
         with tempfile.TemporaryDirectory() as tmp:
