@@ -310,6 +310,36 @@ M12c exposes three Codex runtime controls:
 - `--codex-timeout-seconds`: sets the adapter subprocess timeout, defaulting to
   `300`.
 
+M13a lets the selected agent override those CLI fallback values through
+`agent_pool.agents[].runtime_profile`:
+
+```json
+{
+  "agent_id": "agent-implementation",
+  "role": "worker_agent",
+  "status": "idle",
+  "model_profile": "coding-l1",
+  "runtime_adapter": "codex",
+  "runtime_profile": {
+    "adapter": "codex",
+    "model": "gpt-5.4",
+    "sandbox": "workspace-write",
+    "timeout_seconds": 300
+  }
+}
+```
+
+The dispatch-time precedence is:
+
+1. the selected agent's `runtime_profile`;
+2. CLI runtime flags as fallback;
+3. `FakeRuntimeAdapter` when neither profile nor CLI runtime is supplied.
+
+For tests and local experiments, `--codex-command` remains a command override
+even when the selected agent has a Codex profile. This allows fake Codex
+commands to verify profile model/sandbox forwarding without making a live model
+call.
+
 `CodexRuntimeAdapter` invokes the command as:
 
 ```text
@@ -995,7 +1025,9 @@ scheduler smoke that exercises scheduler, state index, and runtime session
 mechanics through `CodexRuntimeAdapter`. M12b makes Codex a first-class CLI
 runtime selector through `--runtime codex`, while retaining `--codex-command`
 as a test/experiment override. M12c exposes Codex model, sandbox, and timeout
-controls through the CLI. Claude Code is not integrated yet.
+controls through the CLI. M13a adds agent-level `runtime_profile` resolution so
+different role agents can carry different Codex runtime settings in
+`agent_pool`. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

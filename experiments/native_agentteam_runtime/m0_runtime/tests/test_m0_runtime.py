@@ -1851,6 +1851,68 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(recorded["model"], "gpt-test-model")
             self.assertEqual(recorded["sandbox"], "read-only")
 
+    def test_cli_uses_agent_runtime_profile_for_codex_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            fake_codex = tmp_path / "fake_codex_profile.py"
+            target_file = "generated/codex_agent_profile.json"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_agent_pool_with_runtime_profile(
+                agent_pool_path,
+                runtime_profile={
+                    "adapter": "codex",
+                    "model": "agent-profile-model",
+                    "sandbox": "read-only",
+                    "timeout_seconds": 30,
+                },
+            )
+            _write_fake_codex_arg_recorder(fake_codex, changed_file=target_file)
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(agent_pool_path),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--project-root",
+                    str(repo),
+                    "--codex-command",
+                    sys.executable,
+                    str(fake_codex),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            recorded = json.loads(
+                (Path(summary["worktree_path"]) / target_file).read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(summary["validation_status"], "accepted")
+            self.assertEqual(
+                summary["snapshot"]["runtime_sessions"]["SESSION-ATTEMPT-001"][
+                    "runtime_adapter"
+                ],
+                "CodexRuntimeAdapter",
+            )
+            self.assertEqual(recorded["model"], "agent-profile-model")
+            self.assertEqual(recorded["sandbox"], "read-only")
+
 
 def _init_git_repo(path):
     path.mkdir(parents=True)
@@ -1906,6 +1968,36 @@ def _write_backlog(tmp_path, write_scope, tasks=None):
     path = tmp_path / "backlog.json"
     path.write_text(json.dumps(backlog), encoding="utf-8")
     return path
+
+
+def _write_agent_pool_with_runtime_profile(path, runtime_profile):
+    agent_pool = {
+        "pool_id": "test-agent-pool",
+        "scheduler_agent_id": "agent-scheduler",
+        "updated_at": "2026-06-02T00:00:00Z",
+        "agents": [
+            {
+                "agent_id": "agent-repo-map",
+                "role": "repo_map_agent",
+                "status": "idle",
+                "model_profile": "small-tooling",
+                "runtime_adapter": "codex",
+                "runtime_profile": runtime_profile,
+                "subscriptions": ["repo_index_stale"],
+                "inbox_path": "mailboxes/agent-repo-map/inbox.jsonl",
+                "outbox_path": "mailboxes/agent-repo-map/outbox.jsonl",
+                "lease": {
+                    "lease_id": None,
+                    "task_id": None,
+                    "expires_at": None,
+                },
+                "owned_artifacts": [],
+                "last_event_id": None,
+                "memory_summary_path": None,
+            }
+        ],
+    }
+    path.write_text(json.dumps(agent_pool), encoding="utf-8")
 
 
 def _backlog_task(

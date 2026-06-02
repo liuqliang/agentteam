@@ -228,6 +228,7 @@ def run_simulation(
     clock=None,
     project_root=None,
     runtime_adapter=None,
+    runtime_adapter_factory=None,
     max_attempts=1,
     cleanup_accepted_worktrees=False,
     integrate_accepted_patch=False,
@@ -238,7 +239,6 @@ def run_simulation(
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
     clock = clock or SystemClock()
-    runtime_adapter = runtime_adapter or FakeRuntimeAdapter()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -247,6 +247,12 @@ def run_simulation(
 
     task = _select_ready_task(backlog)
     agent = _find_idle_agent(agent_pool, task["required_role"])
+    runtime_adapter = _resolve_runtime_adapter(
+        runtime_adapter,
+        runtime_adapter_factory,
+        agent,
+        task,
+    )
 
     inbox_path = output_dir / agent["inbox_path"]
     events_path = output_dir / "events.jsonl"
@@ -665,6 +671,7 @@ class FileScheduler:
         integration_verification_command=None,
         commit_verified_integration=False,
         state_path=None,
+        runtime_adapter_factory=None,
     ):
         self.agent_pool_path = agent_pool_path
         self.backlog_path = backlog_path
@@ -673,6 +680,7 @@ class FileScheduler:
         self.clock = clock or SystemClock()
         self.project_root = project_root
         self.runtime_adapter = runtime_adapter or FakeRuntimeAdapter()
+        self.runtime_adapter_factory = runtime_adapter_factory
         self.max_attempts = max_attempts
         self.cleanup_accepted_worktrees = cleanup_accepted_worktrees
         self.integrate_accepted_patch = integrate_accepted_patch
@@ -718,6 +726,7 @@ class FileScheduler:
             clock=self.clock,
             project_root=self.project_root,
             runtime_adapter=self.runtime_adapter,
+            runtime_adapter_factory=self.runtime_adapter_factory,
             max_attempts=self.max_attempts,
             cleanup_accepted_worktrees=self.cleanup_accepted_worktrees,
             integrate_accepted_patch=self.integrate_accepted_patch,
@@ -847,6 +856,7 @@ def run_scheduler_loop(
     clock=None,
     project_root=None,
     runtime_adapter=None,
+    runtime_adapter_factory=None,
     max_attempts=1,
     cleanup_accepted_worktrees=False,
     integrate_accepted_patch=False,
@@ -861,6 +871,7 @@ def run_scheduler_loop(
         clock=clock,
         project_root=project_root,
         runtime_adapter=runtime_adapter,
+        runtime_adapter_factory=runtime_adapter_factory,
         max_attempts=max_attempts,
         cleanup_accepted_worktrees=cleanup_accepted_worktrees,
         integrate_accepted_patch=integrate_accepted_patch,
@@ -1282,6 +1293,12 @@ def _find_idle_agent(agent_pool, role):
         if agent["role"] == role and agent["status"] == "idle":
             return agent
     raise ValueError(f"no idle agent found for role {role}")
+
+
+def _resolve_runtime_adapter(runtime_adapter, runtime_adapter_factory, agent, task):
+    if runtime_adapter_factory:
+        return runtime_adapter_factory(agent, task) or FakeRuntimeAdapter()
+    return runtime_adapter or FakeRuntimeAdapter()
 
 
 def _fake_changed_files(write_scope):

@@ -84,7 +84,7 @@ def main(argv=None):
         return
     _require_execution_arg(parser, args.agent_pool, "--agent-pool")
     _require_execution_arg(parser, args.backlog, "--backlog")
-    runtime_adapter = _build_runtime_adapter(parser, args)
+    runtime_adapter_factory = _build_runtime_adapter_factory(parser, args)
     integration_verification_command = _parse_command_json(
         parser,
         args.integration_verification_command_json,
@@ -96,7 +96,7 @@ def main(argv=None):
             args.backlog,
             args.output_dir,
             project_root=args.project_root,
-            runtime_adapter=runtime_adapter,
+            runtime_adapter_factory=runtime_adapter_factory,
             integrate_accepted_patch=args.integrate_accepted_patch,
             integration_verification_command=integration_verification_command,
             commit_verified_integration=args.commit_verified_integration,
@@ -111,7 +111,7 @@ def main(argv=None):
         args.backlog,
         args.output_dir,
         project_root=args.project_root,
-        runtime_adapter=runtime_adapter,
+        runtime_adapter_factory=runtime_adapter_factory,
         integrate_accepted_patch=args.integrate_accepted_patch,
         integration_verification_command=integration_verification_command,
         commit_verified_integration=args.commit_verified_integration,
@@ -162,6 +162,57 @@ def _build_runtime_adapter(parser, args):
             timeout_seconds=args.codex_timeout_seconds or 300,
         )
     raise AssertionError(f"unhandled runtime: {runtime}")
+
+
+def _build_runtime_adapter_factory(parser, args):
+    fallback_adapter = _build_runtime_adapter(parser, args)
+
+    def runtime_adapter_factory(agent, task):
+        del task
+        profile = agent.get("runtime_profile")
+        if profile:
+            return _build_runtime_adapter_from_profile(parser, args, profile)
+        return fallback_adapter
+
+    return runtime_adapter_factory
+
+
+def _build_runtime_adapter_from_profile(parser, args, profile):
+    if not isinstance(profile, dict):
+        parser.error("agent runtime_profile must be an object")
+    adapter = profile.get("adapter", "fake")
+    if adapter == "fake":
+        return None
+    if adapter == "shell":
+        command = profile.get("command") or args.shell_command
+        if not _is_string_list(command):
+            parser.error("shell runtime_profile requires command as a string array")
+        return ShellRuntimeAdapter(command)
+    if adapter == "codex":
+        if args.shell_command:
+            parser.error("--shell-command cannot be combined with Codex agent runtime_profile")
+        if not args.project_root:
+            parser.error("--project-root is required for Codex agent runtime_profile")
+        command = args.codex_command or profile.get("command")
+        if command is not None and not _is_string_list(command):
+            parser.error("codex runtime_profile command must be a string array")
+        timeout_seconds = profile.get(
+            "timeout_seconds",
+            args.codex_timeout_seconds or 300,
+        )
+        if not isinstance(timeout_seconds, int) or timeout_seconds < 1:
+            parser.error("codex runtime_profile timeout_seconds must be an integer >= 1")
+        return CodexRuntimeAdapter(
+            command=command or None,
+            model=profile.get("model", args.codex_model),
+            sandbox=profile.get("sandbox", args.codex_sandbox or "workspace-write"),
+            timeout_seconds=timeout_seconds,
+        )
+    parser.error(f"unsupported agent runtime_profile adapter: {adapter}")
+
+
+def _is_string_list(value):
+    return isinstance(value, list) and value and all(isinstance(part, str) for part in value)
 
 
 def _has_codex_runtime_options(args):

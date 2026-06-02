@@ -37,6 +37,37 @@
       "type": "string",
       "default": "manual"
     },
+    "runtime_profile": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["adapter"],
+      "properties": {
+        "adapter": {
+          "type": "string",
+          "enum": ["fake", "shell", "codex"]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sandbox": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      }
+    },
     "subscriptions": {
       "type": "array",
       "items": {
