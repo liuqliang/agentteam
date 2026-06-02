@@ -298,6 +298,54 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["task_id"], "TASK-001")
             self.assertTrue((output_dir / "events.jsonl").exists())
 
+    def test_cli_can_run_scheduler_loop_until_idle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--run-until-idle",
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            state = json.loads(Path(summary["state_path"]).read_text(encoding="utf-8"))
+            statuses = {
+                item["task_id"]: item["backlog_status"]
+                for item in state["backlog"]["items"]
+            }
+
+            self.assertEqual(summary["scheduler_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertEqual(summary["step_count"], 2)
+            self.assertEqual(statuses["TASK-001"], "done")
+            self.assertEqual(statuses["TASK-002"], "done")
+
     def test_cli_can_create_git_worktree_when_project_root_is_supplied(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

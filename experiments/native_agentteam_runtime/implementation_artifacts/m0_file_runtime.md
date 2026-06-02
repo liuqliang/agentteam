@@ -148,6 +148,34 @@ python3 -m agentteam_runtime.cli \
 The CLI prints one JSON summary containing the simulation result and replayed
 snapshot.
 
+To run the file scheduler loop until no ready tasks remain, pass
+`--run-until-idle`:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool experiments/native_agentteam_runtime/fixtures/sample_agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m7c-run \
+  --run-until-idle
+```
+
+The loop CLI prints the scheduler summary:
+
+```json
+{
+  "scheduler_status": "idle",
+  "processed_task_ids": ["TASK-001", "TASK-002"],
+  "step_count": 2,
+  "state_path": "/tmp/agentteam-m7c-run/state/scheduler_state.json"
+}
+```
+
+Use `--max-steps <n>` with `--run-until-idle` to cap the number of scheduler
+steps. The default CLI path remains single-task and still prints the replayed
+snapshot. The loop path does not attach a unified replay snapshot yet because
+M7a/M7b still keep per-step event logs.
+
 To run a real local process through the shell adapter, put `--shell-command`
 last:
 
@@ -626,7 +654,8 @@ runs opt-in integration verification, and M6 can commit only a verified
 integration worktree checkpoint. M7a adds a sequential file-backed scheduler
 loop that can process multiple ready tasks until idle. M7b makes scheduler-loop
 attempt/worktree ids task-scoped so worktree-backed loops can process more than
-one task in a run. Claude Code is not integrated yet.
+one task in a run. M7c exposes that loop through `--run-until-idle`. Claude Code
+is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

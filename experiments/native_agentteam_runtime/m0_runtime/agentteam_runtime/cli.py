@@ -1,7 +1,13 @@
 import argparse
 import json
 
-from .m0_runtime import CodexRuntimeAdapter, ShellRuntimeAdapter, replay_events, run_simulation
+from .m0_runtime import (
+    CodexRuntimeAdapter,
+    ShellRuntimeAdapter,
+    replay_events,
+    run_scheduler_loop,
+    run_simulation,
+)
 
 
 def main(argv=None):
@@ -10,6 +16,17 @@ def main(argv=None):
     parser.add_argument("--backlog", required=True, help="Path to backlog JSON.")
     parser.add_argument("--output-dir", required=True, help="Directory for mailbox and event output.")
     parser.add_argument("--project-root", help="Optional git repository root for real worktree creation.")
+    parser.add_argument(
+        "--run-until-idle",
+        action="store_true",
+        help="Run the file scheduler loop until no ready tasks remain.",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=100,
+        help="Maximum scheduler loop steps when --run-until-idle is set.",
+    )
     parser.add_argument(
         "--integrate-accepted-patch",
         action="store_true",
@@ -47,6 +64,21 @@ def main(argv=None):
         parser,
         args.integration_verification_command_json,
     )
+
+    if args.run_until_idle:
+        result = run_scheduler_loop(
+            args.agent_pool,
+            args.backlog,
+            args.output_dir,
+            project_root=args.project_root,
+            runtime_adapter=runtime_adapter,
+            integrate_accepted_patch=args.integrate_accepted_patch,
+            integration_verification_command=integration_verification_command,
+            commit_verified_integration=args.commit_verified_integration,
+            max_steps=args.max_steps,
+        )
+        print(json.dumps(result, sort_keys=True))
+        return
 
     result = run_simulation(
         args.agent_pool,
