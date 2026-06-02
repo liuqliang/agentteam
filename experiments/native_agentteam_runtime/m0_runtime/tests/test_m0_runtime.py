@@ -187,6 +187,43 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(second_summary["processed_task_ids"], ["TASK-001", "TASK-002"])
             self.assertEqual(adapter.task_ids, ["TASK-001", "TASK-002"])
 
+    def test_scheduler_loop_uses_task_scoped_worktree_branches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            branches = [step["result"]["branch"] for step in summary["steps"]]
+            worktree_ids = [step["result"]["worktree_id"] for step in summary["steps"]]
+
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertEqual(
+                branches,
+                ["agentteam/TASK-001-ATTEMPT-001", "agentteam/TASK-002-ATTEMPT-001"],
+            )
+            self.assertEqual(
+                worktree_ids,
+                ["WT-TASK-001-ATTEMPT-001", "WT-TASK-002-ATTEMPT-001"],
+            )
+
     def test_replay_reconstructs_done_task_only_after_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)

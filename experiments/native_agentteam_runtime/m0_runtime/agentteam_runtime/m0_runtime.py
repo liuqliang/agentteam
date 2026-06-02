@@ -232,6 +232,7 @@ def run_simulation(
     integrate_accepted_patch=False,
     integration_verification_command=None,
     commit_verified_integration=False,
+    attempt_id_prefix=None,
 ):
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
@@ -270,7 +271,7 @@ def run_simulation(
 
     final_attempt = None
     for attempt_number in range(1, max_attempts + 1):
-        attempt_id = f"ATTEMPT-{attempt_number:03d}"
+        attempt_id = _scoped_attempt_id(attempt_number, attempt_id_prefix)
         lease_id = f"LEASE-{attempt_number:03d}"
         message_id = f"MSG-{attempt_number:04d}"
         worktree_id = f"WT-{attempt_id}" if task.get("write_scope") else None
@@ -549,7 +550,10 @@ def run_simulation(
                     "attempt_id": attempt_id,
                     "lease_id": lease_id,
                     "failure_category": outcome["failure_category"],
-                    "next_attempt_id": f"ATTEMPT-{attempt_number + 1:03d}",
+                    "next_attempt_id": _scoped_attempt_id(
+                        attempt_number + 1,
+                        attempt_id_prefix,
+                    ),
                     "recovery_action": "retry",
                 },
             )
@@ -662,6 +666,7 @@ class FileScheduler:
             integrate_accepted_patch=self.integrate_accepted_patch,
             integration_verification_command=self.integration_verification_command,
             commit_verified_integration=self.commit_verified_integration,
+            attempt_id_prefix=task["task_id"],
         )
         self._update_task_from_result(task["task_id"], result)
         step_summary = {
@@ -887,6 +892,14 @@ def _fake_changed_files(write_scope):
     if not write_scope:
         return []
     return [f"{write_scope[0].rstrip('/')}/m0_generated_repo_index.json"]
+
+
+def _scoped_attempt_id(attempt_number, attempt_id_prefix=None):
+    attempt_id = f"ATTEMPT-{attempt_number:03d}"
+    if not attempt_id_prefix:
+        return attempt_id
+    safe_prefix = str(attempt_id_prefix).replace("/", "-")
+    return f"{safe_prefix}-{attempt_id}"
 
 
 def _changed_files_in_scope(changed_files, task):

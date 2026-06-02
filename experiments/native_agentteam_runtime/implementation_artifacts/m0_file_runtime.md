@@ -587,6 +587,18 @@ If `<output-dir>/state/scheduler_state.json` already exists, `FileScheduler`
 loads it and resumes from the persisted backlog/step state. Re-running the loop
 with the same output directory does not repeat tasks already marked `done`.
 
+When `FileScheduler` delegates a task to `run_simulation(...)`, it namespaces
+attempt ids by task id. This keeps worktree-backed multi-step runs from reusing
+the same git branch:
+
+```text
+TASK-001-ATTEMPT-001 -> agentteam/TASK-001-ATTEMPT-001
+TASK-002-ATTEMPT-001 -> agentteam/TASK-002-ATTEMPT-001
+```
+
+Plain `run_simulation(...)` keeps the existing default ids such as
+`ATTEMPT-001`, `WT-ATTEMPT-001`, and `agentteam/ATTEMPT-001`.
+
 M7a is still intentionally sequential. It does not add concurrent workers,
 database storage, a daemon process, long-lived Codex/Claude sessions, unified
 multi-step event logs, or merge-to-main.
@@ -612,8 +624,9 @@ opt-in accepted-worktree cleanup. M3a adds git diff auditing, M3b writes a patch
 artifact, M4 applies accepted patches into an isolated integration worktree, M5
 runs opt-in integration verification, and M6 can commit only a verified
 integration worktree checkpoint. M7a adds a sequential file-backed scheduler
-loop that can process multiple ready tasks until idle. Claude Code is not
-integrated yet.
+loop that can process multiple ready tasks until idle. M7b makes scheduler-loop
+attempt/worktree ids task-scoped so worktree-backed loops can process more than
+one task in a run. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
