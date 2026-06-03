@@ -2,7 +2,10 @@ import argparse
 import json
 
 from .daemon import run_file_daemon
-from .mailbox_worker import FileMailboxRuntimeAdapter
+from .mailbox_worker import (
+    FileMailboxRuntimeAdapter,
+    FileMailboxSubprocessRuntimeAdapter,
+)
 from .m0_runtime import (
     FakeRuntimeAdapter,
     read_scheduler_state_index,
@@ -37,6 +40,11 @@ def main(argv=None):
         "--daemon-mailbox-worker",
         action="store_true",
         help="Run daemon tasks through the file mailbox worker bridge with a fake delegate.",
+    )
+    parser.add_argument(
+        "--daemon-mailbox-subprocess-worker",
+        action="store_true",
+        help="Run daemon tasks through a one-shot file mailbox worker subprocess.",
     )
     parser.add_argument(
         "--max-steps",
@@ -93,6 +101,10 @@ def main(argv=None):
         parser.error("--run-until-idle and --daemon-run-until-idle are mutually exclusive")
     if args.daemon_mailbox_worker and not args.daemon_run_until_idle:
         parser.error("--daemon-mailbox-worker requires --daemon-run-until-idle")
+    if args.daemon_mailbox_subprocess_worker and not args.daemon_run_until_idle:
+        parser.error("--daemon-mailbox-subprocess-worker requires --daemon-run-until-idle")
+    if args.daemon_mailbox_worker and args.daemon_mailbox_subprocess_worker:
+        parser.error("--daemon-mailbox-worker and --daemon-mailbox-subprocess-worker are mutually exclusive")
     if args.show_state_index:
         result = read_scheduler_state_index(args.output_dir)
         print(json.dumps(result, sort_keys=True))
@@ -130,6 +142,12 @@ def main(argv=None):
                 args.agent_pool,
                 runtime_adapter=FakeRuntimeAdapter(),
             )
+        if args.daemon_mailbox_subprocess_worker:
+            if runtime_profile_defaults:
+                parser.error(
+                    "--daemon-mailbox-subprocess-worker currently supports only the fake delegate runtime"
+                )
+            runtime_adapter = FileMailboxSubprocessRuntimeAdapter(args.agent_pool)
         result = run_file_daemon(
             args.agent_pool,
             args.backlog,

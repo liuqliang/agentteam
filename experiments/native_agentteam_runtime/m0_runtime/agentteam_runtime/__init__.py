@@ -4,6 +4,7 @@ from .daemon import (
 )
 from .mailbox_worker import (
     FileMailboxRuntimeAdapter,
+    FileMailboxSubprocessRuntimeAdapter,
     FileMailboxWorker,
 )
 from .m0_runtime import (
@@ -24,6 +25,7 @@ __all__ = [
     "FakeRuntimeAdapter",
     "FileSchedulerDaemon",
     "FileMailboxRuntimeAdapter",
+    "FileMailboxSubprocessRuntimeAdapter",
     "FileMailboxWorker",
     "FileScheduler",
     "ShellRuntimeAdapter",

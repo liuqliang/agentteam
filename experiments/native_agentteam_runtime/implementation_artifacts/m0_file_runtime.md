@@ -59,6 +59,7 @@ from agentteam_runtime import (
     FakeRuntimeAdapter,
     FileSchedulerDaemon,
     FileMailboxRuntimeAdapter,
+    FileMailboxSubprocessRuntimeAdapter,
     FileMailboxWorker,
     FileScheduler,
     ShellRuntimeAdapter,
@@ -91,6 +92,8 @@ mailbox_worker = FileMailboxWorker(
     "agent-repo-map",
     runtime_adapter=FakeRuntimeAdapter(),
 )
+
+mailbox_subprocess_adapter = FileMailboxSubprocessRuntimeAdapter(agent_pool_path)
 
 result_with_worktree = run_simulation(
     agent_pool_path,
@@ -253,6 +256,23 @@ python3 -m agentteam_runtime.cli \
 In M14b this flag uses a fake delegate runtime behind
 `FileMailboxRuntimeAdapter`. Runtime command overrides and Codex options are
 rejected for this flag until a real worker-process supervisor is added.
+
+To exercise the one-shot subprocess worker bridge, use
+`--daemon-mailbox-subprocess-worker` instead:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool experiments/native_agentteam_runtime/fixtures/sample_agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m14c-subprocess-run \
+  --daemon-run-until-idle \
+  --daemon-mailbox-subprocess-worker
+```
+
+This flag launches one worker subprocess per dispatch through
+`FileMailboxSubprocessRuntimeAdapter`. It is mutually exclusive with
+`--daemon-mailbox-worker`.
 
 To inspect a completed or partially completed scheduler run without re-running
 the scheduler, pass `--show-state-index` with only the output directory:
@@ -1179,13 +1199,67 @@ keeping M14b deliberately small. The worker still runs in-process through the
 adapter bridge, one scheduler step at a time. It does not yet spawn, supervise,
 restart, or communicate with an independent OS worker process.
 
+## M14c One-Shot Mailbox Subprocess Worker
+
+M14c adds a real OS subprocess boundary for the mailbox worker:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.mailbox_worker \
+  --agent-pool experiments/native_agentteam_runtime/fixtures/sample_agent_pool.json \
+  --output-dir /tmp/agentteam-step \
+  --agent-id agent-repo-map \
+  --message-id TASK-001-MSG-0001 \
+  --runtime fake
+```
+
+The worker CLI polls exactly one dispatch message, writes one `runtime_result`
+to the selected agent outbox, prints a JSON summary, and exits:
+
+```json
+{
+  "poll_status": "processed",
+  "source_message_id": "TASK-001-MSG-0001",
+  "result_status": "completed",
+  "changed_files": ["generated/m0_generated_repo_index.json"],
+  "outbox_path": "/tmp/agentteam-step/mailboxes/agent-repo-map/outbox.jsonl",
+  "worker_pid": 12345
+}
+```
+
+`FileMailboxSubprocessRuntimeAdapter` preserves the scheduler runtime adapter
+interface. On each dispatch it launches:
+
+```text
+python -m agentteam_runtime.mailbox_worker --agent-pool ... --output-dir ... --agent-id ... --message-id ... --runtime fake
+```
+
+The adapter then reads the matching outbox `runtime_result` and attaches
+subprocess metadata to the runtime output:
+
+```json
+{
+  "adapter": "fake",
+  "mailbox_subprocess": {
+    "worker_pid": 12345,
+    "exit_code": 0,
+    "stdout": "{\"poll_status\":\"processed\",...}"
+  }
+}
+```
+
+This validates process launch, PID reporting, timeout handling, stdout parsing,
+and file-mailbox result recovery. It is still one subprocess per dispatch. It
+does not keep workers resident, restart failed workers, multiplex multiple
+agents concurrently, or define backoff policy.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
 
 - transcript parsing;
 - real code patch integration;
-- supervised daemon process and concurrent worker execution;
+- long-lived supervised daemon worker processes and concurrent worker execution;
 - advanced retry backoff, queues, and cross-process recovery;
 - schema validation through a JSON Schema engine.
 
@@ -1224,7 +1298,9 @@ runtime profile resolver from CLI code into runtime core so daemon/API runners
 can reuse it. M14a adds a file-backed daemon facade and durable worker registry
 while keeping execution sequential and adapter invocations short-lived. M14b
 adds file mailbox worker/result round-tripping through `FileMailboxRuntimeAdapter`
-with an in-process fake delegate. Claude Code is not integrated yet.
+with an in-process fake delegate. M14c runs the same mailbox worker through a
+one-shot OS subprocess via `FileMailboxSubprocessRuntimeAdapter`. Claude Code is
+not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

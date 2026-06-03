@@ -12,6 +12,7 @@ from agentteam_runtime import (
     FakeRuntimeAdapter,
     FileSchedulerDaemon,
     FileMailboxRuntimeAdapter,
+    FileMailboxSubprocessRuntimeAdapter,
     FileMailboxWorker,
     ShellRuntimeAdapter,
     audit_worktree_diff,
@@ -214,6 +215,52 @@ class M0RuntimeTests(unittest.TestCase):
                 ["generated/m0_generated_repo_index.json"],
             )
 
+    def test_file_mailbox_worker_cli_processes_one_message_in_subprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            inbox = output_dir / "mailboxes" / "agent-repo-map" / "inbox.jsonl"
+            outbox = output_dir / "mailboxes" / "agent-repo-map" / "outbox.jsonl"
+            message = _mailbox_dispatch_message(
+                message_id="MSG-SUBPROCESS-001",
+                agent_id="agent-repo-map",
+                write_scope=["generated/"],
+            )
+            _append_test_jsonl(inbox, [message])
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.mailbox_worker",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--output-dir",
+                    str(output_dir),
+                    "--agent-id",
+                    "agent-repo-map",
+                    "--message-id",
+                    "MSG-SUBPROCESS-001",
+                    "--runtime",
+                    "fake",
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            result_message = _read_first_jsonl(outbox)
+
+            self.assertEqual(summary["poll_status"], "processed")
+            self.assertEqual(summary["source_message_id"], "MSG-SUBPROCESS-001")
+            self.assertNotEqual(summary["worker_pid"], os.getpid())
+            self.assertEqual(result_message["message_type"], "runtime_result")
+
     def test_scheduler_loop_can_round_trip_runtime_result_through_mailbox_worker(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -256,6 +303,47 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 {session["runtime_adapter"] for session in state["runtime_sessions"]},
                 {"FileMailboxRuntimeAdapter"},
+            )
+
+    def test_scheduler_loop_can_run_mailbox_worker_as_one_shot_subprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FileMailboxSubprocessRuntimeAdapter(
+                    FIXTURES / "sample_agent_pool.json",
+                    timeout_seconds=30,
+                ),
+            )
+            state = read_scheduler_state_index(output_dir)
+            first_outbox = (
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-001"
+                / "mailboxes"
+                / "agent-repo-map"
+                / "outbox.jsonl"
+            )
+
+            self.assertEqual(summary["scheduler_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertTrue(first_outbox.exists())
+            self.assertEqual(
+                {session["runtime_adapter"] for session in state["runtime_sessions"]},
+                {"FileMailboxSubprocessRuntimeAdapter"},
             )
 
     def test_scheduler_loop_writes_canonical_event_log_for_replay(self):
@@ -1190,6 +1278,52 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["daemon_status"], "idle")
             self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
             self.assertTrue(first_outbox.exists())
+
+    def test_cli_can_run_file_daemon_with_mailbox_subprocess_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--daemon-run-until-idle",
+                    "--daemon-mailbox-subprocess-worker",
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            state = read_scheduler_state_index(output_dir)
+
+            self.assertEqual(summary["daemon_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertEqual(
+                {session["runtime_adapter"] for session in state["runtime_sessions"]},
+                {"FileMailboxSubprocessRuntimeAdapter"},
+            )
 
     def test_cli_can_show_state_index_without_agent_pool_or_backlog(self):
         with tempfile.TemporaryDirectory() as tmp:
