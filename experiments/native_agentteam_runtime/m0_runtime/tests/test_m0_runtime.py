@@ -2212,6 +2212,83 @@ class M0RuntimeTests(unittest.TestCase):
                 "agent-healthy",
             )
 
+    def test_two_phase_scheduler_records_reassignment_event_for_unavailable_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-001", write_scope=["generated/"])],
+            )
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-unhealthy", "repo_map_agent"),
+                    ("agent-healthy", "repo_map_agent"),
+                ],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                unavailable_agent_ids=["agent-unhealthy"],
+            )
+
+            scheduler.dispatch_ready()
+            event_lines = (output_dir / "events.jsonl").read_text(
+                encoding="utf-8",
+            ).splitlines()
+            events = [
+                json.loads(line)
+                for line in event_lines
+            ]
+            reassignments = [
+                event
+                for event in events
+                if event["event_type"] == "task_reassigned"
+            ]
+            self.assertEqual(len(reassignments), 1)
+            reassignment = reassignments[0]
+
+            self.assertEqual(reassignment["payload"]["task_id"], "TASK-001")
+            self.assertEqual(
+                reassignment["payload"]["attempt_id"],
+                "TASK-001-ATTEMPT-001",
+            )
+            self.assertEqual(
+                reassignment["payload"]["required_role"],
+                "repo_map_agent",
+            )
+            self.assertEqual(
+                reassignment["payload"]["selected_agent_id"],
+                "agent-healthy",
+            )
+            self.assertEqual(
+                reassignment["payload"]["unavailable_agent_ids"],
+                ["agent-unhealthy"],
+            )
+            self.assertEqual(
+                reassignment["payload"]["reassignment_reason"],
+                "agent_unavailable",
+            )
+            snapshot = replay_events(output_dir / "events.jsonl")
+            self.assertIn(
+                "reassignment",
+                snapshot["attempts"]["TASK-001-ATTEMPT-001"],
+            )
+            self.assertEqual(
+                snapshot["attempts"]["TASK-001-ATTEMPT-001"]["reassignment"],
+                {
+                    "reassignment_reason": "agent_unavailable",
+                    "required_role": "repo_map_agent",
+                    "unavailable_agent_ids": ["agent-unhealthy"],
+                    "selected_agent_id": "agent-healthy",
+                },
+            )
+
     def test_two_phase_scheduler_retries_retryable_failed_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

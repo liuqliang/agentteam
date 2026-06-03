@@ -235,8 +235,9 @@ is gated by batch verification and fast-forward merge.
 
 Goal: let the scheduler react to unhealthy workers without user intervention.
 
-Status: restart-budget, quarantine, and new-dispatch avoidance implemented.
-Remaining work is explicit reassignment events and inflight migration policy.
+Status: restart-budget, quarantine, new-dispatch avoidance, and explicit
+reassignment event lineage implemented. Remaining work is inflight migration
+policy.
 
 Scope:
 
@@ -303,4 +304,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended milestone is M29c: Reassignment Event Lineage.
+The next recommended milestone is M30: Runtime Observability. Inflight migration
+remains a separate M29 decision gate because it changes ownership of already
+leased work.

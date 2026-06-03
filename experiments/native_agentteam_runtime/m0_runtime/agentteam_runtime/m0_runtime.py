@@ -1393,6 +1393,15 @@ def replay_events(events_path):
                 "attempt_status": "created",
                 "task_id": task_id,
             }
+        elif event["event_type"] == "task_reassigned":
+            attempt_state = snapshot["attempts"].setdefault(attempt_id, {})
+            attempt_state.setdefault("task_id", task_id)
+            attempt_state["reassignment"] = {
+                "reassignment_reason": payload["reassignment_reason"],
+                "required_role": payload["required_role"],
+                "unavailable_agent_ids": payload["unavailable_agent_ids"],
+                "selected_agent_id": payload["selected_agent_id"],
+            }
         elif event["event_type"] == "lease_acquired":
             snapshot["leases"][lease_id] = {
                 "lease_status": "active",

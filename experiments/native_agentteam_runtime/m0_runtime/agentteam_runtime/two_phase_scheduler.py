@@ -249,6 +249,10 @@ class TwoPhaseFileScheduler:
             encoding="utf-8",
         )
 
+        unavailable_agent_ids = self._unavailable_agent_ids_for_role(
+            agent_pool,
+            task["required_role"],
+        )
         agent = _find_idle_agent(agent_pool, task["required_role"])
         attempt_number = self._next_attempt_number(task["task_id"])
         attempt_id = f"{task['task_id']}-ATTEMPT-{attempt_number:03d}"
@@ -326,6 +330,28 @@ class TwoPhaseFileScheduler:
                     f"select:{task['task_id']}:{attempt_id}",
                     correlation_id,
                     {"task_id": task["task_id"], "attempt_id": attempt_id},
+                ),
+                *(
+                    [
+                        self._event(
+                            "task_reassigned",
+                            agent_pool["scheduler_agent_id"],
+                            agent["agent_id"],
+                            f"reassign:{task['task_id']}:{attempt_id}",
+                            correlation_id,
+                            {
+                                "task_id": task["task_id"],
+                                "attempt_id": attempt_id,
+                                "lease_id": lease_id,
+                                "required_role": task["required_role"],
+                                "unavailable_agent_ids": unavailable_agent_ids,
+                                "selected_agent_id": agent["agent_id"],
+                                "reassignment_reason": "agent_unavailable",
+                            },
+                        )
+                    ]
+                    if unavailable_agent_ids
+                    else []
                 ),
                 self._event(
                     "lease_acquired",
@@ -876,6 +902,14 @@ class TwoPhaseFileScheduler:
         for agent in agent_pool["agents"]:
             if agent["agent_id"] in self.unavailable_agent_ids:
                 agent["status"] = "unavailable"
+
+    def _unavailable_agent_ids_for_role(self, agent_pool, role):
+        return [
+            agent["agent_id"]
+            for agent in agent_pool["agents"]
+            if agent.get("role") == role
+            and agent["agent_id"] in self.unavailable_agent_ids
+        ]
 
     def _status_without_dispatch(self):
         if self.state["inflight_attempts"]:

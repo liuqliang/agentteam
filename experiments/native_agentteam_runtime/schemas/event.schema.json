@@ -52,6 +52,7 @@
         "backlog_updated",
         "checkpoint",
         "task_selected",
+        "task_reassigned",
         "lease_acquired",
         "worktree_created",
         "worktree_removed",

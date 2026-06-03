@@ -2280,6 +2280,34 @@ worker_status == quarantined -> unavailable_agent_ids
 This is conservative reassignment. It prevents new dispatches to quarantined
 workers, but it does not move already inflight attempts.
 
+## M29c Reassignment Event Lineage
+
+M29c makes conservative reassignment explicit in the event log. When the
+two-phase scheduler sees unavailable agents for the required role and dispatches
+the task to another compatible idle agent, it emits:
+
+```json
+{
+  "event_type": "task_reassigned",
+  "payload": {
+    "task_id": "TASK-001",
+    "attempt_id": "TASK-001-ATTEMPT-001",
+    "lease_id": "TASK-001-LEASE-001",
+    "required_role": "repo_map_agent",
+    "unavailable_agent_ids": ["agent-unhealthy"],
+    "selected_agent_id": "agent-healthy",
+    "reassignment_reason": "agent_unavailable"
+  }
+}
+```
+
+Replay stores the same lineage on
+`attempts[attempt_id]["reassignment"]`. This makes health-driven routing
+auditable without changing the execution policy.
+
+M29c still does not move already inflight attempts. It only records why a new
+attempt was dispatched to a replacement agent.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -2355,7 +2383,8 @@ worker processes through attached PID supervisors. M28 adds a durable accepted
 patch integration queue and replay snapshot. M28b adds batch worktree
 verification for queued patch sets. M28c adds verified batch fast-forward merge
 back to the source branch. M29a adds worker-pool restart budgets and quarantine.
-M29b routes new work away from quarantined worker agents. Claude Code is not
+M29b routes new work away from quarantined worker agents. M29c records explicit
+reassignment event lineage for those conservative dispatches. Claude Code is not
 integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
