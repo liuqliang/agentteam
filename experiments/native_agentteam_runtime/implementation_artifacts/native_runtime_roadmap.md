@@ -77,7 +77,18 @@ The implementation has already proven these layers:
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
 communication files, scoped worker execution, proposal validation, and Codex as
-an optional backend.
+the only live LLM backend on the current route.
+
+## Backend Constraint
+
+Current implementation constraint: all live LLM worker execution must use
+Codex. The user does not have Claude API access, so Claude Code compatibility is
+not an active target.
+
+Role differentiation should be implemented through Codex runtime profiles:
+different roles can carry different Codex model, sandbox, timeout, command,
+prompt contract, context package, and worktree policy. Fake and shell adapters
+remain test harnesses, not production multi-agent backends.
 
 ## Roadmap Principles
 
@@ -272,12 +283,11 @@ until the CLI views prove the data shape.
 
 These items should wait until M23-M30 have made the local runtime reliable:
 
-- Claude Code adapter compatibility after a stable result extraction contract
-  exists.
 - MCP tool and context compatibility as adapter capabilities, not as the native
-  control plane.
-- Cross-model role routing where planner, implementer, reviewer, and integrator
-  can use different model profiles.
+  control plane, and initially around Codex runtime sessions.
+- Codex profile routing where planner, implementer, reviewer, and integrator
+  can use different Codex models, prompts, sandboxes, timeouts, and context
+  packages.
 - A stronger durable store if file locking and JSONL replay become insufficient
   for long project runs.
 - Policy-governed semantic feedback where implementation evidence can propose
@@ -285,6 +295,8 @@ These items should wait until M23-M30 have made the local runtime reliable:
   those artifacts directly.
 - Repository map integration using language-aware tools such as compilers, LSP,
   build systems, and static analyzers, with compact summaries fed to planners.
+- Claude Code or other backend adapters only after an executable/API contract
+  and result extraction path are available.
 
 ## Explicit Non-Goals For The Current Route
 

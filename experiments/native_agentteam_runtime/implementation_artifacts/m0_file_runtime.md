@@ -10,10 +10,12 @@ For the implementation route after M22, see
 
 ## What M0 Proves
 
-The M0 runtime proves the local control-plane path without requiring Codex,
-Claude Code, A2A, MCP, an external database service, or a persistent agent
-process. The current M1b slice also includes a Codex process adapter so the same
-control-plane contract can be exercised through `codex exec`.
+The M0 runtime proves the local control-plane path without requiring a live
+model backend, A2A, MCP, an external database service, or a persistent agent
+process. The current implementation route uses Codex as the only live LLM
+backend because Claude API access is not available. The M1b slice includes a
+Codex process adapter so the same control-plane contract can be exercised
+through `codex exec`.
 
 Implemented path:
 
@@ -2454,7 +2456,8 @@ M29b routes new work away from quarantined worker agents. M29c records explicit
 reassignment event lineage for those conservative dispatches. M30a adds a
 read-only runtime observability summary CLI. M30b adds resource drilldown views.
 M30c adds current milestone and next decomposition visibility. Claude Code is not
-integrated yet.
+an active backend target on the current route because Claude API access is not
+available; live LLM work is Codex-only.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -2464,9 +2467,10 @@ Before the next backend milestone, the next design/code step should define:
 
 - decide when live Codex smoke should run outside local opt-in, such as nightly
   or pre-release only;
-- Claude Code adapter feasibility and result extraction contract;
-- decide when worker supervision should add heartbeat, backoff/quarantine,
-  health-driven task reassignment, and real Claude worker runtimes;
+- decide how Codex-only role profiles should differ for planner, implementer,
+  reviewer, and integrator workers;
+- decide when worker supervision should add heartbeat, backoff, and inflight
+  migration beyond the current restart-budget/quarantine path;
 - decide when planner context should ingest code-map and verification-summary
   context in addition to selected roadmap/design artifacts;
 - decide whether lightweight artifact lint should grow into full JSON Schema
