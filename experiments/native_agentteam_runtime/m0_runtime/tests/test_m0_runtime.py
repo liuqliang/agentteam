@@ -2524,6 +2524,80 @@ class M0RuntimeTests(unittest.TestCase):
                 },
             )
 
+    def test_cli_two_phase_worker_pool_can_auto_decompose_with_fake_codex_planner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            fake_codex = tmp_path / "fake_codex_planner_and_worker.py"
+            _init_git_repo(repo)
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-planner", "task_planner"),
+                    ("agent-repo-map", "repo_map_agent"),
+                ],
+            )
+            _write_fake_codex_planner_and_worker(fake_codex)
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(agent_pool_path),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--project-root",
+                    str(repo),
+                    "--daemon-run-until-idle",
+                    "--daemon-two-phase-worker-pool",
+                    "--auto-decompose-backlog",
+                    "--decomposition-milestone-id",
+                    "M23",
+                    "--decomposition-planner-role",
+                    "task_planner",
+                    "--decomposition-default-worker-role",
+                    "repo_map_agent",
+                    "--runtime",
+                    "codex",
+                    "--max-steps",
+                    "10",
+                    "--codex-command",
+                    sys.executable,
+                    str(fake_codex),
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            state = read_scheduler_state_index(output_dir)
+
+            self.assertEqual(completed.stderr, "")
+            self.assertEqual(summary["daemon_status"], "idle")
+            self.assertIn("DECOMPOSE-M23-001", summary["processed_task_ids"])
+            self.assertIn("TASK-M23-CODEX-001", summary["processed_task_ids"])
+            self.assertEqual(
+                {task["task_id"]: task["task_status"] for task in state["tasks"]},
+                {
+                    "DECOMPOSE-M23-001": "done",
+                    "TASK-M23-CODEX-001": "done",
+                },
+            )
+            self.assertEqual(_git_status_short(repo), "")
+
     def test_cli_two_phase_worker_pool_can_commit_verified_integration_patch(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -3380,6 +3454,79 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(result["validation_status"], "accepted")
             self.assertTrue((worktree_path / "generated" / "codex_result.json").exists())
 
+    def test_codex_runtime_adapter_builds_planner_prompt_contract(self):
+        message = {
+            "message_id": "MSG-0001",
+            "from_agent": "agent-scheduler",
+            "to_agent": "agent-planner",
+            "message_type": "dispatch_task",
+            "correlation_id": "DECOMPOSE-M23-001:ATTEMPT-001",
+            "created_at": "2026-06-03T00:00:00Z",
+            "lease_expires_at": "2026-06-03T00:15:00Z",
+            "payload": {
+                "task_id": "DECOMPOSE-M23-001",
+                "attempt_id": "DECOMPOSE-M23-001-ATTEMPT-001",
+                "lease_id": "DECOMPOSE-M23-001-LEASE-001",
+                "task_kind": "decompose_backlog",
+                "milestone_id": "M23",
+                "planner_context_path": (
+                    "/tmp/planner_contexts/DECOMPOSE-M23-001.json"
+                ),
+                "objective": "Generate bounded backlog tasks.",
+                "read_scope": ["."],
+                "write_scope": [],
+            },
+        }
+
+        prompt = CodexRuntimeAdapter(command=["codex", "exec"])._build_prompt(message)
+
+        self.assertIn("AgentTeam planner", prompt)
+        self.assertIn("task_proposal", prompt)
+        self.assertIn("DECOMPOSE-M23-001.json", prompt)
+        self.assertIn('"changed_files": []', prompt)
+        self.assertIn('"required_role"', prompt)
+
+    def test_codex_runtime_adapter_runs_planner_with_fallback_worktree_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            fake_codex = tmp_path / "fake_codex_planner.py"
+            _init_git_repo(repo)
+            _write_fake_codex_planner(fake_codex)
+
+            result = CodexRuntimeAdapter(
+                command=[sys.executable, str(fake_codex)],
+                fallback_worktree_path=repo,
+            ).run(_planner_message(tmp_path), worktree_path=None)
+
+            self.assertEqual(result["result_status"], "completed")
+            self.assertEqual(result["changed_files"], [])
+            self.assertEqual(
+                result["output"]["task_proposal"]["tasks"][0]["task_id"],
+                "TASK-M23-CODEX-001",
+            )
+            self.assertEqual(_git_status_short(repo), "")
+
+    def test_codex_runtime_adapter_rejects_dirty_fallback_worktree_after_planner_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            fake_codex = tmp_path / "fake_codex_dirty_planner.py"
+            _init_git_repo(repo)
+            _write_fake_codex_planner(fake_codex, dirty_file="generated/dirty.json")
+
+            result = CodexRuntimeAdapter(
+                command=[sys.executable, str(fake_codex)],
+                fallback_worktree_path=repo,
+            ).run(_planner_message(tmp_path), worktree_path=None)
+
+            self.assertEqual(result["result_status"], "failed")
+            self.assertEqual(
+                result["output"]["error"],
+                "fallback_worktree_modified",
+            )
+            self.assertIn("generated/dirty.json", result["output"]["changed_files"])
+
     def test_codex_runtime_adapter_missing_last_message_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -3698,6 +3845,57 @@ def _git_status_short(repo):
     return completed.stdout.strip()
 
 
+def _planner_message(tmp_path):
+    context_path = Path(tmp_path) / "planner_contexts" / "DECOMPOSE-M23-001.json"
+    context_path.parent.mkdir(parents=True, exist_ok=True)
+    context_path.write_text(
+        json.dumps(
+            {
+                "context_schema_version": "planner_context.v1",
+                "milestone_id": "M23",
+                "default_worker_role": "repo_map_agent",
+                "allowed_read_scopes": ["."],
+                "allowed_write_scopes": ["generated/"],
+                "available_agent_roles": ["repo_map_agent", "task_planner"],
+                "proposal_contract": {
+                    "schema_version": "task_proposal.v1",
+                    "required_fields": [
+                        "task_id",
+                        "objective",
+                        "read_scope",
+                        "write_scope",
+                        "required_role",
+                        "risk_target",
+                    ],
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "message_id": "MSG-0001",
+        "from_agent": "agent-scheduler",
+        "to_agent": "agent-planner",
+        "message_type": "dispatch_task",
+        "correlation_id": "DECOMPOSE-M23-001:ATTEMPT-001",
+        "created_at": "2026-06-03T00:00:00Z",
+        "lease_expires_at": "2026-06-03T00:15:00Z",
+        "payload": {
+            "task_id": "DECOMPOSE-M23-001",
+            "attempt_id": "DECOMPOSE-M23-001-ATTEMPT-001",
+            "lease_id": "DECOMPOSE-M23-001-LEASE-001",
+            "task_kind": "decompose_backlog",
+            "milestone_id": "M23",
+            "default_worker_role": "repo_map_agent",
+            "planner_context_path": str(context_path),
+            "objective": "Generate bounded backlog tasks.",
+            "read_scope": ["."],
+            "write_scope": [],
+        },
+    }
+
+
 def _read_first_jsonl(path):
     return json.loads(Path(path).read_text(encoding="utf-8").splitlines()[0])
 
@@ -4009,6 +4207,106 @@ def _write_fake_codex(path, changed_file):
                 "    'output': {'adapter': 'codex', 'prompt_contains_contract': 'changed_files' in prompt}",
                 "}), encoding='utf-8')",
                 "print(json.dumps({'event': 'fake_codex_done'}))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_fake_codex_planner(path, dirty_file=None):
+    lines = [
+        "import json",
+        "import pathlib",
+        "import sys",
+        "args = sys.argv[1:]",
+        "prompt = sys.stdin.read()",
+        "output_path = pathlib.Path(args[args.index('--output-last-message') + 1])",
+        "worktree = pathlib.Path(args[args.index('-C') + 1])",
+        "if 'AgentTeam planner' not in prompt or 'task_proposal' not in prompt:",
+        "    sys.exit(7)",
+    ]
+    if dirty_file:
+        lines.extend(
+            [
+                f"dirty = worktree / {dirty_file!r}",
+                "dirty.parent.mkdir(parents=True, exist_ok=True)",
+                "dirty.write_text('dirty planner change\\n', encoding='utf-8')",
+            ]
+        )
+    lines.extend(
+        [
+            "output_path.parent.mkdir(parents=True, exist_ok=True)",
+            "output_path.write_text(json.dumps({",
+            "    'result_status': 'completed',",
+            "    'changed_files': [],",
+            "    'output': {",
+            "        'adapter': 'codex',",
+            "        'task_proposal': {",
+            "            'milestone_id': 'M23',",
+            "            'tasks': [{",
+            "                'task_id': 'TASK-M23-CODEX-001',",
+            "                'objective': 'Run generated Codex planner worker task.',",
+            "                'read_scope': ['.'],",
+            "                'write_scope': ['generated/'],",
+            "                'required_role': 'repo_map_agent',",
+            "                'risk_target': 'L0',",
+            "                'depends_on': [],",
+            "                'blockers': [],",
+            "            }],",
+            "        },",
+            "    },",
+            "}), encoding='utf-8')",
+            "print(json.dumps({'event': 'fake_codex_planner_done'}))",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_fake_codex_planner_and_worker(path):
+    path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                "import sys",
+                "args = sys.argv[1:]",
+                "prompt = sys.stdin.read()",
+                "output_path = pathlib.Path(args[args.index('--output-last-message') + 1])",
+                "worktree = pathlib.Path(args[args.index('-C') + 1])",
+                "output_path.parent.mkdir(parents=True, exist_ok=True)",
+                "if 'AgentTeam planner' in prompt:",
+                "    if 'task_proposal' not in prompt:",
+                "        sys.exit(7)",
+                "    output_path.write_text(json.dumps({",
+                "        'result_status': 'completed',",
+                "        'changed_files': [],",
+                "        'output': {",
+                "            'adapter': 'codex',",
+                "            'task_proposal': {",
+                "                'milestone_id': 'M23',",
+                "                'tasks': [{",
+                "                    'task_id': 'TASK-M23-CODEX-001',",
+                "                    'objective': 'Run generated Codex planner worker task.',",
+                "                    'read_scope': ['.'],",
+                "                    'write_scope': ['generated/'],",
+                "                    'required_role': 'repo_map_agent',",
+                "                    'risk_target': 'L0',",
+                "                    'depends_on': [],",
+                "                    'blockers': [],",
+                "                }],",
+                "            },",
+                "        },",
+                "    }), encoding='utf-8')",
+                "else:",
+                "    target = worktree / 'generated' / 'codex_generated_worker.json'",
+                "    target.parent.mkdir(parents=True, exist_ok=True)",
+                "    target.write_text(json.dumps({'generated_by': 'fake_codex_worker'}), encoding='utf-8')",
+                "    output_path.write_text(json.dumps({",
+                "        'result_status': 'completed',",
+                "        'changed_files': ['generated/codex_generated_worker.json'],",
+                "        'output': {'adapter': 'codex'},",
+                "    }), encoding='utf-8')",
+                "print(json.dumps({'event': 'fake_codex_planner_and_worker_done'}))",
             ]
         ),
         encoding="utf-8",

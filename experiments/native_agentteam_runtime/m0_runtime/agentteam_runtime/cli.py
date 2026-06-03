@@ -456,6 +456,7 @@ def _build_runtime_profile_defaults(parser, args):
             "adapter": "codex",
             "sandbox": args.codex_sandbox or "workspace-write",
             "timeout_seconds": args.codex_timeout_seconds or 300,
+            "fallback_worktree_path": args.project_root,
         }
         if args.codex_command:
             profile["command"] = args.codex_command

@@ -1810,6 +1810,78 @@ M22 intentionally does not read full roadmap/design documents, build a
 language-aware code map, include source snippets, recursively refresh context,
 or update semantic architecture artifacts.
 
+## M23 Codex Planner Prompt Contract
+
+M23 adds a planner-specific prompt path to `CodexRuntimeAdapter`. When a mailbox
+payload has `task_kind=decompose_backlog`, Codex is instructed to act as an
+AgentTeam planner, read `planner_context_path`, avoid file edits, and return one
+JSON object through the existing `--output-last-message` contract:
+
+```json
+{
+  "result_status": "completed",
+  "changed_files": [],
+  "output": {
+    "task_proposal": {
+      "milestone_id": "M23",
+      "tasks": [
+        {
+          "task_id": "TASK-M23-CODEX-001",
+          "objective": "Run generated Codex planner worker task.",
+          "read_scope": ["."],
+          "write_scope": ["generated/"],
+          "required_role": "repo_map_agent",
+          "risk_target": "L0",
+          "depends_on": [],
+          "blockers": []
+        }
+      ]
+    }
+  }
+}
+```
+
+Ordinary implementation tasks still use the existing worker prompt and result
+shape. The scheduler still treats Codex planner output as a proposal only:
+`TwoPhaseFileScheduler` validates generated roles, write scopes, duplicate ids,
+dependencies, and task shape before appending anything to backlog state.
+
+Planner tasks normally have an empty `write_scope`, so they may not receive an
+attempt worktree. `CodexRuntimeAdapter` now accepts an optional
+`fallback_worktree_path`. If no attempt worktree is supplied, Codex can run in
+that fallback path, normally the CLI `--project-root`. The adapter snapshots git
+status before and after fallback execution and rejects the result with
+`fallback_worktree_modified` if Codex dirties the fallback checkout outside
+ignored `.agentteam/` control artifacts.
+
+The two-phase worker-pool CLI can now exercise fake Codex planner
+decomposition:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool /path/to/agent_pool.json \
+  --backlog /path/to/empty_backlog.json \
+  --output-dir /tmp/agentteam-m23-codex-planner-run \
+  --project-root /path/to/git/repo \
+  --daemon-run-until-idle \
+  --daemon-two-phase-worker-pool \
+  --auto-decompose-backlog \
+  --decomposition-milestone-id M23 \
+  --decomposition-planner-role task_planner \
+  --decomposition-default-worker-role repo_map_agent \
+  --runtime codex \
+  --max-steps 10 \
+  --codex-command python3 /path/to/fake_codex_planner_and_worker.py
+```
+
+In this path, the CLI records `--project-root` as the Codex fallback workspace
+and passes it through worker-pool process launch into `CodexRuntimeAdapter`.
+
+M23 intentionally does not ingest roadmap/design artifacts, build a repo map,
+score proposal quality beyond the existing validator, recursively decompose
+milestones, or require live Codex planner calls in normal tests.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -1873,7 +1945,10 @@ registry updates, and two-phase CLI supervision around scheduler ticks. M21 adds
 opt-in planner-agent decomposition proposals, deterministic proposal validation,
 backlog insertion, and a fake planner runtime path for local end-to-end tests.
 M22 adds planner context files, context-derived role/write-scope enforcement,
-and fake planner context reads. Claude Code is not integrated yet.
+and fake planner context reads. M23 adds a Codex planner prompt contract,
+fallback workspace execution for no-worktree planner tasks, fallback dirty-check
+rejection, and fake Codex planner worker-pool coverage. Claude Code is not
+integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -1886,8 +1961,8 @@ Before the next backend milestone, the next design/code step should define:
 - Claude Code adapter feasibility and result extraction contract;
 - decide when worker supervision should add heartbeat, backoff/quarantine,
   health-driven task reassignment, and real Claude worker runtimes;
-- decide how planner prompts should receive roadmap, semantic design, code-map,
-  and verification-summary context;
+- decide how planner context packages should receive roadmap, semantic design,
+  code-map, and verification-summary context;
 - decide whether lightweight artifact lint should grow into full JSON Schema
   validation;
 - retry backoff, retry budget, and failure escalation policy;

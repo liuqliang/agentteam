@@ -115,6 +115,7 @@ class FileMailboxWorkerPoolSupervisor:
             codex_model=profile.get("model"),
             codex_sandbox=profile.get("sandbox", "workspace-write"),
             codex_timeout_seconds=profile.get("timeout_seconds", 300),
+            codex_fallback_worktree_path=profile.get("fallback_worktree_path"),
         )
 
     def _worker_health(self, worker):

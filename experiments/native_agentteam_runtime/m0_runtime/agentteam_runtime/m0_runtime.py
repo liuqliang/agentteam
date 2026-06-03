@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import subprocess
+import tempfile
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -144,93 +145,169 @@ class CodexRuntimeAdapter:
         sandbox="workspace-write",
         timeout_seconds=300,
         extra_args=None,
+        fallback_worktree_path=None,
+        output_dir=None,
     ):
         self.command = list(command or ["codex", "exec"])
         self.model = model
         self.sandbox = sandbox
         self.timeout_seconds = timeout_seconds
         self.extra_args = list(extra_args or [])
+        self.fallback_worktree_path = (
+            str(fallback_worktree_path) if fallback_worktree_path else None
+        )
+        self.output_dir = Path(output_dir) if output_dir else None
+
+    def bind_output_dir(self, output_dir):
+        return CodexRuntimeAdapter(
+            command=self.command,
+            model=self.model,
+            sandbox=self.sandbox,
+            timeout_seconds=self.timeout_seconds,
+            extra_args=self.extra_args,
+            fallback_worktree_path=self.fallback_worktree_path,
+            output_dir=output_dir,
+        )
 
     def run(self, message, worktree_path=None):
-        if not worktree_path:
+        runtime_worktree_path = worktree_path or self.fallback_worktree_path
+        using_fallback = worktree_path is None and self.fallback_worktree_path is not None
+        if not runtime_worktree_path:
             return {
                 "result_status": "failed",
                 "changed_files": [],
                 "output": {"adapter": "codex", "error": "missing_worktree_path"},
             }
 
-        result_path = (
-            Path(worktree_path)
-            / ".agentteam"
-            / f"codex_result_{message['payload']['attempt_id']}.json"
+        fallback_status_before = (
+            _git_status_signature(runtime_worktree_path)
+            if using_fallback
+            else None
         )
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-
-        command = self._build_command(worktree_path, result_path)
-        prompt = self._build_prompt(message)
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=worktree_path,
-                input=prompt,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=self.timeout_seconds,
-                check=False,
+        temporary_result_dir = None
+        result_path = self._result_path(
+            runtime_worktree_path,
+            message["payload"]["attempt_id"],
+            using_fallback=using_fallback,
+        )
+        if result_path is None:
+            temporary_result_dir = tempfile.TemporaryDirectory()
+            result_path = (
+                Path(temporary_result_dir.name)
+                / f"codex_result_{message['payload']['attempt_id']}.json"
             )
-        except subprocess.TimeoutExpired as exc:
-            return {
-                "result_status": "timed_out",
-                "changed_files": [],
-                "output": {
-                    "adapter": "codex",
-                    "error": "timeout",
-                    "timeout_seconds": self.timeout_seconds,
-                    "stdout": exc.stdout or "",
-                    "stderr": exc.stderr or "",
-                },
-            }
-
-        if completed.returncode != 0:
-            return {
-                "result_status": "failed",
-                "changed_files": [],
-                "output": {
-                    "adapter": "codex",
-                    "exit_code": completed.returncode,
-                    "stdout": completed.stdout,
-                    "stderr": completed.stderr,
-                },
-            }
-
-        if not result_path.exists():
-            return {
-                "result_status": "failed",
-                "changed_files": [],
-                "output": {
-                    "adapter": "codex",
-                    "error": "missing_output_last_message",
-                    "stdout": completed.stdout,
-                    "stderr": completed.stderr,
-                },
-            }
-
         try:
-            result = json.loads(result_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {
-                "result_status": "failed",
-                "changed_files": [],
-                "output": {
-                    "adapter": "codex",
-                    "error": "invalid_output_last_message_json",
-                    "stdout": completed.stdout,
-                    "stderr": completed.stderr,
-                },
-            }
+            result_path.parent.mkdir(parents=True, exist_ok=True)
 
-        return _normalize_runtime_result(result, adapter="codex", stderr=completed.stderr)
+            command = self._build_command(runtime_worktree_path, result_path)
+            prompt = self._build_prompt(message)
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=runtime_worktree_path,
+                    input=prompt,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                return {
+                    "result_status": "timed_out",
+                    "changed_files": [],
+                    "output": {
+                        "adapter": "codex",
+                        "error": "timeout",
+                        "timeout_seconds": self.timeout_seconds,
+                        "stdout": exc.stdout or "",
+                        "stderr": exc.stderr or "",
+                    },
+                }
+
+            fallback_modification = self._fallback_modification_result(
+                runtime_worktree_path,
+                fallback_status_before,
+            )
+            if fallback_modification:
+                return fallback_modification
+
+            if completed.returncode != 0:
+                return {
+                    "result_status": "failed",
+                    "changed_files": [],
+                    "output": {
+                        "adapter": "codex",
+                        "exit_code": completed.returncode,
+                        "stdout": completed.stdout,
+                        "stderr": completed.stderr,
+                    },
+                }
+
+            if not result_path.exists():
+                return {
+                    "result_status": "failed",
+                    "changed_files": [],
+                    "output": {
+                        "adapter": "codex",
+                        "error": "missing_output_last_message",
+                        "stdout": completed.stdout,
+                        "stderr": completed.stderr,
+                    },
+                }
+
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return {
+                    "result_status": "failed",
+                    "changed_files": [],
+                    "output": {
+                        "adapter": "codex",
+                        "error": "invalid_output_last_message_json",
+                        "stdout": completed.stdout,
+                        "stderr": completed.stderr,
+                    },
+                }
+
+            return _normalize_runtime_result(
+                result,
+                adapter="codex",
+                stderr=completed.stderr,
+            )
+        finally:
+            if temporary_result_dir:
+                temporary_result_dir.cleanup()
+
+    def _result_path(self, runtime_worktree_path, attempt_id, using_fallback=False):
+        if self.output_dir:
+            return self.output_dir / "codex_results" / f"codex_result_{attempt_id}.json"
+        if using_fallback:
+            return None
+        return Path(runtime_worktree_path) / ".agentteam" / f"codex_result_{attempt_id}.json"
+
+    def _fallback_modification_result(self, runtime_worktree_path, status_before):
+        if status_before is None:
+            return None
+        status_after = _git_status_signature(runtime_worktree_path)
+        if status_after == status_before:
+            return None
+        changed_files = sorted(
+            {
+                path
+                for status, path in status_after
+                if (status, path) not in status_before
+            }
+        )
+        return {
+            "result_status": "failed",
+            "changed_files": [],
+            "output": {
+                "adapter": "codex",
+                "error": "fallback_worktree_modified",
+                "changed_files": changed_files,
+            },
+        }
 
     def _build_command(self, worktree_path, result_path):
         command = [
@@ -247,6 +324,8 @@ class CodexRuntimeAdapter:
         return command
 
     def _build_prompt(self, message):
+        if message["payload"].get("task_kind") == "decompose_backlog":
+            return self._build_planner_prompt(message)
         return "\n".join(
             [
                 "You are an AgentTeam runtime worker.",
@@ -255,6 +334,45 @@ class CodexRuntimeAdapter:
                 "The JSON object must have this shape:",
                 '{"result_status":"completed|blocked|failed|cancelled","changed_files":["path"],"output":{}}',
                 "All changed_files entries must be relative paths inside the declared write_scope.",
+                "Mailbox message:",
+                json.dumps(message, sort_keys=True),
+            ]
+        )
+
+    def _build_planner_prompt(self, message):
+        payload = message["payload"]
+        result_schema = {
+            "result_status": "completed",
+            "changed_files": [],
+            "output": {
+                "task_proposal": {
+                    "milestone_id": payload.get("milestone_id"),
+                    "tasks": [
+                        {
+                            "task_id": "TASK-<MILESTONE>-001",
+                            "objective": "One bounded executable task.",
+                            "read_scope": ["."],
+                            "write_scope": ["generated/"],
+                            "required_role": payload.get("default_worker_role"),
+                            "risk_target": "L0",
+                            "depends_on": [],
+                            "blockers": [],
+                        }
+                    ],
+                }
+            },
+        }
+        return "\n".join(
+            [
+                "You are an AgentTeam planner.",
+                "Generate bounded executable backlog tasks for the requested milestone.",
+                "Read the planner context from planner_context_path before proposing tasks.",
+                "Do not modify files. Planner tasks must report an empty changed_files list.",
+                "Return exactly one JSON object as the final response.",
+                "The JSON object must match this planner result shape:",
+                json.dumps(result_schema, sort_keys=True),
+                "Each proposed task must include task_id, objective, read_scope, write_scope, required_role, risk_target, depends_on, and blockers.",
+                "Do not generate tasks with task_kind=decompose_backlog.",
                 "Mailbox message:",
                 json.dumps(message, sort_keys=True),
             ]
@@ -1434,6 +1552,10 @@ def _runtime_adapter_from_profile(profile, defaults=None, project_root=None):
             model=profile.get("model", defaults.get("model")),
             sandbox=profile.get("sandbox", defaults.get("sandbox", "workspace-write")),
             timeout_seconds=timeout_seconds,
+            fallback_worktree_path=profile.get(
+                "fallback_worktree_path",
+                defaults.get("fallback_worktree_path", project_root),
+            ),
         )
     raise ValueError(f"unsupported runtime_profile adapter: {adapter}")
 
@@ -1739,6 +1861,13 @@ def _integration_commit_result(
 
 def _git_changed_files(worktree_path):
     return [entry["path"] for entry in _git_status_entries(worktree_path)]
+
+
+def _git_status_signature(worktree_path):
+    return sorted(
+        (entry["status"], entry["path"])
+        for entry in _git_status_entries(worktree_path)
+    )
 
 
 def _git_status_entries(worktree_path):

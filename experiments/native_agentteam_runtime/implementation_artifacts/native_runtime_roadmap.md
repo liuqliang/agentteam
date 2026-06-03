@@ -51,6 +51,8 @@ The implementation has already proven these layers:
 8. Planner-generated backlog proposals for decomposition tasks.
 9. Bounded planner context packages that expose current state, available roles,
    allowed scopes, and proposal contract hints without dumping the full repo.
+10. Codex planner prompt contract, no-worktree fallback execution, fallback
+    dirty-check rejection, and fake Codex planner worker-pool coverage.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -75,6 +77,8 @@ an optional backend.
 ## Near-Term Route
 
 ### M23: Codex Planner Prompt Contract
+
+Status: implemented.
 
 Goal: make the real Codex runtime able to produce the same structured
 `task_proposal` shape that the fake planner currently returns.
@@ -265,4 +269,4 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended milestone is M23: Codex Planner Prompt Contract.
+The next recommended milestone is M24: Semantic Artifact Context Ingestion.

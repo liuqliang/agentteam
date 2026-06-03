@@ -352,6 +352,7 @@ class FileMailboxWorkerProcessSupervisor:
         codex_model=None,
         codex_sandbox="workspace-write",
         codex_timeout_seconds=300,
+        codex_fallback_worktree_path=None,
     ):
         if runtime not in {"fake", "codex"}:
             raise ValueError(f"unsupported mailbox worker runtime: {runtime}")
@@ -366,6 +367,7 @@ class FileMailboxWorkerProcessSupervisor:
         self.codex_model = codex_model
         self.codex_sandbox = codex_sandbox
         self.codex_timeout_seconds = codex_timeout_seconds
+        self.codex_fallback_worktree_path = codex_fallback_worktree_path
         self.stop_file = self.output_dir / "state" / "workers" / f"{agent_id}.stop"
         self.process = None
 
@@ -402,6 +404,13 @@ class FileMailboxWorkerProcessSupervisor:
                 command.extend(["--codex-model", self.codex_model])
             if self.codex_command:
                 command.extend(["--codex-command-json", json.dumps(self.codex_command)])
+            if self.codex_fallback_worktree_path:
+                command.extend(
+                    [
+                        "--codex-fallback-worktree-path",
+                        str(self.codex_fallback_worktree_path),
+                    ]
+                )
         self.process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -585,6 +594,10 @@ def main(argv=None):
         default=300,
         help="CodexRuntimeAdapter timeout in seconds.",
     )
+    parser.add_argument(
+        "--codex-fallback-worktree-path",
+        help="Fallback worktree path for Codex tasks without writable worktrees.",
+    )
     args = parser.parse_args(argv)
     runtime_adapter = _runtime_adapter_from_args(parser, args)
 
@@ -649,6 +662,8 @@ def _runtime_adapter_from_args(parser, args):
             model=args.codex_model,
             sandbox=args.codex_sandbox,
             timeout_seconds=args.codex_timeout_seconds,
+            fallback_worktree_path=args.codex_fallback_worktree_path,
+            output_dir=args.output_dir,
         )
     raise ValueError(f"unsupported mailbox worker runtime: {args.runtime}")
 
