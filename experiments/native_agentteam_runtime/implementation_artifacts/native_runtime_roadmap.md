@@ -223,9 +223,9 @@ Scope:
 - require the whole task or feature slice to pass before merging to the main
   branch.
 
-Decision gate: define whether integration commits are always task-level
-checkpoints or can be grouped into feature-level commits before main-branch
-merge.
+Decision: use feature-level verified batch merge. Task-level integration commits
+remain checkpoints for audit and debugging, while final source-branch delivery
+is gated by batch verification and fast-forward merge.
 
 ### M29: Health-Driven Reassignment
 
