@@ -3532,6 +3532,59 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["tasks"][1]["task_status"], "done")
             self.assertTrue(state_db_path.exists())
 
+    def test_cli_can_show_runtime_observability_without_agent_pool_or_backlog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            run_summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+            root_event_count = len(
+                Path(run_summary["events_path"]).read_text(encoding="utf-8").splitlines()
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--output-dir",
+                    str(output_dir),
+                    "--show-runtime-observability",
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["observability_status"], "ready")
+            self.assertEqual(summary["event_count"], root_event_count)
+            self.assertEqual(summary["task_counts"], {"done": 2})
+            self.assertEqual(summary["lease_counts"], {"released": 2})
+            self.assertEqual(summary["runtime_session_counts"], {"stopped": 2})
+            self.assertEqual(summary["integration_queue_counts"], {})
+            self.assertEqual(summary["latest_failures"], [])
+            self.assertEqual(summary["latest_event"]["event_type"], "backlog_updated")
+
     def test_cli_can_create_git_worktree_when_project_root_is_supplied(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

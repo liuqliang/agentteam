@@ -17,6 +17,7 @@ from .m0_runtime import (
     run_scheduler_loop,
     run_simulation,
 )
+from .observability import build_runtime_observability
 from .two_phase_scheduler import TwoPhaseFileScheduler
 
 
@@ -30,6 +31,11 @@ def main(argv=None):
         "--show-state-index",
         action="store_true",
         help="Print a read-only summary from the scheduler SQLite state index.",
+    )
+    parser.add_argument(
+        "--show-runtime-observability",
+        action="store_true",
+        help="Print a read-only runtime observability summary.",
     )
     parser.add_argument(
         "--run-until-idle",
@@ -224,8 +230,14 @@ def main(argv=None):
         parser.error(
             "--daemon-two-phase-worker-pool cannot be combined with other daemon mailbox worker flags"
         )
+    if args.show_state_index and args.show_runtime_observability:
+        parser.error("--show-state-index and --show-runtime-observability are mutually exclusive")
     if args.show_state_index:
         result = read_scheduler_state_index(args.output_dir)
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.show_runtime_observability:
+        result = build_runtime_observability(args.output_dir)
         print(json.dumps(result, sort_keys=True))
         return
     _require_execution_arg(parser, args.agent_pool, "--agent-pool")
@@ -453,7 +465,9 @@ def _quarantined_agent_ids(pool_health):
 
 def _require_execution_arg(parser, value, flag):
     if not value:
-        parser.error(f"{flag} is required unless --show-state-index is set")
+        parser.error(
+            f"{flag} is required unless a read-only show flag is set"
+        )
 
 
 def _build_runtime_profile_defaults(parser, args):

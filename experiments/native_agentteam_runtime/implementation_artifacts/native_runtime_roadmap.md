@@ -253,6 +253,10 @@ single task before escalation.
 
 Goal: make long-running operation inspectable without reading raw JSONL files.
 
+Status: CLI-only runtime observability summary implemented. Remaining work is
+resource-specific drilldown for backlog, leases, workers, events, sessions, and
+integration queue.
+
 Scope:
 
 - add CLI views for backlog, leases, workers, events, sessions, and integration
@@ -261,8 +265,8 @@ Scope:
 - show current roadmap milestone and next scheduled decomposition;
 - keep the underlying event log as the source of truth.
 
-Decision gate: decide whether the first monitor remains CLI-only or adds a
-minimal local dashboard.
+Decision: the first monitor remains CLI-only. A local dashboard is deferred
+until the CLI views prove the data shape.
 
 ## Longer-Term Route
 
@@ -304,6 +308,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended milestone is M30: Runtime Observability. Inflight migration
-remains a separate M29 decision gate because it changes ownership of already
-leased work.
+The next recommended milestone is M30b: Runtime Observability Drilldown Views.
+Inflight migration remains a separate M29 decision gate because it changes
+ownership of already leased work.

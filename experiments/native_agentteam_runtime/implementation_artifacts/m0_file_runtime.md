@@ -2308,6 +2308,29 @@ auditable without changing the execution policy.
 M29c still does not move already inflight attempts. It only records why a new
 attempt was dispatched to a replacement agent.
 
+## M30a Runtime Observability Summary
+
+M30a adds a read-only CLI summary for an existing runtime output directory:
+
+```text
+python -m agentteam_runtime.cli \
+  --output-dir output/current \
+  --show-runtime-observability
+```
+
+The command does not require `--agent-pool` or `--backlog`. It reads the
+canonical event log, the rebuildable SQLite state index, the integration queue,
+and worker registry files when present. The JSON output includes:
+
+- `event_count` and `latest_event`;
+- task, attempt, lease, runtime session, integration queue, and worker status
+  counts;
+- `blocked_task_ids`;
+- bounded `latest_failures`.
+
+This is the first M30 monitor slice. It is intentionally CLI-only and keeps
+`events.jsonl` as the source of truth.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -2384,7 +2407,8 @@ patch integration queue and replay snapshot. M28b adds batch worktree
 verification for queued patch sets. M28c adds verified batch fast-forward merge
 back to the source branch. M29a adds worker-pool restart budgets and quarantine.
 M29b routes new work away from quarantined worker agents. M29c records explicit
-reassignment event lineage for those conservative dispatches. Claude Code is not
+reassignment event lineage for those conservative dispatches. M30a adds a
+read-only runtime observability summary CLI. Claude Code is not
 integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
