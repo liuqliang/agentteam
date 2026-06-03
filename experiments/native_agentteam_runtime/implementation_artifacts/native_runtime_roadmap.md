@@ -67,6 +67,8 @@ The implementation has already proven these layers:
     `verified`, `blocked`, and `committed` states, plus replay visibility.
 16. Batch integration verification over queued patch sets in a dedicated batch
     worktree, with persisted batch results.
+17. Verified batch fast-forward merge back to the source branch, with source
+    cleanliness, batch commit, and `--ff-only` safety gates.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -210,8 +212,7 @@ based or moves worker/session state into SQLite.
 
 Goal: make parallel writable work practical for real repositories.
 
-Status: queue and batch-verification slices implemented. Remaining work is the
-final main-branch merge policy.
+Status: implemented with feature-level verified batch merge.
 
 Scope:
 

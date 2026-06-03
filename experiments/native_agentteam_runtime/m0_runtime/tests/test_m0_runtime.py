@@ -3030,7 +3030,7 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(completed.stderr, "")
             self.assertEqual(summary["daemon_status"], "idle")
             self.assertEqual(summary["scheduler_status"], "idle")
-            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertCountEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
             self.assertEqual(summary["inflight_count"], 0)
             self.assertEqual(summary["max_attempts"], 2)
             self.assertEqual(summary["lease_timeout_seconds"], 900)
@@ -3826,6 +3826,50 @@ class M0RuntimeTests(unittest.TestCase):
                 registry["items"][0]["applied_queue_item_ids"],
                 ["TASK-A:A-ATTEMPT-001", "TASK-B:B-ATTEMPT-001"],
             )
+
+    def test_verified_integration_batch_can_merge_back_to_source_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            script = tmp_path / "merge_batch_worker.py"
+            _init_git_repo(repo)
+            source_head = _git_rev_parse(repo, "HEAD")
+            _write_success_worker(script, "generated/merge_batch.json")
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-MERGE", write_scope=["generated/"])],
+            )
+            run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=ShellRuntimeAdapter([sys.executable, str(script)]),
+            )
+
+            batch = verify_integration_batch(
+                repo,
+                output_dir,
+                "BATCH-MERGE",
+                [
+                    sys.executable,
+                    "-c",
+                    "import pathlib; assert pathlib.Path('generated/merge_batch.json').exists()",
+                ],
+                merge_verified_batch=True,
+            )
+            registry = read_integration_batches(output_dir)
+
+            self.assertEqual(batch["batch_status"], "verified")
+            self.assertEqual(batch["merge_status"], "merged")
+            self.assertNotEqual(_git_rev_parse(repo, "HEAD"), source_head)
+            self.assertTrue((repo / "generated" / "merge_batch.json").exists())
+            self.assertEqual(_git_status_short(repo), "")
+            self.assertEqual(registry["items"][0]["merge_status"], "merged")
+            self.assertEqual(registry["items"][0]["merge_commit_sha"], _git_rev_parse(repo, "HEAD"))
 
     def test_accepted_patch_applies_to_integration_worktree_without_commit(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -2146,8 +2146,8 @@ lightweight `integration_queue` snapshot and updates it from the existing
 `patch_integrated`, `integration_verified`, and `integration_commit_evaluated`
 events.
 
-M28 intentionally does not decide task-level versus feature-level integration
-commit grouping and does not merge integration branches into the main branch.
+M28 does not merge individual task integration branches into the main branch.
+Task-level integration commits remain checkpoints for audit and debugging.
 
 ## M28b Integration Batch Verification
 
@@ -2183,16 +2183,47 @@ Batch statuses:
 - `failed`: all patches applied, but the verification command failed;
 - `verified`: all patches applied and the verification command passed.
 
-M28b intentionally does not create integration commits and does not merge into
-the source branch. It only proves whether a queued patch set can coexist and
-pass a command in one worktree.
+M28b does not create integration commits and does not merge into the source
+branch. It only proves whether a queued patch set can coexist and pass a command
+in one worktree.
+
+## M28c Verified Batch Merge
+
+M28c allows a verified batch to merge back into the source branch:
+
+```python
+batch = verify_integration_batch(
+    project_root,
+    output_dir,
+    "BATCH-001",
+    ["python3", "-m", "pytest"],
+    merge_verified_batch=True,
+)
+```
+
+The merge policy is feature-level batch merge:
+
+1. queued accepted patches are applied together in one batch worktree;
+2. the verification command must pass in that batch worktree;
+3. the batch worktree is committed;
+4. `project_root` fast-forwards to the batch commit with
+   `git merge --ff-only`.
+
+The merge is rejected if the batch is not `verified`, the source worktree is
+dirty, the batch worktree cannot commit, or the source branch cannot
+fast-forward.
+
+Checkpoint means an intermediate integration record. A task-level checkpoint can
+show that one task was accepted or committed on an integration branch. A
+feature-level batch merge is the final delivery gate for a set of related
+patches.
 
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
 
 - transcript parsing;
-- production-grade merge orchestration;
+- production-grade non-fast-forward merge orchestration;
 - worker heartbeat files, restart backoff/quarantine, and health-driven task reassignment;
 - full roadmap/design/code-map context and live planner prompt quality;
 - advanced retry backoff, batch merge queues, and cross-process recovery;
@@ -2260,7 +2291,8 @@ events. M26 adds bounded rolling decomposition waves, generated task lineage,
 and milestone decomposition state. M27 adds file-registry resume for resident
 worker processes through attached PID supervisors. M28 adds a durable accepted
 patch integration queue and replay snapshot. M28b adds batch worktree
-verification for queued patch sets. Claude Code is not integrated yet.
+verification for queued patch sets. M28c adds verified batch fast-forward merge
+back to the source branch. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

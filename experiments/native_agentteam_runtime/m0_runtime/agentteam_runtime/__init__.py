@@ -24,6 +24,10 @@ _EXPORTS = {
     ),
     "FileScheduler": (".m0_runtime", "FileScheduler"),
     "FileSchedulerDaemon": (".daemon", "FileSchedulerDaemon"),
+    "merge_verified_integration_batch": (
+        ".integration_batch",
+        "merge_verified_integration_batch",
+    ),
     "ShellRuntimeAdapter": (".m0_runtime", "ShellRuntimeAdapter"),
     "TwoPhaseFileScheduler": (".two_phase_scheduler", "TwoPhaseFileScheduler"),
     "audit_worktree_diff": (".m0_runtime", "audit_worktree_diff"),
