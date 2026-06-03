@@ -110,6 +110,26 @@ def main(argv=None):
         help="Commit the integration worktree only after the verification command passes.",
     )
     parser.add_argument(
+        "--auto-decompose-backlog",
+        action="store_true",
+        help="Let the two-phase worker-pool path dispatch a planner task when no work is ready.",
+    )
+    parser.add_argument(
+        "--decomposition-milestone-id",
+        default="M21",
+        help="Milestone id used by --auto-decompose-backlog planner tasks.",
+    )
+    parser.add_argument(
+        "--decomposition-planner-role",
+        default="task_planner",
+        help="Agent role that should receive decomposition planner tasks.",
+    )
+    parser.add_argument(
+        "--decomposition-default-worker-role",
+        default="repo_map_agent",
+        help="Default worker role included in decomposition planner task payloads.",
+    )
+    parser.add_argument(
         "--runtime",
         choices=["fake", "shell", "codex"],
         help=(
@@ -355,6 +375,10 @@ def _run_supervised_two_phase_scheduler(args, integration_verification_command, 
         integrate_accepted_patch=args.integrate_accepted_patch,
         integration_verification_command=integration_verification_command,
         commit_verified_integration=args.commit_verified_integration,
+        auto_decompose=args.auto_decompose_backlog,
+        decomposition_milestone_id=args.decomposition_milestone_id,
+        decomposition_planner_role=args.decomposition_planner_role,
+        decomposition_default_worker_role=args.decomposition_default_worker_role,
     )
     supervision = []
     tick_count = 0

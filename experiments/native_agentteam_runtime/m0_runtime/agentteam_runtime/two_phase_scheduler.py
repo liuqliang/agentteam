@@ -21,6 +21,7 @@ from .m0_runtime import (
     run_integration_verification,
     write_patch_artifact,
 )
+from .task_proposal import normalize_task_proposal
 
 
 class TwoPhaseFileScheduler:
@@ -39,6 +40,10 @@ class TwoPhaseFileScheduler:
         integration_verification_command=None,
         commit_verified_integration=False,
         state_path=None,
+        auto_decompose=False,
+        decomposition_milestone_id="M21",
+        decomposition_planner_role="task_planner",
+        decomposition_default_worker_role="repo_map_agent",
     ):
         if max_inflight < 1:
             raise ValueError("max_inflight must be at least 1")
@@ -59,6 +64,10 @@ class TwoPhaseFileScheduler:
         self.integrate_accepted_patch = integrate_accepted_patch
         self.integration_verification_command = integration_verification_command
         self.commit_verified_integration = commit_verified_integration
+        self.auto_decompose = auto_decompose
+        self.decomposition_milestone_id = decomposition_milestone_id
+        self.decomposition_planner_role = decomposition_planner_role
+        self.decomposition_default_worker_role = decomposition_default_worker_role
         self.state_path = Path(
             state_path or self.output_dir / "state" / "two_phase_scheduler_state.json"
         )
@@ -68,6 +77,7 @@ class TwoPhaseFileScheduler:
         self.state = self._load_or_create_state()
 
     def dispatch_ready(self):
+        self._ensure_decomposition_task()
         capacity = self.max_inflight - len(self.state["inflight_attempts"])
         if capacity <= 0:
             self.state["scheduler_status"] = "waiting"
@@ -258,6 +268,9 @@ class TwoPhaseFileScheduler:
                 "worktree_id": worktree_id,
                 "worktree_path": str(worktree_path) if worktree_path else None,
                 "branch": branch,
+                "task_kind": task.get("task_kind", "implementation"),
+                "milestone_id": task.get("milestone_id"),
+                "default_worker_role": task.get("default_worker_role"),
                 "objective": task["objective"],
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
@@ -442,6 +455,12 @@ class TwoPhaseFileScheduler:
             patch_path,
             outcome,
         )
+        decomposition_events = self._apply_decomposition_result(
+            inflight,
+            runtime_result,
+            result,
+            outcome,
+        )
         self._append_events(
             inflight["step_id"],
             [
@@ -512,6 +531,7 @@ class TwoPhaseFileScheduler:
                     },
                 ),
                 *integration_events,
+                *decomposition_events,
                 *(
                     [
                         self._event(
@@ -573,6 +593,54 @@ class TwoPhaseFileScheduler:
             }
         )
         return result
+
+    def _apply_decomposition_result(self, inflight, runtime_result, result, outcome):
+        task = self._task_by_id(inflight["task_id"])
+        if task.get("task_kind") != "decompose_backlog":
+            return []
+        if outcome["validation_status"] != "accepted":
+            result["decomposition_status"] = "not_applied"
+            result["generated_task_ids"] = []
+            return []
+        try:
+            normalized = normalize_task_proposal(
+                runtime_result.get("output", {}).get("task_proposal"),
+                existing_task_ids={
+                    item["task_id"]
+                    for item in self.state["backlog"]["items"]
+                },
+            )
+        except ValueError as exc:
+            result["decomposition_status"] = "rejected"
+            result["generated_task_ids"] = []
+            result["failure_category"] = "invalid_task_proposal"
+            result["decomposition_error"] = str(exc)
+            outcome["validation_status"] = "rejected"
+            outcome["failure_category"] = "invalid_task_proposal"
+            outcome["retryable"] = False
+            return []
+
+        self.state["backlog"]["items"].extend(normalized["tasks"])
+        result["decomposition_status"] = "applied"
+        result["generated_task_ids"] = normalized["generated_task_ids"]
+        result["generated_task_count"] = len(normalized["generated_task_ids"])
+        return [
+            self._event(
+                "backlog_updated",
+                "agent-scheduler",
+                None,
+                f"backlog-decomposition:{inflight['attempt_id']}",
+                inflight["correlation_id"],
+                {
+                    "task_id": inflight["task_id"],
+                    "attempt_id": inflight["attempt_id"],
+                    "lease_id": inflight["lease_id"],
+                    "task_status": "done",
+                    "update_type": "decomposition_applied",
+                    "generated_task_ids": normalized["generated_task_ids"],
+                },
+            )
+        ]
 
     def _integrate_accepted_result(self, inflight, result, patch_path, outcome):
         if outcome["validation_status"] != "accepted":
@@ -701,6 +769,37 @@ class TwoPhaseFileScheduler:
         if self._ready_tasks():
             return "running"
         return "idle"
+
+    def _ensure_decomposition_task(self):
+        if not self.auto_decompose:
+            return
+        if self.state["inflight_attempts"] or self._ready_tasks():
+            return
+        if any(
+            item.get("task_kind") == "decompose_backlog"
+            for item in self.state["backlog"]["items"]
+        ):
+            return
+        task_id = f"DECOMPOSE-{self.decomposition_milestone_id}-001"
+        self.state["backlog"]["items"].append(
+            {
+                "task_id": task_id,
+                "task_kind": "decompose_backlog",
+                "milestone_id": self.decomposition_milestone_id,
+                "objective": (
+                    "Generate the next bounded executable backlog tasks for "
+                    f"{self.decomposition_milestone_id}."
+                ),
+                "backlog_status": "ready",
+                "risk_target": "L0",
+                "depends_on": [],
+                "read_scope": ["."],
+                "write_scope": [],
+                "required_role": self.decomposition_planner_role,
+                "default_worker_role": self.decomposition_default_worker_role,
+                "blockers": [],
+            }
+        )
 
     def _task_by_id(self, task_id):
         for task in self.state["backlog"]["items"]:

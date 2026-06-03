@@ -13,6 +13,34 @@ class SystemClock:
 
 class FakeRuntimeAdapter:
     def run(self, message, worktree_path=None):
+        if message["payload"].get("task_kind") == "decompose_backlog":
+            milestone_id = message["payload"].get("milestone_id", "M21")
+            default_worker_role = message["payload"].get(
+                "default_worker_role",
+                "repo_map_agent",
+            )
+            return {
+                "result_status": "completed",
+                "changed_files": [],
+                "output": {
+                    "adapter": "fake",
+                    "task_proposal": {
+                        "milestone_id": milestone_id,
+                        "tasks": [
+                            {
+                                "task_id": f"TASK-{milestone_id}-GENERATED-001",
+                                "objective": f"Run generated worker task for {milestone_id}.",
+                                "read_scope": ["."],
+                                "write_scope": ["generated/"],
+                                "required_role": default_worker_role,
+                                "risk_target": "L0",
+                                "depends_on": [],
+                                "blockers": [],
+                            }
+                        ],
+                    },
+                },
+            }
         changed_files = _fake_changed_files(message["payload"]["write_scope"])
         if worktree_path and changed_files:
             target = Path(worktree_path) / changed_files[0]

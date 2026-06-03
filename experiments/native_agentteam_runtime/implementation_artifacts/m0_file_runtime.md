@@ -1704,6 +1704,64 @@ M20 intentionally does not add heartbeat files, restart backoff, quarantine
 budgets, health-based task reassignment, or cancellation for workers stuck
 inside long-running model calls.
 
+## M21 Planner Proposal Decomposition
+
+M21 adds an opt-in automatic decomposition loop for the two-phase worker-pool
+path. The scheduler remains the authority: a planner agent can only return a
+candidate JSON proposal, and the deterministic scheduler validates and appends
+accepted tasks to `state["backlog"]["items"]`.
+
+Planner proposals use this shape:
+
+```json
+{
+  "milestone_id": "M21",
+  "tasks": [
+    {
+      "task_id": "TASK-M21-GENERATED-001",
+      "objective": "Run generated worker task for M21.",
+      "read_scope": ["."],
+      "write_scope": ["generated/"],
+      "required_role": "repo_map_agent",
+      "risk_target": "L0",
+      "depends_on": [],
+      "blockers": []
+    }
+  ]
+}
+```
+
+`normalize_task_proposal()` rejects malformed proposals, duplicate task ids,
+unknown dependencies, invalid scope fields, unsupported statuses, and generated
+tasks that try to become planner tasks themselves.
+
+The two-phase CLI exposes the feature through:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool /path/to/agent_pool.json \
+  --backlog /path/to/empty_backlog.json \
+  --output-dir /tmp/agentteam-m21-auto-decompose-run \
+  --daemon-run-until-idle \
+  --daemon-two-phase-worker-pool \
+  --auto-decompose-backlog \
+  --decomposition-milestone-id M21 \
+  --decomposition-planner-role task_planner \
+  --decomposition-default-worker-role repo_map_agent
+```
+
+When the backlog has no ready tasks and no inflight attempts, the scheduler
+creates `DECOMPOSE-<milestone>-001`, dispatches it to the planner role, applies
+the returned proposal, and then dispatches generated worker tasks through the
+existing mailbox path. `FakeRuntimeAdapter` can synthesize one deterministic
+proposal for this planner task so local tests can exercise the full scheduler,
+worker-pool, mailbox, proposal, and generated-task loop without a live model.
+
+M21 intentionally does not read roadmap/design documents, recursively decompose
+large goals, infer risk levels, package code-map context, or update semantic
+architecture artifacts from implementation feedback.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -1711,6 +1769,7 @@ M0/M3a intentionally fakes or simplifies:
 - transcript parsing;
 - production-grade merge orchestration;
 - worker heartbeat files, restart backoff/quarantine, and health-driven task reassignment;
+- roadmap-aware decomposition context and live planner prompt quality;
 - advanced retry backoff, queues, and cross-process recovery;
 - schema validation through a JSON Schema engine.
 
@@ -1762,8 +1821,10 @@ ticks. M18 adds retryable result recovery and lease-timeout recovery to that
 two-phase path. M19 connects accepted two-phase worktree results to patch
 artifact creation, integration verification, and optional integration commit.
 M20 adds static worker-pool health checks, exited-worker restart, restart counts,
-registry updates, and two-phase CLI supervision around scheduler ticks. Claude
-Code is not integrated yet.
+registry updates, and two-phase CLI supervision around scheduler ticks. M21 adds
+opt-in planner-agent decomposition proposals, deterministic proposal validation,
+backlog insertion, and a fake planner runtime path for local end-to-end tests.
+Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -1776,6 +1837,8 @@ Before the next backend milestone, the next design/code step should define:
 - Claude Code adapter feasibility and result extraction contract;
 - decide when worker supervision should add heartbeat, backoff/quarantine,
   health-driven task reassignment, and real Claude worker runtimes;
+- decide how planner prompts should receive roadmap, semantic design, code-map,
+  and verification-summary context;
 - decide whether lightweight artifact lint should grow into full JSON Schema
   validation;
 - retry backoff, retry budget, and failure escalation policy;

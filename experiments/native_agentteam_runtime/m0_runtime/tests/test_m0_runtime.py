@@ -22,6 +22,7 @@ from agentteam_runtime import (
     TwoPhaseFileScheduler,
     audit_worktree_diff,
     classify_attempt_outcome,
+    normalize_task_proposal,
     read_scheduler_state_index,
     replay_events,
     run_file_daemon,
@@ -47,6 +48,56 @@ class FixedClock:
 
 
 class M0RuntimeTests(unittest.TestCase):
+    def test_task_proposal_normalizes_valid_generated_tasks(self):
+        proposal = {
+            "milestone_id": "M21",
+            "tasks": [
+                {
+                    "task_id": "TASK-M21-001",
+                    "objective": "Add a bounded generated task.",
+                    "read_scope": ["experiments/native_agentteam_runtime/"],
+                    "write_scope": ["experiments/native_agentteam_runtime/generated/"],
+                    "required_role": "repo_map_agent",
+                    "risk_target": "L1",
+                    "depends_on": [],
+                    "blockers": [],
+                }
+            ],
+        }
+
+        normalized = normalize_task_proposal(
+            proposal,
+            existing_task_ids={"DECOMPOSE-M21-001"},
+        )
+
+        self.assertEqual(normalized["proposal_status"], "accepted")
+        self.assertEqual(normalized["generated_task_ids"], ["TASK-M21-001"])
+        self.assertEqual(normalized["tasks"][0]["backlog_status"], "ready")
+        self.assertEqual(normalized["tasks"][0]["milestone_id"], "M21")
+
+    def test_task_proposal_rejects_duplicate_existing_task_id(self):
+        proposal = {
+            "milestone_id": "M21",
+            "tasks": [
+                {
+                    "task_id": "TASK-M21-001",
+                    "objective": "Duplicate task id.",
+                    "read_scope": ["."],
+                    "write_scope": ["generated/"],
+                    "required_role": "repo_map_agent",
+                    "risk_target": "L0",
+                    "depends_on": [],
+                    "blockers": [],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "duplicate task_id"):
+            normalize_task_proposal(
+                proposal,
+                existing_task_ids={"TASK-M21-001"},
+            )
+
     def test_run_simulation_dispatches_ready_task_and_validates_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
@@ -1831,6 +1882,107 @@ class M0RuntimeTests(unittest.TestCase):
                 {"TASK-001": "done"},
             )
 
+    def test_two_phase_scheduler_dispatches_planner_task_when_auto_decompose_is_idle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-planner", "task_planner"),
+                    ("agent-repo-map", "repo_map_agent"),
+                ],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                auto_decompose=True,
+                decomposition_milestone_id="M21",
+            )
+
+            dispatch = scheduler.dispatch_ready()
+
+            self.assertEqual(dispatch["dispatch_status"], "dispatched")
+            self.assertEqual(dispatch["dispatched_task_ids"], ["DECOMPOSE-M21-001"])
+            self.assertEqual(
+                scheduler.state["backlog"]["items"][0]["task_kind"],
+                "decompose_backlog",
+            )
+            self.assertEqual(
+                scheduler.state["backlog"]["items"][0]["required_role"],
+                "task_planner",
+            )
+
+    def test_two_phase_scheduler_applies_planner_task_proposal_to_backlog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-planner", "task_planner"),
+                    ("agent-repo-map", "repo_map_agent"),
+                ],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                auto_decompose=True,
+                decomposition_milestone_id="M21",
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                "DECOMPOSE-M21-001",
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                [],
+                {
+                    "task_proposal": {
+                        "milestone_id": "M21",
+                        "tasks": [
+                            {
+                                "task_id": "TASK-M21-001",
+                                "objective": "Run generated worker task.",
+                                "read_scope": ["."],
+                                "write_scope": ["generated/"],
+                                "required_role": "repo_map_agent",
+                                "risk_target": "L0",
+                                "depends_on": [],
+                                "blockers": [],
+                            }
+                        ],
+                    }
+                },
+            )
+
+            collected = scheduler.collect_ready_results()
+
+            self.assertEqual(
+                collected["results"][0]["decomposition_status"],
+                "applied",
+            )
+            self.assertEqual(
+                collected["results"][0]["generated_task_ids"],
+                ["TASK-M21-001"],
+            )
+            self.assertEqual(
+                [item["task_id"] for item in scheduler.state["backlog"]["items"]],
+                ["DECOMPOSE-M21-001", "TASK-M21-001"],
+            )
+
     def test_two_phase_scheduler_collects_expired_inflight_as_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2142,6 +2294,68 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 {task["task_id"]: task["task_status"] for task in state["tasks"]},
                 {"TASK-001": "done", "TASK-002": "done"},
+            )
+
+    def test_cli_two_phase_worker_pool_can_auto_decompose_with_fake_planner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-planner", "task_planner"),
+                    ("agent-repo-map", "repo_map_agent"),
+                ],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(agent_pool_path),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--daemon-run-until-idle",
+                    "--daemon-two-phase-worker-pool",
+                    "--auto-decompose-backlog",
+                    "--decomposition-milestone-id",
+                    "M21",
+                    "--decomposition-planner-role",
+                    "task_planner",
+                    "--decomposition-default-worker-role",
+                    "repo_map_agent",
+                    "--max-steps",
+                    "10",
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            state = read_scheduler_state_index(output_dir)
+
+            self.assertEqual(completed.stderr, "")
+            self.assertEqual(summary["daemon_status"], "idle")
+            self.assertIn("DECOMPOSE-M21-001", summary["processed_task_ids"])
+            self.assertIn("TASK-M21-GENERATED-001", summary["processed_task_ids"])
+            self.assertEqual(
+                {task["task_id"]: task["task_status"] for task in state["tasks"]},
+                {
+                    "DECOMPOSE-M21-001": "done",
+                    "TASK-M21-GENERATED-001": "done",
+                },
             )
 
     def test_cli_two_phase_worker_pool_can_commit_verified_integration_patch(self):
@@ -3357,7 +3571,7 @@ def _mailbox_dispatch_message(message_id, agent_id, write_scope):
 def _write_backlog(tmp_path, write_scope, tasks=None):
     backlog = {
         "backlog_id": "BL-TEST",
-        "items": tasks or [_backlog_task("TASK-001", write_scope=write_scope)],
+        "items": [_backlog_task("TASK-001", write_scope=write_scope)] if tasks is None else tasks,
     }
     path = tmp_path / "backlog.json"
     path.write_text(json.dumps(backlog), encoding="utf-8")
@@ -3453,6 +3667,36 @@ def _write_agent_pool_with_agent_ids(path, agent_ids):
     path.write_text(json.dumps(agent_pool, sort_keys=True), encoding="utf-8")
 
 
+def _write_agent_pool_with_agent_roles(path, agent_roles):
+    agent_pool = {
+        "pool_id": "test-agent-pool",
+        "scheduler_agent_id": "agent-scheduler",
+        "updated_at": "2026-06-03T00:00:00Z",
+        "agents": [
+            {
+                "agent_id": agent_id,
+                "role": role,
+                "status": "idle",
+                "model_profile": "small-tooling",
+                "runtime_adapter": "codex",
+                "subscriptions": ["repo_index_stale"],
+                "inbox_path": f"mailboxes/{agent_id}/inbox.jsonl",
+                "outbox_path": f"mailboxes/{agent_id}/outbox.jsonl",
+                "lease": {
+                    "lease_id": None,
+                    "task_id": None,
+                    "expires_at": None,
+                },
+                "owned_artifacts": [],
+                "last_event_id": None,
+                "memory_summary_path": None,
+            }
+            for agent_id, role in agent_roles
+        ],
+    }
+    path.write_text(json.dumps(agent_pool, sort_keys=True), encoding="utf-8")
+
+
 def _append_runtime_result(
     outbox_path,
     source_message_id,
@@ -3477,6 +3721,40 @@ def _append_runtime_result(
             "result_status": result_status,
             "changed_files": changed_files,
             "output": {"test": "m18"},
+        },
+    }
+    outbox_path = Path(outbox_path)
+    outbox_path.parent.mkdir(parents=True, exist_ok=True)
+    with outbox_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, sort_keys=True))
+        stream.write("\n")
+
+
+def _append_runtime_result_with_output(
+    outbox_path,
+    source_message_id,
+    task_id,
+    attempt_id,
+    lease_id,
+    result_status,
+    changed_files,
+    output,
+):
+    record = {
+        "message_id": f"RESULT-{source_message_id}",
+        "from_agent": "agent-planner",
+        "to_agent": "agent-scheduler",
+        "message_type": "runtime_result",
+        "correlation_id": f"{task_id}:{attempt_id}",
+        "created_at": "2026-06-03T00:00:00Z",
+        "payload": {
+            "source_message_id": source_message_id,
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "lease_id": lease_id,
+            "result_status": result_status,
+            "changed_files": changed_files,
+            "output": output,
         },
     }
     outbox_path = Path(outbox_path)
