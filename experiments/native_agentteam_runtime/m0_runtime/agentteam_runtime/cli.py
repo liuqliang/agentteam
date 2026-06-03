@@ -410,7 +410,11 @@ def _run_supervised_two_phase_scheduler(args, integration_verification_command, 
     last_tick = None
     for _ in range(args.max_steps):
         tick_count += 1
-        supervision.append(worker_pool.supervise_once())
+        supervision_result = worker_pool.supervise_once()
+        supervision.append(supervision_result)
+        scheduler.set_unavailable_agent_ids(
+            _quarantined_agent_ids(supervision_result["after"])
+        )
         last_tick = scheduler.tick()
         supervision.append(worker_pool.supervise_once())
         if last_tick["tick_status"] == "idle":
@@ -437,6 +441,14 @@ def _run_supervised_two_phase_scheduler(args, integration_verification_command, 
         "worker_pool_supervision": supervision,
         "worker_pool_health": worker_pool.health_check(),
     }
+
+
+def _quarantined_agent_ids(pool_health):
+    return [
+        worker["worker_agent_id"]
+        for worker in pool_health.get("workers", [])
+        if worker.get("worker_status") == "quarantined"
+    ]
 
 
 def _require_execution_arg(parser, value, flag):

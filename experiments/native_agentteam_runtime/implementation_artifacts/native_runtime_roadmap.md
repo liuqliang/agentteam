@@ -71,6 +71,8 @@ The implementation has already proven these layers:
     cleanliness, batch commit, and `--ff-only` safety gates.
 18. Worker-pool restart budgets with quarantine state after repeated process
     exits.
+19. Two-phase dispatch avoidance for quarantined agents, allowing new work to
+    route to another compatible idle agent.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -233,8 +235,8 @@ is gated by batch verification and fast-forward merge.
 
 Goal: let the scheduler react to unhealthy workers without user intervention.
 
-Status: restart-budget and quarantine slice implemented. Remaining work is task
-reassignment away from quarantined workers.
+Status: restart-budget, quarantine, and new-dispatch avoidance implemented.
+Remaining work is explicit reassignment events and inflight migration policy.
 
 Scope:
 
@@ -301,4 +303,4 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended milestone is M29b: Task Reassignment From Quarantined Workers.
+The next recommended milestone is M29c: Reassignment Event Lineage.

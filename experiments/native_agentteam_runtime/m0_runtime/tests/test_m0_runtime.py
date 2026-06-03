@@ -2179,6 +2179,39 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(dispatch["dispatched_task_ids"], ["TASK-001"])
             self.assertEqual(dispatch["inflight_count"], 1)
 
+    def test_two_phase_scheduler_skips_unavailable_agent_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-001", write_scope=["generated/"])],
+            )
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-unhealthy", "repo_map_agent"),
+                    ("agent-healthy", "repo_map_agent"),
+                ],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                unavailable_agent_ids=["agent-unhealthy"],
+            )
+
+            dispatch = scheduler.dispatch_ready()
+
+            self.assertEqual(dispatch["dispatch_status"], "dispatched")
+            self.assertEqual(
+                scheduler.state["inflight_attempts"][0]["agent_id"],
+                "agent-healthy",
+            )
+
     def test_two_phase_scheduler_retries_retryable_failed_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

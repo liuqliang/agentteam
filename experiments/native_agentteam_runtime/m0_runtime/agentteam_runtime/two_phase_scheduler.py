@@ -51,6 +51,7 @@ class TwoPhaseFileScheduler:
         decomposition_context_artifact_paths=None,
         decomposition_context_excerpt_chars=1200,
         decomposition_max_waves=1,
+        unavailable_agent_ids=None,
     ):
         if max_inflight < 1:
             raise ValueError("max_inflight must be at least 1")
@@ -88,6 +89,7 @@ class TwoPhaseFileScheduler:
         )
         self.decomposition_context_excerpt_chars = decomposition_context_excerpt_chars
         self.decomposition_max_waves = decomposition_max_waves
+        self.unavailable_agent_ids = set(unavailable_agent_ids or [])
         self.state_path = Path(
             state_path or self.output_dir / "state" / "two_phase_scheduler_state.json"
         )
@@ -111,6 +113,7 @@ class TwoPhaseFileScheduler:
 
         agent_pool = _read_json(self.agent_pool_path)
         self._mark_inflight_agents_busy(agent_pool)
+        self._mark_unavailable_agents(agent_pool)
         dispatched = []
         for task in self._ready_tasks():
             if len(dispatched) >= capacity:
@@ -178,6 +181,9 @@ class TwoPhaseFileScheduler:
             "inflight_count": len(self.state["inflight_attempts"]),
             "processed_task_ids": self.summary()["processed_task_ids"],
         }
+
+    def set_unavailable_agent_ids(self, agent_ids):
+        self.unavailable_agent_ids = set(agent_ids or [])
 
     def run_until_idle(self, max_ticks=100, poll_interval_seconds=0.02):
         if max_ticks < 1:
@@ -865,6 +871,11 @@ class TwoPhaseFileScheduler:
         for agent in agent_pool["agents"]:
             if agent["agent_id"] in inflight_agent_ids:
                 agent["status"] = "busy"
+
+    def _mark_unavailable_agents(self, agent_pool):
+        for agent in agent_pool["agents"]:
+            if agent["agent_id"] in self.unavailable_agent_ids:
+                agent["status"] = "unavailable"
 
     def _status_without_dispatch(self):
         if self.state["inflight_attempts"]:

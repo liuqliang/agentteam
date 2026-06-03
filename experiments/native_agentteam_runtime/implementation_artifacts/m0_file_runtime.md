@@ -2253,13 +2253,40 @@ behavior.
 
 M29a intentionally does not reassign tasks away from quarantined workers yet.
 
+## M29b Quarantined Agent Dispatch Avoidance
+
+M29b connects worker-pool health to two-phase scheduler dispatch. The scheduler
+now accepts unavailable agent ids:
+
+```python
+scheduler = TwoPhaseFileScheduler(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    unavailable_agent_ids=["agent-unhealthy"],
+)
+```
+
+Before dispatch, those agents are marked `unavailable`, so normal role matching
+selects another compatible idle agent if one exists.
+
+The supervised two-phase worker-pool CLI updates this set before each scheduler
+tick from worker-pool health:
+
+```text
+worker_status == quarantined -> unavailable_agent_ids
+```
+
+This is conservative reassignment. It prevents new dispatches to quarantined
+workers, but it does not move already inflight attempts.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
 
 - transcript parsing;
 - production-grade non-fast-forward merge orchestration;
-- worker heartbeat files, restart backoff, and health-driven task reassignment;
+- worker heartbeat files, restart backoff, and inflight task migration;
 - full roadmap/design/code-map context and live planner prompt quality;
 - advanced retry backoff, batch merge queues, and cross-process recovery;
 - schema validation through a JSON Schema engine.
@@ -2328,7 +2355,8 @@ worker processes through attached PID supervisors. M28 adds a durable accepted
 patch integration queue and replay snapshot. M28b adds batch worktree
 verification for queued patch sets. M28c adds verified batch fast-forward merge
 back to the source branch. M29a adds worker-pool restart budgets and quarantine.
-Claude Code is not integrated yet.
+M29b routes new work away from quarantined worker agents. Claude Code is not
+integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
