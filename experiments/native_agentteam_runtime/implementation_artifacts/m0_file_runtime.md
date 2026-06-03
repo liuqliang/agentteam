@@ -1956,6 +1956,44 @@ M24 intentionally does not discover artifacts automatically, build language-awar
 code maps, summarize source files, infer proposal quality, or let planner agents
 edit roadmap/design authority documents.
 
+## M25 Proposal Quality Gate
+
+M25 strengthens `normalize_task_proposal()` so planner output is rejected before
+backlog insertion when the generated task graph is structurally unsafe or too
+broad for its declared risk target.
+
+New deterministic proposal checks:
+
+- generated tasks may not depend on themselves;
+- generated tasks may not form dependency cycles through `depends_on`;
+- `risk_target` must be one of `L0`, `L1`, or `L2`;
+- `L0` tasks may not declare multiple write scopes;
+- `L0` tasks may not use repository-wide `write_scope=["."]`;
+- `L1` tasks may not declare more than three write scopes.
+
+`L2` generated tasks are accepted only as review-blocked backlog candidates:
+
+```json
+{
+  "task_id": "TASK-M25-REVIEW-001",
+  "backlog_status": "blocked",
+  "risk_target": "L2",
+  "blockers": ["requires_review"]
+}
+```
+
+This lets the planner surface a high-risk task without allowing the scheduler to
+dispatch it to an implementation worker before review policy exists.
+
+When decomposition is rejected by the proposal quality gate, the scheduler still
+uses `failure_category=invalid_task_proposal`. M25 also copies
+`decomposition_status` and `decomposition_error` into the `validation_rejected`
+event payload so event inspection can show the specific reason, such as
+`self dependency` or `dependency cycle`.
+
+M25 intentionally does not infer risk semantically, implement reviewer-agent
+unblocking, support L3 authority-update routing, or perform learned task sizing.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -2023,7 +2061,9 @@ and fake planner context reads. M23 adds a Codex planner prompt contract,
 fallback workspace execution for no-worktree planner tasks, fallback dirty-check
 rejection, and fake Codex planner worker-pool coverage. M24 adds selected
 artifact summaries with digest, timestamp, heading, excerpt, and warning
-metadata in planner context files. Claude Code is not integrated yet.
+metadata in planner context files. M25 adds deterministic proposal quality
+checks, L2 review blocking, and decomposition rejection details in validation
+events. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

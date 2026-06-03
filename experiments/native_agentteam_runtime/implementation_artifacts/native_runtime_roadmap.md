@@ -55,6 +55,9 @@ The implementation has already proven these layers:
     dirty-check rejection, and fake Codex planner worker-pool coverage.
 11. Selected semantic artifact context ingestion with digest, timestamp,
     heading, bounded excerpt, and warning metadata.
+12. Proposal quality gate for self-dependencies, generated dependency cycles,
+    risk-target enforcement, L0/L1 scope size limits, L2 review blocking, and
+    inspectable decomposition rejection details.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -128,6 +131,8 @@ Acceptance:
 - tests verify that full document bodies are not embedded by default.
 
 ### M25: Proposal Quality Gate
+
+Status: implemented.
 
 Goal: reject bad automatic task splits before they become executable backlog
 state.
@@ -273,4 +278,4 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended milestone is M25: Proposal Quality Gate.
+The next recommended milestone is M26: Rolling Milestone Decomposition.

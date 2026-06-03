@@ -249,6 +249,122 @@ class M0RuntimeTests(unittest.TestCase):
                 allowed_write_scopes=["generated/"],
             )
 
+    def test_task_proposal_rejects_self_dependency(self):
+        proposal = {
+            "milestone_id": "M25",
+            "tasks": [
+                {
+                    "task_id": "TASK-M25-001",
+                    "objective": "Depend on itself.",
+                    "read_scope": ["."],
+                    "write_scope": ["generated/"],
+                    "required_role": "repo_map_agent",
+                    "risk_target": "L0",
+                    "depends_on": ["TASK-M25-001"],
+                    "blockers": [],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "self dependency"):
+            normalize_task_proposal(proposal)
+
+    def test_task_proposal_rejects_generated_dependency_cycle(self):
+        proposal = {
+            "milestone_id": "M25",
+            "tasks": [
+                {
+                    "task_id": "TASK-M25-001",
+                    "objective": "First cyclic task.",
+                    "read_scope": ["."],
+                    "write_scope": ["generated/one/"],
+                    "required_role": "repo_map_agent",
+                    "risk_target": "L1",
+                    "depends_on": ["TASK-M25-002"],
+                    "blockers": [],
+                },
+                {
+                    "task_id": "TASK-M25-002",
+                    "objective": "Second cyclic task.",
+                    "read_scope": ["."],
+                    "write_scope": ["generated/two/"],
+                    "required_role": "repo_map_agent",
+                    "risk_target": "L1",
+                    "depends_on": ["TASK-M25-001"],
+                    "blockers": [],
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "dependency cycle"):
+            normalize_task_proposal(proposal)
+
+    def test_task_proposal_rejects_unsupported_risk_target(self):
+        proposal = {
+            "milestone_id": "M25",
+            "tasks": [
+                {
+                    "task_id": "TASK-M25-001",
+                    "objective": "Use unsupported risk target.",
+                    "read_scope": ["."],
+                    "write_scope": ["generated/"],
+                    "required_role": "repo_map_agent",
+                    "risk_target": "L9",
+                    "depends_on": [],
+                    "blockers": [],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "unsupported risk_target"):
+            normalize_task_proposal(proposal)
+
+    def test_task_proposal_rejects_l0_with_multiple_write_scopes(self):
+        proposal = {
+            "milestone_id": "M25",
+            "tasks": [
+                {
+                    "task_id": "TASK-M25-001",
+                    "objective": "Declare too many write scopes for L0.",
+                    "read_scope": ["."],
+                    "write_scope": ["generated/one/", "generated/two/"],
+                    "required_role": "repo_map_agent",
+                    "risk_target": "L0",
+                    "depends_on": [],
+                    "blockers": [],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "L0 task may not declare multiple write scopes",
+        ):
+            normalize_task_proposal(proposal)
+
+    def test_task_proposal_routes_l2_generated_task_to_review(self):
+        proposal = {
+            "milestone_id": "M25",
+            "tasks": [
+                {
+                    "task_id": "TASK-M25-REVIEW-001",
+                    "objective": "Require review before execution.",
+                    "read_scope": ["."],
+                    "write_scope": ["generated/review/"],
+                    "required_role": "repo_map_agent",
+                    "risk_target": "L2",
+                    "depends_on": [],
+                    "blockers": [],
+                }
+            ],
+        }
+
+        normalized = normalize_task_proposal(proposal)
+        task = normalized["tasks"][0]
+
+        self.assertEqual(task["backlog_status"], "blocked")
+        self.assertEqual(task["blockers"], ["requires_review"])
+
     def test_run_simulation_dispatches_ready_task_and_validates_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
@@ -2251,6 +2367,82 @@ class M0RuntimeTests(unittest.TestCase):
                 "invalid_task_proposal",
             )
             self.assertEqual(len(scheduler.state["backlog"]["items"]), 1)
+
+    def test_two_phase_scheduler_records_proposal_quality_rejection_error_in_validation_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-planner", "task_planner"),
+                    ("agent-repo-map", "repo_map_agent"),
+                ],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                auto_decompose=True,
+                decomposition_milestone_id="M25",
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                "DECOMPOSE-M25-001",
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                [],
+                {
+                    "task_proposal": {
+                        "milestone_id": "M25",
+                        "tasks": [
+                            {
+                                "task_id": "TASK-M25-SELF-001",
+                                "objective": "Invalid self-dependent task.",
+                                "read_scope": ["."],
+                                "write_scope": ["generated/"],
+                                "required_role": "repo_map_agent",
+                                "risk_target": "L0",
+                                "depends_on": ["TASK-M25-SELF-001"],
+                                "blockers": [],
+                            }
+                        ],
+                    }
+                },
+            )
+
+            collected = scheduler.collect_ready_results()
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            validation_event = next(
+                event
+                for event in events
+                if event["event_type"] == "validation_rejected"
+            )
+
+            self.assertEqual(
+                collected["results"][0]["decomposition_status"],
+                "rejected",
+            )
+            self.assertIn(
+                "self dependency",
+                collected["results"][0]["decomposition_error"],
+            )
+            self.assertIn(
+                "self dependency",
+                validation_event["payload"]["decomposition_error"],
+            )
 
     def test_two_phase_scheduler_collects_expired_inflight_as_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:

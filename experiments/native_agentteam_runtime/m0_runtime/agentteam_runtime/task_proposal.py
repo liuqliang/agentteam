@@ -1,4 +1,5 @@
 _VALID_BACKLOG_STATUSES = {"ready", "blocked"}
+_VALID_RISK_TARGETS = {"L0", "L1", "L2"}
 
 
 def normalize_task_proposal(
@@ -39,6 +40,7 @@ def normalize_task_proposal(
         )
         for raw_task in raw_tasks
     ]
+    _validate_generated_dependency_cycles(tasks)
     return {
         "proposal_status": "accepted",
         "milestone_id": milestone_id,
@@ -65,12 +67,15 @@ def _normalize_task(
     if allowed_roles is not None and required_role not in allowed_roles:
         raise ValueError(f"unknown required_role: {required_role}")
     risk_target = _required_string(raw_task, "risk_target")
+    _validate_risk_target(risk_target)
     milestone_id = _optional_string(raw_task, "milestone_id", default_milestone_id)
     backlog_status = _optional_string(raw_task, "backlog_status", "ready")
     if backlog_status not in _VALID_BACKLOG_STATUSES:
         raise ValueError(f"unsupported backlog_status: {backlog_status}")
 
     depends_on = _string_list(raw_task, "depends_on")
+    if task_id in depends_on:
+        raise ValueError(f"self dependency: {task_id}")
     unknown_dependencies = [
         dependency_id
         for dependency_id in depends_on
@@ -81,6 +86,13 @@ def _normalize_task(
 
     write_scope = _string_list(raw_task, "write_scope")
     _validate_write_scope(write_scope, allowed_write_scopes)
+    _validate_risk_scope_size(risk_target, write_scope)
+    blockers = _string_list(raw_task, "blockers")
+    backlog_status, blockers = _apply_risk_policy(
+        risk_target,
+        backlog_status,
+        blockers,
+    )
 
     return {
         "task_id": task_id,
@@ -92,7 +104,7 @@ def _normalize_task(
         "read_scope": _string_list(raw_task, "read_scope"),
         "write_scope": write_scope,
         "required_role": required_role,
-        "blockers": _string_list(raw_task, "blockers"),
+        "blockers": blockers,
     }
 
 
@@ -126,6 +138,58 @@ def _validate_write_scope(write_scope, allowed_write_scopes):
         scope_prefix = _scope_prefix(scope)
         if not any(scope_prefix.startswith(allowed) for allowed in allowed_write_scopes):
             raise ValueError(f"write_scope outside allowed scope: {scope}")
+
+
+def _validate_risk_target(risk_target):
+    if risk_target not in _VALID_RISK_TARGETS:
+        raise ValueError(f"unsupported risk_target: {risk_target}")
+
+
+def _validate_risk_scope_size(risk_target, write_scope):
+    if risk_target == "L0":
+        if len(write_scope) > 1:
+            raise ValueError("L0 task may not declare multiple write scopes")
+        if "." in write_scope:
+            raise ValueError("L0 task may not use repository-wide write_scope")
+    if risk_target == "L1" and len(write_scope) > 3:
+        raise ValueError("L1 task may not declare more than three write scopes")
+
+
+def _apply_risk_policy(risk_target, backlog_status, blockers):
+    if risk_target != "L2":
+        return backlog_status, blockers
+    normalized_blockers = list(blockers)
+    if "requires_review" not in normalized_blockers:
+        normalized_blockers.append("requires_review")
+    return "blocked", normalized_blockers
+
+
+def _validate_generated_dependency_cycles(tasks):
+    generated_ids = {task["task_id"] for task in tasks}
+    graph = {
+        task["task_id"]: [
+            dependency_id
+            for dependency_id in task["depends_on"]
+            if dependency_id in generated_ids
+        ]
+        for task in tasks
+    }
+    visiting = set()
+    visited = set()
+
+    def visit(task_id):
+        if task_id in visiting:
+            raise ValueError(f"dependency cycle involving task_id: {task_id}")
+        if task_id in visited:
+            return
+        visiting.add(task_id)
+        for dependency_id in graph[task_id]:
+            visit(dependency_id)
+        visiting.remove(task_id)
+        visited.add(task_id)
+
+    for task_id in sorted(graph):
+        visit(task_id)
 
 
 def _scope_prefix(scope):

@@ -544,6 +544,7 @@ class TwoPhaseFileScheduler:
                         "lease_id": inflight["lease_id"],
                         "diff_audit": diff_audit,
                         "patch_path": str(patch_path) if patch_path else None,
+                        **_decomposition_validation_payload(result),
                     },
                 ),
                 *integration_events,
@@ -951,6 +952,15 @@ def run_two_phase_scheduler_loop(*args, max_ticks=100, poll_interval_seconds=0.0
         max_ticks=max_ticks,
         poll_interval_seconds=poll_interval_seconds,
     )
+
+
+def _decomposition_validation_payload(result):
+    payload = {}
+    if "decomposition_status" in result:
+        payload["decomposition_status"] = result["decomposition_status"]
+    if "decomposition_error" in result:
+        payload["decomposition_error"] = result["decomposition_error"]
+    return payload
 
 
 def _runtime_result_from_outbox(outbox_path, source_message_id):
