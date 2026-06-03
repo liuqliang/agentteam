@@ -8,6 +8,7 @@ from .mailbox_worker import (
     FileMailboxSubprocessRuntimeAdapter,
     FileMailboxWorkerProcessSupervisor,
 )
+from .worker_pool import FileMailboxWorkerPoolSupervisor
 from .m0_runtime import (
     FakeRuntimeAdapter,
     read_scheduler_state_index,
@@ -57,6 +58,11 @@ def main(argv=None):
         "--daemon-long-running-worker-agent-id",
         default="agent-repo-map",
         help="Agent id served by --daemon-long-running-mailbox-worker.",
+    )
+    parser.add_argument(
+        "--daemon-long-running-worker-pool",
+        action="store_true",
+        help="Run daemon tasks through one long-running mailbox worker process per agent.",
     )
     parser.add_argument(
         "--max-steps",
@@ -117,6 +123,8 @@ def main(argv=None):
         parser.error("--daemon-mailbox-subprocess-worker requires --daemon-run-until-idle")
     if args.daemon_long_running_mailbox_worker and not args.daemon_run_until_idle:
         parser.error("--daemon-long-running-mailbox-worker requires --daemon-run-until-idle")
+    if args.daemon_long_running_worker_pool and not args.daemon_run_until_idle:
+        parser.error("--daemon-long-running-worker-pool requires --daemon-run-until-idle")
     if args.daemon_mailbox_worker and args.daemon_mailbox_subprocess_worker:
         parser.error("--daemon-mailbox-worker and --daemon-mailbox-subprocess-worker are mutually exclusive")
     if args.daemon_long_running_mailbox_worker and (
@@ -124,6 +132,14 @@ def main(argv=None):
     ):
         parser.error(
             "--daemon-long-running-mailbox-worker cannot be combined with other daemon mailbox worker flags"
+        )
+    if args.daemon_long_running_worker_pool and (
+        args.daemon_mailbox_worker
+        or args.daemon_mailbox_subprocess_worker
+        or args.daemon_long_running_mailbox_worker
+    ):
+        parser.error(
+            "--daemon-long-running-worker-pool cannot be combined with other daemon mailbox worker flags"
         )
     if args.show_state_index:
         result = read_scheduler_state_index(args.output_dir)
@@ -156,6 +172,9 @@ def main(argv=None):
     if args.daemon_run_until_idle:
         runtime_adapter = None
         worker_process = None
+        worker_pool = None
+        worker_start = None
+        worker_pool_start = None
         if args.daemon_mailbox_worker:
             if runtime_profile_defaults:
                 parser.error("--daemon-mailbox-worker currently supports only the fake delegate runtime")
@@ -195,8 +214,14 @@ def main(argv=None):
                 args.agent_pool,
                 timeout_seconds=external_timeout_seconds,
             )
-        else:
-            worker_start = None
+        if args.daemon_long_running_worker_pool:
+            worker_pool = FileMailboxWorkerPoolSupervisor(
+                args.agent_pool,
+                args.output_dir,
+                runtime_profile_defaults=runtime_profile_defaults,
+            )
+            worker_pool_start = worker_pool.start()
+            runtime_adapter = FileMailboxExternalRuntimeAdapter(args.agent_pool)
         try:
             result = run_file_daemon(
                 args.agent_pool,
@@ -212,12 +237,21 @@ def main(argv=None):
             )
         finally:
             worker_stop = worker_process.stop() if worker_process else None
+            worker_pool_stop = worker_pool.stop() if worker_pool else None
         if worker_process:
             result = {
                 **result,
                 "worker_process": {
                     **worker_start,
                     **worker_stop,
+                },
+            }
+        if worker_pool:
+            result = {
+                **result,
+                "worker_pool": {
+                    **worker_pool_start,
+                    **worker_pool_stop,
                 },
             }
         snapshot = replay_events(result["events_path"])

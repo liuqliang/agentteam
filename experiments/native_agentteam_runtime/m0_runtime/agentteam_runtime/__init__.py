@@ -18,6 +18,10 @@ _EXPORTS = {
         ".mailbox_worker",
         "FileMailboxWorkerProcessSupervisor",
     ),
+    "FileMailboxWorkerPoolSupervisor": (
+        ".worker_pool",
+        "FileMailboxWorkerPoolSupervisor",
+    ),
     "FileScheduler": (".m0_runtime", "FileScheduler"),
     "FileSchedulerDaemon": (".daemon", "FileSchedulerDaemon"),
     "ShellRuntimeAdapter": (".m0_runtime", "ShellRuntimeAdapter"),

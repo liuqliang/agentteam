@@ -63,6 +63,7 @@ from agentteam_runtime import (
     FileMailboxSubprocessRuntimeAdapter,
     FileMailboxWorker,
     FileMailboxWorkerProcessSupervisor,
+    FileMailboxWorkerPoolSupervisor,
     FileScheduler,
     ShellRuntimeAdapter,
     classify_attempt_outcome,
@@ -102,6 +103,7 @@ mailbox_supervisor = FileMailboxWorkerProcessSupervisor(
     output_dir,
     "agent-repo-map",
 )
+mailbox_pool = FileMailboxWorkerPoolSupervisor(agent_pool_path, output_dir)
 
 result_with_worktree = run_simulation(
     agent_pool_path,
@@ -321,6 +323,24 @@ The normal Codex CLI options, such as `--codex-command`, `--codex-model`,
 worker process. The scheduler side still records
 `FileMailboxExternalRuntimeAdapter` because it waits for mailbox results rather
 than directly invoking Codex.
+
+In M16 the daemon can start one long-running worker process per non-scheduler
+agent in the agent pool:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool /path/to/agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m16-static-worker-pool-run \
+  --daemon-run-until-idle \
+  --daemon-long-running-worker-pool
+```
+
+This starts a static worker pool and writes
+`<output-dir>/state/worker_process_registry.json`. The scheduler remains
+sequential; the pool proves resident multi-process lifecycle, not concurrent
+task dispatch.
 
 To inspect a completed or partially completed scheduler run without re-running
 the scheduler, pass `--show-state-index` with only the output directory:
@@ -1425,6 +1445,49 @@ worker id must match the agent selected by the scheduler for the ready task;
 otherwise the external adapter waits on one outbox while the running worker
 serves a different mailbox.
 
+## M16 Static Multi-Worker Supervisor
+
+M16 adds `FileMailboxWorkerPoolSupervisor`, a lifecycle wrapper around multiple
+`FileMailboxWorkerProcessSupervisor` instances:
+
+```python
+pool = FileMailboxWorkerPoolSupervisor(agent_pool_path, output_dir)
+start = pool.start()
+stop = pool.stop()
+```
+
+The pool reads the agent pool, skips the scheduler agent, and starts one serving
+worker process per remaining agent. Each worker serves only its own mailbox.
+The pool writes a process registry:
+
+```text
+<output-dir>/state/worker_process_registry.json
+```
+
+The registry records the real OS worker process state:
+
+```json
+{
+  "registry_status": "stopped",
+  "worker_count": 2,
+  "workers": [
+    {
+      "worker_agent_id": "agent-repo-map",
+      "worker_runtime": "fake",
+      "worker_status": "stopped",
+      "worker_pid": 12345
+    }
+  ]
+}
+```
+
+M16 intentionally keeps the scheduler path blocking and sequential. A daemon
+run with `--daemon-long-running-worker-pool` still processes one scheduler step
+at a time through `FileMailboxExternalRuntimeAdapter`; the matching resident
+worker writes the outbox result, and idle workers remain alive until daemon
+shutdown. True concurrent dispatch requires a later split between dispatch and
+result collection.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -1475,8 +1538,9 @@ one-shot OS subprocess via `FileMailboxSubprocessRuntimeAdapter`. M15a adds one
 long-running fake mailbox worker process with explicit supervisor start/stop.
 M15b lets that long-running worker execute through `CodexRuntimeAdapter` while
 preserving the single-worker topology. M15c makes the long-worker daemon CLI
-agent id configurable while still starting only one worker process. Claude Code
-is not integrated yet.
+agent id configurable while still starting only one worker process. M16 adds a
+static worker pool that starts one resident worker per agent while preserving
+sequential scheduler execution. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -1487,8 +1551,8 @@ Before the next backend milestone, the next design/code step should define:
 - decide when live Codex smoke should run outside local opt-in, such as nightly
   or pre-release only;
 - Claude Code adapter feasibility and result extraction contract;
-- decide when the single long-running Codex worker should expand to multiple
-  agents, restart/backoff, and real Claude worker runtimes;
+- decide when static worker-pool lifecycle should expand to true concurrent
+  dispatch/result collection, restart/backoff, and real Claude worker runtimes;
 - decide whether lightweight artifact lint should grow into full JSON Schema
   validation;
 - retry backoff, retry budget, and failure escalation policy;

@@ -15,6 +15,7 @@ from agentteam_runtime import (
     FileMailboxRuntimeAdapter,
     FileMailboxSubprocessRuntimeAdapter,
     FileMailboxWorkerProcessSupervisor,
+    FileMailboxWorkerPoolSupervisor,
     FileMailboxWorker,
     ShellRuntimeAdapter,
     audit_worktree_diff,
@@ -1612,6 +1613,115 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["worker_process"]["worker_agent_id"], "agent-custom-map")
             self.assertTrue(custom_outbox.exists())
 
+    def test_file_mailbox_worker_pool_supervisor_starts_and_stops_all_agents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_ids(
+                agent_pool_path,
+                ["agent-repo-map", "agent-doc-map"],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+            pool = FileMailboxWorkerPoolSupervisor(
+                agent_pool_path,
+                output_dir,
+                env=env,
+                poll_interval_seconds=0.01,
+            )
+
+            start = pool.start()
+            try:
+                self.assertEqual(start["pool_status"], "running")
+                self.assertEqual(start["worker_count"], 2)
+                self.assertEqual(
+                    {worker["worker_agent_id"] for worker in start["workers"]},
+                    {"agent-repo-map", "agent-doc-map"},
+                )
+                self.assertTrue(Path(start["process_registry_path"]).exists())
+                self.assertTrue(
+                    all(worker["worker_pid"] != os.getpid() for worker in start["workers"])
+                )
+            finally:
+                stop = pool.stop()
+
+            registry = json.loads(
+                Path(stop["process_registry_path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(stop["pool_status"], "stopped")
+            self.assertEqual(stop["worker_count"], 2)
+            self.assertEqual(registry["registry_status"], "stopped")
+            self.assertEqual(
+                {worker["worker_agent_id"] for worker in stop["workers"]},
+                {"agent-repo-map", "agent-doc-map"},
+            )
+            self.assertTrue(
+                all(worker["worker_status"] == "stopped" for worker in stop["workers"])
+            )
+
+    def test_cli_can_run_file_daemon_with_static_long_running_worker_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_agent_pool_with_agent_ids(
+                agent_pool_path,
+                ["agent-repo-map", "agent-doc-map"],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(agent_pool_path),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--daemon-run-until-idle",
+                    "--daemon-long-running-worker-pool",
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            process_registry = json.loads(
+                Path(summary["worker_pool"]["process_registry_path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            repo_outbox = (
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-001"
+                / "mailboxes"
+                / "agent-repo-map"
+                / "outbox.jsonl"
+            )
+
+            self.assertEqual(completed.stderr, "")
+            self.assertEqual(summary["daemon_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001"])
+            self.assertEqual(summary["worker_pool"]["pool_status"], "stopped")
+            self.assertEqual(summary["worker_pool"]["worker_count"], 2)
+            self.assertEqual(process_registry["registry_status"], "stopped")
+            self.assertEqual(
+                {worker["worker_agent_id"] for worker in summary["worker_pool"]["workers"]},
+                {"agent-repo-map", "agent-doc-map"},
+            )
+            self.assertTrue(repo_outbox.exists())
+
     def test_cli_can_show_state_index_without_agent_pool_or_backlog(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2820,6 +2930,36 @@ def _write_agent_pool_with_agent_id(path, agent_id):
                 "last_event_id": None,
                 "memory_summary_path": None,
             }
+        ],
+    }
+    path.write_text(json.dumps(agent_pool, sort_keys=True), encoding="utf-8")
+
+
+def _write_agent_pool_with_agent_ids(path, agent_ids):
+    agent_pool = {
+        "pool_id": "test-agent-pool",
+        "scheduler_agent_id": "agent-scheduler",
+        "updated_at": "2026-06-03T00:00:00Z",
+        "agents": [
+            {
+                "agent_id": agent_id,
+                "role": "repo_map_agent" if index == 0 else f"aux_role_{index}",
+                "status": "idle",
+                "model_profile": "small-tooling",
+                "runtime_adapter": "codex",
+                "subscriptions": ["repo_index_stale"],
+                "inbox_path": f"mailboxes/{agent_id}/inbox.jsonl",
+                "outbox_path": f"mailboxes/{agent_id}/outbox.jsonl",
+                "lease": {
+                    "lease_id": None,
+                    "task_id": None,
+                    "expires_at": None,
+                },
+                "owned_artifacts": [],
+                "last_event_id": None,
+                "memory_summary_path": None,
+            }
+            for index, agent_id in enumerate(agent_ids)
         ],
     }
     path.write_text(json.dumps(agent_pool, sort_keys=True), encoding="utf-8")
