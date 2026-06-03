@@ -112,6 +112,8 @@ two_phase_summary = run_two_phase_scheduler_loop(
     backlog_path,
     output_dir,
     max_inflight=2,
+    max_attempts=2,
+    lease_timeout_seconds=900,
 )
 
 result_with_worktree = run_simulation(
@@ -361,7 +363,9 @@ python3 -m agentteam_runtime.cli \
   --output-dir /tmp/agentteam-m17-two-phase-worker-pool-run \
   --daemon-run-until-idle \
   --daemon-two-phase-worker-pool \
-  --max-inflight 2
+  --max-inflight 2 \
+  --max-attempts 2 \
+  --lease-timeout-seconds 900
 ```
 
 This path dispatches ready tasks up to `--max-inflight` without waiting for
@@ -1559,6 +1563,56 @@ index. M17 keeps these limits:
 - no lease timeout recovery;
 - no worker restart/backoff.
 
+## M18 Two-Phase Retry Timeout Recovery
+
+M18 adds bounded recovery to `TwoPhaseFileScheduler`:
+
+```python
+scheduler = TwoPhaseFileScheduler(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    max_inflight=2,
+    max_attempts=2,
+    lease_timeout_seconds=900,
+)
+```
+
+`max_attempts` is per task. When an attempt returns a retryable runtime failure,
+the scheduler appends `validation_rejected` and `recovery_routed`, removes the
+attempt from `inflight_attempts`, leaves the task `ready`, and lets a later
+dispatch pass create the next attempt. Attempt ids remain task-scoped:
+
+```text
+TASK-001-ATTEMPT-001
+TASK-001-ATTEMPT-002
+```
+
+If an inflight attempt has no matching mailbox result and its lease expires,
+`collect_ready_results()` synthesizes a `timed_out` runtime result. That timeout
+uses the same outcome classifier as normal runtime output. A timeout is
+retryable while attempts remain and blocks the task once the retry budget is
+exhausted.
+
+The two-phase CLI exposes the same controls:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool /path/to/agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m18-two-phase-retry-timeout-run \
+  --daemon-run-until-idle \
+  --daemon-two-phase-worker-pool \
+  --max-inflight 2 \
+  --max-attempts 2 \
+  --lease-timeout-seconds 900
+```
+
+M18 still does not restart or kill worker processes. It only makes scheduler
+state advance when the worker reports a retryable failure or fails to report
+before the lease deadline.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -1613,7 +1667,8 @@ agent id configurable while still starting only one worker process. M16 adds a
 static worker pool that starts one resident worker per agent while preserving
 sequential scheduler execution. M17 adds a side-by-side two-phase scheduler
 that can keep multiple attempts inflight and collect mailbox results in later
-ticks. Claude Code is not integrated yet.
+ticks. M18 adds retryable result recovery and lease-timeout recovery to that
+two-phase path. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

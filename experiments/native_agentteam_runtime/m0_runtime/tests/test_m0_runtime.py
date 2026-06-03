@@ -1690,6 +1690,112 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(dispatch["dispatched_task_ids"], ["TASK-001"])
             self.assertEqual(dispatch["inflight_count"], 1)
 
+    def test_two_phase_scheduler_retries_retryable_failed_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/"]),
+                ],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=2,
+            )
+
+            first_dispatch = scheduler.dispatch_ready()
+            first_inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result(
+                first_inflight["outbox_path"],
+                first_inflight["message_id"],
+                first_inflight["task_id"],
+                first_inflight["attempt_id"],
+                first_inflight["lease_id"],
+                "failed",
+                [],
+            )
+
+            first_collect = scheduler.collect_ready_results()
+            second_dispatch = scheduler.dispatch_ready()
+            second_inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result(
+                second_inflight["outbox_path"],
+                second_inflight["message_id"],
+                second_inflight["task_id"],
+                second_inflight["attempt_id"],
+                second_inflight["lease_id"],
+                "completed",
+                ["generated/retry.json"],
+            )
+            second_collect = scheduler.collect_ready_results()
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            state = read_scheduler_state_index(output_dir)
+
+            self.assertEqual(first_dispatch["dispatched_task_ids"], ["TASK-001"])
+            self.assertEqual(first_collect["collected_task_ids"], ["TASK-001"])
+            self.assertEqual(second_dispatch["dispatched_task_ids"], ["TASK-001"])
+            self.assertEqual(second_inflight["attempt_id"], "TASK-001-ATTEMPT-002")
+            self.assertEqual(second_collect["collected_task_ids"], ["TASK-001"])
+            self.assertIn("recovery_routed", {event["event_type"] for event in events})
+            self.assertEqual(
+                [step["step_status"] for step in scheduler.state["steps"]],
+                ["retry_routed", "processed"],
+            )
+            self.assertEqual(
+                {task["task_id"]: task["task_status"] for task in state["tasks"]},
+                {"TASK-001": "done"},
+            )
+
+    def test_two_phase_scheduler_collects_expired_inflight_as_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/"]),
+                ],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                lease_timeout_seconds=0,
+            )
+
+            scheduler.dispatch_ready()
+            collected = scheduler.collect_ready_results()
+            state = read_scheduler_state_index(output_dir)
+
+            self.assertEqual(collected["collect_status"], "collected")
+            self.assertEqual(collected["collected_task_ids"], ["TASK-001"])
+            self.assertEqual(scheduler.summary()["inflight_count"], 0)
+            self.assertEqual(scheduler.state["steps"][0]["failure_category"], "timeout")
+            self.assertTrue(scheduler.state["steps"][0]["result"]["retryable"])
+            self.assertEqual(
+                {task["task_id"]: task["task_status"] for task in state["tasks"]},
+                {"TASK-001": "running"},
+            )
+            self.assertEqual(
+                scheduler.state["backlog"]["items"][0]["blockers"],
+                ["timeout"],
+            )
+
     def test_two_phase_scheduler_dispatches_multiple_tasks_before_collecting(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1857,6 +1963,10 @@ class M0RuntimeTests(unittest.TestCase):
                     "--daemon-two-phase-worker-pool",
                     "--max-inflight",
                     "2",
+                    "--max-attempts",
+                    "2",
+                    "--lease-timeout-seconds",
+                    "900",
                 ],
                 check=False,
                 env=env,
@@ -1874,6 +1984,8 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["scheduler_status"], "idle")
             self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
             self.assertEqual(summary["inflight_count"], 0)
+            self.assertEqual(summary["max_attempts"], 2)
+            self.assertEqual(summary["lease_timeout_seconds"], 900)
             self.assertEqual(summary["worker_pool"]["pool_status"], "stopped")
             self.assertEqual(summary["worker_pool"]["worker_count"], 2)
             self.assertEqual(
@@ -3122,6 +3234,39 @@ def _write_agent_pool_with_agent_ids(path, agent_ids):
         ],
     }
     path.write_text(json.dumps(agent_pool, sort_keys=True), encoding="utf-8")
+
+
+def _append_runtime_result(
+    outbox_path,
+    source_message_id,
+    task_id,
+    attempt_id,
+    lease_id,
+    result_status,
+    changed_files,
+):
+    record = {
+        "message_id": f"RESULT-{source_message_id}",
+        "from_agent": "agent-repo-map",
+        "to_agent": "agent-scheduler",
+        "message_type": "runtime_result",
+        "correlation_id": f"{task_id}:{attempt_id}",
+        "created_at": "2026-06-03T00:00:00Z",
+        "payload": {
+            "source_message_id": source_message_id,
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "lease_id": lease_id,
+            "result_status": result_status,
+            "changed_files": changed_files,
+            "output": {"test": "m18"},
+        },
+    }
+    outbox_path = Path(outbox_path)
+    outbox_path.parent.mkdir(parents=True, exist_ok=True)
+    with outbox_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, sort_keys=True))
+        stream.write("\n")
 
 
 def _backlog_task(

@@ -83,6 +83,18 @@ def main(argv=None):
         help="Maximum inflight attempts for --daemon-two-phase-worker-pool.",
     )
     parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=1,
+        help="Maximum attempts per task for --daemon-two-phase-worker-pool.",
+    )
+    parser.add_argument(
+        "--lease-timeout-seconds",
+        type=int,
+        default=900,
+        help="Lease timeout for inflight two-phase attempts.",
+    )
+    parser.add_argument(
         "--integrate-accepted-patch",
         action="store_true",
         help="Apply accepted patch artifacts to an integration worktree without committing.",
@@ -141,6 +153,10 @@ def main(argv=None):
         parser.error("--daemon-two-phase-worker-pool requires --daemon-run-until-idle")
     if args.max_inflight < 1:
         parser.error("--max-inflight must be at least 1")
+    if args.max_attempts < 1:
+        parser.error("--max-attempts must be at least 1")
+    if args.lease_timeout_seconds < 0:
+        parser.error("--lease-timeout-seconds must be at least 0")
     if args.daemon_mailbox_worker and args.daemon_mailbox_subprocess_worker:
         parser.error("--daemon-mailbox-worker and --daemon-mailbox-subprocess-worker are mutually exclusive")
     if args.daemon_long_running_mailbox_worker and (
@@ -209,6 +225,8 @@ def main(argv=None):
                     args.output_dir,
                     project_root=args.project_root,
                     max_inflight=args.max_inflight,
+                    max_attempts=args.max_attempts,
+                    lease_timeout_seconds=args.lease_timeout_seconds,
                     max_ticks=args.max_steps,
                 )
             finally:

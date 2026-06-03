@@ -1,6 +1,7 @@
 import json
 import time
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .m0_runtime import (
@@ -12,7 +13,7 @@ from .m0_runtime import (
     _read_json,
     _runtime_adapter_metadata,
     _scoped_id,
-    _validate_runtime_result,
+    classify_attempt_outcome,
     rebuild_sqlite_state_index,
 )
 
@@ -27,10 +28,16 @@ class TwoPhaseFileScheduler:
         project_root=None,
         runtime_adapter=None,
         max_inflight=2,
+        max_attempts=1,
+        lease_timeout_seconds=900,
         state_path=None,
     ):
         if max_inflight < 1:
             raise ValueError("max_inflight must be at least 1")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        if lease_timeout_seconds < 0:
+            raise ValueError("lease_timeout_seconds must be at least 0")
         self.agent_pool_path = Path(agent_pool_path)
         self.backlog_path = Path(backlog_path)
         self.output_dir = Path(output_dir)
@@ -39,6 +46,8 @@ class TwoPhaseFileScheduler:
         self.project_root = Path(project_root) if project_root else None
         self.runtime_adapter = runtime_adapter
         self.max_inflight = max_inflight
+        self.max_attempts = max_attempts
+        self.lease_timeout_seconds = lease_timeout_seconds
         self.state_path = Path(
             state_path or self.output_dir / "state" / "two_phase_scheduler_state.json"
         )
@@ -93,8 +102,10 @@ class TwoPhaseFileScheduler:
                 inflight["message_id"],
             )
             if result is None:
-                remaining.append(inflight)
-                continue
+                if not self._lease_expired(inflight):
+                    remaining.append(inflight)
+                    continue
+                result = self._timeout_runtime_result(inflight)
             collected.append(self._collect_result(inflight, result))
 
         self.state["inflight_attempts"] = remaining
@@ -163,6 +174,8 @@ class TwoPhaseFileScheduler:
             "processed_task_ids": processed_task_ids,
             "step_count": len(self.state["steps"]),
             "inflight_count": len(self.state["inflight_attempts"]),
+            "max_attempts": self.state["max_attempts"],
+            "lease_timeout_seconds": self.state["lease_timeout_seconds"],
             "steps": self.state["steps"],
             "events_path": str(self.events_path),
             "state_path": str(self.state_path),
@@ -189,19 +202,25 @@ class TwoPhaseFileScheduler:
         )
 
         agent = _find_idle_agent(agent_pool, task["required_role"])
-        attempt_id = f"{task['task_id']}-ATTEMPT-001"
-        lease_id = f"{task['task_id']}-LEASE-001"
-        message_id = _scoped_id("MSG", 1, task["task_id"], width=4)
+        attempt_number = self._next_attempt_number(task["task_id"])
+        attempt_id = f"{task['task_id']}-ATTEMPT-{attempt_number:03d}"
+        lease_id = f"{task['task_id']}-LEASE-{attempt_number:03d}"
+        message_id = _scoped_id("MSG", attempt_number, task["task_id"], width=4)
         worktree_id = f"WT-{attempt_id}" if task.get("write_scope") else None
         runtime_session_id = f"SESSION-{attempt_id}"
         worktree_path = None
         branch = None
         correlation_id = f"{task['task_id']}:{attempt_id}"
+        created_at = self.clock.now()
+        lease_expires_at = _timestamp_after(
+            created_at,
+            self.state["lease_timeout_seconds"],
+        )
         agent["status"] = "busy"
         agent["lease"] = {
             "lease_id": lease_id,
             "task_id": task["task_id"],
-            "expires_at": "2026-05-31T00:15:00Z",
+            "expires_at": lease_expires_at,
         }
 
         if self.project_root and worktree_id:
@@ -218,8 +237,8 @@ class TwoPhaseFileScheduler:
             "to_agent": agent["agent_id"],
             "message_type": "dispatch_task",
             "correlation_id": correlation_id,
-            "created_at": self.clock.now(),
-            "lease_expires_at": "2026-05-31T00:15:00Z",
+            "created_at": created_at,
+            "lease_expires_at": lease_expires_at,
             "payload": {
                 "task_id": task["task_id"],
                 "attempt_id": attempt_id,
@@ -267,6 +286,7 @@ class TwoPhaseFileScheduler:
                         "attempt_id": attempt_id,
                         "lease_id": lease_id,
                         "lease_status": "active",
+                        "lease_expires_at": lease_expires_at,
                     },
                 ),
                 *(
@@ -327,8 +347,10 @@ class TwoPhaseFileScheduler:
             "step_id": step_id,
             "step_dir": str(step_dir),
             "task_id": task["task_id"],
+            "attempt_number": attempt_number,
             "attempt_id": attempt_id,
             "lease_id": lease_id,
+            "lease_expires_at": lease_expires_at,
             "message_id": message_id,
             "runtime_session_id": runtime_session_id,
             "agent_id": agent["agent_id"],
@@ -343,11 +365,22 @@ class TwoPhaseFileScheduler:
 
     def _collect_result(self, inflight, runtime_result):
         task = self._task_by_id(inflight["task_id"])
-        validation_status = _validate_runtime_result(runtime_result, task)
-        failure_category = None if validation_status == "accepted" else "scope_violation"
-        retryable = False
+        outcome = classify_attempt_outcome(runtime_result, task, diff_audit=None)
+        retry_allowed = (
+            outcome["retryable"]
+            and inflight["attempt_number"] < self.state["max_attempts"]
+        )
+        next_attempt_id = (
+            f"{inflight['task_id']}-ATTEMPT-{inflight['attempt_number'] + 1:03d}"
+        )
+        result_actor = (
+            "agent-scheduler"
+            if runtime_result["result_status"] == "timed_out"
+            else inflight["agent_id"]
+        )
         result = {
             "task_id": inflight["task_id"],
+            "attempt_number": inflight["attempt_number"],
             "attempt_id": inflight["attempt_id"],
             "lease_id": inflight["lease_id"],
             "message_id": inflight["message_id"],
@@ -356,9 +389,9 @@ class TwoPhaseFileScheduler:
             "worktree_id": inflight["worktree_id"],
             "worktree_path": inflight["worktree_path"],
             "branch": inflight["branch"],
-            "validation_status": validation_status,
-            "failure_category": failure_category,
-            "retryable": retryable,
+            "validation_status": outcome["validation_status"],
+            "failure_category": outcome["failure_category"],
+            "retryable": outcome["retryable"],
             "diff_audit": None,
             "patch_path": None,
         }
@@ -367,7 +400,7 @@ class TwoPhaseFileScheduler:
             [
                 self._event(
                     "runtime_session_observed",
-                    inflight["agent_id"],
+                    result_actor,
                     "agent-scheduler",
                     f"runtime-session-observed:{inflight['runtime_session_id']}",
                     inflight["correlation_id"],
@@ -383,7 +416,7 @@ class TwoPhaseFileScheduler:
                 ),
                 self._event(
                     "runtime_output_received",
-                    inflight["agent_id"],
+                    result_actor,
                     "agent-scheduler",
                     f"runtime-result:{inflight['attempt_id']}",
                     inflight["correlation_id"],
@@ -414,7 +447,7 @@ class TwoPhaseFileScheduler:
                 ),
                 self._event(
                     "validation_accepted"
-                    if validation_status == "accepted"
+                    if outcome["validation_status"] == "accepted"
                     else "validation_rejected",
                     "agent-scheduler",
                     inflight["agent_id"],
@@ -423,9 +456,9 @@ class TwoPhaseFileScheduler:
                     {
                         "task_id": inflight["task_id"],
                         "attempt_id": inflight["attempt_id"],
-                        "validation_status": validation_status,
-                        "failure_category": failure_category,
-                        "retryable": retryable,
+                        "validation_status": outcome["validation_status"],
+                        "failure_category": outcome["failure_category"],
+                        "retryable": outcome["retryable"],
                         "lease_id": inflight["lease_id"],
                         "diff_audit": None,
                         "patch_path": None,
@@ -447,23 +480,68 @@ class TwoPhaseFileScheduler:
                             },
                         )
                     ]
-                    if validation_status == "accepted"
+                    if outcome["validation_status"] == "accepted"
+                    else []
+                ),
+                *(
+                    [
+                        self._event(
+                            "recovery_routed",
+                            "agent-scheduler",
+                            inflight["agent_id"],
+                            f"recovery:{inflight['attempt_id']}",
+                            inflight["correlation_id"],
+                            {
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "lease_id": inflight["lease_id"],
+                                "failure_category": outcome["failure_category"],
+                                "next_attempt_id": next_attempt_id,
+                                "recovery_action": "retry",
+                            },
+                        )
+                    ]
+                    if retry_allowed
                     else []
                 ),
             ],
         )
-        self._update_task_from_validation(inflight["task_id"], validation_status, failure_category)
+        self._update_task_from_outcome(
+            inflight["task_id"],
+            outcome["validation_status"],
+            outcome["failure_category"],
+            retry_allowed,
+        )
         self.state["steps"].append(
             {
                 "step_id": inflight["step_id"],
-                "step_status": "processed",
+                "step_status": "retry_routed" if retry_allowed else "processed",
                 "task_id": inflight["task_id"],
-                "validation_status": validation_status,
-                "failure_category": failure_category,
+                "attempt_number": inflight["attempt_number"],
+                "validation_status": outcome["validation_status"],
+                "failure_category": outcome["failure_category"],
+                "retryable": outcome["retryable"],
                 "result": result,
             }
         )
         return result
+
+    def _lease_expired(self, inflight):
+        now = _parse_utc_timestamp(self.clock.now())
+        lease_expires_at = _parse_utc_timestamp(inflight["lease_expires_at"])
+        return now >= lease_expires_at
+
+    def _timeout_runtime_result(self, inflight):
+        return {
+            "result_status": "timed_out",
+            "changed_files": [],
+            "output": {
+                "adapter": "two_phase_scheduler",
+                "error": "lease_timeout",
+                "lease_expires_at": inflight["lease_expires_at"],
+                "message_id": inflight["message_id"],
+            },
+        }
 
     def _ready_tasks(self):
         inflight_task_ids = {
@@ -509,14 +587,34 @@ class TwoPhaseFileScheduler:
                 return task
         raise ValueError(f"task not found in two-phase scheduler state: {task_id}")
 
-    def _update_task_from_validation(self, task_id, validation_status, failure_category):
+    def _update_task_from_outcome(
+        self,
+        task_id,
+        validation_status,
+        failure_category,
+        retry_allowed,
+    ):
         task = self._task_by_id(task_id)
         if validation_status == "accepted":
             task["backlog_status"] = "done"
             task["blockers"] = []
+        elif retry_allowed:
+            task["backlog_status"] = "ready"
+            task["blockers"] = []
         else:
             task["backlog_status"] = "blocked"
             task["blockers"] = [failure_category or "validation_rejected"]
+
+    def _next_attempt_number(self, task_id):
+        attempt_numbers = [
+            item.get("attempt_number", 1)
+            for item in [
+                *self.state["steps"],
+                *self.state["inflight_attempts"],
+            ]
+            if item["task_id"] == task_id
+        ]
+        return max(attempt_numbers, default=0) + 1
 
     def _next_step_id(self, task_id):
         step_number = len(self.state["steps"]) + len(self.state["inflight_attempts"]) + 1
@@ -561,9 +659,14 @@ class TwoPhaseFileScheduler:
 
     def _load_or_create_state(self):
         if self.state_path.exists():
-            return _read_json(self.state_path)
+            state = _read_json(self.state_path)
+            state.setdefault("max_attempts", self.max_attempts)
+            state.setdefault("lease_timeout_seconds", self.lease_timeout_seconds)
+            return state
         return {
             "scheduler_status": "initialized",
+            "max_attempts": self.max_attempts,
+            "lease_timeout_seconds": self.lease_timeout_seconds,
             "backlog": _read_json(self.backlog_path),
             "steps": [],
             "inflight_attempts": [],
@@ -606,3 +709,17 @@ def _read_jsonl_if_exists(path):
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _timestamp_after(timestamp, seconds):
+    return _format_utc_timestamp(
+        _parse_utc_timestamp(timestamp) + timedelta(seconds=seconds)
+    )
+
+
+def _parse_utc_timestamp(timestamp):
+    return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _format_utc_timestamp(timestamp):
+    return timestamp.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
