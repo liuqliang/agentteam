@@ -3678,6 +3678,42 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["event_count"], root_event_count)
             self.assertEqual(summary["events"][-1]["event_type"], "backlog_updated")
 
+    def test_runtime_observability_reports_current_milestone_and_decomposition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [("agent-planner", "task_planner")],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                auto_decompose=True,
+                decomposition_milestone_id="M30",
+            )
+
+            scheduler.dispatch_ready()
+            summary = build_runtime_observability(output_dir)
+
+            self.assertIn("current_milestone", summary)
+            self.assertIn("next_decomposition", summary)
+            self.assertEqual(summary["current_milestone"]["milestone_id"], "M30")
+            self.assertEqual(
+                summary["current_milestone"]["current_decomposition_task_id"],
+                "DECOMPOSE-M30-001",
+            )
+            self.assertEqual(
+                summary["next_decomposition"]["task_id"],
+                "DECOMPOSE-M30-001",
+            )
+            self.assertEqual(summary["next_decomposition"]["task_status"], "ready")
+            self.assertEqual(summary["next_decomposition"]["required_role"], "task_planner")
+
     def test_cli_can_create_git_worktree_when_project_root_is_supplied(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

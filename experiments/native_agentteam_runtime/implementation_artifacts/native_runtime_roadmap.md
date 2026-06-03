@@ -253,9 +253,9 @@ single task before escalation.
 
 Goal: make long-running operation inspectable without reading raw JSONL files.
 
-Status: CLI-only runtime observability summary and resource-specific drilldown
-views implemented. Remaining work is current milestone and next decomposition
-visibility.
+Status: implemented for the current route. CLI-only summary, resource-specific
+drilldown views, current milestone visibility, and next decomposition visibility
+are available.
 
 Scope:
 
@@ -308,6 +308,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended milestone is M30c: Roadmap And Decomposition Visibility.
+The next recommended step is a route decision for the longer-term work below.
 Inflight migration remains a separate M29 decision gate because it changes
 ownership of already leased work.

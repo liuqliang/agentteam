@@ -2349,6 +2349,32 @@ adds the requested resource list.
 `--observability-view` is only valid with `--show-runtime-observability`. The
 default remains `summary`, so existing M30a usage is unchanged.
 
+## M30c Roadmap And Decomposition Visibility
+
+M30c adds current milestone and next decomposition visibility to every
+observability view:
+
+```json
+{
+  "current_milestone": {
+    "milestone_id": "M30",
+    "milestone_status": "active",
+    "decomposition_status": "decomposition_ready",
+    "current_decomposition_task_id": "DECOMPOSE-M30-001"
+  },
+  "next_decomposition": {
+    "task_id": "DECOMPOSE-M30-001",
+    "task_status": "ready",
+    "milestone_id": "M30",
+    "decomposition_wave": 1,
+    "required_role": "task_planner"
+  }
+}
+```
+
+This data is read from the two-phase scheduler state when present. Older output
+directories without scheduler milestone state report both fields as `null`.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -2427,7 +2453,7 @@ back to the source branch. M29a adds worker-pool restart budgets and quarantine.
 M29b routes new work away from quarantined worker agents. M29c records explicit
 reassignment event lineage for those conservative dispatches. M30a adds a
 read-only runtime observability summary CLI. M30b adds resource drilldown views.
-Claude Code is not
+M30c adds current milestone and next decomposition visibility. Claude Code is not
 integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.

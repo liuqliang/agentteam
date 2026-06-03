@@ -26,6 +26,8 @@ def build_runtime_observability(output_dir, view="summary"):
     snapshot = replay_events(events_path)
     integration_queue = read_integration_queue(output_dir)
     worker_registry = _read_worker_registry(output_dir)
+    scheduler_state = _read_scheduler_state(output_dir)
+    current_milestone = _current_milestone(scheduler_state)
 
     base = {
         "observability_status": "ready",
@@ -35,6 +37,11 @@ def build_runtime_observability(output_dir, view="summary"):
         "state_db_path": state_index["state_db_path"],
         "event_count": state_index["event_count"],
         "latest_event": state_index["latest_event"],
+        "current_milestone": current_milestone,
+        "next_decomposition": _next_decomposition(
+            scheduler_state,
+            current_milestone,
+        ),
     }
     if view == "backlog":
         return {**base, "tasks": state_index["tasks"]}
@@ -129,3 +136,48 @@ def _read_worker_registry(output_dir):
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
     return {"workers": []}
+
+
+def _read_scheduler_state(output_dir):
+    path = output_dir / "state" / "two_phase_scheduler_state.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _current_milestone(scheduler_state):
+    milestones = list(scheduler_state.get("milestones", {}).values())
+    if not milestones:
+        return None
+    return sorted(milestones, key=_milestone_sort_key)[0]
+
+
+def _milestone_sort_key(milestone):
+    status = milestone.get("milestone_status")
+    if status == "active":
+        rank = 0
+    elif status in {"blocked", "max_waves_reached"}:
+        rank = 1
+    else:
+        rank = 2
+    return (rank, milestone.get("milestone_id", ""))
+
+
+def _next_decomposition(scheduler_state, current_milestone):
+    if not current_milestone:
+        return None
+    task_id = current_milestone.get("current_decomposition_task_id")
+    if not task_id:
+        return None
+    for task in scheduler_state.get("backlog", {}).get("items", []):
+        if task.get("task_id") != task_id:
+            continue
+        return {
+            "task_id": task["task_id"],
+            "task_status": task.get("backlog_status"),
+            "milestone_id": task.get("milestone_id"),
+            "decomposition_wave": task.get("decomposition_wave"),
+            "required_role": task.get("required_role"),
+            "planner_context_path": task.get("planner_context_path"),
+        }
+    return None
