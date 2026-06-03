@@ -165,17 +165,31 @@ def main(argv=None):
                 )
             runtime_adapter = FileMailboxSubprocessRuntimeAdapter(args.agent_pool)
         if args.daemon_long_running_mailbox_worker:
-            if runtime_profile_defaults:
+            worker_runtime_profile = runtime_profile_defaults or {"adapter": "fake"}
+            worker_runtime = worker_runtime_profile.get("adapter", "fake")
+            if worker_runtime not in {"fake", "codex"}:
                 parser.error(
-                    "--daemon-long-running-mailbox-worker currently supports only the fake delegate runtime"
+                    "--daemon-long-running-mailbox-worker currently supports only fake or codex delegate runtimes"
                 )
+            worker_timeout_seconds = worker_runtime_profile.get("timeout_seconds", 300)
             worker_process = FileMailboxWorkerProcessSupervisor(
                 args.agent_pool,
                 args.output_dir,
                 "agent-repo-map",
+                runtime=worker_runtime,
+                codex_command=worker_runtime_profile.get("command"),
+                codex_model=worker_runtime_profile.get("model"),
+                codex_sandbox=worker_runtime_profile.get("sandbox", "workspace-write"),
+                codex_timeout_seconds=worker_timeout_seconds,
             )
             worker_start = worker_process.start()
-            runtime_adapter = FileMailboxExternalRuntimeAdapter(args.agent_pool)
+            external_timeout_seconds = 60
+            if worker_runtime == "codex":
+                external_timeout_seconds = max(60, worker_timeout_seconds + 5)
+            runtime_adapter = FileMailboxExternalRuntimeAdapter(
+                args.agent_pool,
+                timeout_seconds=external_timeout_seconds,
+            )
         else:
             worker_start = None
         try:

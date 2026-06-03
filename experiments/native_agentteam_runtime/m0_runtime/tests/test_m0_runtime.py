@@ -248,13 +248,14 @@ class M0RuntimeTests(unittest.TestCase):
                     "--runtime",
                     "fake",
                 ],
-                check=True,
+                check=False,
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
 
+            self.assertEqual(completed.returncode, 0, completed.stderr)
             summary = json.loads(completed.stdout)
             result_message = _read_first_jsonl(outbox)
 
@@ -263,6 +264,62 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertNotEqual(summary["worker_pid"], os.getpid())
             self.assertEqual(completed.stderr, "")
             self.assertEqual(result_message["message_type"], "runtime_result")
+
+    def test_file_mailbox_worker_cli_can_use_codex_delegate_from_payload_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            fake_codex = tmp_path / "fake_codex_mailbox.py"
+            target_file = "generated/mailbox_codex_delegate.json"
+            _init_git_repo(repo)
+            _write_fake_codex(fake_codex, changed_file=target_file)
+            inbox = output_dir / "mailboxes" / "agent-repo-map" / "inbox.jsonl"
+            outbox = output_dir / "mailboxes" / "agent-repo-map" / "outbox.jsonl"
+            message = _mailbox_dispatch_message(
+                message_id="MSG-CODEX-MAILBOX-001",
+                agent_id="agent-repo-map",
+                write_scope=["generated/"],
+            )
+            message["payload"]["worktree_path"] = str(repo)
+            _append_test_jsonl(inbox, [message])
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.mailbox_worker",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--output-dir",
+                    str(output_dir),
+                    "--agent-id",
+                    "agent-repo-map",
+                    "--message-id",
+                    "MSG-CODEX-MAILBOX-001",
+                    "--runtime",
+                    "codex",
+                    "--codex-command-json",
+                    json.dumps([sys.executable, str(fake_codex)]),
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            result_message = _read_first_jsonl(outbox)
+
+            self.assertEqual(completed.stderr, "")
+            self.assertEqual(summary["poll_status"], "processed")
+            self.assertEqual(summary["result_status"], "completed")
+            self.assertTrue((repo / target_file).exists())
+            self.assertEqual(result_message["payload"]["output"]["adapter"], "codex")
 
     def test_scheduler_loop_can_round_trip_runtime_result_through_mailbox_worker(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1443,6 +1500,67 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 {session["runtime_adapter"] for session in state["runtime_sessions"]},
                 {"FileMailboxExternalRuntimeAdapter"},
+            )
+
+    def test_cli_can_run_file_daemon_with_long_running_codex_mailbox_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            fake_codex = tmp_path / "fake_codex_long_worker.py"
+            target_file = "generated/long_worker_codex_delegate.json"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_fake_codex(fake_codex, changed_file=target_file)
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--project-root",
+                    str(repo),
+                    "--daemon-run-until-idle",
+                    "--daemon-long-running-mailbox-worker",
+                    "--runtime",
+                    "codex",
+                    "--codex-command",
+                    sys.executable,
+                    str(fake_codex),
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            worktree_path = Path(
+                summary["snapshot"]["attempts"]["TASK-001-ATTEMPT-001"]["worktree_path"]
+            )
+
+            self.assertEqual(completed.stderr, "")
+            self.assertEqual(summary["daemon_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001"])
+            self.assertEqual(summary["worker_process"]["worker_status"], "stopped")
+            self.assertEqual(summary["worker_process"]["worker_runtime"], "codex")
+            self.assertEqual(summary["worker_process"]["stderr"], "")
+            self.assertTrue((worktree_path / target_file).exists())
+            self.assertEqual(
+                summary["snapshot"]["runtime_sessions"]["SESSION-TASK-001-ATTEMPT-001"][
+                    "runtime_adapter"
+                ],
+                "FileMailboxExternalRuntimeAdapter",
             )
 
     def test_cli_can_show_state_index_without_agent_pool_or_backlog(self):

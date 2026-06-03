@@ -299,6 +299,26 @@ This starts one serving worker process for `agent-repo-map`, runs the daemon wit
 `FileMailboxExternalRuntimeAdapter`, then stops the worker before printing the
 summary. It is mutually exclusive with the M14b/M14c mailbox worker flags.
 
+In M15b the same flag can run the serving worker with a Codex delegate:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool experiments/native_agentteam_runtime/fixtures/sample_agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m15b-long-codex-worker-run \
+  --project-root /path/to/git/repo \
+  --daemon-run-until-idle \
+  --daemon-long-running-mailbox-worker \
+  --runtime codex
+```
+
+The normal Codex CLI options, such as `--codex-command`, `--codex-model`,
+`--codex-sandbox`, and `--codex-timeout-seconds`, are passed to the resident
+worker process. The scheduler side still records
+`FileMailboxExternalRuntimeAdapter` because it waits for mailbox results rather
+than directly invoking Codex.
+
 To inspect a completed or partially completed scheduler run without re-running
 the scheduler, pass `--show-state-index` with only the output directory:
 
@@ -1336,6 +1356,49 @@ scheduler execution, and explicit stop-file shutdown. It does not yet supervise
 multiple workers, restart failed workers, allocate tasks across a pool, or run
 Codex/Claude as resident processes.
 
+## M15b Codex Long-Running Mailbox Worker
+
+M15b keeps the M15a resident worker topology but allows the worker delegate
+runtime to be Codex. The worker CLI now accepts:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.mailbox_worker \
+  --agent-pool experiments/native_agentteam_runtime/fixtures/sample_agent_pool.json \
+  --output-dir /tmp/agentteam-step \
+  --agent-id agent-repo-map \
+  --message-id TASK-001-MSG-0001 \
+  --runtime codex \
+  --codex-command-json '["codex","exec"]' \
+  --codex-sandbox workspace-write \
+  --codex-timeout-seconds 300
+```
+
+For one-shot or serving mode, the worker gets the writable worktree from the
+dispatch payload when `--worktree-path` is not explicitly provided:
+
+```json
+{
+  "payload": {
+    "worktree_path": "/tmp/agentteam-run/steps/STEP-0001-TASK-001/worktrees/WT-TASK-001-ATTEMPT-001"
+  }
+}
+```
+
+The daemon CLI translates existing Codex options into supervisor settings. The
+supervisor launches one process with `--runtime codex`; the worker then executes
+each dispatch through `CodexRuntimeAdapter`, writes the normal
+`runtime_result` outbox message, and keeps serving until the stop file appears.
+
+M15b still has these limits:
+
+- one resident worker process;
+- one hardcoded agent id in the daemon CLI path, `agent-repo-map`;
+- sequential scheduler execution;
+- no worker restart/backoff;
+- no multi-agent worker pool;
+- no Claude delegate runtime.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -1384,7 +1447,8 @@ adds file mailbox worker/result round-tripping through `FileMailboxRuntimeAdapte
 with an in-process fake delegate. M14c runs the same mailbox worker through a
 one-shot OS subprocess via `FileMailboxSubprocessRuntimeAdapter`. M15a adds one
 long-running fake mailbox worker process with explicit supervisor start/stop.
-Claude Code is not integrated yet.
+M15b lets that long-running worker execute through `CodexRuntimeAdapter` while
+preserving the single-worker topology. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -1395,8 +1459,8 @@ Before the next backend milestone, the next design/code step should define:
 - decide when live Codex smoke should run outside local opt-in, such as nightly
   or pre-release only;
 - Claude Code adapter feasibility and result extraction contract;
-- decide when long-running mailbox workers should support multiple agents,
-  restart/backoff, and real Codex/Claude worker runtimes;
+- decide when the single long-running Codex worker should expand to multiple
+  agents, restart/backoff, and real Claude worker runtimes;
 - decide whether lightweight artifact lint should grow into full JSON Schema
   validation;
 - retry backoff, retry budget, and failure escalation policy;

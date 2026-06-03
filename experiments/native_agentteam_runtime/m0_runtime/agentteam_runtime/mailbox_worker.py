@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from .m0_runtime import FakeRuntimeAdapter, SystemClock
+from .m0_runtime import CodexRuntimeAdapter, FakeRuntimeAdapter, SystemClock
 
 
 class FileMailboxWorker:
@@ -34,6 +34,8 @@ class FileMailboxWorker:
                 "poll_status": "idle",
                 "reason": "no_dispatch_message",
             }
+        if worktree_path is None:
+            worktree_path = message.get("payload", {}).get("worktree_path")
         runtime_result = self.runtime_adapter.run(message, worktree_path=worktree_path)
         result_message = self._result_message(message, runtime_result)
         _append_jsonl(self.outbox_path, [result_message])
@@ -345,13 +347,25 @@ class FileMailboxWorkerProcessSupervisor:
         command=None,
         env=None,
         poll_interval_seconds=0.05,
+        runtime="fake",
+        codex_command=None,
+        codex_model=None,
+        codex_sandbox="workspace-write",
+        codex_timeout_seconds=300,
     ):
+        if runtime not in {"fake", "codex"}:
+            raise ValueError(f"unsupported mailbox worker runtime: {runtime}")
         self.agent_pool_path = Path(agent_pool_path)
         self.output_dir = Path(output_dir)
         self.agent_id = agent_id
         self.command = list(command or [sys.executable, "-m", "agentteam_runtime.mailbox_worker"])
         self.env = env
         self.poll_interval_seconds = poll_interval_seconds
+        self.runtime = runtime
+        self.codex_command = list(codex_command) if codex_command else None
+        self.codex_model = codex_model
+        self.codex_sandbox = codex_sandbox
+        self.codex_timeout_seconds = codex_timeout_seconds
         self.stop_file = self.output_dir / "state" / "workers" / f"{agent_id}.stop"
         self.process = None
 
@@ -368,13 +382,26 @@ class FileMailboxWorkerProcessSupervisor:
             "--agent-id",
             self.agent_id,
             "--runtime",
-            "fake",
+            self.runtime,
             "--serve",
             "--poll-interval-seconds",
             str(self.poll_interval_seconds),
             "--stop-file",
             str(self.stop_file),
         ]
+        if self.runtime == "codex":
+            command.extend(
+                [
+                    "--codex-sandbox",
+                    self.codex_sandbox,
+                    "--codex-timeout-seconds",
+                    str(self.codex_timeout_seconds),
+                ]
+            )
+            if self.codex_model:
+                command.extend(["--codex-model", self.codex_model])
+            if self.codex_command:
+                command.extend(["--codex-command-json", json.dumps(self.codex_command)])
         self.process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -385,6 +412,7 @@ class FileMailboxWorkerProcessSupervisor:
         return {
             "worker_status": "running",
             "worker_pid": self.process.pid,
+            "worker_runtime": self.runtime,
             "stop_file": str(self.stop_file),
         }
 
@@ -411,6 +439,7 @@ class FileMailboxWorkerProcessSupervisor:
         return {
             "worker_status": "stopped",
             "worker_pid": self.process.pid,
+            "worker_runtime": self.runtime,
             "exit_code": self.process.returncode,
             "stopped_by": stopped_by,
             "stdout": stdout,
@@ -500,11 +529,28 @@ def main(argv=None):
     parser.add_argument("--stop-file", help="Path that stops --serve mode when present.")
     parser.add_argument(
         "--runtime",
-        choices=["fake"],
+        choices=["fake", "codex"],
         default="fake",
-        help="Delegate runtime to execute. M14c supports only fake.",
+        help="Delegate runtime to execute.",
+    )
+    parser.add_argument(
+        "--codex-command-json",
+        help="JSON string array command prefix for CodexRuntimeAdapter.",
+    )
+    parser.add_argument("--codex-model", help="Optional model passed to CodexRuntimeAdapter.")
+    parser.add_argument(
+        "--codex-sandbox",
+        default="workspace-write",
+        help="Sandbox mode passed to CodexRuntimeAdapter.",
+    )
+    parser.add_argument(
+        "--codex-timeout-seconds",
+        type=int,
+        default=300,
+        help="CodexRuntimeAdapter timeout in seconds.",
     )
     args = parser.parse_args(argv)
+    runtime_adapter = _runtime_adapter_from_args(parser, args)
 
     if args.serve:
         stop_file = Path(args.stop_file or Path(args.output_dir) / "state" / "workers" / f"{args.agent_id}.stop")
@@ -515,7 +561,7 @@ def main(argv=None):
                 args.agent_pool,
                 args.output_dir,
                 args.agent_id,
-                runtime_adapter=_runtime_adapter_from_name(args.runtime),
+                runtime_adapter=runtime_adapter,
             )
             last_summary = summary
             if summary["poll_status"] == "processed":
@@ -538,7 +584,7 @@ def main(argv=None):
         args.agent_pool,
         args.output_dir,
         args.agent_id,
-        runtime_adapter=_runtime_adapter_from_name(args.runtime),
+        runtime_adapter=runtime_adapter,
     )
     summary = worker.poll_once(
         message_id=args.message_id,
@@ -549,10 +595,42 @@ def main(argv=None):
     return 0
 
 
-def _runtime_adapter_from_name(name):
-    if name == "fake":
+def _runtime_adapter_from_args(parser, args):
+    if args.runtime == "fake":
+        if (
+            args.codex_command_json
+            or args.codex_model
+            or args.codex_sandbox != "workspace-write"
+            or args.codex_timeout_seconds != 300
+        ):
+            parser.error("Codex runtime options require --runtime codex")
         return FakeRuntimeAdapter()
-    raise ValueError(f"unsupported mailbox worker runtime: {name}")
+    if args.runtime == "codex":
+        if args.codex_timeout_seconds < 1:
+            parser.error("--codex-timeout-seconds must be at least 1")
+        return CodexRuntimeAdapter(
+            command=_parse_command_json(parser, args.codex_command_json),
+            model=args.codex_model,
+            sandbox=args.codex_sandbox,
+            timeout_seconds=args.codex_timeout_seconds,
+        )
+    raise ValueError(f"unsupported mailbox worker runtime: {args.runtime}")
+
+
+def _parse_command_json(parser, raw_command):
+    if not raw_command:
+        return None
+    try:
+        command = json.loads(raw_command)
+    except json.JSONDecodeError as exc:
+        parser.error(f"--codex-command-json must be valid JSON: {exc}")
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(part, str) for part in command)
+    ):
+        parser.error("--codex-command-json must be a non-empty JSON string array")
+    return command
 
 
 if __name__ == "__main__":
