@@ -16,6 +16,7 @@ from .m0_runtime import (
     run_scheduler_loop,
     run_simulation,
 )
+from .two_phase_scheduler import run_two_phase_scheduler_loop
 
 
 def main(argv=None):
@@ -65,10 +66,21 @@ def main(argv=None):
         help="Run daemon tasks through one long-running mailbox worker process per agent.",
     )
     parser.add_argument(
+        "--daemon-two-phase-worker-pool",
+        action="store_true",
+        help="Run daemon tasks through the two-phase scheduler and static worker pool.",
+    )
+    parser.add_argument(
         "--max-steps",
         type=int,
         default=100,
         help="Maximum scheduler loop steps when --run-until-idle is set.",
+    )
+    parser.add_argument(
+        "--max-inflight",
+        type=int,
+        default=2,
+        help="Maximum inflight attempts for --daemon-two-phase-worker-pool.",
     )
     parser.add_argument(
         "--integrate-accepted-patch",
@@ -125,6 +137,10 @@ def main(argv=None):
         parser.error("--daemon-long-running-mailbox-worker requires --daemon-run-until-idle")
     if args.daemon_long_running_worker_pool and not args.daemon_run_until_idle:
         parser.error("--daemon-long-running-worker-pool requires --daemon-run-until-idle")
+    if args.daemon_two_phase_worker_pool and not args.daemon_run_until_idle:
+        parser.error("--daemon-two-phase-worker-pool requires --daemon-run-until-idle")
+    if args.max_inflight < 1:
+        parser.error("--max-inflight must be at least 1")
     if args.daemon_mailbox_worker and args.daemon_mailbox_subprocess_worker:
         parser.error("--daemon-mailbox-worker and --daemon-mailbox-subprocess-worker are mutually exclusive")
     if args.daemon_long_running_mailbox_worker and (
@@ -140,6 +156,15 @@ def main(argv=None):
     ):
         parser.error(
             "--daemon-long-running-worker-pool cannot be combined with other daemon mailbox worker flags"
+        )
+    if args.daemon_two_phase_worker_pool and (
+        args.daemon_mailbox_worker
+        or args.daemon_mailbox_subprocess_worker
+        or args.daemon_long_running_mailbox_worker
+        or args.daemon_long_running_worker_pool
+    ):
+        parser.error(
+            "--daemon-two-phase-worker-pool cannot be combined with other daemon mailbox worker flags"
         )
     if args.show_state_index:
         result = read_scheduler_state_index(args.output_dir)
@@ -170,6 +195,36 @@ def main(argv=None):
         return
 
     if args.daemon_run_until_idle:
+        if args.daemon_two_phase_worker_pool:
+            worker_pool = FileMailboxWorkerPoolSupervisor(
+                args.agent_pool,
+                args.output_dir,
+                runtime_profile_defaults=runtime_profile_defaults,
+            )
+            worker_pool_start = worker_pool.start()
+            try:
+                result = run_two_phase_scheduler_loop(
+                    args.agent_pool,
+                    args.backlog,
+                    args.output_dir,
+                    project_root=args.project_root,
+                    max_inflight=args.max_inflight,
+                    max_ticks=args.max_steps,
+                )
+            finally:
+                worker_pool_stop = worker_pool.stop()
+            result = {
+                **result,
+                "daemon_status": result["scheduler_status"],
+                "worker_pool": {
+                    **worker_pool_start,
+                    **worker_pool_stop,
+                },
+            }
+            snapshot = replay_events(result["events_path"])
+            print(json.dumps({**result, "snapshot": snapshot}, sort_keys=True))
+            return
+
         runtime_adapter = None
         worker_process = None
         worker_pool = None

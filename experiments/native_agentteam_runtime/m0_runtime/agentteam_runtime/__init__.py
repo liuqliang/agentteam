@@ -25,6 +25,7 @@ _EXPORTS = {
     "FileScheduler": (".m0_runtime", "FileScheduler"),
     "FileSchedulerDaemon": (".daemon", "FileSchedulerDaemon"),
     "ShellRuntimeAdapter": (".m0_runtime", "ShellRuntimeAdapter"),
+    "TwoPhaseFileScheduler": (".two_phase_scheduler", "TwoPhaseFileScheduler"),
     "audit_worktree_diff": (".m0_runtime", "audit_worktree_diff"),
     "classify_attempt_outcome": (".m0_runtime", "classify_attempt_outcome"),
     "read_scheduler_state_index": (".m0_runtime", "read_scheduler_state_index"),
@@ -32,6 +33,10 @@ _EXPORTS = {
     "run_file_daemon": (".daemon", "run_file_daemon"),
     "run_scheduler_loop": (".m0_runtime", "run_scheduler_loop"),
     "run_simulation": (".m0_runtime", "run_simulation"),
+    "run_two_phase_scheduler_loop": (
+        ".two_phase_scheduler",
+        "run_two_phase_scheduler_loop",
+    ),
 }
 
 __all__ = list(_EXPORTS)

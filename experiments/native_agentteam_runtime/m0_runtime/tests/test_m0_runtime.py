@@ -4,6 +4,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from agentteam_runtime import (
     FileMailboxWorkerPoolSupervisor,
     FileMailboxWorker,
     ShellRuntimeAdapter,
+    TwoPhaseFileScheduler,
     audit_worktree_diff,
     classify_attempt_outcome,
     read_scheduler_state_index,
@@ -1660,6 +1662,100 @@ class M0RuntimeTests(unittest.TestCase):
                 all(worker["worker_status"] == "stopped" for worker in stop["workers"])
             )
 
+    def test_two_phase_scheduler_does_not_double_book_same_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_inflight=2,
+            )
+
+            dispatch = scheduler.dispatch_ready()
+
+            self.assertEqual(dispatch["dispatch_status"], "dispatched")
+            self.assertEqual(dispatch["dispatched_task_ids"], ["TASK-001"])
+            self.assertEqual(dispatch["inflight_count"], 1)
+
+    def test_two_phase_scheduler_dispatches_multiple_tasks_before_collecting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task(
+                        "TASK-002",
+                        write_scope=["generated/task-002/"],
+                        required_role="aux_role_1",
+                    ),
+                ],
+            )
+            _write_agent_pool_with_agent_ids(
+                agent_pool_path,
+                ["agent-repo-map", "agent-doc-map"],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+            pool = FileMailboxWorkerPoolSupervisor(
+                agent_pool_path,
+                output_dir,
+                env=env,
+                poll_interval_seconds=0.01,
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_inflight=2,
+            )
+
+            pool.start()
+            try:
+                dispatch = scheduler.dispatch_ready()
+                self.assertEqual(dispatch["dispatch_status"], "dispatched")
+                self.assertEqual(dispatch["dispatched_task_ids"], ["TASK-001", "TASK-002"])
+                self.assertEqual(dispatch["inflight_count"], 2)
+                self.assertEqual(scheduler.summary()["processed_task_ids"], [])
+
+                collected = None
+                for _ in range(50):
+                    collected = scheduler.collect_ready_results()
+                    if collected["collected_count"] == 2:
+                        break
+                    time.sleep(0.02)
+            finally:
+                pool.stop()
+
+            state = read_scheduler_state_index(output_dir)
+            self.assertEqual(collected["collected_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertEqual(
+                scheduler.summary()["processed_task_ids"],
+                ["TASK-001", "TASK-002"],
+            )
+            self.assertEqual(scheduler.summary()["inflight_count"], 0)
+            self.assertEqual(
+                {task["task_id"]: task["task_status"] for task in state["tasks"]},
+                {"TASK-001": "done", "TASK-002": "done"},
+            )
+
     def test_cli_can_run_file_daemon_with_static_long_running_worker_pool(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1721,6 +1817,69 @@ class M0RuntimeTests(unittest.TestCase):
                 {"agent-repo-map", "agent-doc-map"},
             )
             self.assertTrue(repo_outbox.exists())
+
+    def test_cli_can_run_two_phase_scheduler_with_static_worker_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task(
+                        "TASK-002",
+                        write_scope=["generated/task-002/"],
+                        required_role="aux_role_1",
+                    ),
+                ],
+            )
+            _write_agent_pool_with_agent_ids(
+                agent_pool_path,
+                ["agent-repo-map", "agent-doc-map"],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(agent_pool_path),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--daemon-run-until-idle",
+                    "--daemon-two-phase-worker-pool",
+                    "--max-inflight",
+                    "2",
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            state = read_scheduler_state_index(output_dir)
+
+            self.assertEqual(completed.stderr, "")
+            self.assertEqual(summary["daemon_status"], "idle")
+            self.assertEqual(summary["scheduler_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertEqual(summary["inflight_count"], 0)
+            self.assertEqual(summary["worker_pool"]["pool_status"], "stopped")
+            self.assertEqual(summary["worker_pool"]["worker_count"], 2)
+            self.assertEqual(
+                {task["task_id"]: task["task_status"] for task in state["tasks"]},
+                {"TASK-001": "done", "TASK-002": "done"},
+            )
 
     def test_cli_can_show_state_index_without_agent_pool_or_backlog(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2971,6 +3130,7 @@ def _backlog_task(
     status="ready",
     depends_on=None,
     blockers=None,
+    required_role="repo_map_agent",
 ):
     return {
         "task_id": task_id,
@@ -2981,7 +3141,7 @@ def _backlog_task(
         "depends_on": list(depends_on or []),
         "read_scope": ["."],
         "write_scope": write_scope,
-        "required_role": "repo_map_agent",
+        "required_role": required_role,
         "blockers": list(blockers or []),
     }
 

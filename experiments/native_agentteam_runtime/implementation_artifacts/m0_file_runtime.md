@@ -66,12 +66,14 @@ from agentteam_runtime import (
     FileMailboxWorkerPoolSupervisor,
     FileScheduler,
     ShellRuntimeAdapter,
+    TwoPhaseFileScheduler,
     classify_attempt_outcome,
     read_scheduler_state_index,
     replay_events,
     run_file_daemon,
     run_scheduler_loop,
     run_simulation,
+    run_two_phase_scheduler_loop,
 )
 
 result = run_simulation(agent_pool_path, backlog_path, output_dir)
@@ -104,6 +106,13 @@ mailbox_supervisor = FileMailboxWorkerProcessSupervisor(
     "agent-repo-map",
 )
 mailbox_pool = FileMailboxWorkerPoolSupervisor(agent_pool_path, output_dir)
+two_phase = TwoPhaseFileScheduler(agent_pool_path, backlog_path, output_dir)
+two_phase_summary = run_two_phase_scheduler_loop(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    max_inflight=2,
+)
 
 result_with_worktree = run_simulation(
     agent_pool_path,
@@ -341,6 +350,24 @@ This starts a static worker pool and writes
 `<output-dir>/state/worker_process_registry.json`. The scheduler remains
 sequential; the pool proves resident multi-process lifecycle, not concurrent
 task dispatch.
+
+In M17 the daemon can run the two-phase scheduler with the static worker pool:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool /path/to/agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m17-two-phase-worker-pool-run \
+  --daemon-run-until-idle \
+  --daemon-two-phase-worker-pool \
+  --max-inflight 2
+```
+
+This path dispatches ready tasks up to `--max-inflight` without waiting for
+runtime completion, then collects mailbox results in later ticks. It writes
+`<output-dir>/state/two_phase_scheduler_state.json` plus the canonical root
+`events.jsonl` and rebuildable SQLite index.
 
 To inspect a completed or partially completed scheduler run without re-running
 the scheduler, pass `--show-state-index` with only the output directory:
@@ -1488,6 +1515,50 @@ worker writes the outbox result, and idle workers remain alive until daemon
 shutdown. True concurrent dispatch requires a later split between dispatch and
 result collection.
 
+## M17 Two-Phase Dispatch Collect
+
+M17 adds `TwoPhaseFileScheduler`, a side-by-side scheduler that separates
+dispatch from result collection:
+
+```python
+scheduler = TwoPhaseFileScheduler(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    max_inflight=2,
+)
+dispatch = scheduler.dispatch_ready()
+collect = scheduler.collect_ready_results()
+```
+
+`dispatch_ready()` selects ready tasks while respecting dependencies, skips
+tasks already in `inflight_attempts`, writes each dispatch message to the
+selected agent mailbox, and records `runtime_session_started` without waiting
+for a runtime result. It also treats existing inflight agents and newly selected
+agents as busy, so `max_inflight` never double-books one agent in the same
+dispatch pass.
+
+`collect_ready_results()` scans the outboxes for matching `runtime_result`
+messages. When a result exists, it records runtime observation, validates
+changed files against the task write scope, updates backlog state, appends root
+events, rebuilds the SQLite state index, and removes the attempt from
+`inflight_attempts`.
+
+The two-phase state file is separate from the blocking scheduler state:
+
+```text
+<output-dir>/state/two_phase_scheduler_state.json
+```
+
+The root `events.jsonl` remains the authority for replay and the SQLite query
+index. M17 keeps these limits:
+
+- one attempt per task;
+- no retry routing;
+- no integration apply/verify/commit path;
+- no lease timeout recovery;
+- no worker restart/backoff.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -1540,7 +1611,9 @@ M15b lets that long-running worker execute through `CodexRuntimeAdapter` while
 preserving the single-worker topology. M15c makes the long-worker daemon CLI
 agent id configurable while still starting only one worker process. M16 adds a
 static worker pool that starts one resident worker per agent while preserving
-sequential scheduler execution. Claude Code is not integrated yet.
+sequential scheduler execution. M17 adds a side-by-side two-phase scheduler
+that can keep multiple attempts inflight and collect mailbox results in later
+ticks. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
