@@ -13,9 +13,10 @@ For the implementation route after M22, see
 The M0 runtime proves the local control-plane path without requiring a live
 model backend, A2A, MCP, an external database service, or a persistent agent
 process. The current implementation route uses Codex as the only live LLM
-backend because Claude API access is not available. The M1b slice includes a
-Codex process adapter so the same control-plane contract can be exercised
-through `codex exec`.
+backend. Future API-based models such as DeepSeek or Claude Opus can be added
+through adapters when credentials and result contracts are available. The M1b
+slice includes a Codex process adapter so the same control-plane contract can be
+exercised through `codex exec`.
 
 Implemented path:
 
@@ -2456,8 +2457,9 @@ M29b routes new work away from quarantined worker agents. M29c records explicit
 reassignment event lineage for those conservative dispatches. M30a adds a
 read-only runtime observability summary CLI. M30b adds resource drilldown views.
 M30c adds current milestone and next decomposition visibility. Claude Code is not
-an active backend target on the current route because Claude API access is not
-available; live LLM work is Codex-only.
+an active backend target on the current route; live LLM work is Codex-only for
+now. Future API-based models such as DeepSeek or Claude Opus remain possible
+after credentials and result extraction contracts are defined.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

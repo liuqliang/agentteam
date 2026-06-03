@@ -77,13 +77,14 @@ The implementation has already proven these layers:
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
 communication files, scoped worker execution, proposal validation, and Codex as
-the only live LLM backend on the current route.
+the only live LLM backend on the current implementation route.
 
 ## Backend Constraint
 
-Current implementation constraint: all live LLM worker execution must use
-Codex. The user does not have Claude API access, so Claude Code compatibility is
-not an active target.
+Current implementation constraint: all live LLM worker execution must use Codex.
+This is not a permanent architecture ban on other models. The user may later
+introduce API-based models such as DeepSeek or Claude Opus, but those backends
+are not active targets now.
 
 Role differentiation should be implemented through Codex runtime profiles:
 different roles can carry different Codex model, sandbox, timeout, command,
@@ -295,8 +296,9 @@ These items should wait until M23-M30 have made the local runtime reliable:
   those artifacts directly.
 - Repository map integration using language-aware tools such as compilers, LSP,
   build systems, and static analyzers, with compact summaries fed to planners.
-- Claude Code or other backend adapters only after an executable/API contract
-  and result extraction path are available.
+- API or executable backend adapters for DeepSeek, Claude Opus, Claude Code, or
+  other models only after credentials, contracts, and result extraction paths
+  are available.
 
 ## Explicit Non-Goals For The Current Route
 
