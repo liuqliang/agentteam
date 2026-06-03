@@ -1796,6 +1796,80 @@ class M0RuntimeTests(unittest.TestCase):
                 ["timeout"],
             )
 
+    def test_two_phase_scheduler_can_commit_verified_integration_patch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            source_head = _git_rev_parse(repo, "HEAD")
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/"]),
+                ],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                integrate_accepted_patch=True,
+                integration_verification_command=[
+                    sys.executable,
+                    "-c",
+                    "import pathlib; assert pathlib.Path('generated/two_phase_commit.json').exists()",
+                ],
+                commit_verified_integration=True,
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            worktree_path = Path(inflight["worktree_path"])
+            target = worktree_path / "generated" / "two_phase_commit.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps({"attempt_id": inflight["attempt_id"]}),
+                encoding="utf-8",
+            )
+            _append_runtime_result(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                ["generated/two_phase_commit.json"],
+            )
+
+            collected = scheduler.collect_ready_results()
+            result = collected["results"][0]
+            integration_worktree = Path(result["integration_worktree_path"])
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertEqual(result["validation_status"], "accepted")
+            self.assertEqual(result["diff_audit"]["diff_status"], "matched")
+            self.assertTrue(Path(result["patch_path"]).exists())
+            self.assertEqual(result["integration_status"], "applied")
+            self.assertEqual(result["integration_verification_status"], "passed")
+            self.assertEqual(result["integration_commit_status"], "committed")
+            self.assertNotEqual(result["integration_commit_sha"], None)
+            self.assertTrue(
+                (integration_worktree / "generated" / "two_phase_commit.json").exists()
+            )
+            self.assertEqual(_git_rev_parse(repo, "HEAD"), source_head)
+            self.assertNotEqual(_git_rev_parse(integration_worktree, "HEAD"), source_head)
+            self.assertEqual(
+                snapshot["attempts"]["TASK-001-ATTEMPT-001"][
+                    "integration_commit_status"
+                ],
+                "committed",
+            )
+
     def test_two_phase_scheduler_dispatches_multiple_tasks_before_collecting(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1992,6 +2066,72 @@ class M0RuntimeTests(unittest.TestCase):
                 {task["task_id"]: task["task_status"] for task in state["tasks"]},
                 {"TASK-001": "done", "TASK-002": "done"},
             )
+
+    def test_cli_two_phase_worker_pool_can_commit_verified_integration_patch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            source_head = _git_rev_parse(repo, "HEAD")
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(agent_pool_path),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--project-root",
+                    str(repo),
+                    "--daemon-run-until-idle",
+                    "--daemon-two-phase-worker-pool",
+                    "--max-inflight",
+                    "1",
+                    "--integrate-accepted-patch",
+                    "--integration-verification-command-json",
+                    json.dumps(
+                        [
+                            sys.executable,
+                            "-c",
+                            "import pathlib; assert pathlib.Path('generated/m0_generated_repo_index.json').exists()",
+                        ]
+                    ),
+                    "--commit-verified-integration",
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            result = summary["steps"][0]["result"]
+            integration_worktree = Path(result["integration_worktree_path"])
+
+            self.assertEqual(summary["daemon_status"], "idle")
+            self.assertEqual(result["integration_status"], "applied")
+            self.assertEqual(result["integration_verification_status"], "passed")
+            self.assertEqual(result["integration_commit_status"], "committed")
+            self.assertTrue(
+                (
+                    integration_worktree
+                    / "generated"
+                    / "m0_generated_repo_index.json"
+                ).exists()
+            )
+            self.assertEqual(_git_rev_parse(repo, "HEAD"), source_head)
 
     def test_cli_can_show_state_index_without_agent_pool_or_backlog(self):
         with tempfile.TemporaryDirectory() as tmp:

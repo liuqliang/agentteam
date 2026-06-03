@@ -13,8 +13,13 @@ from .m0_runtime import (
     _read_json,
     _runtime_adapter_metadata,
     _scoped_id,
+    apply_patch_to_integration_worktree,
+    audit_worktree_diff,
     classify_attempt_outcome,
+    evaluate_integration_commit,
     rebuild_sqlite_state_index,
+    run_integration_verification,
+    write_patch_artifact,
 )
 
 
@@ -30,6 +35,9 @@ class TwoPhaseFileScheduler:
         max_inflight=2,
         max_attempts=1,
         lease_timeout_seconds=900,
+        integrate_accepted_patch=False,
+        integration_verification_command=None,
+        commit_verified_integration=False,
         state_path=None,
     ):
         if max_inflight < 1:
@@ -48,6 +56,9 @@ class TwoPhaseFileScheduler:
         self.max_inflight = max_inflight
         self.max_attempts = max_attempts
         self.lease_timeout_seconds = lease_timeout_seconds
+        self.integrate_accepted_patch = integrate_accepted_patch
+        self.integration_verification_command = integration_verification_command
+        self.commit_verified_integration = commit_verified_integration
         self.state_path = Path(
             state_path or self.output_dir / "state" / "two_phase_scheduler_state.json"
         )
@@ -118,6 +129,7 @@ class TwoPhaseFileScheduler:
             "collected_task_ids": [item["task_id"] for item in collected],
             "collected_count": len(collected),
             "inflight_count": len(self.state["inflight_attempts"]),
+            "results": collected,
         }
 
     def tick(self):
@@ -365,7 +377,23 @@ class TwoPhaseFileScheduler:
 
     def _collect_result(self, inflight, runtime_result):
         task = self._task_by_id(inflight["task_id"])
-        outcome = classify_attempt_outcome(runtime_result, task, diff_audit=None)
+        diff_audit = (
+            audit_worktree_diff(inflight["worktree_path"], runtime_result["changed_files"])
+            if inflight["worktree_path"]
+            else None
+        )
+        patch_path = (
+            write_patch_artifact(
+                inflight["worktree_path"],
+                self.output_dir / "attempts" / inflight["attempt_id"],
+                diff_audit["actual_changed_files"],
+            )
+            if inflight["worktree_path"]
+            and diff_audit
+            and diff_audit["actual_changed_files"]
+            else None
+        )
+        outcome = classify_attempt_outcome(runtime_result, task, diff_audit=diff_audit)
         retry_allowed = (
             outcome["retryable"]
             and inflight["attempt_number"] < self.state["max_attempts"]
@@ -392,9 +420,28 @@ class TwoPhaseFileScheduler:
             "validation_status": outcome["validation_status"],
             "failure_category": outcome["failure_category"],
             "retryable": outcome["retryable"],
-            "diff_audit": None,
-            "patch_path": None,
+            "diff_audit": diff_audit,
+            "patch_path": str(patch_path) if patch_path else None,
+            "integration_status": "not_requested",
+            "integration_branch": None,
+            "integration_worktree_path": None,
+            "integration_verification_status": "not_requested",
+            "integration_verification_exit_code": None,
+            "integration_verification_stdout": "",
+            "integration_verification_stderr": "",
+            "integration_commit_status": "not_requested",
+            "integration_commit_sha": None,
+            "integration_commit_message": None,
+            "integration_commit_reason": None,
+            "integration_commit_stdout": "",
+            "integration_commit_stderr": "",
         }
+        integration_events = self._integrate_accepted_result(
+            inflight,
+            result,
+            patch_path,
+            outcome,
+        )
         self._append_events(
             inflight["step_id"],
             [
@@ -426,8 +473,8 @@ class TwoPhaseFileScheduler:
                         "result_status": runtime_result["result_status"],
                         "changed_files": runtime_result["changed_files"],
                         "output": runtime_result.get("output", {}),
-                        "diff_audit": None,
-                        "patch_path": None,
+                        "diff_audit": diff_audit,
+                        "patch_path": str(patch_path) if patch_path else None,
                     },
                 ),
                 self._event(
@@ -460,10 +507,11 @@ class TwoPhaseFileScheduler:
                         "failure_category": outcome["failure_category"],
                         "retryable": outcome["retryable"],
                         "lease_id": inflight["lease_id"],
-                        "diff_audit": None,
-                        "patch_path": None,
+                        "diff_audit": diff_audit,
+                        "patch_path": str(patch_path) if patch_path else None,
                     },
                 ),
+                *integration_events,
                 *(
                     [
                         self._event(
@@ -525,6 +573,79 @@ class TwoPhaseFileScheduler:
             }
         )
         return result
+
+    def _integrate_accepted_result(self, inflight, result, patch_path, outcome):
+        if outcome["validation_status"] != "accepted":
+            return []
+        events = []
+        if self.integrate_accepted_patch and self.project_root and patch_path:
+            integration = apply_patch_to_integration_worktree(
+                self.project_root,
+                self.output_dir,
+                inflight["task_id"],
+                patch_path,
+            )
+            result.update(integration)
+            events.append(
+                self._event(
+                    "patch_integrated",
+                    "agent-scheduler",
+                    inflight["agent_id"],
+                    f"patch-integrated:{inflight['attempt_id']}",
+                    inflight["correlation_id"],
+                    {
+                        "task_id": inflight["task_id"],
+                        "attempt_id": inflight["attempt_id"],
+                        "lease_id": inflight["lease_id"],
+                        "patch_path": str(patch_path),
+                        **integration,
+                    },
+                )
+            )
+            if self.integration_verification_command:
+                verification = run_integration_verification(
+                    self.integration_verification_command,
+                    integration["integration_worktree_path"],
+                )
+                result.update(verification)
+                events.append(
+                    self._event(
+                        "integration_verified",
+                        "agent-scheduler",
+                        inflight["agent_id"],
+                        f"integration-verified:{inflight['attempt_id']}",
+                        inflight["correlation_id"],
+                        {
+                            "task_id": inflight["task_id"],
+                            "attempt_id": inflight["attempt_id"],
+                            "lease_id": inflight["lease_id"],
+                            **verification,
+                        },
+                    )
+                )
+        if self.commit_verified_integration:
+            integration_commit = evaluate_integration_commit(
+                result,
+                inflight["task_id"],
+                inflight["attempt_id"],
+            )
+            result.update(integration_commit)
+            events.append(
+                self._event(
+                    "integration_commit_evaluated",
+                    "agent-scheduler",
+                    inflight["agent_id"],
+                    f"integration-commit:{inflight['attempt_id']}",
+                    inflight["correlation_id"],
+                    {
+                        "task_id": inflight["task_id"],
+                        "attempt_id": inflight["attempt_id"],
+                        "lease_id": inflight["lease_id"],
+                        **integration_commit,
+                    },
+                )
+            )
+        return events
 
     def _lease_expired(self, inflight):
         now = _parse_utc_timestamp(self.clock.now())

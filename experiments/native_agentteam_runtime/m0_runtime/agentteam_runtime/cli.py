@@ -227,6 +227,9 @@ def main(argv=None):
                     max_inflight=args.max_inflight,
                     max_attempts=args.max_attempts,
                     lease_timeout_seconds=args.lease_timeout_seconds,
+                    integrate_accepted_patch=args.integrate_accepted_patch,
+                    integration_verification_command=integration_verification_command,
+                    commit_verified_integration=args.commit_verified_integration,
                     max_ticks=args.max_steps,
                 )
             finally:

@@ -1613,12 +1613,69 @@ M18 still does not restart or kill worker processes. It only makes scheduler
 state advance when the worker reports a retryable failure or fails to report
 before the lease deadline.
 
+## M19 Two-Phase Integration Gate
+
+M19 connects accepted two-phase worktree results to the existing integration
+gate. The scheduler can now audit the actual worktree diff, write a patch
+artifact, apply that patch to an isolated integration worktree, run verification
+there, and optionally commit the integration worktree:
+
+```python
+scheduler = TwoPhaseFileScheduler(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    project_root=repo,
+    integrate_accepted_patch=True,
+    integration_verification_command=[
+        "python3",
+        "-c",
+        "import pathlib; assert pathlib.Path('generated/result.json').exists()",
+    ],
+    commit_verified_integration=True,
+)
+```
+
+For accepted worktree-backed results, `collect_ready_results()` now includes
+integration fields in each collected result:
+
+```json
+{
+  "diff_audit": {"diff_status": "matched"},
+  "patch_path": "/tmp/run/attempts/TASK-001-ATTEMPT-001/worktree.patch",
+  "integration_status": "applied",
+  "integration_verification_status": "passed",
+  "integration_commit_status": "committed"
+}
+```
+
+The two-phase CLI uses the existing integration flags:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool /path/to/agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m19-two-phase-integration-run \
+  --project-root /path/to/git/repo \
+  --daemon-run-until-idle \
+  --daemon-two-phase-worker-pool \
+  --max-inflight 1 \
+  --integrate-accepted-patch \
+  --integration-verification-command-json '["python3", "-c", "import pathlib; assert pathlib.Path(\"generated/result.json\").exists()"]' \
+  --commit-verified-integration
+```
+
+M19 still does not merge the integration commit back to the source branch, batch
+several task patches into one integration branch, clean up integration
+worktrees, or resolve patch conflicts automatically.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
 
 - transcript parsing;
-- real code patch integration;
+- production-grade merge orchestration;
 - multi-worker supervision, restart/backoff, and concurrent worker execution;
 - advanced retry backoff, queues, and cross-process recovery;
 - schema validation through a JSON Schema engine.
@@ -1668,7 +1725,9 @@ static worker pool that starts one resident worker per agent while preserving
 sequential scheduler execution. M17 adds a side-by-side two-phase scheduler
 that can keep multiple attempts inflight and collect mailbox results in later
 ticks. M18 adds retryable result recovery and lease-timeout recovery to that
-two-phase path. Claude Code is not integrated yet.
+two-phase path. M19 connects accepted two-phase worktree results to patch
+artifact creation, integration verification, and optional integration commit.
+Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
