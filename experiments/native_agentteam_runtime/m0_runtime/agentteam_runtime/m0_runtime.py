@@ -413,6 +413,7 @@ def run_simulation(
         runtime_adapter_factory,
         agent,
         task,
+        agent_pool=agent_pool,
         project_root=project_root,
         runtime_profile_defaults=runtime_profile_defaults,
     )
@@ -1635,6 +1636,7 @@ def _resolve_runtime_adapter(
     runtime_adapter_factory,
     agent,
     task,
+    agent_pool=None,
     project_root=None,
     runtime_profile_defaults=None,
 ):
@@ -1652,6 +1654,16 @@ def _resolve_runtime_adapter(
             )
             or FakeRuntimeAdapter()
         )
+    role_profile = _role_runtime_profile(agent_pool, agent)
+    if role_profile:
+        return (
+            _runtime_adapter_from_profile(
+                role_profile,
+                defaults=runtime_profile_defaults,
+                project_root=project_root,
+            )
+            or FakeRuntimeAdapter()
+        )
     if runtime_profile_defaults:
         return (
             _runtime_adapter_from_profile(
@@ -1662,6 +1674,15 @@ def _resolve_runtime_adapter(
             or FakeRuntimeAdapter()
         )
     return FakeRuntimeAdapter()
+
+
+def _role_runtime_profile(agent_pool, agent):
+    if not agent_pool:
+        return None
+    role_profiles = agent_pool.get("role_runtime_profiles", {})
+    if not isinstance(role_profiles, dict):
+        raise ValueError("role_runtime_profiles must be an object")
+    return role_profiles.get(agent.get("role"))
 
 
 def _runtime_adapter_from_profile(profile, defaults=None, project_root=None):

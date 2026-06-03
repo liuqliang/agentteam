@@ -65,6 +65,10 @@
             "minLength": 1
           },
           "minItems": 1
+        },
+        "fallback_worktree_path": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },

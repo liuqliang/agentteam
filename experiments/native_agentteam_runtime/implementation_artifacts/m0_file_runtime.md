@@ -2378,6 +2378,39 @@ observability view:
 This data is read from the two-phase scheduler state when present. Older output
 directories without scheduler milestone state report both fields as `null`.
 
+## M31a Codex Role Runtime Profiles
+
+M31a lets an agent pool define Codex runtime settings once per role:
+
+```json
+{
+  "role_runtime_profiles": {
+    "repo_map_agent": {
+      "adapter": "codex",
+      "model": "gpt-5.4-mini",
+      "sandbox": "workspace-write",
+      "timeout_seconds": 300
+    }
+  }
+}
+```
+
+The scheduler and resident worker pool now use the same profile precedence:
+
+1. `agent.runtime_profile`;
+2. `agent_pool.role_runtime_profiles[agent.role]`;
+3. runtime defaults from the CLI or caller;
+4. fake runtime.
+
+This keeps role configuration compact while preserving agent-level overrides for
+special cases. CLI/default Codex command settings still act as local environment
+defaults, so a role profile can declare model, sandbox, and timeout without
+hard-coding the executable path.
+
+M31a is still Codex-only for live LLM execution. Fake and shell profiles remain
+test or local harnesses. Role-specific prompt and context contracts are deferred
+to M31b.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -2456,10 +2489,11 @@ back to the source branch. M29a adds worker-pool restart budgets and quarantine.
 M29b routes new work away from quarantined worker agents. M29c records explicit
 reassignment event lineage for those conservative dispatches. M30a adds a
 read-only runtime observability summary CLI. M30b adds resource drilldown views.
-M30c adds current milestone and next decomposition visibility. Claude Code is not
-an active backend target on the current route; live LLM work is Codex-only for
-now. Future API-based models such as DeepSeek or Claude Opus remain possible
-after credentials and result extraction contracts are defined.
+M30c adds current milestone and next decomposition visibility. M31a adds
+role-level Codex runtime profiles for scheduler core and resident worker pools.
+Claude Code is not an active backend target on the current route; live LLM work
+is Codex-only for now. Future API-based models such as DeepSeek or Claude Opus
+remain possible after credentials and result extraction contracts are defined.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -2469,8 +2503,8 @@ Before the next backend milestone, the next design/code step should define:
 
 - decide when live Codex smoke should run outside local opt-in, such as nightly
   or pre-release only;
-- decide how Codex-only role profiles should differ for planner, implementer,
-  reviewer, and integrator workers;
+- decide how Codex-only role prompt/context contracts should differ for planner,
+  implementer, reviewer, and integrator workers;
 - decide when worker supervision should add heartbeat, backoff, and inflight
   migration beyond the current restart-budget/quarantine path;
 - decide when planner context should ingest code-map and verification-summary

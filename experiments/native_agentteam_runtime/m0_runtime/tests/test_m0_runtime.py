@@ -1163,22 +1163,74 @@ class M0RuntimeTests(unittest.TestCase):
 
             state = read_scheduler_state_index(output_dir)
             session = state["runtime_sessions"][0]
-            recorded = json.loads(
-                (
-                    output_dir
-                    / "steps"
-                    / "STEP-0001-TASK-001"
-                    / "worktrees"
-                    / "WT-TASK-001-ATTEMPT-001"
-                    / target_file
-                ).read_text(encoding="utf-8")
+            recorded_path = (
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-001"
+                / "worktrees"
+                / "WT-TASK-001-ATTEMPT-001"
+                / target_file
             )
+            self.assertTrue(recorded_path.exists())
+            recorded = json.loads(recorded_path.read_text(encoding="utf-8"))
 
             self.assertEqual(session["runtime_adapter"], "CodexRuntimeAdapter")
             self.assertEqual(session["runtime_model"], "core-profile-model")
             self.assertEqual(session["runtime_sandbox"], "read-only")
             self.assertEqual(session["runtime_timeout_seconds"], 30)
             self.assertEqual(recorded["model"], "core-profile-model")
+            self.assertEqual(recorded["sandbox"], "read-only")
+
+    def test_scheduler_core_uses_role_runtime_profile_when_agent_profile_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            fake_codex = tmp_path / "fake_codex_role_profile.py"
+            target_file = "generated/role_profile.json"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_agent_pool_with_role_runtime_profiles(
+                agent_pool_path,
+                role_runtime_profiles={
+                    "repo_map_agent": {
+                        "adapter": "codex",
+                        "command": [sys.executable, str(fake_codex)],
+                        "model": "role-profile-model",
+                        "sandbox": "read-only",
+                        "timeout_seconds": 45,
+                    }
+                },
+            )
+            _write_fake_codex_arg_recorder(fake_codex, changed_file=target_file)
+
+            run_scheduler_loop(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+            )
+
+            state = read_scheduler_state_index(output_dir)
+            session = state["runtime_sessions"][0]
+            recorded_path = (
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-001"
+                / "worktrees"
+                / "WT-TASK-001-ATTEMPT-001"
+                / target_file
+            )
+            self.assertTrue(recorded_path.exists())
+            recorded = json.loads(recorded_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(session["runtime_adapter"], "CodexRuntimeAdapter")
+            self.assertEqual(session["runtime_model"], "role-profile-model")
+            self.assertEqual(session["runtime_sandbox"], "read-only")
+            self.assertEqual(session["runtime_timeout_seconds"], 45)
+            self.assertEqual(recorded["model"], "role-profile-model")
             self.assertEqual(recorded["sandbox"], "read-only")
 
     def test_read_scheduler_state_index_rebuilds_stale_sqlite_index(self):
@@ -2015,6 +2067,49 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue(
                 all(worker["worker_status"] == "stopped" for worker in stop["workers"])
             )
+
+    def test_file_mailbox_worker_pool_supervisor_uses_role_runtime_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            fake_codex = tmp_path / "fake_codex_worker_profile.py"
+            _write_agent_pool_with_role_runtime_profiles(
+                agent_pool_path,
+                role_runtime_profiles={
+                    "repo_map_agent": {
+                        "adapter": "codex",
+                        "command": [sys.executable, str(fake_codex)],
+                        "model": "worker-role-profile-model",
+                        "sandbox": "read-only",
+                        "timeout_seconds": 45,
+                    }
+                },
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+            pool = FileMailboxWorkerPoolSupervisor(
+                agent_pool_path,
+                output_dir,
+                env=env,
+                poll_interval_seconds=0.01,
+            )
+
+            start = pool.start()
+            try:
+                self.assertEqual(start["pool_status"], "running")
+                self.assertEqual(start["workers"][0]["worker_runtime"], "codex")
+                self.assertEqual(
+                    pool.workers[0].codex_command,
+                    [sys.executable, str(fake_codex)],
+                )
+                self.assertEqual(pool.workers[0].codex_model, "worker-role-profile-model")
+                self.assertEqual(pool.workers[0].codex_sandbox, "read-only")
+                self.assertEqual(pool.workers[0].codex_timeout_seconds, 45)
+            finally:
+                stop = pool.stop()
+
+            self.assertEqual(stop["workers"][0]["worker_runtime"], "codex")
 
     def test_file_mailbox_worker_pool_supervisor_resumes_running_workers_from_registry(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5121,6 +5216,36 @@ def _write_agent_pool_with_runtime_profile(path, runtime_profile):
         ],
     }
     path.write_text(json.dumps(agent_pool), encoding="utf-8")
+
+
+def _write_agent_pool_with_role_runtime_profiles(path, role_runtime_profiles):
+    agent_pool = {
+        "pool_id": "test-agent-pool",
+        "scheduler_agent_id": "agent-scheduler",
+        "updated_at": "2026-06-03T00:00:00Z",
+        "role_runtime_profiles": role_runtime_profiles,
+        "agents": [
+            {
+                "agent_id": "agent-repo-map",
+                "role": "repo_map_agent",
+                "status": "idle",
+                "model_profile": "small-tooling",
+                "runtime_adapter": "codex",
+                "subscriptions": ["repo_index_stale"],
+                "inbox_path": "mailboxes/agent-repo-map/inbox.jsonl",
+                "outbox_path": "mailboxes/agent-repo-map/outbox.jsonl",
+                "lease": {
+                    "lease_id": None,
+                    "task_id": None,
+                    "expires_at": None,
+                },
+                "owned_artifacts": [],
+                "last_event_id": None,
+                "memory_summary_path": None,
+            }
+        ],
+    }
+    path.write_text(json.dumps(agent_pool, sort_keys=True), encoding="utf-8")
 
 
 def _write_agent_pool_with_agent_id(path, agent_id):

@@ -18,6 +18,44 @@
       "type": "string",
       "format": "date-time"
     },
+    "role_runtime_profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["adapter"],
+        "properties": {
+          "adapter": {
+            "type": "string",
+            "enum": ["fake", "shell", "codex"]
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sandbox": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "fallback_worktree_path": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
     "agents": {
       "type": "array",
       "items": {
