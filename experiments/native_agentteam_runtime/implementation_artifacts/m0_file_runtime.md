@@ -58,9 +58,11 @@ from agentteam_runtime import (
     CodexRuntimeAdapter,
     FakeRuntimeAdapter,
     FileSchedulerDaemon,
+    FileMailboxExternalRuntimeAdapter,
     FileMailboxRuntimeAdapter,
     FileMailboxSubprocessRuntimeAdapter,
     FileMailboxWorker,
+    FileMailboxWorkerProcessSupervisor,
     FileScheduler,
     ShellRuntimeAdapter,
     classify_attempt_outcome,
@@ -94,6 +96,12 @@ mailbox_worker = FileMailboxWorker(
 )
 
 mailbox_subprocess_adapter = FileMailboxSubprocessRuntimeAdapter(agent_pool_path)
+mailbox_external_adapter = FileMailboxExternalRuntimeAdapter(agent_pool_path)
+mailbox_supervisor = FileMailboxWorkerProcessSupervisor(
+    agent_pool_path,
+    output_dir,
+    "agent-repo-map",
+)
 
 result_with_worktree = run_simulation(
     agent_pool_path,
@@ -273,6 +281,23 @@ python3 -m agentteam_runtime.cli \
 This flag launches one worker subprocess per dispatch through
 `FileMailboxSubprocessRuntimeAdapter`. It is mutually exclusive with
 `--daemon-mailbox-worker`.
+
+To exercise one long-running fake mailbox worker for the daemon run, use
+`--daemon-long-running-mailbox-worker`:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool experiments/native_agentteam_runtime/fixtures/sample_agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m15a-long-worker-run \
+  --daemon-run-until-idle \
+  --daemon-long-running-mailbox-worker
+```
+
+This starts one serving worker process for `agent-repo-map`, runs the daemon with
+`FileMailboxExternalRuntimeAdapter`, then stops the worker before printing the
+summary. It is mutually exclusive with the M14b/M14c mailbox worker flags.
 
 To inspect a completed or partially completed scheduler run without re-running
 the scheduler, pass `--show-state-index` with only the output directory:
@@ -1253,13 +1278,71 @@ and file-mailbox result recovery. It is still one subprocess per dispatch. It
 does not keep workers resident, restart failed workers, multiplex multiple
 agents concurrently, or define backoff policy.
 
+## M15a Long-Running Fake Mailbox Worker
+
+M15a adds the first resident worker-process path. The worker CLI can run in
+serve mode:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.mailbox_worker \
+  --agent-pool experiments/native_agentteam_runtime/fixtures/sample_agent_pool.json \
+  --output-dir /tmp/agentteam-run \
+  --agent-id agent-repo-map \
+  --runtime fake \
+  --serve \
+  --poll-interval-seconds 0.05 \
+  --stop-file /tmp/agentteam-run/state/workers/agent-repo-map.stop
+```
+
+In serve mode the worker scans:
+
+```text
+<output-dir>/mailboxes/<agent-id>/inbox.jsonl
+<output-dir>/steps/*/mailboxes/<agent-id>/inbox.jsonl
+```
+
+It processes the first unanswered dispatch it finds, writes the matching
+`runtime_result`, and continues polling until the stop file appears.
+
+`FileMailboxWorkerProcessSupervisor` owns the process lifecycle:
+
+```python
+supervisor = FileMailboxWorkerProcessSupervisor(
+    agent_pool_path,
+    output_dir,
+    "agent-repo-map",
+)
+start = supervisor.start()
+stop = supervisor.stop()
+```
+
+`FileMailboxExternalRuntimeAdapter` is the scheduler-side counterpart. It does
+not start a process. For each runtime call it binds to the current step output
+directory and waits for the long-running worker to write the matching outbox
+result:
+
+```python
+summary = run_scheduler_loop(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    runtime_adapter=FileMailboxExternalRuntimeAdapter(agent_pool_path),
+)
+```
+
+M15a is intentionally narrow: one fake worker process, one agent id, sequential
+scheduler execution, and explicit stop-file shutdown. It does not yet supervise
+multiple workers, restart failed workers, allocate tasks across a pool, or run
+Codex/Claude as resident processes.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
 
 - transcript parsing;
 - real code patch integration;
-- long-lived supervised daemon worker processes and concurrent worker execution;
+- multi-worker supervision, restart/backoff, and concurrent worker execution;
 - advanced retry backoff, queues, and cross-process recovery;
 - schema validation through a JSON Schema engine.
 
@@ -1299,8 +1382,9 @@ can reuse it. M14a adds a file-backed daemon facade and durable worker registry
 while keeping execution sequential and adapter invocations short-lived. M14b
 adds file mailbox worker/result round-tripping through `FileMailboxRuntimeAdapter`
 with an in-process fake delegate. M14c runs the same mailbox worker through a
-one-shot OS subprocess via `FileMailboxSubprocessRuntimeAdapter`. Claude Code is
-not integrated yet.
+one-shot OS subprocess via `FileMailboxSubprocessRuntimeAdapter`. M15a adds one
+long-running fake mailbox worker process with explicit supervisor start/stop.
+Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -1311,8 +1395,8 @@ Before the next backend milestone, the next design/code step should define:
 - decide when live Codex smoke should run outside local opt-in, such as nightly
   or pre-release only;
 - Claude Code adapter feasibility and result extraction contract;
-- decide when file mailbox workers should become supervised long-running OS
-  processes;
+- decide when long-running mailbox workers should support multiple agents,
+  restart/backoff, and real Codex/Claude worker runtimes;
 - decide whether lightweight artifact lint should grow into full JSON Schema
   validation;
 - retry backoff, retry budget, and failure escalation policy;

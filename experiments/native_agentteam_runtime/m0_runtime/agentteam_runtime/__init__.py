@@ -1,39 +1,43 @@
-from .daemon import (
-    FileSchedulerDaemon,
-    run_file_daemon,
-)
-from .mailbox_worker import (
-    FileMailboxRuntimeAdapter,
-    FileMailboxSubprocessRuntimeAdapter,
-    FileMailboxWorker,
-)
-from .m0_runtime import (
-    CodexRuntimeAdapter,
-    FakeRuntimeAdapter,
-    FileScheduler,
-    ShellRuntimeAdapter,
-    audit_worktree_diff,
-    classify_attempt_outcome,
-    read_scheduler_state_index,
-    replay_events,
-    run_scheduler_loop,
-    run_simulation,
-)
+from importlib import import_module
 
-__all__ = [
-    "CodexRuntimeAdapter",
-    "FakeRuntimeAdapter",
-    "FileSchedulerDaemon",
-    "FileMailboxRuntimeAdapter",
-    "FileMailboxSubprocessRuntimeAdapter",
-    "FileMailboxWorker",
-    "FileScheduler",
-    "ShellRuntimeAdapter",
-    "audit_worktree_diff",
-    "classify_attempt_outcome",
-    "read_scheduler_state_index",
-    "replay_events",
-    "run_file_daemon",
-    "run_scheduler_loop",
-    "run_simulation",
-]
+
+_EXPORTS = {
+    "CodexRuntimeAdapter": (".m0_runtime", "CodexRuntimeAdapter"),
+    "FakeRuntimeAdapter": (".m0_runtime", "FakeRuntimeAdapter"),
+    "FileMailboxExternalRuntimeAdapter": (
+        ".mailbox_worker",
+        "FileMailboxExternalRuntimeAdapter",
+    ),
+    "FileMailboxRuntimeAdapter": (".mailbox_worker", "FileMailboxRuntimeAdapter"),
+    "FileMailboxSubprocessRuntimeAdapter": (
+        ".mailbox_worker",
+        "FileMailboxSubprocessRuntimeAdapter",
+    ),
+    "FileMailboxWorker": (".mailbox_worker", "FileMailboxWorker"),
+    "FileMailboxWorkerProcessSupervisor": (
+        ".mailbox_worker",
+        "FileMailboxWorkerProcessSupervisor",
+    ),
+    "FileScheduler": (".m0_runtime", "FileScheduler"),
+    "FileSchedulerDaemon": (".daemon", "FileSchedulerDaemon"),
+    "ShellRuntimeAdapter": (".m0_runtime", "ShellRuntimeAdapter"),
+    "audit_worktree_diff": (".m0_runtime", "audit_worktree_diff"),
+    "classify_attempt_outcome": (".m0_runtime", "classify_attempt_outcome"),
+    "read_scheduler_state_index": (".m0_runtime", "read_scheduler_state_index"),
+    "replay_events": (".m0_runtime", "replay_events"),
+    "run_file_daemon": (".daemon", "run_file_daemon"),
+    "run_scheduler_loop": (".m0_runtime", "run_scheduler_loop"),
+    "run_simulation": (".m0_runtime", "run_simulation"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name):
+    try:
+        module_name, attribute_name = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    value = getattr(import_module(module_name, __name__), attribute_name)
+    globals()[name] = value
+    return value

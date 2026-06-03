@@ -3,8 +3,10 @@ import json
 
 from .daemon import run_file_daemon
 from .mailbox_worker import (
+    FileMailboxExternalRuntimeAdapter,
     FileMailboxRuntimeAdapter,
     FileMailboxSubprocessRuntimeAdapter,
+    FileMailboxWorkerProcessSupervisor,
 )
 from .m0_runtime import (
     FakeRuntimeAdapter,
@@ -45,6 +47,11 @@ def main(argv=None):
         "--daemon-mailbox-subprocess-worker",
         action="store_true",
         help="Run daemon tasks through a one-shot file mailbox worker subprocess.",
+    )
+    parser.add_argument(
+        "--daemon-long-running-mailbox-worker",
+        action="store_true",
+        help="Run daemon tasks through one long-running fake mailbox worker process.",
     )
     parser.add_argument(
         "--max-steps",
@@ -103,8 +110,16 @@ def main(argv=None):
         parser.error("--daemon-mailbox-worker requires --daemon-run-until-idle")
     if args.daemon_mailbox_subprocess_worker and not args.daemon_run_until_idle:
         parser.error("--daemon-mailbox-subprocess-worker requires --daemon-run-until-idle")
+    if args.daemon_long_running_mailbox_worker and not args.daemon_run_until_idle:
+        parser.error("--daemon-long-running-mailbox-worker requires --daemon-run-until-idle")
     if args.daemon_mailbox_worker and args.daemon_mailbox_subprocess_worker:
         parser.error("--daemon-mailbox-worker and --daemon-mailbox-subprocess-worker are mutually exclusive")
+    if args.daemon_long_running_mailbox_worker and (
+        args.daemon_mailbox_worker or args.daemon_mailbox_subprocess_worker
+    ):
+        parser.error(
+            "--daemon-long-running-mailbox-worker cannot be combined with other daemon mailbox worker flags"
+        )
     if args.show_state_index:
         result = read_scheduler_state_index(args.output_dir)
         print(json.dumps(result, sort_keys=True))
@@ -135,6 +150,7 @@ def main(argv=None):
 
     if args.daemon_run_until_idle:
         runtime_adapter = None
+        worker_process = None
         if args.daemon_mailbox_worker:
             if runtime_profile_defaults:
                 parser.error("--daemon-mailbox-worker currently supports only the fake delegate runtime")
@@ -148,18 +164,43 @@ def main(argv=None):
                     "--daemon-mailbox-subprocess-worker currently supports only the fake delegate runtime"
                 )
             runtime_adapter = FileMailboxSubprocessRuntimeAdapter(args.agent_pool)
-        result = run_file_daemon(
-            args.agent_pool,
-            args.backlog,
-            args.output_dir,
-            project_root=args.project_root,
-            runtime_adapter=runtime_adapter,
-            runtime_profile_defaults=None if runtime_adapter else runtime_profile_defaults,
-            integrate_accepted_patch=args.integrate_accepted_patch,
-            integration_verification_command=integration_verification_command,
-            commit_verified_integration=args.commit_verified_integration,
-            max_ticks=args.max_steps,
-        )
+        if args.daemon_long_running_mailbox_worker:
+            if runtime_profile_defaults:
+                parser.error(
+                    "--daemon-long-running-mailbox-worker currently supports only the fake delegate runtime"
+                )
+            worker_process = FileMailboxWorkerProcessSupervisor(
+                args.agent_pool,
+                args.output_dir,
+                "agent-repo-map",
+            )
+            worker_start = worker_process.start()
+            runtime_adapter = FileMailboxExternalRuntimeAdapter(args.agent_pool)
+        else:
+            worker_start = None
+        try:
+            result = run_file_daemon(
+                args.agent_pool,
+                args.backlog,
+                args.output_dir,
+                project_root=args.project_root,
+                runtime_adapter=runtime_adapter,
+                runtime_profile_defaults=None if runtime_adapter else runtime_profile_defaults,
+                integrate_accepted_patch=args.integrate_accepted_patch,
+                integration_verification_command=integration_verification_command,
+                commit_verified_integration=args.commit_verified_integration,
+                max_ticks=args.max_steps,
+            )
+        finally:
+            worker_stop = worker_process.stop() if worker_process else None
+        if worker_process:
+            result = {
+                **result,
+                "worker_process": {
+                    **worker_start,
+                    **worker_stop,
+                },
+            }
         snapshot = replay_events(result["events_path"])
         print(json.dumps({**result, "snapshot": snapshot}, sort_keys=True))
         return

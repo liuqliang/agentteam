@@ -11,8 +11,10 @@ from agentteam_runtime import (
     CodexRuntimeAdapter,
     FakeRuntimeAdapter,
     FileSchedulerDaemon,
+    FileMailboxExternalRuntimeAdapter,
     FileMailboxRuntimeAdapter,
     FileMailboxSubprocessRuntimeAdapter,
+    FileMailboxWorkerProcessSupervisor,
     FileMailboxWorker,
     ShellRuntimeAdapter,
     audit_worktree_diff,
@@ -259,6 +261,7 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["poll_status"], "processed")
             self.assertEqual(summary["source_message_id"], "MSG-SUBPROCESS-001")
             self.assertNotEqual(summary["worker_pid"], os.getpid())
+            self.assertEqual(completed.stderr, "")
             self.assertEqual(result_message["message_type"], "runtime_result")
 
     def test_scheduler_loop_can_round_trip_runtime_result_through_mailbox_worker(self):
@@ -344,6 +347,75 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 {session["runtime_adapter"] for session in state["runtime_sessions"]},
                 {"FileMailboxSubprocessRuntimeAdapter"},
+            )
+
+    def test_scheduler_loop_can_use_long_running_mailbox_worker_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+            supervisor = FileMailboxWorkerProcessSupervisor(
+                FIXTURES / "sample_agent_pool.json",
+                output_dir,
+                "agent-repo-map",
+                env=env,
+                poll_interval_seconds=0.01,
+            )
+
+            start = supervisor.start()
+            try:
+                summary = run_scheduler_loop(
+                    FIXTURES / "sample_agent_pool.json",
+                    backlog_path,
+                    output_dir,
+                    clock=FixedClock(),
+                    runtime_adapter=FileMailboxExternalRuntimeAdapter(
+                        FIXTURES / "sample_agent_pool.json",
+                        timeout_seconds=5,
+                        poll_interval_seconds=0.01,
+                    ),
+                )
+                self.assertIsNone(supervisor.process.poll())
+            finally:
+                stop = supervisor.stop()
+
+            state = read_scheduler_state_index(output_dir)
+            first_outbox = (
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-001"
+                / "mailboxes"
+                / "agent-repo-map"
+                / "outbox.jsonl"
+            )
+            second_outbox = (
+                output_dir
+                / "steps"
+                / "STEP-0002-TASK-002"
+                / "mailboxes"
+                / "agent-repo-map"
+                / "outbox.jsonl"
+            )
+
+            self.assertEqual(start["worker_status"], "running")
+            self.assertEqual(stop["worker_status"], "stopped")
+            self.assertEqual(summary["scheduler_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertNotEqual(start["worker_pid"], os.getpid())
+            self.assertTrue(first_outbox.exists())
+            self.assertTrue(second_outbox.exists())
+            self.assertEqual(
+                {session["runtime_adapter"] for session in state["runtime_sessions"]},
+                {"FileMailboxExternalRuntimeAdapter"},
             )
 
     def test_scheduler_loop_writes_canonical_event_log_for_replay(self):
@@ -1323,6 +1395,54 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 {session["runtime_adapter"] for session in state["runtime_sessions"]},
                 {"FileMailboxSubprocessRuntimeAdapter"},
+            )
+
+    def test_cli_can_run_file_daemon_with_long_running_mailbox_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--daemon-run-until-idle",
+                    "--daemon-long-running-mailbox-worker",
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            state = read_scheduler_state_index(output_dir)
+
+            self.assertEqual(summary["daemon_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertEqual(summary["worker_process"]["worker_status"], "stopped")
+            self.assertEqual(summary["worker_process"]["stderr"], "")
+            self.assertEqual(
+                {session["runtime_adapter"] for session in state["runtime_sessions"]},
+                {"FileMailboxExternalRuntimeAdapter"},
             )
 
     def test_cli_can_show_state_index_without_agent_pool_or_backlog(self):
