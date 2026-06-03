@@ -2,7 +2,9 @@ import argparse
 import json
 
 from .daemon import run_file_daemon
+from .mailbox_worker import FileMailboxRuntimeAdapter
 from .m0_runtime import (
+    FakeRuntimeAdapter,
     read_scheduler_state_index,
     replay_events,
     run_scheduler_loop,
@@ -30,6 +32,11 @@ def main(argv=None):
         "--daemon-run-until-idle",
         action="store_true",
         help="Run the file daemon facade until no ready tasks remain.",
+    )
+    parser.add_argument(
+        "--daemon-mailbox-worker",
+        action="store_true",
+        help="Run daemon tasks through the file mailbox worker bridge with a fake delegate.",
     )
     parser.add_argument(
         "--max-steps",
@@ -84,6 +91,8 @@ def main(argv=None):
         parser.error("--shell-command and --codex-command are mutually exclusive")
     if args.run_until_idle and args.daemon_run_until_idle:
         parser.error("--run-until-idle and --daemon-run-until-idle are mutually exclusive")
+    if args.daemon_mailbox_worker and not args.daemon_run_until_idle:
+        parser.error("--daemon-mailbox-worker requires --daemon-run-until-idle")
     if args.show_state_index:
         result = read_scheduler_state_index(args.output_dir)
         print(json.dumps(result, sort_keys=True))
@@ -113,12 +122,21 @@ def main(argv=None):
         return
 
     if args.daemon_run_until_idle:
+        runtime_adapter = None
+        if args.daemon_mailbox_worker:
+            if runtime_profile_defaults:
+                parser.error("--daemon-mailbox-worker currently supports only the fake delegate runtime")
+            runtime_adapter = FileMailboxRuntimeAdapter(
+                args.agent_pool,
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
         result = run_file_daemon(
             args.agent_pool,
             args.backlog,
             args.output_dir,
             project_root=args.project_root,
-            runtime_profile_defaults=runtime_profile_defaults,
+            runtime_adapter=runtime_adapter,
+            runtime_profile_defaults=None if runtime_adapter else runtime_profile_defaults,
             integrate_accepted_patch=args.integrate_accepted_patch,
             integration_verification_command=integration_verification_command,
             commit_verified_integration=args.commit_verified_integration,

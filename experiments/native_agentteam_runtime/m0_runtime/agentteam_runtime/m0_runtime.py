@@ -389,7 +389,8 @@ def run_simulation(
                 "session_status": "started",
             },
         )
-        runtime_result = runtime_adapter.run(message, worktree_path=worktree_path)
+        runtime_adapter_for_attempt = _bind_runtime_adapter_output_dir(runtime_adapter, output_dir)
+        runtime_result = runtime_adapter_for_attempt.run(message, worktree_path=worktree_path)
         append_event(
             "runtime_session_observed",
             agent["agent_id"],
@@ -1408,6 +1409,13 @@ def _runtime_adapter_metadata(runtime_adapter):
         "runtime_sandbox": getattr(runtime_adapter, "sandbox", None),
         "runtime_timeout_seconds": getattr(runtime_adapter, "timeout_seconds", None),
     }
+
+
+def _bind_runtime_adapter_output_dir(runtime_adapter, output_dir):
+    binder = getattr(runtime_adapter, "bind_output_dir", None)
+    if not binder:
+        return runtime_adapter
+    return binder(output_dir)
 
 
 def _fake_changed_files(write_scope):

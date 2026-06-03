@@ -11,6 +11,8 @@ from agentteam_runtime import (
     CodexRuntimeAdapter,
     FakeRuntimeAdapter,
     FileSchedulerDaemon,
+    FileMailboxRuntimeAdapter,
+    FileMailboxWorker,
     ShellRuntimeAdapter,
     audit_worktree_diff,
     classify_attempt_outcome,
@@ -174,6 +176,87 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["tick_count"], 3)
             self.assertEqual(registry["tick_count"], 3)
             self.assertEqual(registry["registry_status"], "active")
+
+    def test_file_mailbox_worker_poll_once_writes_runtime_result_to_outbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            inbox = output_dir / "mailboxes" / "agent-repo-map" / "inbox.jsonl"
+            outbox = output_dir / "mailboxes" / "agent-repo-map" / "outbox.jsonl"
+            message = _mailbox_dispatch_message(
+                message_id="MSG-MAILBOX-001",
+                agent_id="agent-repo-map",
+                write_scope=["generated/"],
+            )
+            _append_test_jsonl(inbox, [message])
+
+            worker = FileMailboxWorker(
+                FIXTURES / "sample_agent_pool.json",
+                output_dir,
+                "agent-repo-map",
+                runtime_adapter=FakeRuntimeAdapter(),
+                clock=FixedClock(),
+            )
+            summary = worker.poll_once()
+
+            result_message = _read_first_jsonl(outbox)
+
+            self.assertEqual(summary["poll_status"], "processed")
+            self.assertEqual(summary["source_message_id"], "MSG-MAILBOX-001")
+            self.assertEqual(result_message["message_type"], "runtime_result")
+            self.assertEqual(
+                result_message["payload"]["source_message_id"],
+                "MSG-MAILBOX-001",
+            )
+            self.assertEqual(result_message["payload"]["result_status"], "completed")
+            self.assertEqual(
+                result_message["payload"]["changed_files"],
+                ["generated/m0_generated_repo_index.json"],
+            )
+
+    def test_scheduler_loop_can_round_trip_runtime_result_through_mailbox_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FileMailboxRuntimeAdapter(
+                    FIXTURES / "sample_agent_pool.json",
+                    runtime_adapter=FakeRuntimeAdapter(),
+                    clock=FixedClock(),
+                ),
+            )
+
+            first_outbox = (
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-001"
+                / "mailboxes"
+                / "agent-repo-map"
+                / "outbox.jsonl"
+            )
+            state = read_scheduler_state_index(output_dir)
+
+            self.assertEqual(summary["scheduler_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertTrue(first_outbox.exists())
+            self.assertEqual(_read_first_jsonl(first_outbox)["message_type"], "runtime_result")
+            self.assertEqual(
+                {session["runtime_adapter"] for session in state["runtime_sessions"]},
+                {"FileMailboxRuntimeAdapter"},
+            )
 
     def test_scheduler_loop_writes_canonical_event_log_for_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1057,6 +1140,56 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["daemon_status"], "idle")
             self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
             self.assertTrue((output_dir / "state" / "worker_registry.json").exists())
+
+    def test_cli_can_run_file_daemon_with_mailbox_worker_adapter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(FIXTURES / "sample_agent_pool.json"),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--daemon-run-until-idle",
+                    "--daemon-mailbox-worker",
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            first_outbox = (
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-001"
+                / "mailboxes"
+                / "agent-repo-map"
+                / "outbox.jsonl"
+            )
+
+            self.assertEqual(summary["daemon_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertTrue(first_outbox.exists())
 
     def test_cli_can_show_state_index_without_agent_pool_or_backlog(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2168,6 +2301,38 @@ def _git_status_short(repo):
 
 def _read_first_jsonl(path):
     return json.loads(Path(path).read_text(encoding="utf-8").splitlines()[0])
+
+
+def _append_test_jsonl(path, records):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record, sort_keys=True))
+            stream.write("\n")
+
+
+def _mailbox_dispatch_message(message_id, agent_id, write_scope):
+    return {
+        "message_id": message_id,
+        "from_agent": "agent-scheduler",
+        "to_agent": agent_id,
+        "message_type": "dispatch_task",
+        "correlation_id": f"TASK-MAILBOX:{message_id}",
+        "created_at": "2026-06-03T00:00:00Z",
+        "lease_expires_at": "2026-06-03T00:15:00Z",
+        "payload": {
+            "task_id": "TASK-MAILBOX",
+            "attempt_id": "ATTEMPT-MAILBOX-001",
+            "lease_id": "LEASE-MAILBOX-001",
+            "worktree_id": "WT-MAILBOX-001",
+            "worktree_path": None,
+            "branch": None,
+            "objective": "Exercise file mailbox worker runtime.",
+            "read_scope": ["."],
+            "write_scope": write_scope,
+        },
+    }
 
 
 def _write_backlog(tmp_path, write_scope, tasks=None):

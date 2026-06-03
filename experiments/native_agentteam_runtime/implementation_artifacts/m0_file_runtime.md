@@ -45,6 +45,7 @@ experiments/native_agentteam_runtime/m0_runtime/
     __init__.py
     cli.py
     daemon.py
+    mailbox_worker.py
     m0_runtime.py
   tests/
     test_m0_runtime.py
@@ -57,6 +58,8 @@ from agentteam_runtime import (
     CodexRuntimeAdapter,
     FakeRuntimeAdapter,
     FileSchedulerDaemon,
+    FileMailboxRuntimeAdapter,
+    FileMailboxWorker,
     FileScheduler,
     ShellRuntimeAdapter,
     classify_attempt_outcome,
@@ -76,6 +79,18 @@ state_index = read_scheduler_state_index(output_dir)
 
 daemon = FileSchedulerDaemon(agent_pool_path, backlog_path, output_dir)
 tick_summary = daemon.tick()
+
+mailbox_adapter = FileMailboxRuntimeAdapter(
+    agent_pool_path,
+    runtime_adapter=FakeRuntimeAdapter(),
+)
+
+mailbox_worker = FileMailboxWorker(
+    agent_pool_path,
+    output_dir,
+    "agent-repo-map",
+    runtime_adapter=FakeRuntimeAdapter(),
+)
 
 result_with_worktree = run_simulation(
     agent_pool_path,
@@ -222,6 +237,22 @@ registry path:
 
 `--daemon-run-until-idle` and `--run-until-idle` are mutually exclusive. The
 daemon path currently reuses `--max-steps` as its tick budget.
+
+To exercise the file mailbox worker bridge, add `--daemon-mailbox-worker`:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool experiments/native_agentteam_runtime/fixtures/sample_agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m14b-mailbox-run \
+  --daemon-run-until-idle \
+  --daemon-mailbox-worker
+```
+
+In M14b this flag uses a fake delegate runtime behind
+`FileMailboxRuntimeAdapter`. Runtime command overrides and Codex options are
+rejected for this flag until a real worker-process supervisor is added.
 
 To inspect a completed or partially completed scheduler run without re-running
 the scheduler, pass `--show-state-index` with only the output directory:
@@ -1088,6 +1119,66 @@ The registry is durable state for observing intended long-lived agents while the
 actual runtime invocation remains the existing short adapter call inside each
 scheduler step.
 
+## M14b File Mailbox Worker Runtime
+
+M14b adds a mailbox-polling worker protocol without changing the scheduler
+validation contract:
+
+```python
+adapter = FileMailboxRuntimeAdapter(
+    agent_pool_path,
+    runtime_adapter=FakeRuntimeAdapter(),
+)
+
+summary = run_scheduler_loop(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    runtime_adapter=adapter,
+)
+```
+
+`run_simulation(...)` still writes the dispatch message to:
+
+```text
+<step-dir>/mailboxes/<agent-id>/inbox.jsonl
+```
+
+`FileMailboxRuntimeAdapter` binds itself to the current step output directory,
+creates a `FileMailboxWorker`, lets it poll the matching dispatch message, and
+then reads the matching `runtime_result` from:
+
+```text
+<step-dir>/mailboxes/<agent-id>/outbox.jsonl
+```
+
+The outbox message has this shape:
+
+```json
+{
+  "message_id": "RESULT-TASK-001-MSG-0001",
+  "from_agent": "agent-repo-map",
+  "to_agent": "agent-scheduler",
+  "message_type": "runtime_result",
+  "correlation_id": "TASK-001:TASK-001-ATTEMPT-001",
+  "created_at": "2026-06-03T00:00:00Z",
+  "payload": {
+    "source_message_id": "TASK-001-MSG-0001",
+    "task_id": "TASK-001",
+    "attempt_id": "TASK-001-ATTEMPT-001",
+    "lease_id": "TASK-001-LEASE-001",
+    "result_status": "completed",
+    "changed_files": ["generated/m0_generated_repo_index.json"],
+    "output": {"adapter": "fake"}
+  }
+}
+```
+
+This establishes the file protocol for future long-lived worker processes while
+keeping M14b deliberately small. The worker still runs in-process through the
+adapter bridge, one scheduler step at a time. It does not yet spawn, supervise,
+restart, or communicate with an independent OS worker process.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -1131,8 +1222,9 @@ different role agents can carry different Codex runtime settings in
 and exposes it through replay and the SQLite state index. M13c moves the
 runtime profile resolver from CLI code into runtime core so daemon/API runners
 can reuse it. M14a adds a file-backed daemon facade and durable worker registry
-while keeping execution sequential and adapter invocations short-lived. Claude
-Code is not integrated yet.
+while keeping execution sequential and adapter invocations short-lived. M14b
+adds file mailbox worker/result round-tripping through `FileMailboxRuntimeAdapter`
+with an in-process fake delegate. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -1143,7 +1235,7 @@ Before the next backend milestone, the next design/code step should define:
 - decide when live Codex smoke should run outside local opt-in, such as nightly
   or pre-release only;
 - Claude Code adapter feasibility and result extraction contract;
-- decide when logical runtime sessions should become real long-running worker
+- decide when file mailbox workers should become supervised long-running OS
   processes;
 - decide whether lightweight artifact lint should grow into full JSON Schema
   validation;

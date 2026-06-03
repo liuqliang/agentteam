@@ -2,6 +2,10 @@ from .daemon import (
     FileSchedulerDaemon,
     run_file_daemon,
 )
+from .mailbox_worker import (
+    FileMailboxRuntimeAdapter,
+    FileMailboxWorker,
+)
 from .m0_runtime import (
     CodexRuntimeAdapter,
     FakeRuntimeAdapter,
@@ -19,6 +23,8 @@ __all__ = [
     "CodexRuntimeAdapter",
     "FakeRuntimeAdapter",
     "FileSchedulerDaemon",
+    "FileMailboxRuntimeAdapter",
+    "FileMailboxWorker",
     "FileScheduler",
     "ShellRuntimeAdapter",
     "audit_worktree_diff",
