@@ -30,6 +30,7 @@ _EXPORTS = {
     "build_planner_context": (".planner_context", "build_planner_context"),
     "classify_attempt_outcome": (".m0_runtime", "classify_attempt_outcome"),
     "normalize_task_proposal": (".task_proposal", "normalize_task_proposal"),
+    "read_integration_batches": (".integration_batch", "read_integration_batches"),
     "read_scheduler_state_index": (".m0_runtime", "read_scheduler_state_index"),
     "read_integration_queue": (".integration_queue", "read_integration_queue"),
     "replay_events": (".m0_runtime", "replay_events"),
@@ -40,6 +41,7 @@ _EXPORTS = {
         ".two_phase_scheduler",
         "run_two_phase_scheduler_loop",
     ),
+    "verify_integration_batch": (".integration_batch", "verify_integration_batch"),
 }
 
 __all__ = list(_EXPORTS)

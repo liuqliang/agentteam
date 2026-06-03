@@ -24,12 +24,14 @@ from agentteam_runtime import (
     build_planner_context,
     classify_attempt_outcome,
     normalize_task_proposal,
+    read_integration_batches,
     read_integration_queue,
     read_scheduler_state_index,
     replay_events,
     run_file_daemon,
     run_scheduler_loop,
     run_simulation,
+    verify_integration_batch,
 )
 
 
@@ -3751,6 +3753,79 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(item["integration_status"], "not_requested")
             self.assertEqual(snapshot_item["queue_status"], "pending")
             self.assertEqual(snapshot_item["patch_path"], result["patch_path"])
+
+    def test_integration_batch_verifies_two_queued_patches_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            script_a = tmp_path / "queued_worker_a.py"
+            script_b = tmp_path / "queued_worker_b.py"
+            _init_git_repo(repo)
+            _write_success_worker(script_a, "generated/a.json")
+            _write_success_worker(script_b, "generated/b.json")
+
+            backlog_a = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-A", write_scope=["generated/"])],
+            )
+            result_a = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_a,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=ShellRuntimeAdapter([sys.executable, str(script_a)]),
+                attempt_id_prefix="A",
+            )
+            backlog_b = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-B", write_scope=["generated/"])],
+            )
+            result_b = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_b,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=ShellRuntimeAdapter([sys.executable, str(script_b)]),
+                attempt_id_prefix="B",
+            )
+
+            batch = verify_integration_batch(
+                repo,
+                output_dir,
+                "BATCH-001",
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib; "
+                        "assert pathlib.Path('generated/a.json').exists(); "
+                        "assert pathlib.Path('generated/b.json').exists()"
+                    ),
+                ],
+            )
+            registry = read_integration_batches(output_dir)
+            batch_worktree = Path(batch["batch_worktree_path"])
+
+            self.assertEqual(result_a["integration_queue_status"], "pending")
+            self.assertEqual(result_b["integration_queue_status"], "pending")
+            self.assertEqual(batch["batch_status"], "verified")
+            self.assertEqual(batch["verification_status"], "passed")
+            self.assertEqual(
+                batch["queue_item_ids"],
+                ["TASK-A:A-ATTEMPT-001", "TASK-B:B-ATTEMPT-001"],
+            )
+            self.assertTrue((batch_worktree / "generated" / "a.json").exists())
+            self.assertTrue((batch_worktree / "generated" / "b.json").exists())
+            self.assertEqual(registry["items"][0]["batch_status"], "verified")
+            self.assertEqual(
+                registry["items"][0]["applied_queue_item_ids"],
+                ["TASK-A:A-ATTEMPT-001", "TASK-B:B-ATTEMPT-001"],
+            )
 
     def test_accepted_patch_applies_to_integration_worktree_without_commit(self):
         with tempfile.TemporaryDirectory() as tmp:

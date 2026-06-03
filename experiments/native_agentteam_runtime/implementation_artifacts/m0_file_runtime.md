@@ -2149,6 +2149,44 @@ events.
 M28 intentionally does not decide task-level versus feature-level integration
 commit grouping and does not merge integration branches into the main branch.
 
+## M28b Integration Batch Verification
+
+M28b adds a batch verification API over the integration queue:
+
+```python
+batch = verify_integration_batch(
+    project_root,
+    output_dir,
+    "BATCH-001",
+    ["python3", "-m", "pytest"],
+)
+```
+
+The verifier reads `state/integration_queue.json`, selects non-blocked queued
+patches, creates one batch worktree at:
+
+```text
+integration_batches/<batch_id>/worktree
+```
+
+It applies selected patches in queue order, runs the verification command in the
+batch worktree, and writes the result to:
+
+```text
+state/integration_batches.json
+```
+
+Batch statuses:
+
+- `empty`: no selected queue items exist;
+- `blocked`: at least one patch failed to apply to the batch worktree;
+- `failed`: all patches applied, but the verification command failed;
+- `verified`: all patches applied and the verification command passed.
+
+M28b intentionally does not create integration commits and does not merge into
+the source branch. It only proves whether a queued patch set can coexist and
+pass a command in one worktree.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -2221,7 +2259,8 @@ checks, L2 review blocking, and decomposition rejection details in validation
 events. M26 adds bounded rolling decomposition waves, generated task lineage,
 and milestone decomposition state. M27 adds file-registry resume for resident
 worker processes through attached PID supervisors. M28 adds a durable accepted
-patch integration queue and replay snapshot. Claude Code is not integrated yet.
+patch integration queue and replay snapshot. M28b adds batch worktree
+verification for queued patch sets. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

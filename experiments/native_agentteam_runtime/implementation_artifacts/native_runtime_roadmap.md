@@ -65,6 +65,8 @@ The implementation has already proven these layers:
     health and stop-file shutdown.
 15. Durable accepted-patch integration queue with `pending`, `applied`,
     `verified`, `blocked`, and `committed` states, plus replay visibility.
+16. Batch integration verification over queued patch sets in a dedicated batch
+    worktree, with persisted batch results.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -208,8 +210,8 @@ based or moves worker/session state into SQLite.
 
 Goal: make parallel writable work practical for real repositories.
 
-Status: queue slice implemented. Remaining work is batch integration
-verification and final merge policy.
+Status: queue and batch-verification slices implemented. Remaining work is the
+final main-branch merge policy.
 
 Scope:
 
@@ -293,4 +295,4 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended milestone is M28b: Integration Batch Verification.
+The next recommended milestone is M29: Health-Driven Reassignment.
