@@ -332,6 +332,7 @@ class CodexRuntimeAdapter:
             [
                 "You are an AgentTeam runtime worker.",
                 "Execute only the bounded task described by this mailbox message.",
+                *self._role_prompt_contract_lines(message),
                 "Return exactly one JSON object as the final response.",
                 "The JSON object must have this shape:",
                 '{"result_status":"completed|blocked|failed|cancelled","changed_files":["path"],"output":{}}',
@@ -369,6 +370,7 @@ class CodexRuntimeAdapter:
                 "You are an AgentTeam planner.",
                 "Generate bounded executable backlog tasks for the requested milestone.",
                 "Read the planner context from planner_context_path before proposing tasks.",
+                *self._role_prompt_contract_lines(message),
                 "Do not modify files. Planner tasks must report an empty changed_files list.",
                 "Return exactly one JSON object as the final response.",
                 "The JSON object must match this planner result shape:",
@@ -379,6 +381,16 @@ class CodexRuntimeAdapter:
                 json.dumps(message, sort_keys=True),
             ]
         )
+
+    def _role_prompt_contract_lines(self, message):
+        contract = message["payload"].get("role_prompt_contract")
+        if not contract:
+            return []
+        return [
+            "Role prompt contract:",
+            json.dumps(contract, sort_keys=True),
+            "Follow this role contract as additional constraints without expanding scope.",
+        ]
 
 
 def run_simulation(
@@ -477,6 +489,7 @@ def run_simulation(
                 "objective": task["objective"],
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
+                **_role_prompt_fields(agent_pool, agent, task),
             },
         }
         _append_jsonl(inbox_path, [message])
@@ -1683,6 +1696,29 @@ def _role_runtime_profile(agent_pool, agent):
     if not isinstance(role_profiles, dict):
         raise ValueError("role_runtime_profiles must be an object")
     return role_profiles.get(agent.get("role"))
+
+
+def _role_prompt_fields(agent_pool, agent, task):
+    fields = {
+        "agent_role": agent.get("role"),
+        "required_role": task.get("required_role"),
+    }
+    contract = _role_prompt_contract(agent_pool, agent)
+    if contract:
+        fields["role_prompt_contract"] = contract
+    return fields
+
+
+def _role_prompt_contract(agent_pool, agent):
+    if not agent_pool:
+        return None
+    contracts = agent_pool.get("role_prompt_contracts", {})
+    if not isinstance(contracts, dict):
+        raise ValueError("role_prompt_contracts must be an object")
+    contract = contracts.get(agent.get("role"))
+    if contract and not isinstance(contract, dict):
+        raise ValueError("role prompt contract must be an object")
+    return deepcopy(contract) if contract else None
 
 
 def _runtime_adapter_from_profile(profile, defaults=None, project_root=None):

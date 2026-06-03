@@ -2408,8 +2408,35 @@ defaults, so a role profile can declare model, sandbox, and timeout without
 hard-coding the executable path.
 
 M31a is still Codex-only for live LLM execution. Fake and shell profiles remain
-test or local harnesses. Role-specific prompt and context contracts are deferred
-to M31b.
+test or local harnesses. Role-specific prompt contracts are added in M31b;
+bounded role context packages remain deferred.
+
+## M31b Role Prompt Contracts
+
+M31b lets an agent pool define model-facing role guidance once per role:
+
+```json
+{
+  "role_prompt_contracts": {
+    "repo_map_agent": {
+      "role_summary": "Implement bounded repository edits.",
+      "instructions": ["Inspect read_scope before writing."],
+      "required_output_keys": ["evidence"]
+    }
+  }
+}
+```
+
+When a scheduler dispatches a task, the mailbox payload includes:
+
+- `agent_role`;
+- `required_role`;
+- `role_prompt_contract`, when the selected role defines one.
+
+`CodexRuntimeAdapter` now renders an explicit `Role prompt contract:` prompt
+section before the fixed JSON result schema. This is model guidance, not new
+authority: scope validation, result schema validation, leases, retries, and
+merge policy remain scheduler-owned.
 
 ## Intentional Fakes
 
@@ -2491,8 +2518,9 @@ reassignment event lineage for those conservative dispatches. M30a adds a
 read-only runtime observability summary CLI. M30b adds resource drilldown views.
 M30c adds current milestone and next decomposition visibility. M31a adds
 role-level Codex runtime profiles for scheduler core and resident worker pools.
-Claude Code is not an active backend target on the current route; live LLM work
-is Codex-only for now. Future API-based models such as DeepSeek or Claude Opus
+M31b adds role prompt contracts to dispatch payloads and Codex prompts. Claude
+Code is not an active backend target on the current route; live LLM work is
+Codex-only for now. Future API-based models such as DeepSeek or Claude Opus
 remain possible after credentials and result extraction contracts are defined.
 
 These are not semantic omissions. They are deferred implementation mechanics.
@@ -2503,7 +2531,7 @@ Before the next backend milestone, the next design/code step should define:
 
 - decide when live Codex smoke should run outside local opt-in, such as nightly
   or pre-release only;
-- decide how Codex-only role prompt/context contracts should differ for planner,
+- decide how Codex-only role context packages should differ for planner,
   implementer, reviewer, and integrator workers;
 - decide when worker supervision should add heartbeat, backoff, and inflight
   migration beyond the current restart-budget/quarantine path;

@@ -73,9 +73,10 @@ The implementation has already proven these layers:
     exits.
 19. Two-phase dispatch avoidance for quarantined agents, allowing new work to
     route to another compatible idle agent.
-20. Codex role runtime profiles, so scheduler and resident worker-pool paths
-    can inherit Codex model, sandbox, timeout, command, and fallback worktree
-    settings from `agent_pool.role_runtime_profiles`.
+20. Codex role runtime profiles and prompt contracts, so scheduler and resident
+    worker-pool paths can inherit Codex model, sandbox, timeout, command,
+    fallback worktree settings, and model-facing role guidance from the agent
+    pool.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -89,10 +90,11 @@ This is not a permanent architecture ban on other models. The user may later
 introduce API-based models such as DeepSeek or Claude Opus, but those backends
 are not active targets now.
 
-Role differentiation is implemented through Codex runtime profiles: different
-roles can carry different Codex model, sandbox, timeout, command, and worktree
-policy. Prompt contracts and context packages are the next M31 layer. Fake and
-shell adapters remain test harnesses, not production multi-agent backends.
+Role differentiation is implemented through Codex runtime profiles and prompt
+contracts: different roles can carry different Codex model, sandbox, timeout,
+command, worktree policy, and model-facing role guidance. Context packages are
+the next M31 layer. Fake and shell adapters remain test harnesses, not
+production multi-agent backends.
 
 ## Roadmap Principles
 
@@ -288,8 +290,8 @@ until the CLI views prove the data shape.
 Goal: make resident role agents configurable without duplicating runtime
 settings onto every agent entry.
 
-Status: M31a implemented for scheduler core, worker pool, and schemas. Prompt
-and context contracts remain pending.
+Status: M31a runtime profiles and M31b prompt contracts are implemented. Role
+context packages remain pending.
 
 Scope:
 
@@ -298,6 +300,8 @@ Scope:
   `role_runtime_profiles[role]`, runtime defaults, then fake;
 - route both core scheduler execution and resident worker-pool startup through
   the same role profile rule;
+- attach role prompt contracts to dispatch payloads and render them explicitly
+  in Codex prompts;
 - keep Codex as the only live LLM backend on this route;
 - keep CLI/default Codex command settings usable as local environment defaults.
 
@@ -307,11 +311,13 @@ Acceptance:
   no agent-level runtime profile;
 - a resident worker pool starts a role agent as a Codex worker from the role
   profile;
-- agent pool schemas accept role runtime profiles.
+- a dispatch payload can carry the selected agent role and role prompt contract;
+- Codex prompts include a dedicated role contract section;
+- agent pool schemas accept role runtime profiles and prompt contracts.
 
 Remaining M31 work:
 
-- define role prompt/context contracts for planner, implementer, reviewer, and
+- define bounded role context packages for planner, implementer, reviewer, and
   integrator roles;
 - expose effective role profile selection in observability if long-running
   debugging needs it.
@@ -322,9 +328,8 @@ These items should wait until M23-M30 have made the local runtime reliable:
 
 - MCP tool and context compatibility as adapter capabilities, not as the native
   control plane, and initially around Codex runtime sessions.
-- Codex role prompt and context routing where planner, implementer, reviewer,
-  and integrator can use different prompt contracts and bounded context
-  packages.
+- Codex role context routing where planner, implementer, reviewer, and
+  integrator can use different bounded context packages.
 - A stronger durable store if file locking and JSONL replay become insufficient
   for long project runs.
 - Policy-governed semantic feedback where implementation evidence can propose
@@ -358,6 +363,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is M31b role prompt/context contracts. Inflight
+The next recommended step is M31c bounded role context packages. Inflight
 migration remains a separate M29 decision gate because it changes ownership of
 already leased work.
