@@ -24,6 +24,7 @@ from agentteam_runtime import (
     build_planner_context,
     classify_attempt_outcome,
     normalize_task_proposal,
+    read_integration_queue,
     read_scheduler_state_index,
     replay_events,
     run_file_daemon,
@@ -2811,7 +2812,12 @@ class M0RuntimeTests(unittest.TestCase):
             collected = scheduler.collect_ready_results()
             result = collected["results"][0]
             integration_worktree = Path(result["integration_worktree_path"])
+            queue = read_integration_queue(output_dir)
+            queue_item = queue["items"][0]
             snapshot = replay_events(output_dir / "events.jsonl")
+            snapshot_item = snapshot["integration_queue"][
+                "TASK-001:TASK-001-ATTEMPT-001"
+            ]
 
             self.assertEqual(result["validation_status"], "accepted")
             self.assertEqual(result["diff_audit"]["diff_status"], "matched")
@@ -2820,6 +2826,10 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(result["integration_verification_status"], "passed")
             self.assertEqual(result["integration_commit_status"], "committed")
             self.assertNotEqual(result["integration_commit_sha"], None)
+            self.assertEqual(result["integration_queue_status"], "committed")
+            self.assertEqual(queue_item["queue_status"], "committed")
+            self.assertEqual(queue_item["integration_commit_sha"], result["integration_commit_sha"])
+            self.assertEqual(snapshot_item["queue_status"], "committed")
             self.assertTrue(
                 (integration_worktree / "generated" / "two_phase_commit.json").exists()
             )
@@ -3707,6 +3717,40 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue(patch_path.exists())
             self.assertEqual(result["attempts"][0]["patch_path"], str(patch_path))
             self.assertIn("generated/patch_result.json", patch_path.read_text(encoding="utf-8"))
+
+    def test_accepted_patch_is_queued_without_auto_integration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            script = tmp_path / "queued_worker.py"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_success_worker(script, "generated/queued_result.json")
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=ShellRuntimeAdapter([sys.executable, str(script)]),
+            )
+
+            queue = read_integration_queue(output_dir)
+            item = queue["items"][0]
+            snapshot = replay_events(output_dir / "events.jsonl")
+            snapshot_item = snapshot["integration_queue"]["TASK-001:ATTEMPT-001"]
+
+            self.assertEqual(result["validation_status"], "accepted")
+            self.assertEqual(result["integration_status"], "not_requested")
+            self.assertEqual(result["integration_queue_status"], "pending")
+            self.assertEqual(result["integration_queue_item_id"], "TASK-001:ATTEMPT-001")
+            self.assertEqual(item["queue_status"], "pending")
+            self.assertEqual(item["patch_path"], result["patch_path"])
+            self.assertEqual(item["integration_status"], "not_requested")
+            self.assertEqual(snapshot_item["queue_status"], "pending")
+            self.assertEqual(snapshot_item["patch_path"], result["patch_path"])
 
     def test_accepted_patch_applies_to_integration_worktree_without_commit(self):
         with tempfile.TemporaryDirectory() as tmp:

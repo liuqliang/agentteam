@@ -21,6 +21,7 @@ from .m0_runtime import (
     run_integration_verification,
     write_patch_artifact,
 )
+from .integration_queue import integration_queue_path, upsert_integration_queue_item
 from .planner_context import build_planner_context
 from .task_proposal import normalize_task_proposal
 
@@ -468,6 +469,9 @@ class TwoPhaseFileScheduler:
             "integration_commit_reason": None,
             "integration_commit_stdout": "",
             "integration_commit_stderr": "",
+            "integration_queue_status": "not_queued",
+            "integration_queue_item_id": None,
+            "integration_queue_path": str(integration_queue_path(self.output_dir)),
         }
         integration_events = self._integrate_accepted_result(
             inflight,
@@ -724,6 +728,25 @@ class TwoPhaseFileScheduler:
         if outcome["validation_status"] != "accepted":
             return []
         events = []
+        if patch_path:
+            queue = upsert_integration_queue_item(self.output_dir, result)
+            result.update(queue)
+            events.append(
+                self._event(
+                    "integration_queued",
+                    "agent-scheduler",
+                    inflight["agent_id"],
+                    f"integration-queued:{inflight['attempt_id']}",
+                    inflight["correlation_id"],
+                    {
+                        "task_id": inflight["task_id"],
+                        "attempt_id": inflight["attempt_id"],
+                        "lease_id": inflight["lease_id"],
+                        "patch_path": str(patch_path),
+                        **queue,
+                    },
+                )
+            )
         if self.integrate_accepted_patch and self.project_root and patch_path:
             integration = apply_patch_to_integration_worktree(
                 self.project_root,
@@ -791,6 +814,8 @@ class TwoPhaseFileScheduler:
                     },
                 )
             )
+        if patch_path:
+            result.update(upsert_integration_queue_item(self.output_dir, result))
         return events
 
     def _lease_expired(self, inflight):

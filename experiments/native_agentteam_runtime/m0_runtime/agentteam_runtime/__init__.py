@@ -31,6 +31,7 @@ _EXPORTS = {
     "classify_attempt_outcome": (".m0_runtime", "classify_attempt_outcome"),
     "normalize_task_proposal": (".task_proposal", "normalize_task_proposal"),
     "read_scheduler_state_index": (".m0_runtime", "read_scheduler_state_index"),
+    "read_integration_queue": (".integration_queue", "read_integration_queue"),
     "replay_events": (".m0_runtime", "replay_events"),
     "run_file_daemon": (".daemon", "run_file_daemon"),
     "run_scheduler_loop": (".m0_runtime", "run_scheduler_loop"),

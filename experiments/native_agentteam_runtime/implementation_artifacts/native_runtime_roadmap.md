@@ -63,6 +63,8 @@ The implementation has already proven these layers:
     single-wave compatibility.
 14. File-backed worker-pool resume from process registry with attached PID
     health and stop-file shutdown.
+15. Durable accepted-patch integration queue with `pending`, `applied`,
+    `verified`, `blocked`, and `committed` states, plus replay visibility.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -206,6 +208,9 @@ based or moves worker/session state into SQLite.
 
 Goal: make parallel writable work practical for real repositories.
 
+Status: queue slice implemented. Remaining work is batch integration
+verification and final merge policy.
+
 Scope:
 
 - create one worktree per writable attempt;
@@ -216,7 +221,8 @@ Scope:
   branch.
 
 Decision gate: define whether integration commits are always task-level
-checkpoints or can be grouped into feature-level commits.
+checkpoints or can be grouped into feature-level commits before main-branch
+merge.
 
 ### M29: Health-Driven Reassignment
 
@@ -287,4 +293,4 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended milestone is M28: Worktree Isolation And Integration Queue.
+The next recommended milestone is M28b: Integration Batch Verification.

@@ -2105,6 +2105,50 @@ the lifetime of the current supervisor object.
 M27 intentionally does not daemonize the scheduler, add heartbeat/quarantine
 policy, recover workers across hosts, or change the storage backend.
 
+## M28 Integration Queue
+
+M28 adds a durable queue view for accepted patch artifacts:
+
+```text
+state/integration_queue.json
+```
+
+The queue is a materialized view, not the authority. The canonical event log
+still owns history; the queue file gives the scheduler and future CLI monitor a
+small current-state object to read without replaying the whole run.
+
+Queue entries are keyed by `task_id:attempt_id`:
+
+```json
+{
+  "queue_item_id": "TASK-001:ATTEMPT-001",
+  "queue_status": "pending",
+  "task_id": "TASK-001",
+  "attempt_id": "ATTEMPT-001",
+  "patch_path": "/tmp/run/attempts/ATTEMPT-001/worktree.patch",
+  "integration_status": "not_requested",
+  "integration_verification_status": "not_requested",
+  "integration_commit_status": "not_requested"
+}
+```
+
+Status transitions are derived from existing gates:
+
+- `pending`: accepted patch captured, automatic integration not yet applied;
+- `applied`: patch applied to an integration worktree;
+- `verified`: integration verification passed without a created integration
+  commit;
+- `blocked`: verification or integration commit failed;
+- `committed`: verified integration commit was created.
+
+`integration_queued` records the queue insertion in events. Replay now exposes a
+lightweight `integration_queue` snapshot and updates it from the existing
+`patch_integrated`, `integration_verified`, and `integration_commit_evaluated`
+events.
+
+M28 intentionally does not decide task-level versus feature-level integration
+commit grouping and does not merge integration branches into the main branch.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -2113,7 +2157,7 @@ M0/M3a intentionally fakes or simplifies:
 - production-grade merge orchestration;
 - worker heartbeat files, restart backoff/quarantine, and health-driven task reassignment;
 - full roadmap/design/code-map context and live planner prompt quality;
-- advanced retry backoff, queues, and cross-process recovery;
+- advanced retry backoff, batch merge queues, and cross-process recovery;
 - schema validation through a JSON Schema engine.
 
 M0 now performs actual git worktree creation when `project_root` is provided.
@@ -2176,8 +2220,8 @@ metadata in planner context files. M25 adds deterministic proposal quality
 checks, L2 review blocking, and decomposition rejection details in validation
 events. M26 adds bounded rolling decomposition waves, generated task lineage,
 and milestone decomposition state. M27 adds file-registry resume for resident
-worker processes through attached PID supervisors. Claude Code is not integrated
-yet.
+worker processes through attached PID supervisors. M28 adds a durable accepted
+patch integration queue and replay snapshot. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

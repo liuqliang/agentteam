@@ -6,6 +6,8 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .integration_queue import integration_queue_path, upsert_integration_queue_item
+
 
 class SystemClock:
     def now(self):
@@ -660,11 +662,31 @@ def run_simulation(
             "integration_commit_reason": None,
             "integration_commit_stdout": "",
             "integration_commit_stderr": "",
+            "integration_queue_status": "not_queued",
+            "integration_queue_item_id": None,
+            "integration_queue_path": str(integration_queue_path(output_dir)),
             "worktree_removed": False,
         }
         attempts.append(final_attempt)
 
         if outcome["validation_status"] == "accepted":
+            if patch_path:
+                queue = upsert_integration_queue_item(output_dir, final_attempt)
+                final_attempt.update(queue)
+                append_event(
+                    "integration_queued",
+                    agent_pool["scheduler_agent_id"],
+                    agent["agent_id"],
+                    f"integration-queued:{attempt_id}",
+                    correlation_id,
+                    {
+                        "task_id": task["task_id"],
+                        "attempt_id": attempt_id,
+                        "lease_id": lease_id,
+                        "patch_path": str(patch_path),
+                        **queue,
+                    },
+                )
             if integrate_accepted_patch and project_root and patch_path:
                 integration = apply_patch_to_integration_worktree(
                     project_root,
@@ -725,6 +747,10 @@ def run_simulation(
                         "lease_id": lease_id,
                         **integration_commit,
                     },
+                )
+            if patch_path:
+                final_attempt.update(
+                    upsert_integration_queue_item(output_dir, final_attempt)
                 )
             if cleanup_accepted_worktrees and project_root and worktree_path:
                 _remove_git_worktree(project_root, worktree_path)
@@ -810,6 +836,9 @@ def run_simulation(
         "integration_commit_reason": final_attempt["integration_commit_reason"],
         "integration_commit_stdout": final_attempt["integration_commit_stdout"],
         "integration_commit_stderr": final_attempt["integration_commit_stderr"],
+        "integration_queue_status": final_attempt["integration_queue_status"],
+        "integration_queue_item_id": final_attempt["integration_queue_item_id"],
+        "integration_queue_path": final_attempt["integration_queue_path"],
         "attempt_count": len(attempts),
         "attempts": attempts,
         "worktree_removed": final_attempt["worktree_removed"],
@@ -1345,7 +1374,13 @@ def _create_sqlite_state_schema(connection):
 
 
 def replay_events(events_path):
-    snapshot = {"tasks": {}, "attempts": {}, "leases": {}, "runtime_sessions": {}}
+    snapshot = {
+        "tasks": {},
+        "attempts": {},
+        "leases": {},
+        "runtime_sessions": {},
+        "integration_queue": {},
+    }
     for event in _read_jsonl(events_path):
         payload = event["payload"]
         task_id = payload.get("task_id")
@@ -1433,6 +1468,25 @@ def replay_events(events_path):
             )
             if lease_id in snapshot["leases"]:
                 snapshot["leases"][lease_id]["lease_status"] = "released"
+        elif event["event_type"] == "integration_queued":
+            queue_status = payload.get("integration_queue_status", "pending")
+            queue_item = _integration_queue_snapshot_item(snapshot, task_id, attempt_id)
+            queue_item.update(
+                {
+                    "queue_status": queue_status,
+                    "patch_path": payload.get("patch_path"),
+                    "integration_queue_path": payload.get("integration_queue_path"),
+                    "integration_status": "not_requested",
+                    "integration_verification_status": "not_requested",
+                    "integration_commit_status": "not_requested",
+                }
+            )
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "integration_queue_status"
+            ] = queue_status
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "integration_queue_item_id"
+            ] = queue_item["queue_item_id"]
         elif event["event_type"] == "patch_integrated":
             snapshot["attempts"].setdefault(attempt_id, {})["integration_status"] = payload[
                 "integration_status"
@@ -1443,6 +1497,19 @@ def replay_events(events_path):
             snapshot["attempts"].setdefault(attempt_id, {})["integration_worktree_path"] = payload[
                 "integration_worktree_path"
             ]
+            queue_item = _integration_queue_snapshot_item(snapshot, task_id, attempt_id)
+            queue_item.update(
+                {
+                    "queue_status": "applied",
+                    "patch_path": payload.get("patch_path", queue_item.get("patch_path")),
+                    "integration_status": payload["integration_status"],
+                    "integration_branch": payload["integration_branch"],
+                    "integration_worktree_path": payload["integration_worktree_path"],
+                }
+            )
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "integration_queue_status"
+            ] = "applied"
         elif event["event_type"] == "integration_verified":
             snapshot["attempts"].setdefault(attempt_id, {})[
                 "integration_verification_status"
@@ -1456,6 +1523,26 @@ def replay_events(events_path):
             snapshot["attempts"].setdefault(attempt_id, {})[
                 "integration_verification_stderr"
             ] = payload["integration_verification_stderr"]
+            queue_status = (
+                "verified"
+                if payload["integration_verification_status"] == "passed"
+                else "blocked"
+            )
+            queue_item = _integration_queue_snapshot_item(snapshot, task_id, attempt_id)
+            queue_item.update(
+                {
+                    "queue_status": queue_status,
+                    "integration_verification_status": payload[
+                        "integration_verification_status"
+                    ],
+                    "integration_verification_exit_code": payload[
+                        "integration_verification_exit_code"
+                    ],
+                }
+            )
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "integration_queue_status"
+            ] = queue_status
         elif event["event_type"] == "integration_commit_evaluated":
             snapshot["attempts"].setdefault(attempt_id, {})[
                 "integration_commit_status"
@@ -1469,10 +1556,55 @@ def replay_events(events_path):
             snapshot["attempts"].setdefault(attempt_id, {})[
                 "integration_commit_reason"
             ] = payload["integration_commit_reason"]
+            queue_status = _queue_status_from_commit_event(payload)
+            queue_item = _existing_integration_queue_snapshot_item(
+                snapshot,
+                task_id,
+                attempt_id,
+            )
+            if queue_item:
+                queue_item.update(
+                    {
+                        "integration_commit_status": payload["integration_commit_status"],
+                        "integration_commit_sha": payload["integration_commit_sha"],
+                        "integration_commit_message": payload["integration_commit_message"],
+                        "integration_commit_reason": payload["integration_commit_reason"],
+                    }
+                )
+                if queue_status:
+                    queue_item["queue_status"] = queue_status
+                    snapshot["attempts"].setdefault(attempt_id, {})[
+                        "integration_queue_status"
+                    ] = queue_status
         elif event["event_type"] == "backlog_updated":
             snapshot["tasks"].setdefault(task_id, {})["task_status"] = payload["task_status"]
 
     return snapshot
+
+
+def _integration_queue_snapshot_item(snapshot, task_id, attempt_id):
+    queue_item_id = f"{task_id}:{attempt_id}"
+    return snapshot["integration_queue"].setdefault(
+        queue_item_id,
+        {
+            "queue_item_id": queue_item_id,
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "queue_status": "pending",
+        },
+    )
+
+
+def _existing_integration_queue_snapshot_item(snapshot, task_id, attempt_id):
+    return snapshot["integration_queue"].get(f"{task_id}:{attempt_id}")
+
+
+def _queue_status_from_commit_event(payload):
+    if payload["integration_commit_status"] == "committed":
+        return "committed"
+    if payload["integration_commit_status"] == "failed":
+        return "blocked"
+    return None
 
 
 def _select_ready_task(backlog):

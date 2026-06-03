@@ -61,6 +61,7 @@
         "runtime_output_received",
         "validation_accepted",
         "validation_rejected",
+        "integration_queued",
         "patch_integrated",
         "integration_verified",
         "integration_commit_evaluated",
