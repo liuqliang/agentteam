@@ -5,6 +5,9 @@ Status: implemented on branch `native-runtime-m0`.
 This document records the first executable slice of the native AgentTeam
 runtime experiment.
 
+For the implementation route after M22, see
+`implementation_artifacts/native_runtime_roadmap.md`.
+
 ## What M0 Proves
 
 The M0 runtime proves the local control-plane path without requiring Codex,
