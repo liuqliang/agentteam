@@ -1882,6 +1882,80 @@ M23 intentionally does not ingest roadmap/design artifacts, build a repo map,
 score proposal quality beyond the existing validator, recursively decompose
 milestones, or require live Codex planner calls in normal tests.
 
+## M24 Semantic Artifact Context Ingestion
+
+M24 lets the planner context include compact summaries of explicitly selected
+design or implementation artifacts. This is still a bounded context package,
+not a full repository dump and not an LLM-generated summary.
+
+`build_planner_context()` now accepts:
+
+```python
+context = build_planner_context(
+    agent_pool,
+    state,
+    milestone_id="M24",
+    default_worker_role="repo_map_agent",
+    context_artifact_paths=[
+        "experiments/native_agentteam_runtime/implementation_artifacts/native_runtime_roadmap.md",
+    ],
+    context_artifact_excerpt_chars=1200,
+)
+```
+
+When artifact paths are supplied, the context includes:
+
+```json
+{
+  "artifact_context": {
+    "schema_version": "artifact_context.v1",
+    "excerpt_budget_chars": 1200,
+    "sources": [
+      {
+        "path": "experiments/native_agentteam_runtime/implementation_artifacts/native_runtime_roadmap.md",
+        "sha256": "hex digest",
+        "size_bytes": 4096,
+        "modified_at": "2026-06-03T00:00:00Z",
+        "heading_count": 8,
+        "headings": ["Native Runtime Long-Term Roadmap", "Artifact Role"],
+        "excerpt": "bounded normalized text",
+        "excerpt_chars": 1200,
+        "omitted_chars": 2896
+      }
+    ],
+    "warnings": []
+  }
+}
+```
+
+Missing, non-file, or non-UTF-8 artifacts produce warnings instead of invented
+state. The context records no source body beyond the configured per-source
+excerpt limit.
+
+The two-phase worker-pool CLI exposes selected artifact ingestion through:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool /path/to/agent_pool.json \
+  --backlog /path/to/empty_backlog.json \
+  --output-dir /tmp/agentteam-m24-artifact-context-run \
+  --daemon-run-until-idle \
+  --daemon-two-phase-worker-pool \
+  --auto-decompose-backlog \
+  --decomposition-milestone-id M24 \
+  --decomposition-planner-role task_planner \
+  --decomposition-default-worker-role repo_map_agent \
+  --planner-context-artifact /path/to/roadmap.md \
+  --planner-context-artifact /path/to/design.md \
+  --planner-context-excerpt-chars 1200 \
+  --max-steps 10
+```
+
+M24 intentionally does not discover artifacts automatically, build language-aware
+code maps, summarize source files, infer proposal quality, or let planner agents
+edit roadmap/design authority documents.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -1947,8 +2021,9 @@ backlog insertion, and a fake planner runtime path for local end-to-end tests.
 M22 adds planner context files, context-derived role/write-scope enforcement,
 and fake planner context reads. M23 adds a Codex planner prompt contract,
 fallback workspace execution for no-worktree planner tasks, fallback dirty-check
-rejection, and fake Codex planner worker-pool coverage. Claude Code is not
-integrated yet.
+rejection, and fake Codex planner worker-pool coverage. M24 adds selected
+artifact summaries with digest, timestamp, heading, excerpt, and warning
+metadata in planner context files. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -1961,8 +2036,8 @@ Before the next backend milestone, the next design/code step should define:
 - Claude Code adapter feasibility and result extraction contract;
 - decide when worker supervision should add heartbeat, backoff/quarantine,
   health-driven task reassignment, and real Claude worker runtimes;
-- decide how planner context packages should receive roadmap, semantic design,
-  code-map, and verification-summary context;
+- decide when planner context should ingest code-map and verification-summary
+  context in addition to selected roadmap/design artifacts;
 - decide whether lightweight artifact lint should grow into full JSON Schema
   validation;
 - retry backoff, retry budget, and failure escalation policy;

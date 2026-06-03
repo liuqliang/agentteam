@@ -130,6 +130,18 @@ def main(argv=None):
         help="Default worker role included in decomposition planner task payloads.",
     )
     parser.add_argument(
+        "--planner-context-artifact",
+        action="append",
+        default=[],
+        help="Repeatable selected artifact path to summarize in planner context.",
+    )
+    parser.add_argument(
+        "--planner-context-excerpt-chars",
+        type=int,
+        default=1200,
+        help="Maximum excerpt characters per selected planner context artifact.",
+    )
+    parser.add_argument(
         "--runtime",
         choices=["fake", "shell", "codex"],
         help=(
@@ -178,6 +190,8 @@ def main(argv=None):
         parser.error("--max-attempts must be at least 1")
     if args.lease_timeout_seconds < 0:
         parser.error("--lease-timeout-seconds must be at least 0")
+    if args.planner_context_excerpt_chars < 1:
+        parser.error("--planner-context-excerpt-chars must be at least 1")
     if args.daemon_mailbox_worker and args.daemon_mailbox_subprocess_worker:
         parser.error("--daemon-mailbox-worker and --daemon-mailbox-subprocess-worker are mutually exclusive")
     if args.daemon_long_running_mailbox_worker and (
@@ -379,6 +393,8 @@ def _run_supervised_two_phase_scheduler(args, integration_verification_command, 
         decomposition_milestone_id=args.decomposition_milestone_id,
         decomposition_planner_role=args.decomposition_planner_role,
         decomposition_default_worker_role=args.decomposition_default_worker_role,
+        decomposition_context_artifact_paths=args.planner_context_artifact,
+        decomposition_context_excerpt_chars=args.planner_context_excerpt_chars,
     )
     supervision = []
     tick_count = 0

@@ -89,6 +89,69 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertEqual(context["completed_task_ids"], ["TASK-DONE"])
         self.assertIn("proposal_contract", context)
 
+    def test_build_planner_context_includes_bounded_artifact_summaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            artifact = tmp_path / "roadmap.md"
+            artifact.write_text(
+                "\n".join(
+                    [
+                        "# Native Runtime Roadmap",
+                        "",
+                        "This is the selected roadmap artifact.",
+                        "",
+                        "## M24",
+                        *["context line" for _ in range(40)],
+                        "UNIQUE_TAIL_MARKER_SHOULD_NOT_BE_EMBEDDED",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            context = build_planner_context(
+                {"agents": [{"agent_id": "agent-planner", "role": "task_planner"}]},
+                {"backlog": {"items": []}, "steps": [], "inflight_attempts": []},
+                milestone_id="M24",
+                default_worker_role="repo_map_agent",
+                context_artifact_paths=[artifact],
+                context_artifact_excerpt_chars=80,
+            )
+
+            artifact_context = context["artifact_context"]
+            source = artifact_context["sources"][0]
+
+            self.assertEqual(artifact_context["schema_version"], "artifact_context.v1")
+            self.assertEqual(artifact_context["excerpt_budget_chars"], 80)
+            self.assertEqual(source["path"], str(artifact))
+            self.assertEqual(len(source["sha256"]), 64)
+            self.assertEqual(source["size_bytes"], artifact.stat().st_size)
+            self.assertIn("modified_at", source)
+            self.assertEqual(source["headings"], ["Native Runtime Roadmap", "M24"])
+            self.assertLessEqual(source["excerpt_chars"], 80)
+            self.assertGreater(source["omitted_chars"], 0)
+            self.assertNotIn(
+                "UNIQUE_TAIL_MARKER_SHOULD_NOT_BE_EMBEDDED",
+                json.dumps(artifact_context, sort_keys=True),
+            )
+
+    def test_build_planner_context_warns_for_missing_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing-design.md"
+
+            context = build_planner_context(
+                {"agents": [{"agent_id": "agent-planner", "role": "task_planner"}]},
+                {"backlog": {"items": []}, "steps": [], "inflight_attempts": []},
+                milestone_id="M24",
+                default_worker_role="repo_map_agent",
+                context_artifact_paths=[missing],
+            )
+
+            self.assertEqual(context["artifact_context"]["sources"], [])
+            self.assertEqual(
+                context["artifact_context"]["warnings"],
+                [{"path": str(missing), "warning": "missing"}],
+            )
+
     def test_task_proposal_normalizes_valid_generated_tasks(self):
         proposal = {
             "milestone_id": "M21",
@@ -2020,6 +2083,46 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(context["allowed_write_scopes"], ["generated/"])
             self.assertEqual(message["payload"]["planner_context_path"], str(context_path))
 
+    def test_two_phase_scheduler_writes_selected_artifacts_into_planner_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            artifact = tmp_path / "design.md"
+            artifact.write_text(
+                "# Design\n\nSelected artifact body.\n\n## Boundary\nKeep context bounded.\n",
+                encoding="utf-8",
+            )
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-planner", "task_planner"),
+                    ("agent-repo-map", "repo_map_agent"),
+                ],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                auto_decompose=True,
+                decomposition_milestone_id="M24",
+                decomposition_context_artifact_paths=[artifact],
+                decomposition_context_excerpt_chars=80,
+            )
+
+            scheduler.dispatch_ready()
+            planner_task = scheduler.state["backlog"]["items"][0]
+            context = json.loads(
+                Path(planner_task["planner_context_path"]).read_text(encoding="utf-8")
+            )
+            source = context["artifact_context"]["sources"][0]
+
+            self.assertEqual(source["path"], str(artifact))
+            self.assertEqual(source["headings"], ["Design", "Boundary"])
+            self.assertLessEqual(source["excerpt_chars"], 80)
+
     def test_two_phase_scheduler_applies_planner_task_proposal_to_backlog(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2597,6 +2700,87 @@ class M0RuntimeTests(unittest.TestCase):
                 },
             )
             self.assertEqual(_git_status_short(repo), "")
+
+    def test_cli_two_phase_worker_pool_accepts_planner_context_artifact_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            artifact = tmp_path / "roadmap.md"
+            artifact.write_text(
+                "\n".join(
+                    [
+                        "# Roadmap",
+                        "Selected CLI artifact.",
+                        "## M24",
+                        *["bounded context line" for _ in range(20)],
+                        "CLI_TAIL_MARKER_SHOULD_NOT_BE_EMBEDDED",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-planner", "task_planner"),
+                    ("agent-repo-map", "repo_map_agent"),
+                ],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(agent_pool_path),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--daemon-run-until-idle",
+                    "--daemon-two-phase-worker-pool",
+                    "--auto-decompose-backlog",
+                    "--decomposition-milestone-id",
+                    "M24",
+                    "--decomposition-planner-role",
+                    "task_planner",
+                    "--decomposition-default-worker-role",
+                    "repo_map_agent",
+                    "--planner-context-artifact",
+                    str(artifact),
+                    "--planner-context-excerpt-chars",
+                    "80",
+                    "--max-steps",
+                    "10",
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            context = json.loads(
+                (
+                    output_dir
+                    / "planner_contexts"
+                    / "DECOMPOSE-M24-001.json"
+                ).read_text(encoding="utf-8")
+            )
+            source = context["artifact_context"]["sources"][0]
+
+            self.assertEqual(source["path"], str(artifact))
+            self.assertEqual(source["headings"], ["Roadmap", "M24"])
+            self.assertLessEqual(source["excerpt_chars"], 80)
+            self.assertNotIn(
+                "CLI_TAIL_MARKER_SHOULD_NOT_BE_EMBEDDED",
+                json.dumps(context["artifact_context"], sort_keys=True),
+            )
 
     def test_cli_two_phase_worker_pool_can_commit_verified_integration_patch(self):
         with tempfile.TemporaryDirectory() as tmp:

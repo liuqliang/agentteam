@@ -47,6 +47,8 @@ class TwoPhaseFileScheduler:
         decomposition_default_worker_role="repo_map_agent",
         decomposition_allowed_read_scopes=None,
         decomposition_allowed_write_scopes=None,
+        decomposition_context_artifact_paths=None,
+        decomposition_context_excerpt_chars=1200,
     ):
         if max_inflight < 1:
             raise ValueError("max_inflight must be at least 1")
@@ -77,6 +79,10 @@ class TwoPhaseFileScheduler:
         self.decomposition_allowed_write_scopes = list(
             decomposition_allowed_write_scopes or ["generated/"]
         )
+        self.decomposition_context_artifact_paths = list(
+            decomposition_context_artifact_paths or []
+        )
+        self.decomposition_context_excerpt_chars = decomposition_context_excerpt_chars
         self.state_path = Path(
             state_path or self.output_dir / "state" / "two_phase_scheduler_state.json"
         )
@@ -835,6 +841,8 @@ class TwoPhaseFileScheduler:
             default_worker_role=self.decomposition_default_worker_role,
             allowed_read_scopes=self.decomposition_allowed_read_scopes,
             allowed_write_scopes=self.decomposition_allowed_write_scopes,
+            context_artifact_paths=self.decomposition_context_artifact_paths,
+            context_artifact_excerpt_chars=self.decomposition_context_excerpt_chars,
         )
         context_path = self.output_dir / "planner_contexts" / f"{task_id}.json"
         context_path.parent.mkdir(parents=True, exist_ok=True)

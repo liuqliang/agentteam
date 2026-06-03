@@ -53,6 +53,8 @@ The implementation has already proven these layers:
    allowed scopes, and proposal contract hints without dumping the full repo.
 10. Codex planner prompt contract, no-worktree fallback execution, fallback
     dirty-check rejection, and fake Codex planner worker-pool coverage.
+11. Selected semantic artifact context ingestion with digest, timestamp,
+    heading, bounded excerpt, and warning metadata.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -102,6 +104,8 @@ Acceptance:
   task inside the allowed scope.
 
 ### M24: Semantic Artifact Context Ingestion
+
+Status: implemented.
 
 Goal: let decomposition use selected design and implementation artifacts without
 placing large documents or source files directly into the model context.
@@ -269,4 +273,4 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended milestone is M24: Semantic Artifact Context Ingestion.
+The next recommended milestone is M25: Proposal Quality Gate.
