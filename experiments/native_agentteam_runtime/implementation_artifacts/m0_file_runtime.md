@@ -1670,13 +1670,47 @@ M19 still does not merge the integration commit back to the source branch, batch
 several task patches into one integration branch, clean up integration
 worktrees, or resolve patch conflicts automatically.
 
+## M20 Worker Health And Restart Supervision
+
+M20 adds process-level and pool-level health supervision for resident mailbox
+workers. `FileMailboxWorkerProcessSupervisor.health()` reports `not_started`,
+`running`, or `exited` from the underlying `Popen` state without changing the
+process lifecycle. `restart_if_exited()` restarts only workers that are not
+currently running.
+
+`FileMailboxWorkerPoolSupervisor` now exposes:
+
+- `health_check()` for a registry-backed pool snapshot;
+- `restart_exited_workers()` for one restart pass across all workers;
+- `supervise_once()` for the combined health, restart, and post-health cycle.
+
+The worker process registry at `state/worker_process_registry.json` records the
+latest worker status plus `restart_count` for each worker. The two-phase worker
+pool CLI interleaves `supervise_once()` before and after each scheduler tick, so
+the static pool can recover an exited worker while the scheduler continues to
+use the existing dispatch/result protocol.
+
+Two-phase CLI output now includes:
+
+```json
+{
+  "worker_pool_health": {"pool_status": "running"},
+  "worker_pool_supervision": [{"supervision_status": "running"}],
+  "worker_pool": {"pool_status": "stopped"}
+}
+```
+
+M20 intentionally does not add heartbeat files, restart backoff, quarantine
+budgets, health-based task reassignment, or cancellation for workers stuck
+inside long-running model calls.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
 
 - transcript parsing;
 - production-grade merge orchestration;
-- multi-worker supervision, restart/backoff, and concurrent worker execution;
+- worker heartbeat files, restart backoff/quarantine, and health-driven task reassignment;
 - advanced retry backoff, queues, and cross-process recovery;
 - schema validation through a JSON Schema engine.
 
@@ -1727,7 +1761,9 @@ that can keep multiple attempts inflight and collect mailbox results in later
 ticks. M18 adds retryable result recovery and lease-timeout recovery to that
 two-phase path. M19 connects accepted two-phase worktree results to patch
 artifact creation, integration verification, and optional integration commit.
-Claude Code is not integrated yet.
+M20 adds static worker-pool health checks, exited-worker restart, restart counts,
+registry updates, and two-phase CLI supervision around scheduler ticks. Claude
+Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
@@ -1738,8 +1774,8 @@ Before the next backend milestone, the next design/code step should define:
 - decide when live Codex smoke should run outside local opt-in, such as nightly
   or pre-release only;
 - Claude Code adapter feasibility and result extraction contract;
-- decide when static worker-pool lifecycle should expand to true concurrent
-  dispatch/result collection, restart/backoff, and real Claude worker runtimes;
+- decide when worker supervision should add heartbeat, backoff/quarantine,
+  health-driven task reassignment, and real Claude worker runtimes;
 - decide whether lightweight artifact lint should grow into full JSON Schema
   validation;
 - retry backoff, retry budget, and failure escalation policy;

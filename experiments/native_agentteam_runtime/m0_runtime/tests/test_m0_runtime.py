@@ -478,6 +478,38 @@ class M0RuntimeTests(unittest.TestCase):
                 {"FileMailboxExternalRuntimeAdapter"},
             )
 
+    def test_file_mailbox_worker_process_supervisor_reports_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+            supervisor = FileMailboxWorkerProcessSupervisor(
+                agent_pool_path,
+                output_dir,
+                "agent-repo-map",
+                env=env,
+                poll_interval_seconds=0.01,
+            )
+
+            before = supervisor.health()
+            start = supervisor.start()
+            try:
+                running = supervisor.health()
+            finally:
+                stop = supervisor.stop()
+            stopped = supervisor.health()
+
+            self.assertEqual(before["worker_status"], "not_started")
+            self.assertEqual(running["worker_status"], "running")
+            self.assertEqual(running["worker_pid"], start["worker_pid"])
+            self.assertEqual(running["exit_code"], None)
+            self.assertEqual(stop["worker_status"], "stopped")
+            self.assertEqual(stopped["worker_status"], "exited")
+            self.assertEqual(stopped["exit_code"], 0)
+
     def test_scheduler_loop_writes_canonical_event_log_for_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1662,6 +1694,48 @@ class M0RuntimeTests(unittest.TestCase):
                 all(worker["worker_status"] == "stopped" for worker in stop["workers"])
             )
 
+    def test_file_mailbox_worker_pool_supervisor_restarts_exited_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+            pool = FileMailboxWorkerPoolSupervisor(
+                agent_pool_path,
+                output_dir,
+                env=env,
+                poll_interval_seconds=0.01,
+            )
+
+            start = pool.start()
+            first_pid = start["workers"][0]["worker_pid"]
+            pool.workers[0].process.terminate()
+            pool.workers[0].process.wait(timeout=5)
+            degraded = pool.health_check()
+            restarted = pool.restart_exited_workers()
+            try:
+                recovered = pool.health_check()
+            finally:
+                stop = pool.stop()
+
+            registry = json.loads(
+                Path(stop["process_registry_path"]).read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(degraded["pool_status"], "degraded")
+            self.assertEqual(degraded["workers"][0]["worker_status"], "exited")
+            self.assertEqual(restarted["restarted_count"], 1)
+            self.assertEqual(restarted["workers"][0]["restart_status"], "restarted")
+            self.assertNotEqual(
+                restarted["workers"][0]["new_worker"]["worker_pid"],
+                first_pid,
+            )
+            self.assertEqual(recovered["pool_status"], "running")
+            self.assertEqual(recovered["workers"][0]["worker_status"], "running")
+            self.assertEqual(registry["workers"][0]["restart_count"], 1)
+
     def test_two_phase_scheduler_does_not_double_book_same_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2062,6 +2136,9 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["lease_timeout_seconds"], 900)
             self.assertEqual(summary["worker_pool"]["pool_status"], "stopped")
             self.assertEqual(summary["worker_pool"]["worker_count"], 2)
+            self.assertEqual(summary["worker_pool_health"]["pool_status"], "running")
+            self.assertGreaterEqual(len(summary["worker_pool_supervision"]), 1)
+            self.assertIn("restart_count", summary["worker_pool_health"]["workers"][0])
             self.assertEqual(
                 {task["task_id"]: task["task_status"] for task in state["tasks"]},
                 {"TASK-001": "done", "TASK-002": "done"},

@@ -1,5 +1,6 @@
 import argparse
 import json
+import time
 
 from .daemon import run_file_daemon
 from .mailbox_worker import (
@@ -16,7 +17,7 @@ from .m0_runtime import (
     run_scheduler_loop,
     run_simulation,
 )
-from .two_phase_scheduler import run_two_phase_scheduler_loop
+from .two_phase_scheduler import TwoPhaseFileScheduler
 
 
 def main(argv=None):
@@ -219,18 +220,10 @@ def main(argv=None):
             )
             worker_pool_start = worker_pool.start()
             try:
-                result = run_two_phase_scheduler_loop(
-                    args.agent_pool,
-                    args.backlog,
-                    args.output_dir,
-                    project_root=args.project_root,
-                    max_inflight=args.max_inflight,
-                    max_attempts=args.max_attempts,
-                    lease_timeout_seconds=args.lease_timeout_seconds,
-                    integrate_accepted_patch=args.integrate_accepted_patch,
-                    integration_verification_command=integration_verification_command,
-                    commit_verified_integration=args.commit_verified_integration,
-                    max_ticks=args.max_steps,
+                result = _run_supervised_two_phase_scheduler(
+                    args,
+                    integration_verification_command,
+                    worker_pool,
                 )
             finally:
                 worker_pool_stop = worker_pool.stop()
@@ -346,6 +339,55 @@ def main(argv=None):
     )
     snapshot = replay_events(result["events_path"])
     print(json.dumps({**result, "snapshot": snapshot}, sort_keys=True))
+
+
+def _run_supervised_two_phase_scheduler(args, integration_verification_command, worker_pool):
+    if args.max_steps < 1:
+        raise ValueError("max_ticks must be at least 1")
+    scheduler = TwoPhaseFileScheduler(
+        args.agent_pool,
+        args.backlog,
+        args.output_dir,
+        project_root=args.project_root,
+        max_inflight=args.max_inflight,
+        max_attempts=args.max_attempts,
+        lease_timeout_seconds=args.lease_timeout_seconds,
+        integrate_accepted_patch=args.integrate_accepted_patch,
+        integration_verification_command=integration_verification_command,
+        commit_verified_integration=args.commit_verified_integration,
+    )
+    supervision = []
+    tick_count = 0
+    last_tick = None
+    for _ in range(args.max_steps):
+        tick_count += 1
+        supervision.append(worker_pool.supervise_once())
+        last_tick = scheduler.tick()
+        supervision.append(worker_pool.supervise_once())
+        if last_tick["tick_status"] == "idle":
+            result = {
+                **scheduler.summary(),
+                "scheduler_status": "idle",
+                "tick_count": tick_count,
+                "last_tick": last_tick,
+            }
+            break
+        if last_tick["tick_status"] == "waiting":
+            time.sleep(0.02)
+    else:
+        scheduler.state["scheduler_status"] = "max_ticks_reached"
+        scheduler._write_state()
+        result = {
+            **scheduler.summary(),
+            "scheduler_status": "max_ticks_reached",
+            "tick_count": tick_count,
+            "last_tick": last_tick,
+        }
+    return {
+        **result,
+        "worker_pool_supervision": supervision,
+        "worker_pool_health": worker_pool.health_check(),
+    }
 
 
 def _require_execution_arg(parser, value, flag):

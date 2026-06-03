@@ -417,6 +417,40 @@ class FileMailboxWorkerProcessSupervisor:
             "stop_file": str(self.stop_file),
         }
 
+    def health(self):
+        if not self.process:
+            return {
+                "worker_status": "not_started",
+                "worker_pid": None,
+                "worker_agent_id": self.agent_id,
+                "worker_runtime": self.runtime,
+                "exit_code": None,
+            }
+        exit_code = self.process.poll()
+        return {
+            "worker_status": "running" if exit_code is None else "exited",
+            "worker_pid": self.process.pid,
+            "worker_agent_id": self.agent_id,
+            "worker_runtime": self.runtime,
+            "exit_code": exit_code,
+        }
+
+    def restart_if_exited(self):
+        previous_worker = self.health()
+        if previous_worker["worker_status"] == "running":
+            return {
+                "restart_status": "not_needed",
+                "previous_worker": previous_worker,
+                "new_worker": previous_worker,
+            }
+        if self.process:
+            self.process.communicate()
+        return {
+            "restart_status": "restarted",
+            "previous_worker": previous_worker,
+            "new_worker": self.start(),
+        }
+
     def stop(self, timeout_seconds=5):
         if not self.process:
             return {
