@@ -58,6 +58,9 @@ The implementation has already proven these layers:
 12. Proposal quality gate for self-dependencies, generated dependency cycles,
     risk-target enforcement, L0/L1 scope size limits, L2 review blocking, and
     inspectable decomposition rejection details.
+13. Rolling milestone decomposition waves with generated task lineage,
+    milestone decomposition state, max-wave terminal status, and default
+    single-wave compatibility.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -154,6 +157,8 @@ Acceptance:
 - rejection events are inspectable from the state index.
 
 ### M26: Rolling Milestone Decomposition
+
+Status: implemented.
 
 Goal: turn automatic decomposition from a one-shot generated task into a
 milestone-level loop.
@@ -278,4 +283,4 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended milestone is M26: Rolling Milestone Decomposition.
+The next recommended milestone is M27: Persistent Runtime Process Model.

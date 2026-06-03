@@ -49,6 +49,7 @@ class TwoPhaseFileScheduler:
         decomposition_allowed_write_scopes=None,
         decomposition_context_artifact_paths=None,
         decomposition_context_excerpt_chars=1200,
+        decomposition_max_waves=1,
     ):
         if max_inflight < 1:
             raise ValueError("max_inflight must be at least 1")
@@ -56,6 +57,8 @@ class TwoPhaseFileScheduler:
             raise ValueError("max_attempts must be at least 1")
         if lease_timeout_seconds < 0:
             raise ValueError("lease_timeout_seconds must be at least 0")
+        if decomposition_max_waves < 1:
+            raise ValueError("decomposition_max_waves must be at least 1")
         self.agent_pool_path = Path(agent_pool_path)
         self.backlog_path = Path(backlog_path)
         self.output_dir = Path(output_dir)
@@ -83,6 +86,7 @@ class TwoPhaseFileScheduler:
             decomposition_context_artifact_paths or []
         )
         self.decomposition_context_excerpt_chars = decomposition_context_excerpt_chars
+        self.decomposition_max_waves = decomposition_max_waves
         self.state_path = Path(
             state_path or self.output_dir / "state" / "two_phase_scheduler_state.json"
         )
@@ -640,7 +644,19 @@ class TwoPhaseFileScheduler:
             outcome["retryable"] = False
             return []
 
+        decomposition_wave = task.get(
+            "decomposition_wave",
+            _decomposition_wave_from_task_id(task["task_id"]),
+        )
+        for generated_task in normalized["tasks"]:
+            generated_task["generated_by_decomposition_task_id"] = task["task_id"]
+            generated_task["decomposition_wave"] = decomposition_wave
         self.state["backlog"]["items"].extend(normalized["tasks"])
+        self._record_decomposition_applied(
+            task,
+            normalized["generated_task_ids"],
+            decomposition_wave,
+        )
         result["decomposition_status"] = "applied"
         result["generated_task_ids"] = normalized["generated_task_ids"]
         result["generated_task_count"] = len(normalized["generated_task_ids"])
@@ -670,6 +686,39 @@ class TwoPhaseFileScheduler:
                 "allowed_write_scopes": None,
             }
         return json.loads(Path(context_path).read_text(encoding="utf-8"))
+
+    def _milestone_state(self, milestone_id):
+        milestones = self.state.setdefault("milestones", {})
+        return milestones.setdefault(
+            milestone_id,
+            {
+                "milestone_id": milestone_id,
+                "milestone_status": "active",
+                "decomposition_status": "idle",
+                "decomposition_wave_count": 0,
+                "current_decomposition_task_id": None,
+                "generated_task_ids": [],
+            },
+        )
+
+    def _record_decomposition_applied(self, task, generated_task_ids, decomposition_wave):
+        milestone = self._milestone_state(task["milestone_id"])
+        generated = list(milestone.get("generated_task_ids", []))
+        for task_id in generated_task_ids:
+            if task_id not in generated:
+                generated.append(task_id)
+        milestone.update(
+            {
+                "milestone_status": "active",
+                "decomposition_status": "batch_active",
+                "decomposition_wave_count": max(
+                    milestone.get("decomposition_wave_count", 0),
+                    decomposition_wave,
+                ),
+                "current_decomposition_task_id": task["task_id"],
+                "generated_task_ids": generated,
+            }
+        )
 
     def _integrate_accepted_result(self, inflight, result, patch_path, outcome):
         if outcome["validation_status"] != "accepted":
@@ -804,21 +853,37 @@ class TwoPhaseFileScheduler:
             return
         if self.state["inflight_attempts"] or self._ready_tasks():
             return
-        if any(
-            item.get("task_kind") == "decompose_backlog"
-            for item in self.state["backlog"]["items"]
-        ):
+        milestone_id = self.decomposition_milestone_id
+        decomposition_tasks = self._decomposition_tasks_for_milestone(milestone_id)
+        if any(not _is_terminal_backlog_status(task) for task in decomposition_tasks):
             return
-        task_id = f"DECOMPOSE-{self.decomposition_milestone_id}-001"
+        if decomposition_tasks:
+            latest = decomposition_tasks[-1]
+            if latest.get("backlog_status") != "done":
+                self._mark_milestone_terminal(milestone_id, "blocked")
+                return
+            if not self._generated_batch_terminal(latest["task_id"]):
+                milestone = self._milestone_state(milestone_id)
+                milestone["decomposition_status"] = "batch_active"
+                return
+        if len(decomposition_tasks) >= self.decomposition_max_waves:
+            self._mark_milestone_terminal(
+                milestone_id,
+                self._terminal_milestone_status(milestone_id),
+            )
+            return
+        decomposition_wave = len(decomposition_tasks) + 1
+        task_id = f"DECOMPOSE-{milestone_id}-{decomposition_wave:03d}"
         planner_context_path = self._write_planner_context(task_id)
         self.state["backlog"]["items"].append(
             {
                 "task_id": task_id,
                 "task_kind": "decompose_backlog",
-                "milestone_id": self.decomposition_milestone_id,
+                "milestone_id": milestone_id,
+                "decomposition_wave": decomposition_wave,
                 "objective": (
                     "Generate the next bounded executable backlog tasks for "
-                    f"{self.decomposition_milestone_id}."
+                    f"{milestone_id}."
                 ),
                 "backlog_status": "ready",
                 "risk_target": "L0",
@@ -831,6 +896,18 @@ class TwoPhaseFileScheduler:
                 "allowed_read_scopes": self.decomposition_allowed_read_scopes,
                 "allowed_write_scopes": self.decomposition_allowed_write_scopes,
                 "blockers": [],
+            }
+        )
+        milestone = self._milestone_state(milestone_id)
+        milestone.update(
+            {
+                "milestone_status": "active",
+                "decomposition_status": "decomposition_ready",
+                "decomposition_wave_count": max(
+                    milestone.get("decomposition_wave_count", 0),
+                    decomposition_wave,
+                ),
+                "current_decomposition_task_id": task_id,
             }
         )
 
@@ -855,6 +932,45 @@ class TwoPhaseFileScheduler:
             if task["task_id"] == task_id:
                 return task
         raise ValueError(f"task not found in two-phase scheduler state: {task_id}")
+
+    def _decomposition_tasks_for_milestone(self, milestone_id):
+        return sorted(
+            [
+                task
+                for task in self.state["backlog"]["items"]
+                if task.get("task_kind") == "decompose_backlog"
+                and task.get("milestone_id") == milestone_id
+            ],
+            key=lambda task: task.get(
+                "decomposition_wave",
+                _decomposition_wave_from_task_id(task["task_id"]),
+            ),
+        )
+
+    def _generated_batch_terminal(self, decomposition_task_id):
+        generated_tasks = [
+            task
+            for task in self.state["backlog"]["items"]
+            if task.get("generated_by_decomposition_task_id") == decomposition_task_id
+        ]
+        return all(_is_terminal_backlog_status(task) for task in generated_tasks)
+
+    def _terminal_milestone_status(self, milestone_id):
+        generated_ids = self._milestone_state(milestone_id).get("generated_task_ids", [])
+        generated_tasks = [
+            self._task_by_id(task_id)
+            for task_id in generated_ids
+            if any(item["task_id"] == task_id for item in self.state["backlog"]["items"])
+        ]
+        if any(task.get("backlog_status") == "blocked" for task in generated_tasks):
+            return "blocked"
+        return "completed"
+
+    def _mark_milestone_terminal(self, milestone_id, milestone_status):
+        milestone = self._milestone_state(milestone_id)
+        milestone["milestone_status"] = milestone_status
+        milestone["decomposition_status"] = "max_waves_reached"
+        milestone["terminal_reason"] = "max_waves_reached"
 
     def _update_task_from_outcome(
         self,
@@ -931,6 +1047,7 @@ class TwoPhaseFileScheduler:
             state = _read_json(self.state_path)
             state.setdefault("max_attempts", self.max_attempts)
             state.setdefault("lease_timeout_seconds", self.lease_timeout_seconds)
+            state.setdefault("milestones", {})
             return state
         return {
             "scheduler_status": "initialized",
@@ -939,6 +1056,7 @@ class TwoPhaseFileScheduler:
             "backlog": _read_json(self.backlog_path),
             "steps": [],
             "inflight_attempts": [],
+            "milestones": {},
         }
 
     def _write_state(self):
@@ -961,6 +1079,17 @@ def _decomposition_validation_payload(result):
     if "decomposition_error" in result:
         payload["decomposition_error"] = result["decomposition_error"]
     return payload
+
+
+def _decomposition_wave_from_task_id(task_id):
+    try:
+        return int(str(task_id).rsplit("-", 1)[1])
+    except (TypeError, ValueError):
+        return 1
+
+
+def _is_terminal_backlog_status(task):
+    return task.get("backlog_status") in {"done", "blocked"}
 
 
 def _runtime_result_from_outbox(outbox_path, source_message_id):

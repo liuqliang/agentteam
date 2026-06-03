@@ -2305,6 +2305,229 @@ class M0RuntimeTests(unittest.TestCase):
                 ["DECOMPOSE-M21-001", "TASK-M21-001"],
             )
 
+    def test_two_phase_scheduler_records_decomposition_lineage_and_milestone_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-planner", "task_planner"),
+                    ("agent-repo-map", "repo_map_agent"),
+                ],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                auto_decompose=True,
+                decomposition_milestone_id="M26",
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                "DECOMPOSE-M26-001",
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                [],
+                {
+                    "task_proposal": {
+                        "milestone_id": "M26",
+                        "tasks": [
+                            {
+                                "task_id": "TASK-M26-001",
+                                "objective": "Run first generated wave task.",
+                                "read_scope": ["."],
+                                "write_scope": ["generated/wave-1/"],
+                                "required_role": "repo_map_agent",
+                                "risk_target": "L0",
+                                "depends_on": [],
+                                "blockers": [],
+                            }
+                        ],
+                    }
+                },
+            )
+
+            scheduler.collect_ready_results()
+            generated_task = scheduler._task_by_id("TASK-M26-001")
+            milestone = scheduler.state["milestones"]["M26"]
+
+            self.assertEqual(
+                generated_task["generated_by_decomposition_task_id"],
+                "DECOMPOSE-M26-001",
+            )
+            self.assertEqual(generated_task["decomposition_wave"], 1)
+            self.assertEqual(milestone["milestone_status"], "active")
+            self.assertEqual(milestone["decomposition_status"], "batch_active")
+            self.assertEqual(milestone["decomposition_wave_count"], 1)
+            self.assertEqual(milestone["generated_task_ids"], ["TASK-M26-001"])
+
+    def test_two_phase_scheduler_opens_next_decomposition_wave_after_generated_batch_done(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-planner", "task_planner"),
+                    ("agent-repo-map", "repo_map_agent"),
+                ],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                auto_decompose=True,
+                decomposition_milestone_id="M26",
+                decomposition_max_waves=2,
+            )
+
+            scheduler.dispatch_ready()
+            first_decompose = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                first_decompose["outbox_path"],
+                first_decompose["message_id"],
+                "DECOMPOSE-M26-001",
+                first_decompose["attempt_id"],
+                first_decompose["lease_id"],
+                "completed",
+                [],
+                {
+                    "task_proposal": {
+                        "milestone_id": "M26",
+                        "tasks": [
+                            {
+                                "task_id": "TASK-M26-WAVE-1",
+                                "objective": "Complete first generated batch.",
+                                "read_scope": ["."],
+                                "write_scope": ["generated/wave-1/"],
+                                "required_role": "repo_map_agent",
+                                "risk_target": "L0",
+                                "depends_on": [],
+                                "blockers": [],
+                            }
+                        ],
+                    }
+                },
+            )
+            scheduler.collect_ready_results()
+
+            scheduler.dispatch_ready()
+            generated_inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result(
+                generated_inflight["outbox_path"],
+                generated_inflight["message_id"],
+                generated_inflight["task_id"],
+                generated_inflight["attempt_id"],
+                generated_inflight["lease_id"],
+                "completed",
+                ["generated/wave-1/result.json"],
+            )
+            scheduler.collect_ready_results()
+
+            second_dispatch = scheduler.dispatch_ready()
+
+            self.assertEqual(
+                second_dispatch["dispatched_task_ids"],
+                ["DECOMPOSE-M26-002"],
+            )
+            self.assertEqual(
+                scheduler.state["milestones"]["M26"]["decomposition_wave_count"],
+                2,
+            )
+
+    def test_two_phase_scheduler_marks_milestone_completed_when_max_waves_reached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-planner", "task_planner"),
+                    ("agent-repo-map", "repo_map_agent"),
+                ],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                auto_decompose=True,
+                decomposition_milestone_id="M26",
+                decomposition_max_waves=1,
+            )
+
+            scheduler.dispatch_ready()
+            decompose = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                decompose["outbox_path"],
+                decompose["message_id"],
+                "DECOMPOSE-M26-001",
+                decompose["attempt_id"],
+                decompose["lease_id"],
+                "completed",
+                [],
+                {
+                    "task_proposal": {
+                        "milestone_id": "M26",
+                        "tasks": [
+                            {
+                                "task_id": "TASK-M26-FINAL",
+                                "objective": "Complete final generated batch.",
+                                "read_scope": ["."],
+                                "write_scope": ["generated/final/"],
+                                "required_role": "repo_map_agent",
+                                "risk_target": "L0",
+                                "depends_on": [],
+                                "blockers": [],
+                            }
+                        ],
+                    }
+                },
+            )
+            scheduler.collect_ready_results()
+            scheduler.dispatch_ready()
+            generated = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result(
+                generated["outbox_path"],
+                generated["message_id"],
+                generated["task_id"],
+                generated["attempt_id"],
+                generated["lease_id"],
+                "completed",
+                ["generated/final/result.json"],
+            )
+            scheduler.collect_ready_results()
+
+            final_dispatch = scheduler.dispatch_ready()
+            milestone = scheduler.state["milestones"]["M26"]
+
+            self.assertEqual(final_dispatch["dispatch_status"], "idle")
+            self.assertEqual(
+                [
+                    task["task_id"]
+                    for task in scheduler.state["backlog"]["items"]
+                    if task.get("task_kind") == "decompose_backlog"
+                ],
+                ["DECOMPOSE-M26-001"],
+            )
+            self.assertEqual(milestone["milestone_status"], "completed")
+            self.assertEqual(milestone["decomposition_status"], "max_waves_reached")
+            self.assertEqual(milestone["terminal_reason"], "max_waves_reached")
+
     def test_two_phase_scheduler_rejects_planner_proposal_outside_context_write_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

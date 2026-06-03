@@ -1994,6 +1994,75 @@ event payload so event inspection can show the specific reason, such as
 M25 intentionally does not infer risk semantically, implement reviewer-agent
 unblocking, support L3 authority-update routing, or perform learned task sizing.
 
+## M26 Rolling Milestone Decomposition
+
+M26 changes auto-decomposition from a single synthetic planner task into a
+bounded wave loop. The default remains one wave, so existing
+`--auto-decompose-backlog` behavior is preserved unless callers explicitly set a
+higher wave limit through the scheduler API:
+
+```python
+scheduler = TwoPhaseFileScheduler(
+    agent_pool_path,
+    backlog_path,
+    output_dir,
+    auto_decompose=True,
+    decomposition_milestone_id="M26",
+    decomposition_max_waves=2,
+)
+```
+
+The synthetic planner task id suffix is now treated as the decomposition wave:
+
+```text
+DECOMPOSE-M26-001
+DECOMPOSE-M26-002
+```
+
+When a planner proposal is applied, generated tasks are tagged with lineage:
+
+```json
+{
+  "task_id": "TASK-M26-WAVE-1",
+  "generated_by_decomposition_task_id": "DECOMPOSE-M26-001",
+  "decomposition_wave": 1
+}
+```
+
+Scheduler state now includes milestone decomposition metadata separate from
+worker task status:
+
+```json
+{
+  "milestones": {
+    "M26": {
+      "milestone_id": "M26",
+      "milestone_status": "active",
+      "decomposition_status": "batch_active",
+      "decomposition_wave_count": 1,
+      "current_decomposition_task_id": "DECOMPOSE-M26-001",
+      "generated_task_ids": ["TASK-M26-WAVE-1"]
+    }
+  }
+}
+```
+
+A later wave is opened only when there are no ready tasks, no inflight attempts,
+the latest decomposition task is done, every generated task from that wave is
+terminal, and `decomposition_wave_count < decomposition_max_waves`.
+
+When the configured wave limit is reached, the milestone is marked terminal:
+
+- `milestone_status=completed` when generated tasks are done or there are no
+  generated tasks;
+- `milestone_status=blocked` when any generated task is blocked;
+- `decomposition_status=max_waves_reached`;
+- `terminal_reason=max_waves_reached`.
+
+M26 intentionally does not let the planner decide whether another wave is
+needed, choose the next milestone automatically, unblock review tasks, or merge
+completed feature work back to the main branch.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -2063,7 +2132,8 @@ rejection, and fake Codex planner worker-pool coverage. M24 adds selected
 artifact summaries with digest, timestamp, heading, excerpt, and warning
 metadata in planner context files. M25 adds deterministic proposal quality
 checks, L2 review blocking, and decomposition rejection details in validation
-events. Claude Code is not integrated yet.
+events. M26 adds bounded rolling decomposition waves, generated task lineage,
+and milestone decomposition state. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
