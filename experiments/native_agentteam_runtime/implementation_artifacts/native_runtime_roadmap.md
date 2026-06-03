@@ -61,6 +61,8 @@ The implementation has already proven these layers:
 13. Rolling milestone decomposition waves with generated task lineage,
     milestone decomposition state, max-wave terminal status, and default
     single-wave compatibility.
+14. File-backed worker-pool resume from process registry with attached PID
+    health and stop-file shutdown.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -185,6 +187,8 @@ Acceptance:
 
 ### M27: Persistent Runtime Process Model
 
+Status: implemented.
+
 Goal: make resident role agents feel like durable workers rather than short
 experiments launched only for a CLI run.
 
@@ -283,4 +287,4 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended milestone is M27: Persistent Runtime Process Model.
+The next recommended milestone is M28: Worktree Isolation And Integration Queue.

@@ -2012,6 +2012,58 @@ class M0RuntimeTests(unittest.TestCase):
                 all(worker["worker_status"] == "stopped" for worker in stop["workers"])
             )
 
+    def test_file_mailbox_worker_pool_supervisor_resumes_running_workers_from_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+            pool = FileMailboxWorkerPoolSupervisor(
+                agent_pool_path,
+                output_dir,
+                env=env,
+                poll_interval_seconds=0.01,
+            )
+
+            start = pool.start()
+            resumed_pool = FileMailboxWorkerPoolSupervisor(
+                agent_pool_path,
+                output_dir,
+                env=env,
+                poll_interval_seconds=0.01,
+            )
+            try:
+                resumed = resumed_pool.resume_from_registry()
+                health = resumed_pool.health_check()
+                stop = resumed_pool.stop()
+            finally:
+                if pool.workers:
+                    process = pool.workers[0].process
+                    if process:
+                        try:
+                            if process.poll() is None:
+                                pool.stop()
+                        except ChildProcessError:
+                            pass
+                        for stream in (process.stdout, process.stderr):
+                            if stream:
+                                stream.close()
+
+            registry = json.loads(
+                Path(stop["process_registry_path"]).read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(resumed["pool_status"], "running")
+            self.assertEqual(
+                resumed["workers"][0]["worker_pid"],
+                start["workers"][0]["worker_pid"],
+            )
+            self.assertEqual(health["workers"][0]["worker_status"], "running")
+            self.assertEqual(stop["workers"][0]["worker_status"], "stopped")
+            self.assertEqual(registry["registry_status"], "stopped")
+
     def test_file_mailbox_worker_pool_supervisor_restarts_exited_worker(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

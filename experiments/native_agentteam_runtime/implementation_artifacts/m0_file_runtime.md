@@ -2063,6 +2063,48 @@ M26 intentionally does not let the planner decide whether another wave is
 needed, choose the next milestone automatically, unblock review tasks, or merge
 completed feature work back to the main branch.
 
+## M27 Persistent Runtime Process Model
+
+M27 lets a new worker-pool supervisor recover visibility over resident worker
+processes that were started by an earlier supervisor instance. It keeps the
+runtime state file-backed and does not move worker/session state into SQLite.
+
+The worker pool already writes:
+
+```text
+<output-dir>/state/worker_process_registry.json
+```
+
+M27 adds:
+
+```python
+pool = FileMailboxWorkerPoolSupervisor(agent_pool_path, output_dir)
+summary = pool.resume_from_registry()
+```
+
+`resume_from_registry()` reads existing worker rows, creates supervisor objects
+for the current agent pool, attaches to recorded PIDs, and writes a refreshed
+registry summary. Attached workers report health without needing the original
+`subprocess.Popen` object:
+
+```json
+{
+  "worker_status": "running",
+  "worker_pid": 12345,
+  "worker_agent_id": "agent-repo-map",
+  "worker_runtime": "fake",
+  "attached": true,
+  "stop_file": "/tmp/run/state/workers/agent-repo-map.stop"
+}
+```
+
+Stopping a resumed pool writes the existing stop file and waits for the attached
+PID to exit. This separates logical agent identity, worker process health, and
+the lifetime of the current supervisor object.
+
+M27 intentionally does not daemonize the scheduler, add heartbeat/quarantine
+policy, recover workers across hosts, or change the storage backend.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -2133,7 +2175,9 @@ artifact summaries with digest, timestamp, heading, excerpt, and warning
 metadata in planner context files. M25 adds deterministic proposal quality
 checks, L2 review blocking, and decomposition rejection details in validation
 events. M26 adds bounded rolling decomposition waves, generated task lineage,
-and milestone decomposition state. Claude Code is not integrated yet.
+and milestone decomposition state. M27 adds file-registry resume for resident
+worker processes through attached PID supervisors. Claude Code is not integrated
+yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

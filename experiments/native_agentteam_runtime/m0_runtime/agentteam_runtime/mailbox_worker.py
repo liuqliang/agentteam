@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -370,6 +371,16 @@ class FileMailboxWorkerProcessSupervisor:
         self.codex_fallback_worktree_path = codex_fallback_worktree_path
         self.stop_file = self.output_dir / "state" / "workers" / f"{agent_id}.stop"
         self.process = None
+        self.attached_pid = None
+        self.attached_exit_code = None
+
+    def attach_existing_process(self, pid, stop_file=None):
+        self.process = None
+        self.attached_pid = int(pid)
+        self.attached_exit_code = None
+        if stop_file:
+            self.stop_file = Path(stop_file)
+        return self.health()
 
     def start(self):
         self.stop_file.parent.mkdir(parents=True, exist_ok=True)
@@ -428,12 +439,29 @@ class FileMailboxWorkerProcessSupervisor:
 
     def health(self):
         if not self.process:
+            if self.attached_pid:
+                worker_status = (
+                    "running"
+                    if self.attached_exit_code is None
+                    and _pid_is_running(self.attached_pid)
+                    else "exited"
+                )
+                return {
+                    "worker_status": worker_status,
+                    "worker_pid": self.attached_pid,
+                    "worker_agent_id": self.agent_id,
+                    "worker_runtime": self.runtime,
+                    "exit_code": self.attached_exit_code,
+                    "stop_file": str(self.stop_file),
+                    "attached": True,
+                }
             return {
                 "worker_status": "not_started",
                 "worker_pid": None,
                 "worker_agent_id": self.agent_id,
                 "worker_runtime": self.runtime,
                 "exit_code": None,
+                "stop_file": str(self.stop_file),
             }
         exit_code = self.process.poll()
         return {
@@ -442,6 +470,7 @@ class FileMailboxWorkerProcessSupervisor:
             "worker_agent_id": self.agent_id,
             "worker_runtime": self.runtime,
             "exit_code": exit_code,
+            "stop_file": str(self.stop_file),
         }
 
     def restart_if_exited(self):
@@ -462,6 +491,8 @@ class FileMailboxWorkerProcessSupervisor:
 
     def stop(self, timeout_seconds=5):
         if not self.process:
+            if self.attached_pid:
+                return self._stop_attached(timeout_seconds=timeout_seconds)
             return {
                 "worker_status": "not_started",
                 "worker_pid": None,
@@ -487,8 +518,36 @@ class FileMailboxWorkerProcessSupervisor:
             "worker_runtime": self.runtime,
             "exit_code": self.process.returncode,
             "stopped_by": stopped_by,
+            "stop_file": str(self.stop_file),
             "stdout": stdout,
             "stderr": stderr,
+        }
+
+    def _stop_attached(self, timeout_seconds=5):
+        self.stop_file.parent.mkdir(parents=True, exist_ok=True)
+        self.stop_file.write_text("stop\n", encoding="utf-8")
+        exit_code = _wait_for_pid_exit(self.attached_pid, timeout_seconds)
+        stopped_by = "stop_file"
+        if exit_code is None and _pid_is_running(self.attached_pid):
+            os.kill(self.attached_pid, signal.SIGTERM)
+            exit_code = _wait_for_pid_exit(self.attached_pid, timeout_seconds)
+            stopped_by = "terminated"
+        if exit_code is None and _pid_is_running(self.attached_pid):
+            os.kill(self.attached_pid, signal.SIGKILL)
+            exit_code = _wait_for_pid_exit(self.attached_pid, timeout_seconds)
+            stopped_by = "killed"
+        self.attached_exit_code = exit_code
+        return {
+            "worker_status": "stopped" if exit_code is not None else "stop_requested",
+            "worker_pid": self.attached_pid,
+            "worker_agent_id": self.agent_id,
+            "worker_runtime": self.runtime,
+            "exit_code": exit_code,
+            "stopped_by": stopped_by,
+            "stop_file": str(self.stop_file),
+            "attached": True,
+            "stdout": "",
+            "stderr": "",
         }
 
 
@@ -551,6 +610,36 @@ def _candidate_mailbox_output_dirs(root_output_dir, agent):
             if (step_dir / inbox_relative_path).exists():
                 candidates.append(step_dir)
     return candidates
+
+
+def _pid_is_running(pid):
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_for_pid_exit(pid, timeout_seconds):
+    pid = int(pid)
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() <= deadline:
+        try:
+            waited_pid, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            waited_pid = 0
+            status = 0
+        if waited_pid == pid:
+            try:
+                return os.waitstatus_to_exitcode(status)
+            except ValueError:
+                return 0
+        if not _pid_is_running(pid):
+            return 0
+        time.sleep(0.05)
+    return None
 
 
 def main(argv=None):

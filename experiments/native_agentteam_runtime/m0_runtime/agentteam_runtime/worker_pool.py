@@ -38,6 +38,35 @@ class FileMailboxWorkerPoolSupervisor:
         self._write_registry(summary)
         return summary
 
+    def resume_from_registry(self):
+        registry = self._load_registry()
+        registry_workers = {
+            worker.get("worker_agent_id"): worker
+            for worker in registry.get("workers", [])
+        }
+        self.workers = []
+        for agent in _worker_agents(self.agent_pool_path):
+            agent_id = agent["agent_id"]
+            worker = self._worker_for_agent(agent)
+            registered = registry_workers.get(agent_id, {})
+            self.restart_counts[agent_id] = registered.get("restart_count", 0)
+            if registered.get("worker_pid"):
+                worker.attach_existing_process(
+                    registered["worker_pid"],
+                    stop_file=registered.get("stop_file"),
+                )
+            self.workers.append(worker)
+        workers = [
+            self._worker_health(worker)
+            for worker in self.workers
+        ]
+        summary = {
+            **self._summary(self._pool_health_status(workers), workers),
+            "resume_status": "resumed" if registry else "registry_missing",
+        }
+        self._write_registry(summary)
+        return summary
+
     def stop(self):
         stops = [
             self._with_restart_count(worker.stop())
@@ -160,6 +189,11 @@ class FileMailboxWorkerPoolSupervisor:
             ),
             encoding="utf-8",
         )
+
+    def _load_registry(self):
+        if not self.process_registry_path.exists():
+            return {}
+        return json.loads(self.process_registry_path.read_text(encoding="utf-8"))
 
 
 def _worker_agents(agent_pool_path):
