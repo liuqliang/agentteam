@@ -1563,6 +1563,55 @@ class M0RuntimeTests(unittest.TestCase):
                 "FileMailboxExternalRuntimeAdapter",
             )
 
+    def test_cli_long_running_mailbox_worker_accepts_agent_id_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "custom_agent_pool.json"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_agent_pool_with_agent_id(agent_pool_path, "agent-custom-map")
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--agent-pool",
+                    str(agent_pool_path),
+                    "--backlog",
+                    str(backlog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--daemon-run-until-idle",
+                    "--daemon-long-running-mailbox-worker",
+                    "--daemon-long-running-worker-agent-id",
+                    "agent-custom-map",
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            custom_outbox = (
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-001"
+                / "mailboxes"
+                / "agent-custom-map"
+                / "outbox.jsonl"
+            )
+
+            self.assertEqual(summary["daemon_status"], "idle")
+            self.assertEqual(summary["processed_task_ids"], ["TASK-001"])
+            self.assertEqual(summary["worker_process"]["worker_agent_id"], "agent-custom-map")
+            self.assertTrue(custom_outbox.exists())
+
     def test_cli_can_show_state_index_without_agent_pool_or_backlog(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2745,6 +2794,35 @@ def _write_agent_pool_with_runtime_profile(path, runtime_profile):
         ],
     }
     path.write_text(json.dumps(agent_pool), encoding="utf-8")
+
+
+def _write_agent_pool_with_agent_id(path, agent_id):
+    agent_pool = {
+        "pool_id": "test-agent-pool",
+        "scheduler_agent_id": "agent-scheduler",
+        "updated_at": "2026-06-03T00:00:00Z",
+        "agents": [
+            {
+                "agent_id": agent_id,
+                "role": "repo_map_agent",
+                "status": "idle",
+                "model_profile": "small-tooling",
+                "runtime_adapter": "codex",
+                "subscriptions": ["repo_index_stale"],
+                "inbox_path": f"mailboxes/{agent_id}/inbox.jsonl",
+                "outbox_path": f"mailboxes/{agent_id}/outbox.jsonl",
+                "lease": {
+                    "lease_id": None,
+                    "task_id": None,
+                    "expires_at": None,
+                },
+                "owned_artifacts": [],
+                "last_event_id": None,
+                "memory_summary_path": None,
+            }
+        ],
+    }
+    path.write_text(json.dumps(agent_pool, sort_keys=True), encoding="utf-8")
 
 
 def _backlog_task(

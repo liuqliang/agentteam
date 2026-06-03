@@ -292,12 +292,14 @@ python3 -m agentteam_runtime.cli \
   --backlog /path/to/backlog.json \
   --output-dir /tmp/agentteam-m15a-long-worker-run \
   --daemon-run-until-idle \
-  --daemon-long-running-mailbox-worker
+  --daemon-long-running-mailbox-worker \
+  --daemon-long-running-worker-agent-id agent-repo-map
 ```
 
-This starts one serving worker process for `agent-repo-map`, runs the daemon with
-`FileMailboxExternalRuntimeAdapter`, then stops the worker before printing the
-summary. It is mutually exclusive with the M14b/M14c mailbox worker flags.
+This starts one serving worker process for the configured agent id, runs the
+daemon with `FileMailboxExternalRuntimeAdapter`, then stops the worker before
+printing the summary. It is mutually exclusive with the M14b/M14c mailbox
+worker flags.
 
 In M15b the same flag can run the serving worker with a Codex delegate:
 
@@ -310,6 +312,7 @@ python3 -m agentteam_runtime.cli \
   --project-root /path/to/git/repo \
   --daemon-run-until-idle \
   --daemon-long-running-mailbox-worker \
+  --daemon-long-running-worker-agent-id agent-repo-map \
   --runtime codex
 ```
 
@@ -1393,11 +1396,34 @@ each dispatch through `CodexRuntimeAdapter`, writes the normal
 M15b still has these limits:
 
 - one resident worker process;
-- one hardcoded agent id in the daemon CLI path, `agent-repo-map`;
+- one configured worker agent id per daemon CLI run;
 - sequential scheduler execution;
 - no worker restart/backoff;
 - no multi-agent worker pool;
 - no Claude delegate runtime.
+
+## M15c Configurable Long-Worker Agent Id
+
+M15c removes the hardcoded daemon CLI worker id. The default remains
+`agent-repo-map` for fixture compatibility, but callers can select another
+agent id from their agent pool:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.cli \
+  --agent-pool /path/to/agent_pool.json \
+  --backlog /path/to/backlog.json \
+  --output-dir /tmp/agentteam-m15c-worker-agent-id-run \
+  --daemon-run-until-idle \
+  --daemon-long-running-mailbox-worker \
+  --daemon-long-running-worker-agent-id agent-custom-map
+```
+
+This option configures only which single mailbox worker process is started. It
+does not add a worker pool or route multiple agents concurrently. The configured
+worker id must match the agent selected by the scheduler for the ready task;
+otherwise the external adapter waits on one outbox while the running worker
+serves a different mailbox.
 
 ## Intentional Fakes
 
@@ -1448,7 +1474,9 @@ with an in-process fake delegate. M14c runs the same mailbox worker through a
 one-shot OS subprocess via `FileMailboxSubprocessRuntimeAdapter`. M15a adds one
 long-running fake mailbox worker process with explicit supervisor start/stop.
 M15b lets that long-running worker execute through `CodexRuntimeAdapter` while
-preserving the single-worker topology. Claude Code is not integrated yet.
+preserving the single-worker topology. M15c makes the long-worker daemon CLI
+agent id configurable while still starting only one worker process. Claude Code
+is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

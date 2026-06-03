@@ -412,6 +412,7 @@ class FileMailboxWorkerProcessSupervisor:
         return {
             "worker_status": "running",
             "worker_pid": self.process.pid,
+            "worker_agent_id": self.agent_id,
             "worker_runtime": self.runtime,
             "stop_file": str(self.stop_file),
         }
@@ -439,6 +440,7 @@ class FileMailboxWorkerProcessSupervisor:
         return {
             "worker_status": "stopped",
             "worker_pid": self.process.pid,
+            "worker_agent_id": self.agent_id,
             "worker_runtime": self.runtime,
             "exit_code": self.process.returncode,
             "stopped_by": stopped_by,

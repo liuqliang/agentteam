@@ -54,6 +54,11 @@ def main(argv=None):
         help="Run daemon tasks through one long-running fake mailbox worker process.",
     )
     parser.add_argument(
+        "--daemon-long-running-worker-agent-id",
+        default="agent-repo-map",
+        help="Agent id served by --daemon-long-running-mailbox-worker.",
+    )
+    parser.add_argument(
         "--max-steps",
         type=int,
         default=100,
@@ -175,7 +180,7 @@ def main(argv=None):
             worker_process = FileMailboxWorkerProcessSupervisor(
                 args.agent_pool,
                 args.output_dir,
-                "agent-repo-map",
+                args.daemon_long_running_worker_agent_id,
                 runtime=worker_runtime,
                 codex_command=worker_runtime_profile.get("command"),
                 codex_model=worker_runtime_profile.get("model"),
