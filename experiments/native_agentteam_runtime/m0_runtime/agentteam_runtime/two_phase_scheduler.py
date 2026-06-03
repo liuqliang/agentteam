@@ -11,6 +11,7 @@ from .m0_runtime import (
     _event,
     _find_idle_agent,
     _read_json,
+    _role_context_fields,
     _role_prompt_fields,
     _runtime_adapter_metadata,
     _scoped_id,
@@ -307,6 +308,7 @@ class TwoPhaseFileScheduler:
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
                 **_role_prompt_fields(agent_pool, agent, task),
+                **_role_context_fields(agent_pool, agent, step_dir, attempt_id),
             },
         }
         inbox_path = step_dir / agent["inbox_path"]

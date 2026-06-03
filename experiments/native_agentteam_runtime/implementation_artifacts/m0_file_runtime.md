@@ -2438,6 +2438,33 @@ section before the fixed JSON result schema. This is model guidance, not new
 authority: scope validation, result schema validation, leases, retries, and
 merge policy remain scheduler-owned.
 
+## M31c Role Context Packages
+
+M31c lets an agent pool define bounded context packages per role:
+
+```json
+{
+  "role_context_packages": {
+    "repo_map_agent": {
+      "context_artifacts": ["design/runtime.md"],
+      "excerpt_chars": 1200,
+      "context_notes": ["Prefer existing helper APIs."]
+    }
+  }
+}
+```
+
+During dispatch, the scheduler writes a `role_context.v1` JSON file under
+`role_contexts/` and adds these payload fields:
+
+- `role_context_path`;
+- `role_context_schema_version`.
+
+The context file includes the selected agent id, role, context notes, and
+bounded artifact summaries. It reuses the same digest, heading, excerpt, and
+warning metadata shape as planner artifact context. The Codex prompt only points
+to `role_context_path`; it does not inline the full context body.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -2518,7 +2545,8 @@ reassignment event lineage for those conservative dispatches. M30a adds a
 read-only runtime observability summary CLI. M30b adds resource drilldown views.
 M30c adds current milestone and next decomposition visibility. M31a adds
 role-level Codex runtime profiles for scheduler core and resident worker pools.
-M31b adds role prompt contracts to dispatch payloads and Codex prompts. Claude
+M31b adds role prompt contracts to dispatch payloads and Codex prompts. M31c
+adds bounded role context package files referenced by dispatch payloads. Claude
 Code is not an active backend target on the current route; live LLM work is
 Codex-only for now. Future API-based models such as DeepSeek or Claude Opus
 remain possible after credentials and result extraction contracts are defined.
@@ -2531,8 +2559,8 @@ Before the next backend milestone, the next design/code step should define:
 
 - decide when live Codex smoke should run outside local opt-in, such as nightly
   or pre-release only;
-- decide how Codex-only role context packages should differ for planner,
-  implementer, reviewer, and integrator workers;
+- decide when role context packages should be generated automatically from a
+  repository map instead of explicit artifact paths;
 - decide when worker supervision should add heartbeat, backoff, and inflight
   migration beyond the current restart-budget/quarantine path;
 - decide when planner context should ingest code-map and verification-summary

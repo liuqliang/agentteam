@@ -93,6 +93,35 @@
         }
       }
     },
+    "role_context_packages": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "context_artifacts": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "excerpt_chars": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "context_notes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          }
+        }
+      }
+    },
     "agents": {
       "type": "array",
       "items": {

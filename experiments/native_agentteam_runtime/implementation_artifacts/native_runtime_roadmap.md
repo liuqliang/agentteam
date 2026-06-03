@@ -73,10 +73,10 @@ The implementation has already proven these layers:
     exits.
 19. Two-phase dispatch avoidance for quarantined agents, allowing new work to
     route to another compatible idle agent.
-20. Codex role runtime profiles and prompt contracts, so scheduler and resident
-    worker-pool paths can inherit Codex model, sandbox, timeout, command,
-    fallback worktree settings, and model-facing role guidance from the agent
-    pool.
+20. Codex role runtime profiles, prompt contracts, and bounded context packages,
+    so scheduler and resident worker-pool paths can inherit Codex model,
+    sandbox, timeout, command, fallback worktree settings, model-facing role
+    guidance, and explicit context references from the agent pool.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -92,9 +92,9 @@ are not active targets now.
 
 Role differentiation is implemented through Codex runtime profiles and prompt
 contracts: different roles can carry different Codex model, sandbox, timeout,
-command, worktree policy, and model-facing role guidance. Context packages are
-the next M31 layer. Fake and shell adapters remain test harnesses, not
-production multi-agent backends.
+command, worktree policy, model-facing role guidance, and bounded role context
+packages. Fake and shell adapters remain test harnesses, not production
+multi-agent backends.
 
 ## Roadmap Principles
 
@@ -290,8 +290,8 @@ until the CLI views prove the data shape.
 Goal: make resident role agents configurable without duplicating runtime
 settings onto every agent entry.
 
-Status: M31a runtime profiles and M31b prompt contracts are implemented. Role
-context packages remain pending.
+Status: implemented for the current route. M31a added runtime profiles, M31b
+added prompt contracts, and M31c added bounded role context packages.
 
 Scope:
 
@@ -302,6 +302,8 @@ Scope:
   the same role profile rule;
 - attach role prompt contracts to dispatch payloads and render them explicitly
   in Codex prompts;
+- write bounded role context files and pass `role_context_path` in dispatch
+  payloads;
 - keep Codex as the only live LLM backend on this route;
 - keep CLI/default Codex command settings usable as local environment defaults.
 
@@ -313,12 +315,15 @@ Acceptance:
   profile;
 - a dispatch payload can carry the selected agent role and role prompt contract;
 - Codex prompts include a dedicated role contract section;
-- agent pool schemas accept role runtime profiles and prompt contracts.
+- a dispatch payload can point to a bounded role context file;
+- Codex prompts include a dedicated role context package section;
+- agent pool schemas accept role runtime profiles, prompt contracts, and
+  context packages.
 
-Remaining M31 work:
+Remaining follow-up work:
 
-- define bounded role context packages for planner, implementer, reviewer, and
-  integrator roles;
+- generate role context packages from repository maps and verification summaries
+  instead of only explicit artifact paths;
 - expose effective role profile selection in observability if long-running
   debugging needs it.
 
@@ -328,15 +333,14 @@ These items should wait until M23-M30 have made the local runtime reliable:
 
 - MCP tool and context compatibility as adapter capabilities, not as the native
   control plane, and initially around Codex runtime sessions.
-- Codex role context routing where planner, implementer, reviewer, and
-  integrator can use different bounded context packages.
+- Repository map integration using language-aware tools such as compilers, LSP,
+  build systems, and static analyzers, with compact summaries fed to planners
+  and role context packages.
 - A stronger durable store if file locking and JSONL replay become insufficient
   for long project runs.
 - Policy-governed semantic feedback where implementation evidence can propose
   updates to design authority artifacts without letting ordinary workers edit
   those artifacts directly.
-- Repository map integration using language-aware tools such as compilers, LSP,
-  build systems, and static analyzers, with compact summaries fed to planners.
 - API or executable backend adapters for DeepSeek, Claude Opus, Claude Code, or
   other models only after credentials, contracts, and result extraction paths
   are available.
@@ -363,6 +367,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is M31c bounded role context packages. Inflight
+The next recommended step is repository-map-backed context generation. Inflight
 migration remains a separate M29 decision gate because it changes ownership of
 already leased work.

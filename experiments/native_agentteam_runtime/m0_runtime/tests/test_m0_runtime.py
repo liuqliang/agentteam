@@ -434,6 +434,58 @@ class M0RuntimeTests(unittest.TestCase):
             )
             self.assertEqual(contract["required_output_keys"], ["evidence"])
 
+    def test_run_simulation_dispatch_writes_role_context_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            artifact = tmp_path / "role-context.md"
+            artifact.write_text(
+                "\n".join(
+                    [
+                        "# Role Context",
+                        "Use this compact context.",
+                        *["bounded line" for _ in range(20)],
+                        "TAIL_SHOULD_BE_OMITTED",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_agent_pool_with_role_context_packages(
+                agent_pool_path,
+                role_context_packages={
+                    "repo_map_agent": {
+                        "context_artifacts": [str(artifact)],
+                        "excerpt_chars": 80,
+                        "context_notes": ["Prefer existing local helpers."],
+                    }
+                },
+            )
+
+            run_simulation(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            message = _read_first_jsonl(
+                output_dir / "mailboxes" / "agent-repo-map" / "inbox.jsonl"
+            )
+            context_path = Path(message["payload"]["role_context_path"])
+            context = json.loads(context_path.read_text(encoding="utf-8"))
+            source = context["artifact_context"]["sources"][0]
+
+            self.assertTrue(context_path.exists())
+            self.assertEqual(context["context_schema_version"], "role_context.v1")
+            self.assertEqual(context["agent_role"], "repo_map_agent")
+            self.assertEqual(context["context_notes"], ["Prefer existing local helpers."])
+            self.assertEqual(source["headings"], ["Role Context"])
+            self.assertLessEqual(source["excerpt_chars"], 80)
+            self.assertNotIn("TAIL_SHOULD_BE_OMITTED", json.dumps(context))
+
     def test_scheduler_loop_runs_ready_tasks_until_idle(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2395,6 +2447,58 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 contract["instructions"],
                 ["Inspect read_scope before writing."],
+            )
+
+    def test_two_phase_scheduler_dispatch_writes_role_context_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            artifact = tmp_path / "role-context.md"
+            artifact.write_text(
+                "# Role Context\n\nTwo-phase context body.\n\n## Boundary\n",
+                encoding="utf-8",
+            )
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-001", write_scope=["generated/"])],
+            )
+            _write_agent_pool_with_role_context_packages(
+                agent_pool_path,
+                role_context_packages={
+                    "repo_map_agent": {
+                        "context_artifacts": [str(artifact)],
+                        "excerpt_chars": 120,
+                    }
+                },
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+            )
+
+            scheduler.dispatch_ready()
+
+            message = _read_first_jsonl(
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-001"
+                / "mailboxes"
+                / "agent-repo-map"
+                / "inbox.jsonl"
+            )
+            context_path = Path(message["payload"]["role_context_path"])
+            context = json.loads(context_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(context_path.exists())
+            self.assertEqual(context["context_schema_version"], "role_context.v1")
+            self.assertEqual(context["agent_role"], "repo_map_agent")
+            self.assertEqual(
+                context["artifact_context"]["sources"][0]["headings"],
+                ["Role Context", "Boundary"],
             )
 
     def test_two_phase_scheduler_records_reassignment_event_for_unavailable_agent(self):
@@ -4853,6 +4957,32 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("Inspect read_scope before writing.", prompt)
         self.assertIn("required_output_keys", prompt)
 
+    def test_codex_runtime_adapter_includes_role_context_path(self):
+        message = {
+            "message_id": "MSG-0001",
+            "from_agent": "agent-scheduler",
+            "to_agent": "agent-repo-map",
+            "message_type": "dispatch_task",
+            "correlation_id": "TASK-001:ATTEMPT-001",
+            "created_at": "2026-06-03T00:00:00Z",
+            "lease_expires_at": "2026-06-03T00:15:00Z",
+            "payload": {
+                "task_id": "TASK-001",
+                "attempt_id": "ATTEMPT-001",
+                "lease_id": "LEASE-001",
+                "objective": "Implement a bounded change.",
+                "read_scope": ["."],
+                "write_scope": ["generated/"],
+                "role_context_path": "/tmp/role_contexts/ATTEMPT-001-repo_map_agent.json",
+            },
+        }
+
+        prompt = CodexRuntimeAdapter(command=["codex", "exec"])._build_prompt(message)
+
+        self.assertIn("Role context package:", prompt)
+        self.assertIn("ATTEMPT-001-repo_map_agent.json", prompt)
+        self.assertIn("Read role_context_path before using role-specific context.", prompt)
+
     def test_codex_runtime_adapter_runs_planner_with_fallback_worktree_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -5375,6 +5505,36 @@ def _write_agent_pool_with_role_prompt_contracts(path, role_prompt_contracts):
         "scheduler_agent_id": "agent-scheduler",
         "updated_at": "2026-06-03T00:00:00Z",
         "role_prompt_contracts": role_prompt_contracts,
+        "agents": [
+            {
+                "agent_id": "agent-repo-map",
+                "role": "repo_map_agent",
+                "status": "idle",
+                "model_profile": "small-tooling",
+                "runtime_adapter": "codex",
+                "subscriptions": ["repo_index_stale"],
+                "inbox_path": "mailboxes/agent-repo-map/inbox.jsonl",
+                "outbox_path": "mailboxes/agent-repo-map/outbox.jsonl",
+                "lease": {
+                    "lease_id": None,
+                    "task_id": None,
+                    "expires_at": None,
+                },
+                "owned_artifacts": [],
+                "last_event_id": None,
+                "memory_summary_path": None,
+            }
+        ],
+    }
+    path.write_text(json.dumps(agent_pool, sort_keys=True), encoding="utf-8")
+
+
+def _write_agent_pool_with_role_context_packages(path, role_context_packages):
+    agent_pool = {
+        "pool_id": "test-agent-pool",
+        "scheduler_agent_id": "agent-scheduler",
+        "updated_at": "2026-06-03T00:00:00Z",
+        "role_context_packages": role_context_packages,
         "agents": [
             {
                 "agent_id": "agent-repo-map",

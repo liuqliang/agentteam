@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
+from .planner_context import build_artifact_context
 
 
 class SystemClock:
@@ -333,6 +334,7 @@ class CodexRuntimeAdapter:
                 "You are an AgentTeam runtime worker.",
                 "Execute only the bounded task described by this mailbox message.",
                 *self._role_prompt_contract_lines(message),
+                *self._role_context_package_lines(message),
                 "Return exactly one JSON object as the final response.",
                 "The JSON object must have this shape:",
                 '{"result_status":"completed|blocked|failed|cancelled","changed_files":["path"],"output":{}}',
@@ -371,6 +373,7 @@ class CodexRuntimeAdapter:
                 "Generate bounded executable backlog tasks for the requested milestone.",
                 "Read the planner context from planner_context_path before proposing tasks.",
                 *self._role_prompt_contract_lines(message),
+                *self._role_context_package_lines(message),
                 "Do not modify files. Planner tasks must report an empty changed_files list.",
                 "Return exactly one JSON object as the final response.",
                 "The JSON object must match this planner result shape:",
@@ -390,6 +393,16 @@ class CodexRuntimeAdapter:
             "Role prompt contract:",
             json.dumps(contract, sort_keys=True),
             "Follow this role contract as additional constraints without expanding scope.",
+        ]
+
+    def _role_context_package_lines(self, message):
+        role_context_path = message["payload"].get("role_context_path")
+        if not role_context_path:
+            return []
+        return [
+            "Role context package:",
+            str(role_context_path),
+            "Read role_context_path before using role-specific context.",
         ]
 
 
@@ -490,6 +503,7 @@ def run_simulation(
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
                 **_role_prompt_fields(agent_pool, agent, task),
+                **_role_context_fields(agent_pool, agent, output_dir, attempt_id),
             },
         }
         _append_jsonl(inbox_path, [message])
@@ -1719,6 +1733,75 @@ def _role_prompt_contract(agent_pool, agent):
     if contract and not isinstance(contract, dict):
         raise ValueError("role prompt contract must be an object")
     return deepcopy(contract) if contract else None
+
+
+def _role_context_fields(agent_pool, agent, output_dir, attempt_id):
+    package = _role_context_package(agent_pool, agent)
+    if not package:
+        return {}
+    context_path = _write_role_context_package(output_dir, attempt_id, agent, package)
+    return {
+        "role_context_path": str(context_path),
+        "role_context_schema_version": "role_context.v1",
+    }
+
+
+def _role_context_package(agent_pool, agent):
+    if not agent_pool:
+        return None
+    packages = agent_pool.get("role_context_packages", {})
+    if not isinstance(packages, dict):
+        raise ValueError("role_context_packages must be an object")
+    package = packages.get(agent.get("role"))
+    if package and not isinstance(package, dict):
+        raise ValueError("role context package must be an object")
+    return deepcopy(package) if package else None
+
+
+def _write_role_context_package(output_dir, attempt_id, agent, package):
+    context_notes = _role_context_string_list(package, "context_notes")
+    artifact_paths = _role_context_string_list(package, "context_artifacts")
+    context = {
+        "context_schema_version": "role_context.v1",
+        "agent_id": agent.get("agent_id"),
+        "agent_role": agent.get("role"),
+        "context_notes": context_notes,
+    }
+    if artifact_paths:
+        context["artifact_context"] = build_artifact_context(
+            artifact_paths,
+            excerpt_chars=package.get("excerpt_chars", 1200),
+        )
+    context_path = (
+        Path(output_dir)
+        / "role_contexts"
+        / f"{attempt_id}-{_safe_role_context_name(agent.get('role'))}.json"
+    )
+    context_path.parent.mkdir(parents=True, exist_ok=True)
+    context_path.write_text(json.dumps(context, sort_keys=True), encoding="utf-8")
+    return context_path
+
+
+def _role_context_string_list(package, key):
+    values = package.get(key, [])
+    if values is None:
+        return []
+    if not isinstance(values, list) or not all(
+        isinstance(value, str) and value
+        for value in values
+    ):
+        raise ValueError(f"role context package {key} must be a string array")
+    return list(values)
+
+
+def _safe_role_context_name(role):
+    role = str(role or "agent")
+    return "".join(
+        character
+        if character.isalnum() or character in {"-", "_"}
+        else "_"
+        for character in role
+    )
 
 
 def _runtime_adapter_from_profile(profile, defaults=None, project_root=None):
