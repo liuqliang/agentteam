@@ -2109,6 +2109,48 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(recovered["workers"][0]["worker_status"], "running")
             self.assertEqual(registry["workers"][0]["restart_count"], 1)
 
+    def test_file_mailbox_worker_pool_quarantines_after_restart_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+            pool = FileMailboxWorkerPoolSupervisor(
+                agent_pool_path,
+                output_dir,
+                env=env,
+                poll_interval_seconds=0.01,
+                max_restart_count=1,
+            )
+
+            pool.start()
+            pool.workers[0].process.terminate()
+            pool.workers[0].process.wait(timeout=5)
+            first_restart = pool.restart_exited_workers()
+            pool.workers[0].process.terminate()
+            pool.workers[0].process.wait(timeout=5)
+            quarantined = pool.restart_exited_workers()
+            try:
+                health = pool.health_check()
+                registry = json.loads(
+                    Path(health["process_registry_path"]).read_text(encoding="utf-8")
+                )
+            finally:
+                pool.stop()
+
+            self.assertEqual(first_restart["restarted_count"], 1)
+            self.assertEqual(quarantined["restarted_count"], 0)
+            self.assertEqual(quarantined["workers"][0]["restart_status"], "quarantined")
+            self.assertEqual(health["workers"][0]["worker_status"], "quarantined")
+            self.assertEqual(
+                health["workers"][0]["quarantine_reason"],
+                "restart_budget_exceeded",
+            )
+            self.assertEqual(registry["workers"][0]["worker_status"], "quarantined")
+            self.assertEqual(registry["workers"][0]["restart_count"], 1)
+
     def test_two_phase_scheduler_does_not_double_book_same_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -3015,6 +3057,8 @@ class M0RuntimeTests(unittest.TestCase):
                     "2",
                     "--lease-timeout-seconds",
                     "900",
+                    "--worker-max-restart-count",
+                    "1",
                 ],
                 check=False,
                 env=env,
@@ -3037,6 +3081,7 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["worker_pool"]["pool_status"], "stopped")
             self.assertEqual(summary["worker_pool"]["worker_count"], 2)
             self.assertEqual(summary["worker_pool_health"]["pool_status"], "running")
+            self.assertEqual(summary["worker_pool_health"]["max_restart_count"], 1)
             self.assertGreaterEqual(len(summary["worker_pool_supervision"]), 1)
             self.assertIn("restart_count", summary["worker_pool_health"]["workers"][0])
             self.assertEqual(

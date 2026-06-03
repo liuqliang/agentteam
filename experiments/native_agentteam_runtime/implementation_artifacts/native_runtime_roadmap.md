@@ -69,6 +69,8 @@ The implementation has already proven these layers:
     worktree, with persisted batch results.
 17. Verified batch fast-forward merge back to the source branch, with source
     cleanliness, batch commit, and `--ff-only` safety gates.
+18. Worker-pool restart budgets with quarantine state after repeated process
+    exits.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -231,6 +233,9 @@ is gated by batch verification and fast-forward merge.
 
 Goal: let the scheduler react to unhealthy workers without user intervention.
 
+Status: restart-budget and quarantine slice implemented. Remaining work is task
+reassignment away from quarantined workers.
+
 Scope:
 
 - restart failed worker processes within policy;
@@ -296,4 +301,4 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended milestone is M29: Health-Driven Reassignment.
+The next recommended milestone is M29b: Task Reassignment From Quarantined Workers.

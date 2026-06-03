@@ -2218,13 +2218,48 @@ show that one task was accepted or committed on an integration branch. A
 feature-level batch merge is the final delivery gate for a set of related
 patches.
 
+## M29a Worker Restart Budget And Quarantine
+
+M29a adds a restart budget to the resident worker pool:
+
+```python
+pool = FileMailboxWorkerPoolSupervisor(
+    agent_pool_path,
+    output_dir,
+    max_restart_count=1,
+)
+```
+
+The daemon worker-pool CLI paths expose the same policy:
+
+```text
+--worker-max-restart-count 1
+```
+
+When a worker exits, the pool restarts it while its `restart_count` is below the
+budget. Once the budget is reached, the worker is not restarted again. Health
+checks and `state/worker_process_registry.json` report:
+
+```json
+{
+  "worker_status": "quarantined",
+  "quarantine_reason": "restart_budget_exceeded",
+  "restart_count": 1
+}
+```
+
+The default `max_restart_count=None` keeps the previous unlimited restart
+behavior.
+
+M29a intentionally does not reassign tasks away from quarantined workers yet.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
 
 - transcript parsing;
 - production-grade non-fast-forward merge orchestration;
-- worker heartbeat files, restart backoff/quarantine, and health-driven task reassignment;
+- worker heartbeat files, restart backoff, and health-driven task reassignment;
 - full roadmap/design/code-map context and live planner prompt quality;
 - advanced retry backoff, batch merge queues, and cross-process recovery;
 - schema validation through a JSON Schema engine.
@@ -2292,7 +2327,8 @@ and milestone decomposition state. M27 adds file-registry resume for resident
 worker processes through attached PID supervisors. M28 adds a durable accepted
 patch integration queue and replay snapshot. M28b adds batch worktree
 verification for queued patch sets. M28c adds verified batch fast-forward merge
-back to the source branch. Claude Code is not integrated yet.
+back to the source branch. M29a adds worker-pool restart budgets and quarantine.
+Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 

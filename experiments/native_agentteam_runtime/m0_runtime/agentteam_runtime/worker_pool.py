@@ -12,15 +12,18 @@ class FileMailboxWorkerPoolSupervisor:
         runtime_profile_defaults=None,
         env=None,
         poll_interval_seconds=0.05,
+        max_restart_count=None,
     ):
         self.agent_pool_path = Path(agent_pool_path)
         self.output_dir = Path(output_dir)
         self.runtime_profile_defaults = runtime_profile_defaults
         self.env = env
         self.poll_interval_seconds = poll_interval_seconds
+        self.max_restart_count = max_restart_count
         self.process_registry_path = self.output_dir / "state" / "worker_process_registry.json"
         self.workers = []
         self.restart_counts = {}
+        self.quarantined_agents = {}
 
     def start(self):
         agents = _worker_agents(self.agent_pool_path)
@@ -50,6 +53,11 @@ class FileMailboxWorkerPoolSupervisor:
             worker = self._worker_for_agent(agent)
             registered = registry_workers.get(agent_id, {})
             self.restart_counts[agent_id] = registered.get("restart_count", 0)
+            if registered.get("worker_status") == "quarantined":
+                self.quarantined_agents[agent_id] = registered.get(
+                    "quarantine_reason",
+                    "restart_budget_exceeded",
+                )
             if registered.get("worker_pid"):
                 worker.attach_existing_process(
                     registered["worker_pid"],
@@ -89,7 +97,7 @@ class FileMailboxWorkerPoolSupervisor:
         restarted_count = 0
         workers = []
         for worker in self.workers:
-            restart = worker.restart_if_exited()
+            restart = self._restart_worker_if_allowed(worker)
             previous_worker = self._with_restart_count(restart["previous_worker"])
             if restart["restart_status"] == "restarted":
                 agent_id = restart["new_worker"]["worker_agent_id"]
@@ -148,7 +156,52 @@ class FileMailboxWorkerPoolSupervisor:
         )
 
     def _worker_health(self, worker):
-        return self._with_restart_count(worker.health())
+        health = worker.health()
+        if health.get("worker_agent_id") in self.quarantined_agents:
+            health = self._quarantine_health(worker, health)
+        return self._with_restart_count(health)
+
+    def _restart_worker_if_allowed(self, worker):
+        previous_worker = worker.health()
+        agent_id = previous_worker.get("worker_agent_id")
+        if agent_id in self.quarantined_agents:
+            return {
+                "restart_status": "quarantined",
+                "previous_worker": self._quarantine_health(worker, previous_worker),
+                "new_worker": self._quarantine_health(worker, previous_worker),
+            }
+        if previous_worker["worker_status"] == "running":
+            return {
+                "restart_status": "not_needed",
+                "previous_worker": previous_worker,
+                "new_worker": previous_worker,
+            }
+        if self._restart_budget_exceeded(agent_id):
+            self.quarantined_agents[agent_id] = "restart_budget_exceeded"
+            quarantined = self._quarantine_health(worker, previous_worker)
+            return {
+                "restart_status": "quarantined",
+                "previous_worker": previous_worker,
+                "new_worker": quarantined,
+            }
+        return worker.restart_if_exited()
+
+    def _restart_budget_exceeded(self, agent_id):
+        if self.max_restart_count is None:
+            return False
+        return self.restart_counts.get(agent_id, 0) >= self.max_restart_count
+
+    def _quarantine_health(self, worker, health):
+        return {
+            **health,
+            "worker_status": "quarantined",
+            "worker_agent_id": worker.agent_id,
+            "worker_runtime": worker.runtime,
+            "quarantine_reason": self.quarantined_agents.get(
+                worker.agent_id,
+                "restart_budget_exceeded",
+            ),
+        }
 
     def _with_restart_count(self, worker):
         agent_id = worker.get("worker_agent_id")
@@ -172,6 +225,7 @@ class FileMailboxWorkerPoolSupervisor:
         return {
             "pool_status": status,
             "worker_count": len(workers),
+            "max_restart_count": self.max_restart_count,
             "process_registry_path": str(self.process_registry_path),
             "workers": workers,
         }

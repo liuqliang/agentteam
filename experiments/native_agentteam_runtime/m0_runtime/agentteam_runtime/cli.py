@@ -96,6 +96,11 @@ def main(argv=None):
         help="Lease timeout for inflight two-phase attempts.",
     )
     parser.add_argument(
+        "--worker-max-restart-count",
+        type=int,
+        help="Maximum automatic restarts per worker before quarantine.",
+    )
+    parser.add_argument(
         "--integrate-accepted-patch",
         action="store_true",
         help="Apply accepted patch artifacts to an integration worktree without committing.",
@@ -184,6 +189,8 @@ def main(argv=None):
         parser.error("--daemon-long-running-worker-pool requires --daemon-run-until-idle")
     if args.daemon_two_phase_worker_pool and not args.daemon_run_until_idle:
         parser.error("--daemon-two-phase-worker-pool requires --daemon-run-until-idle")
+    if args.worker_max_restart_count is not None and args.worker_max_restart_count < 0:
+        parser.error("--worker-max-restart-count must be non-negative")
     if args.max_inflight < 1:
         parser.error("--max-inflight must be at least 1")
     if args.max_attempts < 1:
@@ -251,6 +258,7 @@ def main(argv=None):
                 args.agent_pool,
                 args.output_dir,
                 runtime_profile_defaults=runtime_profile_defaults,
+                max_restart_count=args.worker_max_restart_count,
             )
             worker_pool_start = worker_pool.start()
             try:
@@ -322,6 +330,7 @@ def main(argv=None):
                 args.agent_pool,
                 args.output_dir,
                 runtime_profile_defaults=runtime_profile_defaults,
+                max_restart_count=args.worker_max_restart_count,
             )
             worker_pool_start = worker_pool.start()
             runtime_adapter = FileMailboxExternalRuntimeAdapter(args.agent_pool)
