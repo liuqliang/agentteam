@@ -2331,6 +2331,24 @@ and worker registry files when present. The JSON output includes:
 This is the first M30 monitor slice. It is intentionally CLI-only and keeps
 `events.jsonl` as the source of truth.
 
+## M30b Runtime Observability Drilldown Views
+
+M30b extends the same read-only CLI with a view selector:
+
+```text
+python -m agentteam_runtime.cli \
+  --output-dir output/current \
+  --show-runtime-observability \
+  --observability-view events
+```
+
+Supported views are `summary`, `backlog`, `leases`, `events`, `sessions`,
+`workers`, and `integration-queue`. Each view includes common metadata and then
+adds the requested resource list.
+
+`--observability-view` is only valid with `--show-runtime-observability`. The
+default remains `summary`, so existing M30a usage is unchanged.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -2408,7 +2426,8 @@ verification for queued patch sets. M28c adds verified batch fast-forward merge
 back to the source branch. M29a adds worker-pool restart budgets and quarantine.
 M29b routes new work away from quarantined worker agents. M29c records explicit
 reassignment event lineage for those conservative dispatches. M30a adds a
-read-only runtime observability summary CLI. Claude Code is not
+read-only runtime observability summary CLI. M30b adds resource drilldown views.
+Claude Code is not
 integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.

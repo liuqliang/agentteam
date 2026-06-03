@@ -6,7 +6,20 @@ from .integration_queue import read_integration_queue
 from .m0_runtime import read_scheduler_state_index, replay_events
 
 
-def build_runtime_observability(output_dir):
+OBSERVABILITY_VIEWS = {
+    "summary",
+    "backlog",
+    "leases",
+    "events",
+    "sessions",
+    "workers",
+    "integration-queue",
+}
+
+
+def build_runtime_observability(output_dir, view="summary"):
+    if view not in OBSERVABILITY_VIEWS:
+        raise ValueError(f"unknown observability view: {view}")
     output_dir = Path(output_dir)
     state_index = read_scheduler_state_index(output_dir)
     events_path = output_dir / "events.jsonl"
@@ -14,13 +27,34 @@ def build_runtime_observability(output_dir):
     integration_queue = read_integration_queue(output_dir)
     worker_registry = _read_worker_registry(output_dir)
 
-    return {
+    base = {
         "observability_status": "ready",
+        "view": view,
         "output_dir": str(output_dir),
         "events_path": str(events_path),
         "state_db_path": state_index["state_db_path"],
         "event_count": state_index["event_count"],
         "latest_event": state_index["latest_event"],
+    }
+    if view == "backlog":
+        return {**base, "tasks": state_index["tasks"]}
+    if view == "leases":
+        return {**base, "leases": state_index["leases"]}
+    if view == "events":
+        return {**base, "events": _read_events(events_path)}
+    if view == "sessions":
+        return {**base, "runtime_sessions": state_index["runtime_sessions"]}
+    if view == "workers":
+        return {**base, "workers": worker_registry.get("workers", [])}
+    if view == "integration-queue":
+        return {
+            **base,
+            "integration_queue": integration_queue,
+            "integration_queue_items": integration_queue["items"],
+        }
+
+    return {
+        **base,
         "task_counts": _count_values(snapshot["tasks"].values(), "task_status"),
         "attempt_counts": _count_values(
             snapshot["attempts"].values(),
@@ -78,6 +112,13 @@ def _latest_failures(snapshot, limit=5):
             }
         )
     return failures[-limit:]
+
+
+def _read_events(events_path):
+    return [
+        json.loads(line)
+        for line in Path(events_path).read_text(encoding="utf-8").splitlines()
+    ]
 
 
 def _read_worker_registry(output_dir):

@@ -38,6 +38,20 @@ def main(argv=None):
         help="Print a read-only runtime observability summary.",
     )
     parser.add_argument(
+        "--observability-view",
+        choices=[
+            "summary",
+            "backlog",
+            "leases",
+            "events",
+            "sessions",
+            "workers",
+            "integration-queue",
+        ],
+        default="summary",
+        help="Read-only runtime observability view to print.",
+    )
+    parser.add_argument(
         "--run-until-idle",
         action="store_true",
         help="Run the file scheduler loop until no ready tasks remain.",
@@ -232,12 +246,17 @@ def main(argv=None):
         )
     if args.show_state_index and args.show_runtime_observability:
         parser.error("--show-state-index and --show-runtime-observability are mutually exclusive")
+    if not args.show_runtime_observability and args.observability_view != "summary":
+        parser.error("--observability-view requires --show-runtime-observability")
     if args.show_state_index:
         result = read_scheduler_state_index(args.output_dir)
         print(json.dumps(result, sort_keys=True))
         return
     if args.show_runtime_observability:
-        result = build_runtime_observability(args.output_dir)
+        result = build_runtime_observability(
+            args.output_dir,
+            view=args.observability_view,
+        )
         print(json.dumps(result, sort_keys=True))
         return
     _require_execution_arg(parser, args.agent_pool, "--agent-pool")

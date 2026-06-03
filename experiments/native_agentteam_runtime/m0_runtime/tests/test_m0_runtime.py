@@ -22,6 +22,7 @@ from agentteam_runtime import (
     TwoPhaseFileScheduler,
     audit_worktree_diff,
     build_planner_context,
+    build_runtime_observability,
     classify_attempt_outcome,
     normalize_task_proposal,
     read_integration_batches,
@@ -3584,6 +3585,98 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["integration_queue_counts"], {})
             self.assertEqual(summary["latest_failures"], [])
             self.assertEqual(summary["latest_event"]["event_type"], "backlog_updated")
+
+    def test_runtime_observability_supports_drilldown_views(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            run_summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+            root_event_count = len(
+                Path(run_summary["events_path"]).read_text(encoding="utf-8").splitlines()
+            )
+
+            backlog_view = build_runtime_observability(output_dir, view="backlog")
+            events_view = build_runtime_observability(output_dir, view="events")
+            sessions_view = build_runtime_observability(output_dir, view="sessions")
+            workers_view = build_runtime_observability(output_dir, view="workers")
+
+            self.assertEqual(backlog_view["view"], "backlog")
+            self.assertEqual(
+                backlog_view["tasks"],
+                [
+                    {"task_id": "TASK-001", "task_status": "done"},
+                    {"task_id": "TASK-002", "task_status": "done"},
+                ],
+            )
+            self.assertEqual(events_view["event_count"], root_event_count)
+            self.assertEqual(events_view["events"][-1]["event_type"], "backlog_updated")
+            self.assertEqual(sessions_view["runtime_sessions"][0]["session_status"], "stopped")
+            self.assertEqual(workers_view["workers"], [])
+
+    def test_cli_can_show_runtime_observability_event_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            run_summary = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+            root_event_count = len(
+                Path(run_summary["events_path"]).read_text(encoding="utf-8").splitlines()
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--output-dir",
+                    str(output_dir),
+                    "--show-runtime-observability",
+                    "--observability-view",
+                    "events",
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["view"], "events")
+            self.assertEqual(summary["event_count"], root_event_count)
+            self.assertEqual(summary["events"][-1]["event_type"], "backlog_updated")
 
     def test_cli_can_create_git_worktree_when_project_root_is_supplied(self):
         with tempfile.TemporaryDirectory() as tmp:
