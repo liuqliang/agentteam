@@ -14,11 +14,16 @@ class SystemClock:
 class FakeRuntimeAdapter:
     def run(self, message, worktree_path=None):
         if message["payload"].get("task_kind") == "decompose_backlog":
-            milestone_id = message["payload"].get("milestone_id", "M21")
-            default_worker_role = message["payload"].get(
-                "default_worker_role",
-                "repo_map_agent",
+            context = _read_planner_context_if_present(message["payload"])
+            milestone_id = context.get(
+                "milestone_id",
+                message["payload"].get("milestone_id", "M21"),
             )
+            default_worker_role = context.get(
+                "default_worker_role",
+                message["payload"].get("default_worker_role", "repo_map_agent"),
+            )
+            allowed_write_scopes = context.get("allowed_write_scopes") or ["generated/"]
             return {
                 "result_status": "completed",
                 "changed_files": [],
@@ -31,7 +36,7 @@ class FakeRuntimeAdapter:
                                 "task_id": f"TASK-{milestone_id}-GENERATED-001",
                                 "objective": f"Run generated worker task for {milestone_id}.",
                                 "read_scope": ["."],
-                                "write_scope": ["generated/"],
+                                "write_scope": [allowed_write_scopes[0]],
                                 "required_role": default_worker_role,
                                 "risk_target": "L0",
                                 "depends_on": [],
@@ -61,6 +66,13 @@ class FakeRuntimeAdapter:
             "changed_files": changed_files,
             "output": {"adapter": "fake"},
         }
+
+
+def _read_planner_context_if_present(payload):
+    context_path = payload.get("planner_context_path")
+    if not context_path:
+        return {}
+    return json.loads(Path(context_path).read_text(encoding="utf-8"))
 
 
 class ShellRuntimeAdapter:

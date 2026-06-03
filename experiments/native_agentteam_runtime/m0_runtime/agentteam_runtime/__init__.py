@@ -27,6 +27,7 @@ _EXPORTS = {
     "ShellRuntimeAdapter": (".m0_runtime", "ShellRuntimeAdapter"),
     "TwoPhaseFileScheduler": (".two_phase_scheduler", "TwoPhaseFileScheduler"),
     "audit_worktree_diff": (".m0_runtime", "audit_worktree_diff"),
+    "build_planner_context": (".planner_context", "build_planner_context"),
     "classify_attempt_outcome": (".m0_runtime", "classify_attempt_outcome"),
     "normalize_task_proposal": (".task_proposal", "normalize_task_proposal"),
     "read_scheduler_state_index": (".m0_runtime", "read_scheduler_state_index"),

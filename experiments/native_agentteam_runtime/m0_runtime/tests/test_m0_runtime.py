@@ -21,6 +21,7 @@ from agentteam_runtime import (
     ShellRuntimeAdapter,
     TwoPhaseFileScheduler,
     audit_worktree_diff,
+    build_planner_context,
     classify_attempt_outcome,
     normalize_task_proposal,
     read_scheduler_state_index,
@@ -48,6 +49,46 @@ class FixedClock:
 
 
 class M0RuntimeTests(unittest.TestCase):
+    def test_build_planner_context_summarizes_state_roles_and_scopes(self):
+        agent_pool = {
+            "agents": [
+                {"agent_id": "agent-planner", "role": "task_planner"},
+                {"agent_id": "agent-repo-map", "role": "repo_map_agent"},
+            ]
+        }
+        state = {
+            "backlog": {
+                "items": [
+                    {"task_id": "TASK-DONE", "backlog_status": "done"},
+                    {"task_id": "TASK-BLOCKED", "backlog_status": "blocked"},
+                ]
+            },
+            "steps": [{"task_id": "TASK-DONE", "step_status": "processed"}],
+            "inflight_attempts": [],
+        }
+
+        context = build_planner_context(
+            agent_pool,
+            state,
+            milestone_id="M22",
+            default_worker_role="repo_map_agent",
+            allowed_read_scopes=["."],
+            allowed_write_scopes=["generated/"],
+        )
+
+        self.assertEqual(context["context_schema_version"], "planner_context.v1")
+        self.assertEqual(context["milestone_id"], "M22")
+        self.assertEqual(context["default_worker_role"], "repo_map_agent")
+        self.assertEqual(context["allowed_write_scopes"], ["generated/"])
+        self.assertEqual(
+            context["available_agent_roles"],
+            ["repo_map_agent", "task_planner"],
+        )
+        self.assertEqual(context["backlog_summary"]["done"], 1)
+        self.assertEqual(context["backlog_summary"]["blocked"], 1)
+        self.assertEqual(context["completed_task_ids"], ["TASK-DONE"])
+        self.assertIn("proposal_contract", context)
+
     def test_task_proposal_normalizes_valid_generated_tasks(self):
         proposal = {
             "milestone_id": "M21",
@@ -96,6 +137,53 @@ class M0RuntimeTests(unittest.TestCase):
             normalize_task_proposal(
                 proposal,
                 existing_task_ids={"TASK-M21-001"},
+            )
+
+    def test_task_proposal_rejects_unknown_required_role(self):
+        proposal = {
+            "milestone_id": "M22",
+            "tasks": [
+                {
+                    "task_id": "TASK-M22-001",
+                    "objective": "Use an unknown role.",
+                    "read_scope": ["."],
+                    "write_scope": ["generated/"],
+                    "required_role": "unknown_role",
+                    "risk_target": "L0",
+                    "depends_on": [],
+                    "blockers": [],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "unknown required_role"):
+            normalize_task_proposal(
+                proposal,
+                allowed_roles={"repo_map_agent"},
+            )
+
+    def test_task_proposal_rejects_write_scope_outside_allowed_prefix(self):
+        proposal = {
+            "milestone_id": "M22",
+            "tasks": [
+                {
+                    "task_id": "TASK-M22-001",
+                    "objective": "Write outside generated scope.",
+                    "read_scope": ["."],
+                    "write_scope": ["src/"],
+                    "required_role": "repo_map_agent",
+                    "risk_target": "L0",
+                    "depends_on": [],
+                    "blockers": [],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "write_scope outside allowed scope"):
+            normalize_task_proposal(
+                proposal,
+                allowed_roles={"repo_map_agent"},
+                allowed_write_scopes=["generated/"],
             )
 
     def test_run_simulation_dispatches_ready_task_and_validates_result(self):
@@ -1901,13 +1989,24 @@ class M0RuntimeTests(unittest.TestCase):
                 output_dir,
                 clock=FixedClock(),
                 auto_decompose=True,
-                decomposition_milestone_id="M21",
+                decomposition_milestone_id="M22",
             )
 
             dispatch = scheduler.dispatch_ready()
+            planner_task = scheduler.state["backlog"]["items"][0]
+            context_path = Path(planner_task["planner_context_path"])
+            context = json.loads(context_path.read_text(encoding="utf-8"))
+            message = _read_first_jsonl(
+                output_dir
+                / "steps"
+                / "STEP-0001-DECOMPOSE-M22-001"
+                / "mailboxes"
+                / "agent-planner"
+                / "inbox.jsonl"
+            )
 
             self.assertEqual(dispatch["dispatch_status"], "dispatched")
-            self.assertEqual(dispatch["dispatched_task_ids"], ["DECOMPOSE-M21-001"])
+            self.assertEqual(dispatch["dispatched_task_ids"], ["DECOMPOSE-M22-001"])
             self.assertEqual(
                 scheduler.state["backlog"]["items"][0]["task_kind"],
                 "decompose_backlog",
@@ -1916,6 +2015,10 @@ class M0RuntimeTests(unittest.TestCase):
                 scheduler.state["backlog"]["items"][0]["required_role"],
                 "task_planner",
             )
+            self.assertTrue(context_path.exists())
+            self.assertEqual(context["milestone_id"], "M22")
+            self.assertEqual(context["allowed_write_scopes"], ["generated/"])
+            self.assertEqual(message["payload"]["planner_context_path"], str(context_path))
 
     def test_two_phase_scheduler_applies_planner_task_proposal_to_backlog(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1982,6 +2085,69 @@ class M0RuntimeTests(unittest.TestCase):
                 [item["task_id"] for item in scheduler.state["backlog"]["items"]],
                 ["DECOMPOSE-M21-001", "TASK-M21-001"],
             )
+
+    def test_two_phase_scheduler_rejects_planner_proposal_outside_context_write_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-planner", "task_planner"),
+                    ("agent-repo-map", "repo_map_agent"),
+                ],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                auto_decompose=True,
+                decomposition_milestone_id="M22",
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                "DECOMPOSE-M22-001",
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                [],
+                {
+                    "task_proposal": {
+                        "milestone_id": "M22",
+                        "tasks": [
+                            {
+                                "task_id": "TASK-M22-001",
+                                "objective": "Try to write outside context allowance.",
+                                "read_scope": ["."],
+                                "write_scope": ["src/"],
+                                "required_role": "repo_map_agent",
+                                "risk_target": "L0",
+                                "depends_on": [],
+                                "blockers": [],
+                            }
+                        ],
+                    }
+                },
+            )
+
+            collected = scheduler.collect_ready_results()
+
+            self.assertEqual(
+                collected["results"][0]["decomposition_status"],
+                "rejected",
+            )
+            self.assertEqual(
+                collected["results"][0]["failure_category"],
+                "invalid_task_proposal",
+            )
+            self.assertEqual(len(scheduler.state["backlog"]["items"]), 1)
 
     def test_two_phase_scheduler_collects_expired_inflight_as_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:

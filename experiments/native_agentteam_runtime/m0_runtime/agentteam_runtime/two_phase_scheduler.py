@@ -21,6 +21,7 @@ from .m0_runtime import (
     run_integration_verification,
     write_patch_artifact,
 )
+from .planner_context import build_planner_context
 from .task_proposal import normalize_task_proposal
 
 
@@ -44,6 +45,8 @@ class TwoPhaseFileScheduler:
         decomposition_milestone_id="M21",
         decomposition_planner_role="task_planner",
         decomposition_default_worker_role="repo_map_agent",
+        decomposition_allowed_read_scopes=None,
+        decomposition_allowed_write_scopes=None,
     ):
         if max_inflight < 1:
             raise ValueError("max_inflight must be at least 1")
@@ -68,6 +71,12 @@ class TwoPhaseFileScheduler:
         self.decomposition_milestone_id = decomposition_milestone_id
         self.decomposition_planner_role = decomposition_planner_role
         self.decomposition_default_worker_role = decomposition_default_worker_role
+        self.decomposition_allowed_read_scopes = list(
+            decomposition_allowed_read_scopes or ["."]
+        )
+        self.decomposition_allowed_write_scopes = list(
+            decomposition_allowed_write_scopes or ["generated/"]
+        )
         self.state_path = Path(
             state_path or self.output_dir / "state" / "two_phase_scheduler_state.json"
         )
@@ -271,6 +280,7 @@ class TwoPhaseFileScheduler:
                 "task_kind": task.get("task_kind", "implementation"),
                 "milestone_id": task.get("milestone_id"),
                 "default_worker_role": task.get("default_worker_role"),
+                "planner_context_path": task.get("planner_context_path"),
                 "objective": task["objective"],
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
@@ -603,12 +613,15 @@ class TwoPhaseFileScheduler:
             result["generated_task_ids"] = []
             return []
         try:
+            context = self._read_planner_context(task)
             normalized = normalize_task_proposal(
                 runtime_result.get("output", {}).get("task_proposal"),
                 existing_task_ids={
                     item["task_id"]
                     for item in self.state["backlog"]["items"]
                 },
+                allowed_roles=context["available_agent_roles"],
+                allowed_write_scopes=context["allowed_write_scopes"],
             )
         except ValueError as exc:
             result["decomposition_status"] = "rejected"
@@ -641,6 +654,15 @@ class TwoPhaseFileScheduler:
                 },
             )
         ]
+
+    def _read_planner_context(self, task):
+        context_path = task.get("planner_context_path")
+        if not context_path:
+            return {
+                "available_agent_roles": None,
+                "allowed_write_scopes": None,
+            }
+        return json.loads(Path(context_path).read_text(encoding="utf-8"))
 
     def _integrate_accepted_result(self, inflight, result, patch_path, outcome):
         if outcome["validation_status"] != "accepted":
@@ -781,6 +803,7 @@ class TwoPhaseFileScheduler:
         ):
             return
         task_id = f"DECOMPOSE-{self.decomposition_milestone_id}-001"
+        planner_context_path = self._write_planner_context(task_id)
         self.state["backlog"]["items"].append(
             {
                 "task_id": task_id,
@@ -797,9 +820,26 @@ class TwoPhaseFileScheduler:
                 "write_scope": [],
                 "required_role": self.decomposition_planner_role,
                 "default_worker_role": self.decomposition_default_worker_role,
+                "planner_context_path": str(planner_context_path),
+                "allowed_read_scopes": self.decomposition_allowed_read_scopes,
+                "allowed_write_scopes": self.decomposition_allowed_write_scopes,
                 "blockers": [],
             }
         )
+
+    def _write_planner_context(self, task_id):
+        context = build_planner_context(
+            _read_json(self.agent_pool_path),
+            self.state,
+            milestone_id=self.decomposition_milestone_id,
+            default_worker_role=self.decomposition_default_worker_role,
+            allowed_read_scopes=self.decomposition_allowed_read_scopes,
+            allowed_write_scopes=self.decomposition_allowed_write_scopes,
+        )
+        context_path = self.output_dir / "planner_contexts" / f"{task_id}.json"
+        context_path.parent.mkdir(parents=True, exist_ok=True)
+        context_path.write_text(json.dumps(context, sort_keys=True), encoding="utf-8")
+        return context_path
 
     def _task_by_id(self, task_id):
         for task in self.state["backlog"]["items"]:

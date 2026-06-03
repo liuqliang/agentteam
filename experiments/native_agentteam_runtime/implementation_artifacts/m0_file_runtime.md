@@ -1762,6 +1762,51 @@ M21 intentionally does not read roadmap/design documents, recursively decompose
 large goals, infer risk levels, package code-map context, or update semantic
 architecture artifacts from implementation feedback.
 
+## M22 Planner Context Package
+
+M22 adds a bounded planner context package to the M21 decomposition path. When
+auto-decomposition creates `DECOMPOSE-<milestone>-001`, the scheduler writes:
+
+```text
+<output-dir>/planner_contexts/DECOMPOSE-<milestone>-001.json
+```
+
+The synthetic planner task and mailbox dispatch payload include
+`planner_context_path`, so a planner worker receives a file reference rather
+than a large inline prompt. The context contains scheduler-state summaries and
+permission boundaries:
+
+```json
+{
+  "context_schema_version": "planner_context.v1",
+  "milestone_id": "M22",
+  "default_worker_role": "repo_map_agent",
+  "allowed_read_scopes": ["."],
+  "allowed_write_scopes": ["generated/"],
+  "available_agent_roles": ["repo_map_agent", "task_planner"],
+  "backlog_summary": {"total": 0, "ready": 0, "blocked": 0, "done": 0, "other": 0},
+  "completed_task_ids": []
+}
+```
+
+`normalize_task_proposal()` can now enforce context-derived constraints:
+
+- generated `required_role` must be one of the available agent roles;
+- every generated `write_scope` must be under an allowed write-scope prefix.
+
+The scheduler reads the planner context when applying a proposal and passes
+those constraints to the validator. Invalid proposals are marked
+`decomposition_status=rejected` with `failure_category=invalid_task_proposal`
+and are not appended to the backlog.
+
+`FakeRuntimeAdapter` now reads `planner_context_path` for decomposition tasks
+and uses the context milestone, default worker role, and first allowed write
+scope to synthesize a deterministic proposal.
+
+M22 intentionally does not read full roadmap/design documents, build a
+language-aware code map, include source snippets, recursively refresh context,
+or update semantic architecture artifacts.
+
 ## Intentional Fakes
 
 M0/M3a intentionally fakes or simplifies:
@@ -1769,7 +1814,7 @@ M0/M3a intentionally fakes or simplifies:
 - transcript parsing;
 - production-grade merge orchestration;
 - worker heartbeat files, restart backoff/quarantine, and health-driven task reassignment;
-- roadmap-aware decomposition context and live planner prompt quality;
+- full roadmap/design/code-map context and live planner prompt quality;
 - advanced retry backoff, queues, and cross-process recovery;
 - schema validation through a JSON Schema engine.
 
@@ -1824,7 +1869,8 @@ M20 adds static worker-pool health checks, exited-worker restart, restart counts
 registry updates, and two-phase CLI supervision around scheduler ticks. M21 adds
 opt-in planner-agent decomposition proposals, deterministic proposal validation,
 backlog insertion, and a fake planner runtime path for local end-to-end tests.
-Claude Code is not integrated yet.
+M22 adds planner context files, context-derived role/write-scope enforcement,
+and fake planner context reads. Claude Code is not integrated yet.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
