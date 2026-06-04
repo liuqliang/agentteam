@@ -389,8 +389,9 @@ field onto attempt state, the SQLite state index exposes it on attempts,
 runtime observability has a `repo-contexts` drilldown view, and a gated
 repo-context Codex smoke can verify that a worker reads the attached context
 package. The `repo-contexts` view also reports selected-file hit metrics from
-diff audit. The gated repo-context smoke has also completed successfully against
-the local Codex CLI in a controlled run.
+diff audit. The gated repo-context smoke has completed successfully against the
+local Codex CLI in a controlled run. M33d keeps role context and repo context as
+separate prompt sections and artifact files.
 
 Scope:
 
@@ -408,6 +409,8 @@ Scope:
   `repo_context_path` and reports the selected file.
 - compare `diff_audit.actual_changed_files` with repo-context selected files to
   report changed-selected hits, changed-unselected files, and hit rate.
+- document the boundary decision that role context packages should not
+  automatically inline or absorb repo context packages on the current route.
 
 Acceptance:
 
@@ -417,11 +420,6 @@ Acceptance:
 - the CLI can print the same view as JSON;
 - deterministic tests cover direct API, CLI behavior, env-gated smoke skipping,
   fake-Codex repo context consumption, and diff-audit hit metrics.
-
-Remaining follow-up work:
-
-- decide whether role context packages should automatically reference repo
-  context summaries or remain separate prompt sections.
 
 ## Longer-Term Route
 
@@ -463,7 +461,8 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to decide whether role context packages should
-reference repo context summaries automatically or remain separate prompt
-sections. Inflight migration remains a separate M29 decision gate because it
-changes ownership of already leased work.
+The next recommended step is to improve repository context selection quality
+without changing the scheduler authority model. Candidate slices include test
+candidate selection, better path/symbol ranking, and language-aware extractors
+behind conservative fallbacks. Inflight migration remains a separate M29
+decision gate because it changes ownership of already leased work.
