@@ -197,6 +197,60 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(len(files["pkg/module.py"]["sha256"]), 64)
             self.assertNotIn("notes.tmp", files)
 
+    def test_repo_map_extracts_python_symbol_summaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "runtime"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "pkg" / "service.py").write_text(
+                "\n".join(
+                    [
+                        "import os",
+                        "from pathlib import Path",
+                        "",
+                        "CONSTANT = 'SECRET_BODY_MARKER'",
+                        "",
+                        "class Worker:",
+                        "    def run(self):",
+                        "        return Path(os.getcwd())",
+                        "",
+                        "def build_worker():",
+                        "    return Worker()",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "pkg/service.py"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add service"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            repo_map = build_repository_map(repo, output_dir)
+
+            symbols_path = output_dir / "state" / "repo_map" / "symbols.json"
+            self.assertEqual(repo_map["paths"]["symbols_path"], str(symbols_path))
+            self.assertTrue(symbols_path.exists())
+            self.assertEqual(repo_map["symbols"]["symbols_schema_version"], "repo_symbols.v1")
+            symbols_by_path = {
+                file_symbols["path"]: file_symbols
+                for file_symbols in repo_map["symbols"]["files"]
+            }
+            service = symbols_by_path["pkg/service.py"]
+            self.assertEqual(service["imports"], ["os", "pathlib.Path"])
+            self.assertEqual(service["functions"], [{"name": "build_worker", "line": 10}])
+            self.assertEqual(
+                service["classes"],
+                [{"name": "Worker", "line": 6, "methods": [{"name": "run", "line": 7}]}],
+            )
+            self.assertNotIn("SECRET_BODY_MARKER", json.dumps(repo_map["symbols"]))
+
     def test_task_proposal_normalizes_valid_generated_tasks(self):
         proposal = {
             "milestone_id": "M21",

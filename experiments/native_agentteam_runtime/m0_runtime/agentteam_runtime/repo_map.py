@@ -1,3 +1,4 @@
+import ast
 import hashlib
 import json
 import subprocess
@@ -6,6 +7,8 @@ from pathlib import Path
 
 REPO_MAP_SCHEMA_VERSION = "repo_map.v1"
 REPO_INVENTORY_SCHEMA_VERSION = "repo_inventory.v1"
+REPO_SYMBOLS_SCHEMA_VERSION = "repo_symbols.v1"
+SYMBOL_EXTRACTION_VERSION = "python_ast.v1"
 
 
 def build_repository_map(project_root, output_dir, max_file_bytes=65536):
@@ -16,6 +19,7 @@ def build_repository_map(project_root, output_dir, max_file_bytes=65536):
 
     warnings = []
     inventory_path = repo_map_dir / "inventory.json"
+    symbols_path = repo_map_dir / "symbols.json"
     manifest_path = repo_map_dir / "manifest.json"
     tracked_files = _tracked_files(project_root, warnings)
     inventory = {
@@ -29,6 +33,7 @@ def build_repository_map(project_root, output_dir, max_file_bytes=65536):
     inventory["files"] = [
         entry for entry in inventory["files"] if entry is not None
     ]
+    symbols = _build_symbols(project_root, inventory["files"], max_file_bytes, warnings)
 
     manifest = {
         "repo_map_schema_version": REPO_MAP_SCHEMA_VERSION,
@@ -37,20 +42,26 @@ def build_repository_map(project_root, output_dir, max_file_bytes=65536):
         "warning_count": len(warnings),
         "warnings": warnings,
         "inventory_path": str(inventory_path),
+        "symbols_path": str(symbols_path),
         "inventory_file_count": len(inventory["files"]),
+        "symbol_file_count": len(symbols["files"]),
+        "symbol_extraction_version": SYMBOL_EXTRACTION_VERSION,
         "inventory_options": {
             "max_file_bytes": max_file_bytes,
         },
     }
 
     _write_json(inventory_path, inventory)
+    _write_json(symbols_path, symbols)
     _write_json(manifest_path, manifest)
 
     return {
         "manifest": manifest,
         "inventory": inventory,
+        "symbols": symbols,
         "paths": {
             "inventory_path": str(inventory_path),
+            "symbols_path": str(symbols_path),
             "manifest_path": str(manifest_path),
         },
     }
@@ -113,6 +124,101 @@ def _inventory_entry(project_root, relative_path, max_file_bytes, warnings):
             }
         )
     return entry
+
+
+def _build_symbols(project_root, inventory_files, max_file_bytes, warnings):
+    symbol_files = []
+    for inventory_entry in inventory_files:
+        if inventory_entry["language"] != "python":
+            continue
+        if inventory_entry["size_bytes"] > max_file_bytes:
+            warnings.append(
+                {
+                    "path": inventory_entry["path"],
+                    "warning": "symbol_file_exceeds_max_file_bytes",
+                    "size_bytes": inventory_entry["size_bytes"],
+                    "max_file_bytes": max_file_bytes,
+                }
+            )
+            continue
+        symbol_files.append(
+            _python_symbol_summary(project_root, inventory_entry["path"], warnings)
+        )
+
+    return {
+        "symbols_schema_version": REPO_SYMBOLS_SCHEMA_VERSION,
+        "symbol_extraction_version": SYMBOL_EXTRACTION_VERSION,
+        "files": [
+            file_symbols for file_symbols in symbol_files
+            if file_symbols is not None
+        ],
+    }
+
+
+def _python_symbol_summary(project_root, relative_path, warnings):
+    file_path = project_root / relative_path
+    try:
+        source = file_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=relative_path)
+    except (SyntaxError, UnicodeDecodeError) as exc:
+        warnings.append(
+            {
+                "path": relative_path,
+                "warning": "python_ast_parse_failed",
+                "message": str(exc),
+            }
+        )
+        return None
+    except FileNotFoundError:
+        warnings.append({"path": relative_path, "warning": "missing_during_symbol_scan"})
+        return None
+
+    return {
+        "path": relative_path,
+        "imports": _python_imports(tree),
+        "functions": _python_top_level_functions(tree),
+        "classes": _python_classes(tree),
+    }
+
+
+def _python_imports(tree):
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                _append_unique(imports, alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = "." * node.level + (node.module or "")
+            for alias in node.names:
+                name = f"{module}.{alias.name}" if module else alias.name
+                _append_unique(imports, name)
+    return imports
+
+
+def _python_top_level_functions(tree):
+    functions = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions.append({"name": node.name, "line": node.lineno})
+    return functions
+
+
+def _python_classes(tree):
+    classes = []
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        methods = []
+        for child in node.body:
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                methods.append({"name": child.name, "line": child.lineno})
+        classes.append({"name": node.name, "line": node.lineno, "methods": methods})
+    return classes
+
+
+def _append_unique(values, value):
+    if value not in values:
+        values.append(value)
 
 
 def _language_for_path(path):
