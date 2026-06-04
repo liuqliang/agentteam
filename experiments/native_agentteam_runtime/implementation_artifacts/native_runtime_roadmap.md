@@ -77,6 +77,10 @@ The implementation has already proven these layers:
     so scheduler and resident worker-pool paths can inherit Codex model,
     sandbox, timeout, command, fallback worktree settings, model-facing role
     guidance, and explicit context references from the agent pool.
+21. Repository-map-backed context generation with tracked-file inventory,
+    Python AST symbol summaries, task-scoped `repo_context.v1` packages,
+    dispatch payload paths, Codex prompt references, and conservative cache
+    reuse for clean same-HEAD repositories.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -327,15 +331,61 @@ Remaining follow-up work:
 - expose effective role profile selection in observability if long-running
   debugging needs it.
 
+### M32: Repository Map Context Generation
+
+Goal: give implementation workers a compact navigation map for the target
+repository without dumping source files into planner or worker prompts.
+
+Status: implemented for the current route. M32a added tracked-file inventory,
+M32b added Python AST symbol summaries, M32c added task-scoped repo context
+packages, M32d wired context paths into scheduler dispatch and Codex prompts,
+and M32e added clean-cache reuse with dirty worktree invalidation.
+
+Scope:
+
+- build `state/repo_map/inventory.json` from `git ls-files`, with `rg --files`
+  fallback when Git metadata is unavailable;
+- record path, size, extension-derived language, broad category, and bounded
+  content digest metadata;
+- build `state/repo_map/symbols.json` for Python files using the standard
+  library `ast` module;
+- keep unsupported languages inventory-only;
+- build bounded `repo_context.v1` packages under `repo_contexts/` using task
+  objective, `read_scope`, `write_scope`, and symbol/path matches;
+- attach `repo_context_path` and `repo_context_schema_version` to dispatch
+  payloads when `project_root` is available;
+- prompt Codex workers to read the repo context file before selecting
+  implementation files;
+- reuse repo maps only for clean worktrees at the same HEAD with matching scan
+  options and symbol extraction version.
+
+Acceptance:
+
+- repo inventory, Python symbols, task context selection, dispatch wiring,
+  prompt rendering, and cache invalidation are covered by deterministic unit
+  tests;
+- repo context files contain bounded metadata and symbol summaries, not full
+  source bodies;
+- dirty or unversioned worktrees rebuild the map and record an explicit warning;
+- normal unit tests do not require live Codex calls.
+
+Remaining follow-up work:
+
+- add observability views that show which repo context package was attached to
+  each attempt;
+- measure whether live Codex workers actually inspect and use selected files;
+- add language-aware extractors through compilers, LSPs, Tree-sitter, ctags, or
+  build-system queries only after the bounded MVP proves useful.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
 
 - MCP tool and context compatibility as adapter capabilities, not as the native
   control plane, and initially around Codex runtime sessions.
-- Repository map integration using language-aware tools such as compilers, LSP,
-  build systems, and static analyzers, with compact summaries fed to planners
-  and role context packages.
+- Richer repository analysis using language-aware tools such as compilers, LSP,
+  build systems, and static analyzers, with compact summaries fed to repo and
+  role context packages after the M32 MVP is validated.
 - A stronger durable store if file locking and JSONL replay become insufficient
   for long project runs.
 - Policy-governed semantic feedback where implementation evidence can propose
@@ -367,6 +417,7 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is repository-map-backed context generation. Inflight
+The next recommended step is to validate repo-context effectiveness in live
+Codex worker runs and add observability for selected context packages. Inflight
 migration remains a separate M29 decision gate because it changes ownership of
 already leased work.
