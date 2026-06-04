@@ -22,6 +22,7 @@ from agentteam_runtime import (
     TwoPhaseFileScheduler,
     audit_worktree_diff,
     build_planner_context,
+    build_repository_map,
     build_runtime_observability,
     classify_attempt_outcome,
     normalize_task_proposal,
@@ -155,6 +156,46 @@ class M0RuntimeTests(unittest.TestCase):
                 context["artifact_context"]["warnings"],
                 [{"path": str(missing), "warning": "missing"}],
             )
+
+    def test_repo_map_inventory_records_tracked_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "runtime"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "pkg" / "module.py").write_text(
+                "import os\n\n\ndef run():\n    return os.getcwd()\n",
+                encoding="utf-8",
+            )
+            (repo / "notes.tmp").write_text("not tracked\n", encoding="utf-8")
+            subprocess.run(["git", "add", "pkg/module.py"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add module"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            repo_map = build_repository_map(repo, output_dir)
+
+            inventory_path = output_dir / "state" / "repo_map" / "inventory.json"
+            manifest_path = output_dir / "state" / "repo_map" / "manifest.json"
+            self.assertEqual(repo_map["manifest"]["repo_map_schema_version"], "repo_map.v1")
+            self.assertEqual(repo_map["manifest"]["scan_status"], "ok")
+            self.assertEqual(repo_map["paths"]["inventory_path"], str(inventory_path))
+            self.assertTrue(inventory_path.exists())
+            self.assertTrue(manifest_path.exists())
+
+            files = {entry["path"]: entry for entry in repo_map["inventory"]["files"]}
+            self.assertEqual(sorted(files), ["README.md", "pkg/module.py"])
+            self.assertEqual(files["README.md"]["language"], "markdown")
+            self.assertEqual(files["README.md"]["category"], "docs")
+            self.assertEqual(files["pkg/module.py"]["language"], "python")
+            self.assertEqual(files["pkg/module.py"]["category"], "source")
+            self.assertEqual(len(files["pkg/module.py"]["sha256"]), 64)
+            self.assertNotIn("notes.tmp", files)
 
     def test_task_proposal_normalizes_valid_generated_tasks(self):
         proposal = {
