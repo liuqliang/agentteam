@@ -22,6 +22,7 @@ from agentteam_runtime import (
     TwoPhaseFileScheduler,
     audit_worktree_diff,
     build_planner_context,
+    build_repo_context,
     build_repository_map,
     build_runtime_observability,
     classify_attempt_outcome,
@@ -250,6 +251,80 @@ class M0RuntimeTests(unittest.TestCase):
                 [{"name": "Worker", "line": 6, "methods": [{"name": "run", "line": 7}]}],
             )
             self.assertNotIn("SECRET_BODY_MARKER", json.dumps(repo_map["symbols"]))
+
+    def test_repo_context_selects_files_inside_task_scopes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "runtime"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "docs").mkdir()
+            (repo / "tests").mkdir()
+            (repo / "pkg" / "module.py").write_text(
+                "def build_worker():\n    return 'worker'\n",
+                encoding="utf-8",
+            )
+            (repo / "pkg" / "helper.py").write_text(
+                "def helper():\n    return 'helper'\n",
+                encoding="utf-8",
+            )
+            (repo / "docs" / "guide.md").write_text(
+                "# Guide\n\nUnrelated docs.\n",
+                encoding="utf-8",
+            )
+            (repo / "tests" / "test_module.py").write_text(
+                "from pkg.module import build_worker\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "pkg/module.py", "pkg/helper.py", "docs/guide.md", "tests/test_module.py"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "add context files"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            task = {
+                "task_id": "TASK-CTX-001",
+                "objective": "Update build_worker behavior in pkg/module.py",
+                "read_scope": ["pkg/"],
+                "write_scope": ["pkg/module.py"],
+            }
+
+            context = build_repo_context(
+                repo,
+                output_dir,
+                task,
+                agent_role="repo_map_agent",
+                max_files=3,
+            )
+
+            context_path = output_dir / "repo_contexts" / "TASK-CTX-001-repo_map_agent.json"
+            self.assertEqual(context["repo_context_schema_version"], "repo_context.v1")
+            self.assertEqual(context["repo_context_path"], str(context_path))
+            self.assertTrue(context_path.exists())
+            self.assertEqual(context["task_id"], "TASK-CTX-001")
+            self.assertEqual(context["agent_role"], "repo_map_agent")
+            self.assertEqual(context["selected_files"][0]["path"], "pkg/module.py")
+            self.assertEqual(
+                context["selected_files"][0]["selection_reasons"],
+                ["write_scope", "read_scope", "objective"],
+            )
+            self.assertEqual(
+                context["selected_files"][0]["symbols"]["functions"],
+                [{"name": "build_worker", "line": 1}],
+            )
+            self.assertIn("repo_map_manifest_path", context)
+            self.assertGreaterEqual(context["omitted_file_count"], 1)
+            self.assertNotIn(
+                "docs/guide.md",
+                [entry["path"] for entry in context["selected_files"]],
+            )
 
     def test_task_proposal_normalizes_valid_generated_tasks(self):
         proposal = {

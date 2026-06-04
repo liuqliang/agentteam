@@ -1,12 +1,14 @@
 import ast
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
 
 
 REPO_MAP_SCHEMA_VERSION = "repo_map.v1"
 REPO_INVENTORY_SCHEMA_VERSION = "repo_inventory.v1"
+REPO_CONTEXT_SCHEMA_VERSION = "repo_context.v1"
 REPO_SYMBOLS_SCHEMA_VERSION = "repo_symbols.v1"
 SYMBOL_EXTRACTION_VERSION = "python_ast.v1"
 
@@ -67,6 +69,52 @@ def build_repository_map(project_root, output_dir, max_file_bytes=65536):
     }
 
 
+def build_repo_context(
+    project_root,
+    output_dir,
+    task,
+    agent_role,
+    max_files=8,
+    max_file_bytes=65536,
+    context_id=None,
+):
+    output_dir = Path(output_dir)
+    repo_map = build_repository_map(
+        project_root,
+        output_dir,
+        max_file_bytes=max_file_bytes,
+    )
+    task_id = str(task.get("task_id") or "unknown-task")
+    context_name = _safe_context_name(context_id or task_id)
+    role_name = _safe_context_name(agent_role or "unknown-role")
+    context_path = output_dir / "repo_contexts" / f"{context_name}-{role_name}.json"
+    context_path.parent.mkdir(parents=True, exist_ok=True)
+
+    symbol_by_path = {
+        file_symbols["path"]: file_symbols
+        for file_symbols in repo_map["symbols"]["files"]
+    }
+    ranked = _rank_inventory_files(repo_map["inventory"]["files"], symbol_by_path, task)
+    selected = ranked[:max_files]
+    context = {
+        "repo_context_schema_version": REPO_CONTEXT_SCHEMA_VERSION,
+        "repo_context_path": str(context_path),
+        "task_id": task_id,
+        "agent_role": agent_role,
+        "repo_map_manifest_path": repo_map["paths"]["manifest_path"],
+        "repo_map_inventory_path": repo_map["paths"]["inventory_path"],
+        "repo_map_symbols_path": repo_map["paths"]["symbols_path"],
+        "selected_files": [
+            _context_file_entry(entry, symbol_by_path.get(entry["path"]), score, reasons)
+            for score, reasons, entry in selected
+        ],
+        "omitted_file_count": max(0, len(ranked) - len(selected)),
+        "warnings": repo_map["manifest"]["warnings"],
+    }
+    _write_json(context_path, context)
+    return context
+
+
 def _tracked_files(project_root, warnings):
     completed = _run(["git", "-C", str(project_root), "ls-files"])
     if completed.returncode == 0:
@@ -96,6 +144,113 @@ def _tracked_files(project_root, warnings):
         }
     )
     return []
+
+
+def _rank_inventory_files(inventory_files, symbol_by_path, task):
+    read_scope = _string_list(task.get("read_scope"))
+    write_scope = _string_list(task.get("write_scope"))
+    objective_tokens = _objective_tokens(task.get("objective"))
+    ranked = []
+    for entry in inventory_files:
+        score = 0
+        reasons = []
+        path = entry["path"]
+        if _path_in_scopes(path, write_scope):
+            score += 100
+            reasons.append("write_scope")
+        if _path_in_scopes(path, read_scope):
+            score += 50
+            reasons.append("read_scope")
+        if _matches_objective(path, symbol_by_path.get(path), objective_tokens):
+            score += 10
+            reasons.append("objective")
+        ranked.append((score, reasons, entry))
+    ranked.sort(key=lambda item: (-item[0], item[2]["path"]))
+    return ranked
+
+
+def _context_file_entry(entry, symbols, score, reasons):
+    context_entry = {
+        "path": entry["path"],
+        "language": entry["language"],
+        "category": entry["category"],
+        "size_bytes": entry["size_bytes"],
+        "selection_score": score,
+        "selection_reasons": reasons,
+    }
+    if "sha256" in entry:
+        context_entry["sha256"] = entry["sha256"]
+    if symbols:
+        context_entry["symbols"] = {
+            "imports": symbols["imports"],
+            "functions": symbols["functions"],
+            "classes": symbols["classes"],
+        }
+    return context_entry
+
+
+def _path_in_scopes(path, scopes):
+    if not scopes:
+        return False
+    normalized_path = _normalize_scope(path)
+    for scope in scopes:
+        normalized_scope = _normalize_scope(scope)
+        if normalized_scope in {"", "."}:
+            return True
+        if normalized_scope.endswith("/"):
+            if normalized_path.startswith(normalized_scope):
+                return True
+        elif normalized_path == normalized_scope:
+            return True
+    return False
+
+
+def _normalize_scope(value):
+    normalized = str(value).strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def _objective_tokens(objective):
+    if not objective:
+        return set()
+    tokens = set()
+    for token in re.findall(r"[A-Za-z0-9_]+", str(objective).lower()):
+        tokens.add(token)
+        tokens.update(part for part in token.split("_") if part)
+    return tokens
+
+
+def _matches_objective(path, symbols, objective_tokens):
+    if not objective_tokens:
+        return False
+    haystack = _objective_haystack(path, symbols)
+    return any(token in haystack for token in objective_tokens)
+
+
+def _objective_haystack(path, symbols):
+    values = [path.lower()]
+    if symbols:
+        values.extend(symbol.lower() for symbol in symbols["imports"])
+        values.extend(function["name"].lower() for function in symbols["functions"])
+        for class_symbols in symbols["classes"]:
+            values.append(class_symbols["name"].lower())
+            values.extend(method["name"].lower() for method in class_symbols["methods"])
+    return "\n".join(values)
+
+
+def _string_list(value):
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [str(item) for item in value]
+
+
+def _safe_context_name(value):
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value)).strip("-")
+    return safe or "unknown"
 
 
 def _inventory_entry(project_root, relative_path, max_file_bytes, warnings):
