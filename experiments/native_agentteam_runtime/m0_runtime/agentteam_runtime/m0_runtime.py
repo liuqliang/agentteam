@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
 from .planner_context import build_artifact_context
+from .repo_map import build_repo_context, REPO_CONTEXT_SCHEMA_VERSION
 
 
 class SystemClock:
@@ -335,6 +336,7 @@ class CodexRuntimeAdapter:
                 "Execute only the bounded task described by this mailbox message.",
                 *self._role_prompt_contract_lines(message),
                 *self._role_context_package_lines(message),
+                *self._repo_context_package_lines(message),
                 "Return exactly one JSON object as the final response.",
                 "The JSON object must have this shape:",
                 '{"result_status":"completed|blocked|failed|cancelled","changed_files":["path"],"output":{}}',
@@ -374,6 +376,7 @@ class CodexRuntimeAdapter:
                 "Read the planner context from planner_context_path before proposing tasks.",
                 *self._role_prompt_contract_lines(message),
                 *self._role_context_package_lines(message),
+                *self._repo_context_package_lines(message),
                 "Do not modify files. Planner tasks must report an empty changed_files list.",
                 "Return exactly one JSON object as the final response.",
                 "The JSON object must match this planner result shape:",
@@ -403,6 +406,16 @@ class CodexRuntimeAdapter:
             "Role context package:",
             str(role_context_path),
             "Read role_context_path before using role-specific context.",
+        ]
+
+    def _repo_context_package_lines(self, message):
+        repo_context_path = message["payload"].get("repo_context_path")
+        if not repo_context_path:
+            return []
+        return [
+            "Repo context package:",
+            str(repo_context_path),
+            "Read repo_context_path before selecting implementation files.",
         ]
 
 
@@ -504,6 +517,7 @@ def run_simulation(
                 "write_scope": task["write_scope"],
                 **_role_prompt_fields(agent_pool, agent, task),
                 **_role_context_fields(agent_pool, agent, output_dir, attempt_id),
+                **_repo_context_fields(project_root, output_dir, task, agent, attempt_id),
             },
         }
         _append_jsonl(inbox_path, [message])
@@ -1743,6 +1757,22 @@ def _role_context_fields(agent_pool, agent, output_dir, attempt_id):
     return {
         "role_context_path": str(context_path),
         "role_context_schema_version": "role_context.v1",
+    }
+
+
+def _repo_context_fields(project_root, output_dir, task, agent, attempt_id):
+    if not project_root:
+        return {}
+    context = build_repo_context(
+        project_root,
+        output_dir,
+        task,
+        agent_role=agent.get("role"),
+        context_id=attempt_id,
+    )
+    return {
+        "repo_context_path": context["repo_context_path"],
+        "repo_context_schema_version": REPO_CONTEXT_SCHEMA_VERSION,
     }
 
 

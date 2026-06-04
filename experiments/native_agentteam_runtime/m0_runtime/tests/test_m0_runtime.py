@@ -656,6 +656,57 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertLessEqual(source["excerpt_chars"], 80)
             self.assertNotIn("TAIL_SHOULD_BE_OMITTED", json.dumps(context))
 
+    def test_run_simulation_dispatch_includes_repo_context_path_when_project_root_is_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "pkg" / "module.py").write_text(
+                "def build_worker():\n    return 'worker'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "pkg/module.py"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add module"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            task = _backlog_task("TASK-001", write_scope=["generated/"])
+            task["objective"] = "Update build_worker behavior in pkg/module.py"
+            task["read_scope"] = ["pkg/"]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[task],
+            )
+
+            run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            message = _read_first_jsonl(
+                output_dir / "mailboxes" / "agent-repo-map" / "inbox.jsonl"
+            )
+            context_path = Path(message["payload"]["repo_context_path"])
+            context = json.loads(context_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                message["payload"]["repo_context_schema_version"],
+                "repo_context.v1",
+            )
+            self.assertTrue(context_path.exists())
+            self.assertEqual(context["repo_context_schema_version"], "repo_context.v1")
+            self.assertEqual(context["selected_files"][0]["path"], "pkg/module.py")
+
     def test_scheduler_loop_runs_ready_tasks_until_idle(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2670,6 +2721,63 @@ class M0RuntimeTests(unittest.TestCase):
                 context["artifact_context"]["sources"][0]["headings"],
                 ["Role Context", "Boundary"],
             )
+
+    def test_two_phase_scheduler_dispatch_includes_repo_context_path_when_project_root_is_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "pkg" / "module.py").write_text(
+                "def build_worker():\n    return 'worker'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "pkg/module.py"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add module"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            task = _backlog_task("TASK-001", write_scope=["generated/"])
+            task["objective"] = "Update build_worker behavior in pkg/module.py"
+            task["read_scope"] = ["pkg/"]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[task],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+            )
+
+            scheduler.dispatch_ready()
+
+            message = _read_first_jsonl(
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-001"
+                / "mailboxes"
+                / "agent-repo-map"
+                / "inbox.jsonl"
+            )
+            context_path = Path(message["payload"]["repo_context_path"])
+            context = json.loads(context_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                message["payload"]["repo_context_schema_version"],
+                "repo_context.v1",
+            )
+            self.assertTrue(context_path.exists())
+            self.assertEqual(context["selected_files"][0]["path"], "pkg/module.py")
 
     def test_two_phase_scheduler_records_reassignment_event_for_unavailable_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5152,6 +5260,32 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("Role context package:", prompt)
         self.assertIn("ATTEMPT-001-repo_map_agent.json", prompt)
         self.assertIn("Read role_context_path before using role-specific context.", prompt)
+
+    def test_codex_runtime_adapter_includes_repo_context_path(self):
+        message = {
+            "message_id": "MSG-0001",
+            "from_agent": "agent-scheduler",
+            "to_agent": "agent-repo-map",
+            "message_type": "dispatch_task",
+            "correlation_id": "TASK-001:ATTEMPT-001",
+            "created_at": "2026-06-03T00:00:00Z",
+            "lease_expires_at": "2026-06-03T00:15:00Z",
+            "payload": {
+                "task_id": "TASK-001",
+                "attempt_id": "ATTEMPT-001",
+                "lease_id": "LEASE-001",
+                "objective": "Implement a bounded change.",
+                "read_scope": ["."],
+                "write_scope": ["generated/"],
+                "repo_context_path": "/tmp/repo_contexts/ATTEMPT-001-repo_map_agent.json",
+            },
+        }
+
+        prompt = CodexRuntimeAdapter(command=["codex", "exec"])._build_prompt(message)
+
+        self.assertIn("Repo context package:", prompt)
+        self.assertIn("ATTEMPT-001-repo_map_agent.json", prompt)
+        self.assertIn("Read repo_context_path before selecting implementation files.", prompt)
 
     def test_codex_runtime_adapter_runs_planner_with_fallback_worktree_path(self):
         with tempfile.TemporaryDirectory() as tmp:
