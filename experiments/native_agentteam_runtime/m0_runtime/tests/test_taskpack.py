@@ -88,6 +88,39 @@ class TaskpackTests(unittest.TestCase):
                     taskpack_id="unsupported-author",
                 )
 
+    def test_codex_taskpack_author_rejects_dirty_repo_before_running_codex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            fake_codex = tmp_path / "fake_codex_author.py"
+            marker = tmp_path / "codex-ran.marker"
+            _init_repo(repo)
+            (repo / "untracked.txt").write_text("preexisting untracked file\n", encoding="utf-8")
+            fake_codex.write_text(
+                "\n".join(
+                    [
+                        "import pathlib",
+                        f"pathlib.Path({str(marker)!r}).write_text('ran', encoding='utf-8')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                draft_taskpack_from_goal(
+                    project_root=repo,
+                    goal="Improve fixture behavior.",
+                    draft_root=drafts,
+                    author_runtime="codex",
+                    taskpack_id="dirty-codex-author",
+                    codex_command=["python3", str(fake_codex)],
+                    codex_timeout_seconds=5,
+                )
+
+            self.assertIn("clean", str(raised.exception))
+            self.assertFalse(marker.exists())
+
     def test_draft_taskpack_files_writes_expected_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

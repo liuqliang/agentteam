@@ -74,10 +74,13 @@ def _draft_with_codex(
     ):
         raise TaskpackValidationError("codex taskpack draft_root must not overlap the target repository")
 
+    repo_status_before = _git_status_signature(project_root)
+    if repo_status_before:
+        raise TaskpackValidationError("codex taskpack author requires a clean target repository")
+
     taskpack_dir.mkdir(parents=True, exist_ok=False)
     author_context_dir.mkdir(parents=True, exist_ok=False)
 
-    repo_status_before = _git_status_signature(project_root)
     repo_map = build_repository_map(project_root, author_context_dir)
 
     prompt = _author_prompt(
