@@ -41,6 +41,11 @@ experiments/native_agentteam_runtime/
   README.md
   runtime_model.md
   m0_experiment_plan.md
+  m0_runtime/
+    agentteam_runtime/
+      agentteam.py
+      taskpack.py
+      taskpack_author.py
   schemas/
     agent_pool.schema.json
     agent_state.schema.json
@@ -61,11 +66,82 @@ M0 validates the scheduling model with files only:
 - role agents can be represented by durable `agent_state` records;
 - mailbox messages can wake role agents without relying on chat context;
 - events can reconstruct what happened;
-- a Codex runtime adapter can be specified without being implemented yet.
+- a Codex runtime adapter can be selected by runtime profile;
+- a taskpack can be drafted, validated, frozen, and launched through the
+  existing Python runtime CLI.
 
-The first M0 implementation may be a simple script or manual simulation. The
-important output is whether the schemas are enough to represent scheduling,
-leases, role ownership, and result validation.
+The current implementation is still an experiment. It uses a module CLI rather
+than an installed `agentteam` executable:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.agentteam --help
+```
+
+Shell scripts in or around this experiment are development helpers. They are
+not the primary operator interface.
+
+## Taskpack Authoring Flow
+
+The taskpack path turns a target repository plus a human goal into runtime
+artifacts that the scheduler can consume.
+
+1. Draft a taskpack:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.agentteam taskpack draft \
+  --project-root /path/to/repo \
+  --goal "optimize the target behavior under an explicit metric" \
+  --draft-root /tmp/agentteam-taskpacks/drafts \
+  --taskpack-id example-taskpack \
+  --author-runtime fake
+```
+
+2. Validate the draft:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.agentteam taskpack validate \
+  /tmp/agentteam-taskpacks/drafts/example-taskpack
+```
+
+3. Freeze the accepted draft:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.agentteam taskpack freeze \
+  /tmp/agentteam-taskpacks/drafts/example-taskpack \
+  --frozen-root /tmp/agentteam-taskpacks/frozen
+```
+
+4. Run the frozen taskpack:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.agentteam run \
+  /tmp/agentteam-taskpacks/frozen/example-taskpack \
+  --run-root /tmp/agentteam-runs \
+  --one-shot
+```
+
+Successful `taskpack` commands print JSON to stdout. Draft, validation, freeze,
+and pre-launch failures print JSON to stderr and exit `1`. After pre-launch
+translation succeeds, `run` delegates to `agentteam_runtime.cli` and forwards
+that child process's stdout, stderr, and exit code.
+
+`--author-runtime fake` creates deterministic fixture taskpacks for tests and
+smoke runs. `--author-runtime codex` asks the Codex CLI to author the draft. The
+Codex author path requires a clean target Git repository, writes scratch context
+outside the taskpack directory, and fails validation if the author edits the
+target repository or leaves unexpected files in the taskpack.
+
+Frozen taskpacks are immutable launch inputs. The freezer rejects extra draft
+files and symlinks before copying artifacts and writing `manifest.json`.
+
+The taskpack launcher currently translates `fake` and `codex` runtime backends.
+It intentionally rejects `shell` taskpack launches until shell command mapping
+has an explicit design.
 
 ## Relationship To Codex
 
