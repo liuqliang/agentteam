@@ -8,6 +8,7 @@ from pathlib import Path
 
 TASKPACK_SCHEMA_VERSION = "taskpack.v1"
 DEFAULT_WORKER_ROLE = "implementation_worker"
+TASKPACK_RUNTIME_BACKENDS = {"fake", "shell", "codex"}
 TASKPACK_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 
 
@@ -329,30 +330,48 @@ def build_taskpack_runtime_args(
         raise TaskpackValidationError("taskpack must be frozen before runtime launch")
 
     taskpack_id = _validate_existing_taskpack_id(taskpack.get("taskpack_id"))
+    files = taskpack.get("files", {})
+    if not isinstance(files, dict):
+        raise TaskpackValidationError("taskpack files must be an object")
+    agent_pool_path = _resolve_companion_artifact_path(
+        taskpack_dir,
+        files.get("agent_pool", "agent_pool.json"),
+        "files.agent_pool",
+    )
+    backlog_path = _resolve_companion_artifact_path(
+        taskpack_dir,
+        files.get("backlog", "backlog.json"),
+        "files.backlog",
+    )
+    runtime_backend = _validate_taskpack_runtime_backend(taskpack.get("runtime"))
+    project_root = taskpack.get("project_root")
+    if not isinstance(project_root, str) or not project_root:
+        raise TaskpackValidationError("project_root must be a non-empty string")
+    verification_command = _validate_taskpack_verification_command(loaded.get("verification"))
+    command_json = json.dumps(verification_command)
+
     run_root = Path(run_root).resolve()
     run_dir = (run_root / taskpack_id).resolve()
     _require_contained_path(run_dir, run_root, "run_dir")
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    files = taskpack["files"]
     args = [
         "--agent-pool",
-        str(_resolve_companion_artifact_path(taskpack_dir, files["agent_pool"], "files.agent_pool")),
+        str(agent_pool_path),
         "--backlog",
-        str(_resolve_companion_artifact_path(taskpack_dir, files["backlog"], "files.backlog")),
+        str(backlog_path),
         "--output-dir",
         str(run_dir),
         "--project-root",
-        taskpack["project_root"],
+        project_root,
     ]
     if daemon:
         args.extend(["--daemon-run-until-idle", "--daemon-two-phase-worker-pool"])
         args.extend(["--max-inflight", str(max_inflight), "--max-attempts", str(max_attempts)])
     else:
         args.append("--run-until-idle")
-    args.extend(["--runtime", taskpack["runtime"]["default_backend"]])
+    args.extend(["--runtime", runtime_backend])
     args.append("--integrate-accepted-patch")
-    command_json = json.dumps(loaded["verification"]["command"])
     args.extend(["--integration-verification-command-json", command_json])
     if commit_verified_integration:
         args.append("--commit-verified-integration")
@@ -376,6 +395,26 @@ def _validate_existing_taskpack_id(taskpack_id):
     if not isinstance(taskpack_id, str) or not taskpack_id:
         raise TaskpackValidationError("taskpack_id must be a non-empty string")
     return _normalize_taskpack_id(taskpack_id, "")
+
+
+def _validate_taskpack_runtime_backend(runtime):
+    if not isinstance(runtime, dict):
+        raise TaskpackValidationError("runtime must be an object")
+
+    backend = runtime.get("default_backend")
+    if backend not in TASKPACK_RUNTIME_BACKENDS:
+        raise TaskpackValidationError("runtime.default_backend must be fake, shell, or codex")
+    return backend
+
+
+def _validate_taskpack_verification_command(verification):
+    if not isinstance(verification, dict):
+        raise TaskpackValidationError("verification must be an object")
+
+    command = verification.get("command")
+    if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+        raise TaskpackValidationError("verification.command must be a non-empty string array")
+    return command
 
 
 def _is_non_empty_string(value):

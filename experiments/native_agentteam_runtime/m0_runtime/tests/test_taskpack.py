@@ -24,6 +24,11 @@ def _init_repo(path):
     subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
+def _arg_value(args, flag):
+    index = args.index(flag)
+    return args[index + 1]
+
+
 class TaskpackTests(unittest.TestCase):
     def test_draft_taskpack_files_writes_expected_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -957,12 +962,194 @@ class TaskpackTests(unittest.TestCase):
                 commit_verified_integration=False,
             )
 
-            self.assertEqual(args[0:2], ["--agent-pool", str(Path(frozen["frozen_taskpack_dir"]) / "agent_pool.json")])
+            self.assertEqual(
+                args[0:2],
+                ["--agent-pool", str(Path(frozen["frozen_taskpack_dir"]) / "agent_pool.json")],
+            )
+            self.assertEqual(_arg_value(args, "--runtime"), "codex")
+            self.assertEqual(
+                json.loads(_arg_value(args, "--integration-verification-command-json")),
+                ["python3", "-m", "unittest", "discover"],
+            )
             self.assertIn("--daemon-run-until-idle", args)
             self.assertIn("--daemon-two-phase-worker-pool", args)
-            self.assertIn("--runtime", args)
-            self.assertIn("codex", args)
             self.assertIn("--integrate-accepted-patch", args)
             self.assertNotIn("--commit-verified-integration", args)
-            self.assertIn("--integration-verification-command-json", args)
             self.assertTrue((run_root / "runtime-args").exists())
+
+    def test_build_taskpack_runtime_args_supports_one_shot_and_commit_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Build one-shot runtime args.",
+                draft_root=drafts,
+                taskpack_id="one-shot-runtime-args",
+                write_scope=["src/"],
+            )
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+
+            args = build_taskpack_runtime_args(
+                frozen["frozen_taskpack_dir"],
+                run_root=run_root,
+                daemon=False,
+                commit_verified_integration=True,
+            )
+
+            self.assertIn("--run-until-idle", args)
+            self.assertNotIn("--daemon-run-until-idle", args)
+            self.assertNotIn("--daemon-two-phase-worker-pool", args)
+            self.assertIn("--commit-verified-integration", args)
+            self.assertEqual(_arg_value(args, "--runtime"), "codex")
+
+    def test_build_taskpack_runtime_args_rejects_draft_without_run_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject draft runtime launch.",
+                draft_root=drafts,
+                taskpack_id="draft-runtime-args",
+                write_scope=["src/"],
+            )
+
+            with self.assertRaises(TaskpackValidationError):
+                build_taskpack_runtime_args(result["taskpack_dir"], run_root=run_root)
+
+            self.assertFalse((run_root / "draft-runtime-args").exists())
+
+    def test_build_taskpack_runtime_args_honors_mapped_companion_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Use mapped runtime companion files.",
+                draft_root=drafts,
+                taskpack_id="mapped-runtime-args",
+                write_scope=["src/"],
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+            nested_dir = taskpack_dir / "nested"
+            nested_dir.mkdir()
+            (taskpack_dir / "agent_pool.json").replace(nested_dir / "agent_pool.json")
+            (taskpack_dir / "backlog.json").replace(nested_dir / "backlog.json")
+            taskpack_path = taskpack_dir / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["files"]["agent_pool"] = "nested/agent_pool.json"
+            taskpack["files"]["backlog"] = "nested/backlog.json"
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+            frozen = freeze_taskpack(taskpack_dir, frozen_root)
+            frozen_dir = Path(frozen["frozen_taskpack_dir"])
+
+            args = build_taskpack_runtime_args(frozen_dir, run_root=run_root)
+
+            self.assertEqual(_arg_value(args, "--agent-pool"), str(frozen_dir / "nested" / "agent_pool.json"))
+            self.assertEqual(_arg_value(args, "--backlog"), str(frozen_dir / "nested" / "backlog.json"))
+
+    def test_build_taskpack_runtime_args_defaults_missing_files_mapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Use default runtime companion files.",
+                draft_root=drafts,
+                taskpack_id="default-runtime-files",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            del taskpack["files"]
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+            frozen_dir = Path(frozen["frozen_taskpack_dir"])
+
+            args = build_taskpack_runtime_args(frozen_dir, run_root=run_root)
+
+            self.assertEqual(_arg_value(args, "--agent-pool"), str(frozen_dir / "agent_pool.json"))
+            self.assertEqual(_arg_value(args, "--backlog"), str(frozen_dir / "backlog.json"))
+            self.assertTrue((run_root / "default-runtime-files").exists())
+
+    def test_build_taskpack_runtime_args_rejects_invalid_runtime_without_run_dir(self):
+        cases = [
+            ("non-object-runtime", []),
+            ("missing-runtime-backend", {}),
+            ("unknown-runtime-backend", {"default_backend": "unknown"}),
+        ]
+        for taskpack_id, runtime in cases:
+            with self.subTest(taskpack_id=taskpack_id):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    repo = tmp_path / "repo"
+                    drafts = tmp_path / "drafts"
+                    frozen_root = tmp_path / "frozen"
+                    run_root = tmp_path / "runs"
+                    _init_repo(repo)
+                    result = draft_taskpack_files(
+                        project_root=repo,
+                        goal="Reject invalid runtime metadata.",
+                        draft_root=drafts,
+                        taskpack_id=taskpack_id,
+                        write_scope=["src/"],
+                    )
+                    taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+                    taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+                    taskpack["runtime"] = runtime
+                    taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+                    frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+
+                    with self.assertRaises(TaskpackValidationError) as raised:
+                        build_taskpack_runtime_args(frozen["frozen_taskpack_dir"], run_root=run_root)
+
+                    self.assertIn("runtime", str(raised.exception))
+                    self.assertFalse((run_root / taskpack_id).exists())
+
+    def test_build_taskpack_runtime_args_rejects_invalid_launch_metadata_without_run_dir(self):
+        cases = [
+            ("missing-project-root", "taskpack.yaml", lambda value: value.pop("project_root")),
+            ("missing-verification-command", "verification.json", lambda value: value.pop("command")),
+        ]
+        for taskpack_id, artifact_name, mutate in cases:
+            with self.subTest(taskpack_id=taskpack_id):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    repo = tmp_path / "repo"
+                    drafts = tmp_path / "drafts"
+                    frozen_root = tmp_path / "frozen"
+                    run_root = tmp_path / "runs"
+                    _init_repo(repo)
+                    result = draft_taskpack_files(
+                        project_root=repo,
+                        goal="Reject invalid launch metadata.",
+                        draft_root=drafts,
+                        taskpack_id=taskpack_id,
+                        write_scope=["src/"],
+                    )
+                    frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+                    artifact_path = Path(frozen["frozen_taskpack_dir"]) / artifact_name
+                    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+                    mutate(artifact)
+                    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+                    with self.assertRaises(TaskpackValidationError):
+                        build_taskpack_runtime_args(frozen["frozen_taskpack_dir"], run_root=run_root)
+
+                    self.assertFalse((run_root / taskpack_id).exists())
