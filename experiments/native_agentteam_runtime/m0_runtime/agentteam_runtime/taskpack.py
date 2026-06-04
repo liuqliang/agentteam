@@ -314,6 +314,51 @@ def freeze_taskpack(taskpack_dir, frozen_root):
     return {"frozen_taskpack_dir": str(frozen_dir), "manifest": manifest}
 
 
+def build_taskpack_runtime_args(
+    frozen_taskpack_dir,
+    run_root,
+    daemon=True,
+    max_inflight=2,
+    max_attempts=1,
+    commit_verified_integration=False,
+):
+    taskpack_dir = Path(frozen_taskpack_dir).resolve()
+    loaded = load_taskpack(taskpack_dir)
+    taskpack = loaded["taskpack"]
+    if taskpack.get("status") != "frozen":
+        raise TaskpackValidationError("taskpack must be frozen before runtime launch")
+
+    taskpack_id = _validate_existing_taskpack_id(taskpack.get("taskpack_id"))
+    run_root = Path(run_root).resolve()
+    run_dir = (run_root / taskpack_id).resolve()
+    _require_contained_path(run_dir, run_root, "run_dir")
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    files = taskpack["files"]
+    args = [
+        "--agent-pool",
+        str(_resolve_companion_artifact_path(taskpack_dir, files["agent_pool"], "files.agent_pool")),
+        "--backlog",
+        str(_resolve_companion_artifact_path(taskpack_dir, files["backlog"], "files.backlog")),
+        "--output-dir",
+        str(run_dir),
+        "--project-root",
+        taskpack["project_root"],
+    ]
+    if daemon:
+        args.extend(["--daemon-run-until-idle", "--daemon-two-phase-worker-pool"])
+        args.extend(["--max-inflight", str(max_inflight), "--max-attempts", str(max_attempts)])
+    else:
+        args.append("--run-until-idle")
+    args.extend(["--runtime", taskpack["runtime"]["default_backend"]])
+    args.append("--integrate-accepted-patch")
+    command_json = json.dumps(loaded["verification"]["command"])
+    args.extend(["--integration-verification-command-json", command_json])
+    if commit_verified_integration:
+        args.append("--commit-verified-integration")
+    return args
+
+
 def _normalize_taskpack_id(taskpack_id, goal):
     if taskpack_id is None:
         taskpack_id = _slugify(goal)

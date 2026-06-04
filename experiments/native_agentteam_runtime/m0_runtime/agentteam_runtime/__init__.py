@@ -36,6 +36,7 @@ _EXPORTS = {
     "build_repo_context": (".repo_map", "build_repo_context"),
     "build_repository_map": (".repo_map", "build_repository_map"),
     "build_runtime_observability": (".observability", "build_runtime_observability"),
+    "build_taskpack_runtime_args": (".taskpack", "build_taskpack_runtime_args"),
     "classify_attempt_outcome": (".m0_runtime", "classify_attempt_outcome"),
     "draft_taskpack_files": (".taskpack", "draft_taskpack_files"),
     "freeze_taskpack": (".taskpack", "freeze_taskpack"),

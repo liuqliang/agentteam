@@ -6,6 +6,7 @@ from pathlib import Path
 
 from agentteam_runtime import (
     TaskpackValidationError,
+    build_taskpack_runtime_args,
     draft_taskpack_files,
     freeze_taskpack,
     load_taskpack,
@@ -929,3 +930,39 @@ class TaskpackTests(unittest.TestCase):
             self.assertTrue((frozen_dir / "nested" / "backlog.json").exists())
             self.assertFalse((frozen_dir / "backlog.json").exists())
             self.assertEqual(len(manifest["digest_sha256"]), 64)
+
+    def test_build_taskpack_runtime_args_uses_frozen_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Build runtime args.",
+                draft_root=drafts,
+                taskpack_id="runtime-args",
+                write_scope=["src/"],
+                verification_command=["python3", "-m", "unittest", "discover"],
+            )
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+
+            args = build_taskpack_runtime_args(
+                frozen["frozen_taskpack_dir"],
+                run_root=run_root,
+                daemon=True,
+                max_inflight=2,
+                commit_verified_integration=False,
+            )
+
+            self.assertEqual(args[0:2], ["--agent-pool", str(Path(frozen["frozen_taskpack_dir"]) / "agent_pool.json")])
+            self.assertIn("--daemon-run-until-idle", args)
+            self.assertIn("--daemon-two-phase-worker-pool", args)
+            self.assertIn("--runtime", args)
+            self.assertIn("codex", args)
+            self.assertIn("--integrate-accepted-patch", args)
+            self.assertNotIn("--commit-verified-integration", args)
+            self.assertIn("--integration-verification-command-json", args)
+            self.assertTrue((run_root / "runtime-args").exists())
