@@ -383,12 +383,13 @@ Goal: make M32 context attachment inspectable without opening raw mailbox files
 or guessing from filenames, then provide a gated smoke path for checking
 whether Codex workers can actually consume attached repo context packages.
 
-Status: M33a and M33b implemented. Dispatch events now record
+Status: M33a-M33c implemented. Dispatch events now record
 `repo_context_path` when a repo context is attached, event replay restores that
 field onto attempt state, the SQLite state index exposes it on attempts,
 runtime observability has a `repo-contexts` drilldown view, and a gated
 repo-context Codex smoke can verify that a worker reads the attached context
-package.
+package. The `repo-contexts` view also reports selected-file hit metrics from
+diff audit.
 
 Scope:
 
@@ -404,6 +405,8 @@ Scope:
   `AGENTTEAM_RUN_LIVE_CODEX=1`;
 - keep fake-Codex coverage deterministic by using a fake command that reads
   `repo_context_path` and reports the selected file.
+- compare `diff_audit.actual_changed_files` with repo-context selected files to
+  report changed-selected hits, changed-unselected files, and hit rate.
 
 Acceptance:
 
@@ -412,14 +415,12 @@ Acceptance:
 - the `repo-contexts` view links repo context files back to attempt ids;
 - the CLI can print the same view as JSON;
 - deterministic tests cover direct API, CLI behavior, env-gated smoke skipping,
-  and fake-Codex repo context consumption.
+  fake-Codex repo context consumption, and diff-audit hit metrics.
 
 Remaining follow-up work:
 
 - run the gated repo-context smoke against the real Codex CLI in a controlled
   local environment;
-- expose context effectiveness signals such as selected-file hit rate after diff
-  audit;
 - decide whether role context packages should automatically reference repo
   context summaries or remain separate prompt sections.
 
@@ -463,7 +464,8 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to add post-run repo-context effectiveness metrics
-from existing diff audit and selected-file metadata. Inflight migration remains
-a separate M29 decision gate because it changes ownership of already leased
-work.
+The next recommended step is to run the gated repo-context smoke against the
+real Codex CLI in a controlled local environment and decide whether role context
+packages should reference repo context summaries automatically. Inflight
+migration remains a separate M29 decision gate because it changes ownership of
+already leased work.

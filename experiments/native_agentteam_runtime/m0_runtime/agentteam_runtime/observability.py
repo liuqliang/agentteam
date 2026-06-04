@@ -61,7 +61,11 @@ def build_runtime_observability(output_dir, view="summary"):
             "integration_queue_items": integration_queue["items"],
         }
     if view == "repo-contexts":
-        repo_contexts = _read_repo_contexts(output_dir, state_index["attempts"])
+        repo_contexts = _read_repo_contexts(
+            output_dir,
+            state_index["attempts"],
+            snapshot["attempts"],
+        )
         return {
             **base,
             "repo_context_count": len(repo_contexts),
@@ -146,7 +150,7 @@ def _read_worker_registry(output_dir):
     return {"workers": []}
 
 
-def _read_repo_contexts(output_dir, attempts=None):
+def _read_repo_contexts(output_dir, attempts=None, replay_attempts=None):
     repo_context_dir = Path(output_dir) / "repo_contexts"
     if not repo_context_dir.exists():
         return []
@@ -155,6 +159,7 @@ def _read_repo_contexts(output_dir, attempts=None):
         for attempt in attempts or []
         if attempt.get("repo_context_path")
     }
+    replay_attempts = replay_attempts or {}
     contexts = []
     for path in sorted(repo_context_dir.glob("*.json")):
         try:
@@ -164,6 +169,8 @@ def _read_repo_contexts(output_dir, attempts=None):
             continue
         selected_files = context.get("selected_files", [])
         attempt = attempt_by_context_path.get(str(path), {})
+        replay_attempt = replay_attempts.get(attempt.get("attempt_id"), {})
+        hit_metrics = _repo_context_hit_metrics(selected_files, replay_attempt)
         contexts.append(
             {
                 "path": str(path),
@@ -190,9 +197,38 @@ def _read_repo_contexts(output_dir, attempts=None):
                 "omitted_file_count": context.get("omitted_file_count", 0),
                 "repo_map_manifest_path": context.get("repo_map_manifest_path"),
                 "warning_count": len(context.get("warnings", [])),
+                **hit_metrics,
             }
         )
     return contexts
+
+
+def _repo_context_hit_metrics(selected_files, attempt):
+    selected_paths = {
+        selected_file.get("path")
+        for selected_file in selected_files
+        if selected_file.get("path")
+    }
+    diff_audit = attempt.get("diff_audit") or {}
+    actual_changed_files = sorted(diff_audit.get("actual_changed_files") or [])
+    changed_selected_files = [
+        path for path in actual_changed_files if path in selected_paths
+    ]
+    changed_unselected_files = [
+        path for path in actual_changed_files if path not in selected_paths
+    ]
+    hit_rate = (
+        len(changed_selected_files) / len(actual_changed_files)
+        if actual_changed_files
+        else None
+    )
+    return {
+        "actual_changed_file_count": len(actual_changed_files),
+        "changed_selected_file_count": len(changed_selected_files),
+        "changed_selected_files": changed_selected_files,
+        "changed_unselected_files": changed_unselected_files,
+        "selected_file_hit_rate": hit_rate,
+    }
 
 
 def _read_scheduler_state(output_dir):

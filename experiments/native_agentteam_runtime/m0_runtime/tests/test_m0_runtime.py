@@ -4345,6 +4345,68 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(repo_context["selected_files"][0]["path"], "pkg/module.py")
             self.assertIn("repo_map_manifest_path", repo_context)
 
+    def test_runtime_observability_reports_repo_context_diff_hit_metrics(self):
+        class SourceEditRuntimeAdapter:
+            def run(self, message, worktree_path=None):
+                target = Path(worktree_path) / "pkg" / "module.py"
+                target.write_text(
+                    "def build_worker():\n    return 'updated-worker'\n",
+                    encoding="utf-8",
+                )
+                return {
+                    "result_status": "completed",
+                    "changed_files": ["pkg/module.py"],
+                    "output": {"adapter": "source-edit"},
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "pkg" / "module.py").write_text(
+                "def build_worker():\n    return 'worker'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "pkg/module.py"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add module"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            task = _backlog_task("TASK-001", write_scope=["pkg/module.py"])
+            task["objective"] = "Update build_worker behavior in pkg/module.py"
+            task["read_scope"] = ["pkg/"]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["pkg/module.py"],
+                tasks=[task],
+            )
+
+            run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=SourceEditRuntimeAdapter(),
+            )
+
+            repo_contexts_view = build_runtime_observability(
+                output_dir,
+                view="repo-contexts",
+            )
+            repo_context = repo_contexts_view["repo_contexts"][0]
+
+            self.assertEqual(repo_context["actual_changed_file_count"], 1)
+            self.assertEqual(repo_context["changed_selected_file_count"], 1)
+            self.assertEqual(repo_context["changed_selected_files"], ["pkg/module.py"])
+            self.assertEqual(repo_context["changed_unselected_files"], [])
+            self.assertEqual(repo_context["selected_file_hit_rate"], 1.0)
+
     def test_cli_can_show_runtime_observability_event_view(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
