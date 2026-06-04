@@ -168,6 +168,7 @@ def _read_repo_contexts(output_dir, attempts=None, replay_attempts=None):
             contexts.append({"path": str(path), "read_status": "invalid_json"})
             continue
         selected_files = context.get("selected_files", [])
+        candidate_tests = context.get("candidate_tests", [])
         attempt = attempt_by_context_path.get(str(path), {})
         replay_attempt = replay_attempts.get(attempt.get("attempt_id"), {})
         hit_metrics = _repo_context_hit_metrics(selected_files, replay_attempt)
@@ -193,6 +194,18 @@ def _read_repo_contexts(output_dir, attempts=None, replay_attempts=None):
                         ),
                     }
                     for selected_file in selected_files
+                ],
+                "candidate_test_count": len(candidate_tests),
+                "candidate_tests": [
+                    {
+                        "path": candidate_test.get("path"),
+                        "language": candidate_test.get("language"),
+                        "selection_reasons": candidate_test.get(
+                            "selection_reasons",
+                            [],
+                        ),
+                    }
+                    for candidate_test in candidate_tests
                 ],
                 "omitted_file_count": context.get("omitted_file_count", 0),
                 "repo_map_manifest_path": context.get("repo_map_manifest_path"),

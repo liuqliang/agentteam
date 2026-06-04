@@ -429,10 +429,11 @@ Acceptance:
 Goal: improve repository context usefulness while preserving bounded context
 packages and deterministic scheduler authority.
 
-Status: M34a-M34b implemented. Repo context packages now include
+Status: M34a-M34c implemented. Repo context packages now include
 `candidate_tests` for selected source files. Source ranking also gives stronger
 weight to objective matches against Python symbols than to path-only objective
-matches.
+matches. The `repo-contexts` observability view exposes candidate test
+summaries without requiring operators to open the raw context JSON.
 
 Scope:
 
@@ -443,6 +444,8 @@ Scope:
 - add path-name and objective-token matches as weaker signals;
 - rank selected source files with weighted objective signals: symbol/import
   matches outrank path-only matches;
+- report candidate test count and candidate test summaries in repo context
+  observability;
 - keep unsupported languages on the existing inventory-only fallback path.
 
 Acceptance:
@@ -452,12 +455,12 @@ Acceptance:
 - candidate tests do not consume the `selected_files` budget;
 - a source file defining an objective-matched symbol outranks a path-only file
   with the same objective term;
+- the `repo-contexts` view reports candidate tests with path, language, and
+  selection reasons;
 - no compiler, LSP, or live model call is required.
 
 Remaining follow-up work:
 
-- add candidate tests to `repo-contexts` observability summaries if operators
-  need them outside the raw context file;
 - add language-specific extractors behind conservative fallbacks.
 
 ## Longer-Term Route
@@ -500,8 +503,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to add candidate tests to `repo-contexts`
-observability summaries if operators need them outside the raw context file,
-then add language-aware extractors behind conservative fallbacks. Inflight
-migration remains a separate M29 decision gate because it changes ownership of
-already leased work.
+The next recommended step is to add language-aware extractors behind
+conservative fallbacks. Inflight migration remains a separate M29 decision gate
+because it changes ownership of already leased work.

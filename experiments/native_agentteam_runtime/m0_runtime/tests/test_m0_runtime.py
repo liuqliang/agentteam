@@ -4518,6 +4518,76 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(repo_context["changed_unselected_files"], [])
             self.assertEqual(repo_context["selected_file_hit_rate"], 1.0)
 
+    def test_runtime_observability_reports_repo_context_candidate_tests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "tests").mkdir()
+            (repo / "pkg" / "module.py").write_text(
+                "def build_worker():\n    return 'worker'\n",
+                encoding="utf-8",
+            )
+            (repo / "tests" / "test_module.py").write_text(
+                "import pkg.module\n\n"
+                "def test_build_worker():\n"
+                "    assert pkg.module.build_worker() == 'worker'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "pkg/module.py", "tests/test_module.py"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "add module and test"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            task = _backlog_task("TASK-001", write_scope=["generated/"])
+            task["objective"] = "Update build_worker behavior in pkg/module.py"
+            task["read_scope"] = ["pkg/"]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[task],
+            )
+
+            run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            repo_contexts_view = build_runtime_observability(
+                output_dir,
+                view="repo-contexts",
+            )
+            repo_context = repo_contexts_view["repo_contexts"][0]
+
+            self.assertEqual(repo_context["candidate_test_count"], 1)
+            self.assertEqual(
+                repo_context["candidate_tests"],
+                [
+                    {
+                        "path": "tests/test_module.py",
+                        "language": "python",
+                        "selection_reasons": [
+                            "imports_selected_module",
+                            "path_match",
+                            "objective",
+                        ],
+                    }
+                ],
+            )
+
     def test_cli_can_show_runtime_observability_event_view(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
