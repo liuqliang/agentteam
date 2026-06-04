@@ -867,6 +867,35 @@ class TaskpackTests(unittest.TestCase):
             with self.assertRaises(TaskpackValidationError):
                 freeze_taskpack(taskpack_dir, frozen_root)
 
+    def test_freeze_taskpack_rejects_inventoried_symlink_without_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            outside = tmp_path / "outside-readme.md"
+            _init_repo(repo)
+            outside.write_text("outside\n", encoding="utf-8")
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject inventoried symlink artifacts.",
+                draft_root=drafts,
+                taskpack_id="inventoried-symlink",
+                write_scope=["src/"],
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+            readme_path = taskpack_dir / "README.md"
+            readme_path.unlink()
+            try:
+                readme_path.symlink_to(outside)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink creation unsupported: {exc}")
+
+            with self.assertRaises(TaskpackValidationError):
+                freeze_taskpack(taskpack_dir, frozen_root)
+
+            self.assertFalse((frozen_root / "inventoried-symlink").exists())
+
     def test_freeze_taskpack_honors_companion_mapping(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

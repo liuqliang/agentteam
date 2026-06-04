@@ -469,6 +469,14 @@ def _build_taskpack_artifact_inventory(taskpack_dir):
     seen_relative_paths = set()
     for source_path in artifacts:
         source_path = Path(source_path)
+        try:
+            unresolved_relative_path = source_path.relative_to(taskpack_dir)
+        except ValueError as exc:
+            raise TaskpackValidationError(f"taskpack artifact must stay inside taskpack: {source_path}") from exc
+        if source_path.is_symlink():
+            raise TaskpackValidationError(
+                f"taskpack artifact must not be a symlink: {unresolved_relative_path.as_posix()}"
+            )
         relative_path = source_path.resolve().relative_to(taskpack_dir)
         if relative_path in seen_relative_paths:
             raise TaskpackValidationError(f"duplicate taskpack artifact path: {relative_path.as_posix()}")
