@@ -5,6 +5,7 @@ from pathlib import Path
 
 TASKPACK_SCHEMA_VERSION = "taskpack.v1"
 DEFAULT_WORKER_ROLE = "implementation_worker"
+TASKPACK_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 
 
 class TaskpackValidationError(ValueError):
@@ -24,13 +25,19 @@ def draft_taskpack_files(
 ):
     project_root = Path(project_root).resolve()
     draft_root = Path(draft_root).resolve()
-    taskpack_id = taskpack_id or _slugify(goal)
-    taskpack_dir = draft_root / taskpack_id
-    taskpack_dir.mkdir(parents=True, exist_ok=False)
+    taskpack_id = _normalize_taskpack_id(taskpack_id, goal)
+    taskpack_dir = (draft_root / taskpack_id).resolve()
+    _require_contained_path(taskpack_dir, draft_root, "taskpack_dir")
 
-    read_scope = list(read_scope or ["."])
-    write_scope = list(write_scope or [".agentteam/generated/"])
-    verification_command = list(verification_command or ["python3", "-m", "unittest", "discover"])
+    read_scope = _string_list(read_scope, ["."], "read_scope")
+    write_scope = _string_list(write_scope, [".agentteam/generated/"], "write_scope")
+    verification_command = _string_list(
+        verification_command,
+        ["python3", "-m", "unittest", "discover"],
+        "verification_command",
+    )
+
+    taskpack_dir.mkdir(parents=True, exist_ok=False)
 
     task_id = f"TASK-{taskpack_id.upper().replace('-', '_')}-001"
     taskpack = {
@@ -109,21 +116,81 @@ def draft_taskpack_files(
 
 
 def load_taskpack(taskpack_dir):
-    taskpack_dir = Path(taskpack_dir)
+    taskpack_dir = Path(taskpack_dir).resolve()
     taskpack = _read_json(taskpack_dir / "taskpack.yaml")
     files = taskpack.get("files", {})
+    if not isinstance(files, dict):
+        raise TaskpackValidationError("taskpack files must be an object")
     return {
-        "taskpack_dir": str(taskpack_dir.resolve()),
+        "taskpack_dir": str(taskpack_dir),
         "taskpack": taskpack,
-        "agent_pool": _read_json(taskpack_dir / files.get("agent_pool", "agent_pool.json")),
-        "backlog": _read_json(taskpack_dir / files.get("backlog", "backlog.json")),
-        "verification": _read_json(taskpack_dir / files.get("verification", "verification.json")),
+        "agent_pool": _read_json(
+            _resolve_companion_artifact_path(
+                taskpack_dir, files.get("agent_pool", "agent_pool.json"), "files.agent_pool"
+            )
+        ),
+        "backlog": _read_json(
+            _resolve_companion_artifact_path(taskpack_dir, files.get("backlog", "backlog.json"), "files.backlog")
+        ),
+        "verification": _read_json(
+            _resolve_companion_artifact_path(
+                taskpack_dir, files.get("verification", "verification.json"), "files.verification"
+            )
+        ),
     }
+
+
+def _normalize_taskpack_id(taskpack_id, goal):
+    if taskpack_id is None:
+        taskpack_id = _slugify(goal)
+    elif not isinstance(taskpack_id, str):
+        raise TaskpackValidationError("taskpack_id must be a string")
+
+    if not TASKPACK_ID_PATTERN.fullmatch(taskpack_id):
+        raise TaskpackValidationError(
+            "taskpack_id must be a safe lowercase slug containing only letters, numbers, and hyphens"
+        )
+    return taskpack_id
+
+
+def _string_list(value, default, field_name):
+    if value is None:
+        return list(default)
+    if isinstance(value, str):
+        raise TaskpackValidationError(f"{field_name} must be a list or tuple of strings, not a bare string")
+    if not isinstance(value, (list, tuple)):
+        raise TaskpackValidationError(f"{field_name} must be a list or tuple of strings")
+
+    items = list(value)
+    for item in items:
+        if not isinstance(item, str):
+            raise TaskpackValidationError(f"{field_name} must contain only strings")
+    return items
+
+
+def _resolve_companion_artifact_path(taskpack_dir, value, field_name):
+    if not isinstance(value, str) or not value:
+        raise TaskpackValidationError(f"{field_name} must be a relative path string")
+
+    path = Path(value)
+    if path.is_absolute():
+        raise TaskpackValidationError(f"{field_name} must be relative to the taskpack directory")
+
+    resolved = (taskpack_dir / path).resolve()
+    _require_contained_path(resolved, taskpack_dir, field_name)
+    return resolved
+
+
+def _require_contained_path(path, root, field_name):
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise TaskpackValidationError(f"{field_name} must stay inside {root}") from exc
 
 
 def _slugify(value):
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return slug[:80] or "taskpack"
+    return slug[:80].strip("-") or "taskpack"
 
 
 def _write_json(path, value):
