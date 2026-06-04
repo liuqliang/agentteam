@@ -499,6 +499,81 @@ class M0RuntimeTests(unittest.TestCase):
                 ],
             )
 
+    def test_repo_context_reports_candidate_tests_for_selected_typescript_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "runtime"
+            _init_git_repo(repo)
+            (repo / "src").mkdir()
+            (repo / "tests").mkdir()
+            (repo / "src" / "service.ts").write_text(
+                "\n".join(
+                    [
+                        "export function buildDashboard() {",
+                        "  return 'dashboard';",
+                        "}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (repo / "tests" / "service.test.ts").write_text(
+                "\n".join(
+                    [
+                        "import { buildDashboard } from '../src/service';",
+                        "",
+                        "test('builds dashboard', () => {",
+                        "  expect(buildDashboard()).toBe('dashboard');",
+                        "});",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "src/service.ts", "tests/service.test.ts"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "add typescript source and test"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            task = {
+                "task_id": "TASK-CTX-TS-TESTS-001",
+                "objective": "Update buildDashboard behavior in src/service.ts",
+                "read_scope": ["src/"],
+                "write_scope": ["src/service.ts"],
+            }
+
+            context = build_repo_context(
+                repo,
+                output_dir,
+                task,
+                agent_role="repo_map_agent",
+                max_files=1,
+            )
+
+            self.assertEqual(context["selected_files"][0]["path"], "src/service.ts")
+            self.assertEqual(
+                context["candidate_tests"],
+                [
+                    {
+                        "path": "tests/service.test.ts",
+                        "language": "typescript",
+                        "selection_reasons": [
+                            "imports_selected_module",
+                            "path_match",
+                            "objective",
+                        ],
+                    }
+                ],
+            )
+
     def test_repo_context_ranks_symbol_match_above_path_only_match(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

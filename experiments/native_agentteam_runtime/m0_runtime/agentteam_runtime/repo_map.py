@@ -1,6 +1,7 @@
 import ast
 import hashlib
 import json
+import posixpath
 import re
 import subprocess
 from copy import deepcopy
@@ -300,7 +301,7 @@ def _context_file_entry(entry, symbols, score, reasons):
 
 
 def _candidate_tests(inventory_files, symbol_by_path, selected, task):
-    selected_modules = _selected_python_modules(selected)
+    selected_import_targets = _selected_import_targets(selected)
     selected_path_tokens = _selected_path_tokens(selected)
     objective_tokens = _objective_tokens(task.get("objective"))
     candidates = []
@@ -310,7 +311,11 @@ def _candidate_tests(inventory_files, symbol_by_path, selected, task):
         symbols = symbol_by_path.get(entry["path"], {})
         score = 0
         reasons = []
-        if _test_imports_selected_module(symbols, selected_modules):
+        if _test_imports_selected_module(
+            entry["path"],
+            symbols,
+            selected_import_targets,
+        ):
             score += 100
             reasons.append("imports_selected_module")
         if _test_path_matches_selected_source(entry["path"], selected_path_tokens):
@@ -333,6 +338,13 @@ def _candidate_tests(inventory_files, symbol_by_path, selected, task):
     ]
 
 
+def _selected_import_targets(selected):
+    return {
+        "python_modules": _selected_python_modules(selected),
+        "module_paths": _selected_javascript_module_paths(selected),
+    }
+
+
 def _selected_python_modules(selected):
     modules = set()
     for score, reasons, entry in selected:
@@ -340,6 +352,17 @@ def _selected_python_modules(selected):
             continue
         modules.add(_python_module_name(entry["path"]))
     return modules
+
+
+def _selected_javascript_module_paths(selected):
+    module_paths = set()
+    for score, reasons, entry in selected:
+        if entry["language"] not in {"javascript", "typescript"}:
+            continue
+        if entry["category"] == "test":
+            continue
+        module_paths.add(_javascript_module_path(entry["path"]))
+    return module_paths
 
 
 def _selected_path_tokens(selected):
@@ -366,15 +389,46 @@ def _path_tokens(path):
     return {token.lower() for token in tokens}
 
 
-def _test_imports_selected_module(symbols, selected_modules):
-    if not selected_modules:
+def _test_imports_selected_module(test_path, symbols, selected_import_targets):
+    python_modules = selected_import_targets["python_modules"]
+    module_paths = selected_import_targets["module_paths"]
+    if not python_modules and not module_paths:
         return False
     imports = symbols.get("imports", [])
     return any(
-        imported == module or imported.startswith(f"{module}.")
+        _python_import_matches(imported, python_modules)
+        or _javascript_import_matches(test_path, imported, module_paths)
         for imported in imports
+    )
+
+
+def _python_import_matches(imported, selected_modules):
+    return any(
+        imported == module or imported.startswith(f"{module}.")
         for module in selected_modules
     )
+
+
+def _javascript_import_matches(test_path, imported, selected_module_paths):
+    if not selected_module_paths:
+        return False
+    normalized_import = _javascript_module_path(imported)
+    if normalized_import in selected_module_paths:
+        return True
+    if not imported.startswith("."):
+        return False
+    resolved = posixpath.normpath(
+        posixpath.join(posixpath.dirname(test_path), imported)
+    )
+    return _javascript_module_path(resolved) in selected_module_paths
+
+
+def _javascript_module_path(path):
+    normalized = _normalize_scope(path)
+    root, suffix = posixpath.splitext(normalized)
+    if suffix.lower() in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
+        return root
+    return normalized
 
 
 def _test_path_matches_selected_source(path, selected_path_tokens):

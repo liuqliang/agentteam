@@ -468,9 +468,11 @@ Remaining follow-up work:
 Goal: broaden repository context usefulness beyond Python while keeping the
 repo map deterministic and dependency-light.
 
-Status: M35a implemented. The repo map now extracts lightweight JavaScript and
-TypeScript symbol summaries with conservative regex scanning. Python continues
-to use the standard-library AST extractor.
+Status: M35a-M35b implemented. The repo map now extracts lightweight JavaScript
+and TypeScript symbol summaries with conservative regex scanning. Python
+continues to use the standard-library AST extractor. Candidate test selection
+can use JS/TS relative imports to detect tests that import selected source
+files.
 
 Scope:
 
@@ -478,6 +480,8 @@ Scope:
   classes, and methods;
 - extract ES module imports, exported or top-level function declarations, class
   declarations, and simple class methods for JavaScript and TypeScript files;
+- resolve JS/TS relative import paths from test files to selected source file
+  module paths for candidate test ranking;
 - update the symbol extraction version so clean-cache reuse does not mix old
   Python-only summaries with multi-language summaries;
 - keep unsupported languages on inventory-only fallback until they have a
@@ -488,14 +492,15 @@ Acceptance:
 - a tracked `.ts` source file appears in `symbols.json`;
 - extracted summaries include imports, exported function declarations, class
   declarations, and methods with line numbers;
+- a TypeScript test importing `../src/service` can be ranked as a candidate
+  test for selected source file `src/service.ts`;
 - symbol summaries do not embed source bodies;
 - no Node, LSP, Tree-sitter, compiler, or live model call is required.
 
 Remaining follow-up work:
 
 - add CommonJS and re-export import signals if repository evidence shows they
-  are needed;
-- add language-specific module mapping for JS/TS candidate test selection.
+  are needed.
 
 ## Longer-Term Route
 
@@ -537,7 +542,7 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to use the new JS/TS symbol summaries in candidate
-test selection, starting with module mapping for adjacent test files and ES
-module imports. Inflight migration remains a separate M29 decision gate because
+The next recommended step is to improve JS/TS import coverage only when
+repository evidence shows CommonJS or re-export patterns are blocking candidate
+test selection. Inflight migration remains a separate M29 decision gate because
 it changes ownership of already leased work.
