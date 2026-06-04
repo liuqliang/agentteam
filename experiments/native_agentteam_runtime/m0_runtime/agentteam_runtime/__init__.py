@@ -38,6 +38,7 @@ _EXPORTS = {
     "build_runtime_observability": (".observability", "build_runtime_observability"),
     "classify_attempt_outcome": (".m0_runtime", "classify_attempt_outcome"),
     "draft_taskpack_files": (".taskpack", "draft_taskpack_files"),
+    "freeze_taskpack": (".taskpack", "freeze_taskpack"),
     "load_taskpack": (".taskpack", "load_taskpack"),
     "normalize_task_proposal": (".task_proposal", "normalize_task_proposal"),
     "read_integration_batches": (".integration_batch", "read_integration_batches"),
@@ -51,6 +52,7 @@ _EXPORTS = {
         ".two_phase_scheduler",
         "run_two_phase_scheduler_loop",
     ),
+    "validate_taskpack": (".taskpack", "validate_taskpack"),
     "verify_integration_batch": (".integration_batch", "verify_integration_batch"),
 }
 

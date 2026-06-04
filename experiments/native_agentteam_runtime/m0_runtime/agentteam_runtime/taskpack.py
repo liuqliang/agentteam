@@ -1,5 +1,8 @@
+import hashlib
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -140,6 +143,85 @@ def load_taskpack(taskpack_dir):
     }
 
 
+def validate_taskpack(taskpack_dir):
+    loaded = load_taskpack(taskpack_dir)
+    errors = []
+    taskpack = loaded["taskpack"]
+    backlog = loaded["backlog"]
+    verification = loaded["verification"]
+    project_root = Path(taskpack.get("project_root", ""))
+
+    if taskpack.get("taskpack_schema_version") != TASKPACK_SCHEMA_VERSION:
+        errors.append("taskpack_schema_version must be taskpack.v1")
+    if not project_root.exists():
+        errors.append("project_root does not exist")
+    elif not _is_git_repo(project_root):
+        errors.append("project_root must be a git repository")
+    if taskpack.get("status") not in {"draft", "frozen"}:
+        errors.append("status must be draft or frozen")
+    if not taskpack.get("goal"):
+        errors.append("goal must be non-empty")
+
+    items = backlog.get("items", [])
+    if not items:
+        errors.append("backlog must contain at least one task")
+    seen_task_ids = set()
+    for item in items:
+        task_id = item.get("task_id")
+        if not task_id:
+            errors.append("task_id must be non-empty")
+        if task_id in seen_task_ids:
+            errors.append(f"duplicate task_id: {task_id}")
+        seen_task_ids.add(task_id)
+        write_scope = item.get("write_scope", [])
+        if not isinstance(write_scope, list) or not write_scope:
+            errors.append(f"{task_id} write_scope must be a non-empty list")
+        for scope in write_scope:
+            if scope in {".", "./", "*", "**", "/"}:
+                errors.append("write_scope must not include repository root")
+            if Path(scope).is_absolute():
+                errors.append(f"{task_id} write_scope must be repository-relative: {scope}")
+        for dependency in item.get("depends_on", []):
+            if dependency == task_id:
+                errors.append(f"{task_id} must not depend on itself")
+
+    command = verification.get("command")
+    if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+        errors.append("verification.command must be a non-empty string array")
+    elif command[0] not in {"python3", "python", "/bin/bash", "bash", "make"}:
+        errors.append(f"verification command is not allowed: {command[0]}")
+
+    if errors:
+        raise TaskpackValidationError("; ".join(errors))
+    return {"status": "accepted", "taskpack_id": taskpack["taskpack_id"], "errors": []}
+
+
+def freeze_taskpack(taskpack_dir, frozen_root):
+    validation = validate_taskpack(taskpack_dir)
+    loaded = load_taskpack(taskpack_dir)
+    taskpack_id = loaded["taskpack"]["taskpack_id"]
+    frozen_dir = Path(frozen_root).resolve() / taskpack_id
+    if frozen_dir.exists():
+        raise TaskpackValidationError(f"frozen taskpack already exists: {frozen_dir}")
+    shutil.copytree(taskpack_dir, frozen_dir)
+
+    frozen_taskpack = _read_json(frozen_dir / "taskpack.yaml")
+    frozen_taskpack["status"] = "frozen"
+    _write_json(frozen_dir / "taskpack.yaml", frozen_taskpack)
+
+    digest = _digest_taskpack_files(frozen_dir)
+    manifest = {
+        "manifest_schema_version": "taskpack_manifest.v1",
+        "taskpack_id": taskpack_id,
+        "status": "frozen",
+        "digest_sha256": digest,
+        "source_taskpack_dir": str(Path(taskpack_dir).resolve()),
+        "validation": validation,
+    }
+    _write_json(frozen_dir / "manifest.json", manifest)
+    return {"frozen_taskpack_dir": str(frozen_dir), "manifest": manifest}
+
+
 def _normalize_taskpack_id(taskpack_id, goal):
     if taskpack_id is None:
         taskpack_id = _slugify(goal)
@@ -186,6 +268,29 @@ def _require_contained_path(path, root, field_name):
         path.relative_to(root)
     except ValueError as exc:
         raise TaskpackValidationError(f"{field_name} must stay inside {root}") from exc
+
+
+def _is_git_repo(path):
+    completed = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    return completed.returncode == 0 and completed.stdout.strip() == "true"
+
+
+def _digest_taskpack_files(taskpack_dir):
+    hasher = hashlib.sha256()
+    for name in ["taskpack.yaml", "agent_pool.json", "backlog.json", "verification.json", "README.md"]:
+        path = Path(taskpack_dir) / name
+        hasher.update(name.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(path.read_bytes())
+        hasher.update(b"\0")
+    return hasher.hexdigest()
 
 
 def _slugify(value):

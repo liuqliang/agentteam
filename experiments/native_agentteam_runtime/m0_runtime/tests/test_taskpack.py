@@ -7,7 +7,9 @@ from pathlib import Path
 from agentteam_runtime import (
     TaskpackValidationError,
     draft_taskpack_files,
+    freeze_taskpack,
     load_taskpack,
+    validate_taskpack,
 )
 
 
@@ -130,3 +132,49 @@ class TaskpackTests(unittest.TestCase):
 
                     with self.assertRaises(TaskpackValidationError):
                         load_taskpack(taskpack_dir)
+
+    def test_validate_taskpack_rejects_broad_write_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject broad writes.",
+                draft_root=drafts,
+                taskpack_id="bad-write-scope",
+                write_scope=["."],
+            )
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("write_scope must not include repository root", str(raised.exception))
+
+    def test_validate_and_freeze_taskpack_writes_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Freeze a safe taskpack.",
+                draft_root=drafts,
+                taskpack_id="safe-taskpack",
+                write_scope=["src/"],
+            )
+
+            validation = validate_taskpack(result["taskpack_dir"])
+            self.assertEqual(validation["status"], "accepted")
+
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+            frozen_dir = Path(frozen["frozen_taskpack_dir"])
+            manifest = json.loads((frozen_dir / "manifest.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(manifest["taskpack_id"], "safe-taskpack")
+            self.assertEqual(manifest["status"], "frozen")
+            self.assertEqual(len(manifest["digest_sha256"]), 64)
+            self.assertTrue((frozen_dir / "taskpack.yaml").exists())
