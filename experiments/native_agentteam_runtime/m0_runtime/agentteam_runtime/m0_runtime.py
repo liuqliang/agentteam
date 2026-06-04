@@ -446,7 +446,7 @@ def run_simulation(
 
     task = _select_ready_task(backlog)
     agent = _find_idle_agent(agent_pool, task["required_role"])
-    runtime_adapter = _resolve_runtime_adapter(
+    runtime_adapter_selection = _resolve_runtime_adapter_selection(
         runtime_adapter,
         runtime_adapter_factory,
         agent,
@@ -455,6 +455,8 @@ def run_simulation(
         project_root=project_root,
         runtime_profile_defaults=runtime_profile_defaults,
     )
+    runtime_adapter = runtime_adapter_selection["runtime_adapter"]
+    runtime_profile_source = runtime_adapter_selection["runtime_profile_source"]
 
     inbox_path = output_dir / agent["inbox_path"]
     events_path = output_dir / "events.jsonl"
@@ -587,6 +589,7 @@ def run_simulation(
                 "lease_id": lease_id,
                 "runtime_session_id": runtime_session_id,
                 **_runtime_adapter_metadata(runtime_adapter),
+                "runtime_profile_source": runtime_profile_source,
                 "worktree_id": worktree_id,
                 "worktree_path": str(worktree_path) if worktree_path else None,
                 "session_status": "started",
@@ -1185,8 +1188,9 @@ def rebuild_sqlite_state_index(db_path, events_path):
                 changed_file_count,
                 runtime_model,
                 runtime_sandbox,
-                runtime_timeout_seconds
-            ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                runtime_timeout_seconds,
+                runtime_profile_source
+            ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1201,6 +1205,7 @@ def rebuild_sqlite_state_index(db_path, events_path):
                     session_state.get("runtime_model"),
                     session_state.get("runtime_sandbox"),
                     session_state.get("runtime_timeout_seconds"),
+                    session_state.get("runtime_profile_source"),
                 )
                 for runtime_session_id, session_state in sorted(
                     snapshot["runtime_sessions"].items()
@@ -1293,7 +1298,8 @@ def read_sqlite_state_index(db_path, events_path=None):
                 changed_file_count,
                 runtime_model,
                 runtime_sandbox,
-                runtime_timeout_seconds
+                runtime_timeout_seconds,
+                runtime_profile_source
             from runtime_sessions
             order by runtime_session_id
             """,
@@ -1370,6 +1376,7 @@ def _sqlite_missing_required_tables(db_path):
         "runtime_model",
         "runtime_sandbox",
         "runtime_timeout_seconds",
+        "runtime_profile_source",
     }
     required_attempt_columns = {"repo_context_path"}
     return not (
@@ -1422,9 +1429,16 @@ def _create_sqlite_state_schema(connection):
             changed_file_count integer,
             runtime_model text,
             runtime_sandbox text,
-            runtime_timeout_seconds integer
+            runtime_timeout_seconds integer,
+            runtime_profile_source text
         )
         """
+    )
+    _ensure_sqlite_column(
+        connection,
+        "runtime_sessions",
+        "runtime_profile_source",
+        "text",
     )
     connection.execute(
         """
@@ -1513,6 +1527,7 @@ def replay_events(events_path):
                 "runtime_model": payload.get("runtime_model"),
                 "runtime_sandbox": payload.get("runtime_sandbox"),
                 "runtime_timeout_seconds": payload.get("runtime_timeout_seconds"),
+                "runtime_profile_source": payload.get("runtime_profile_source"),
                 "worktree_id": payload.get("worktree_id"),
                 "worktree_path": payload.get("worktree_path"),
             }
@@ -1717,40 +1732,73 @@ def _resolve_runtime_adapter(
     project_root=None,
     runtime_profile_defaults=None,
 ):
+    return _resolve_runtime_adapter_selection(
+        runtime_adapter,
+        runtime_adapter_factory,
+        agent,
+        task,
+        agent_pool=agent_pool,
+        project_root=project_root,
+        runtime_profile_defaults=runtime_profile_defaults,
+    )["runtime_adapter"]
+
+
+def _resolve_runtime_adapter_selection(
+    runtime_adapter,
+    runtime_adapter_factory,
+    agent,
+    task,
+    agent_pool=None,
+    project_root=None,
+    runtime_profile_defaults=None,
+):
     if runtime_adapter_factory:
-        return runtime_adapter_factory(agent, task) or FakeRuntimeAdapter()
+        return {
+            "runtime_adapter": runtime_adapter_factory(agent, task)
+            or FakeRuntimeAdapter(),
+            "runtime_profile_source": "runtime_adapter_factory",
+        }
     if runtime_adapter:
-        return runtime_adapter
+        return {
+            "runtime_adapter": runtime_adapter,
+            "runtime_profile_source": "explicit_runtime_adapter",
+        }
     profile = agent.get("runtime_profile")
     if profile:
-        return (
-            _runtime_adapter_from_profile(
+        return {
+            "runtime_adapter": _runtime_adapter_from_profile(
                 profile,
                 defaults=runtime_profile_defaults,
                 project_root=project_root,
             )
-            or FakeRuntimeAdapter()
-        )
+            or FakeRuntimeAdapter(),
+            "runtime_profile_source": "agent_runtime_profile",
+        }
     role_profile = _role_runtime_profile(agent_pool, agent)
     if role_profile:
-        return (
-            _runtime_adapter_from_profile(
+        return {
+            "runtime_adapter": _runtime_adapter_from_profile(
                 role_profile,
                 defaults=runtime_profile_defaults,
                 project_root=project_root,
             )
-            or FakeRuntimeAdapter()
-        )
+            or FakeRuntimeAdapter(),
+            "runtime_profile_source": "role_runtime_profile",
+        }
     if runtime_profile_defaults:
-        return (
-            _runtime_adapter_from_profile(
+        return {
+            "runtime_adapter": _runtime_adapter_from_profile(
                 runtime_profile_defaults,
                 defaults={},
                 project_root=project_root,
             )
-            or FakeRuntimeAdapter()
-        )
-    return FakeRuntimeAdapter()
+            or FakeRuntimeAdapter(),
+            "runtime_profile_source": "runtime_profile_defaults",
+        }
+    return {
+        "runtime_adapter": FakeRuntimeAdapter(),
+        "runtime_profile_source": "default_fake",
+    }
 
 
 def _role_runtime_profile(agent_pool, agent):

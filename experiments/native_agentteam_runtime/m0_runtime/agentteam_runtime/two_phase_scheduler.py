@@ -323,16 +323,19 @@ class TwoPhaseFileScheduler:
         inbox_path = step_dir / agent["inbox_path"]
         _append_jsonl(inbox_path, [message])
 
-        metadata = (
-            _runtime_adapter_metadata(self.runtime_adapter)
-            if self.runtime_adapter
-            else {
+        if self.runtime_adapter:
+            metadata = {
+                **_runtime_adapter_metadata(self.runtime_adapter),
+                "runtime_profile_source": "explicit_runtime_adapter",
+            }
+        else:
+            metadata = {
                 "runtime_adapter": "FileMailboxExternalRuntimeAdapter",
                 "runtime_model": None,
                 "runtime_sandbox": None,
                 "runtime_timeout_seconds": None,
+                "runtime_profile_source": "external_mailbox_adapter",
             }
-        )
         self._append_events(
             step_id,
             [

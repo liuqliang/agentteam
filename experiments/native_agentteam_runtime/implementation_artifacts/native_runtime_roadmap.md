@@ -300,7 +300,8 @@ Goal: make resident role agents configurable without duplicating runtime
 settings onto every agent entry.
 
 Status: implemented for the current route. M31a added runtime profiles, M31b
-added prompt contracts, and M31c added bounded role context packages.
+added prompt contracts, M31c added bounded role context packages, and M31d
+exposes effective runtime profile source in session state.
 
 Scope:
 
@@ -313,6 +314,8 @@ Scope:
   in Codex prompts;
 - write bounded role context files and pass `role_context_path` in dispatch
   payloads;
+- record the effective runtime profile source on runtime sessions for state
+  index and observability queries;
 - keep Codex as the only live LLM backend on this route;
 - keep CLI/default Codex command settings usable as local environment defaults.
 
@@ -326,15 +329,16 @@ Acceptance:
 - Codex prompts include a dedicated role contract section;
 - a dispatch payload can point to a bounded role context file;
 - Codex prompts include a dedicated role context package section;
+- runtime session state can distinguish explicit adapters, factories,
+  agent-level profiles, role-level profiles, defaults, and the fallback fake
+  adapter, plus the two-phase external mailbox adapter path;
 - agent pool schemas accept role runtime profiles, prompt contracts, and
   context packages.
 
 Remaining follow-up work:
 
 - generate role context packages from repository maps and verification summaries
-  instead of only explicit artifact paths;
-- expose effective role profile selection in observability if long-running
-  debugging needs it.
+  instead of only explicit artifact paths.
 
 ### M32: Repository Map Context Generation
 

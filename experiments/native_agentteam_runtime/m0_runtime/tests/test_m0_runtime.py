@@ -1728,6 +1728,7 @@ class M0RuntimeTests(unittest.TestCase):
                         "result_status": "completed",
                         "runtime_adapter": "FakeRuntimeAdapter",
                         "runtime_model": None,
+                        "runtime_profile_source": "explicit_runtime_adapter",
                         "runtime_sandbox": None,
                         "runtime_session_id": "SESSION-TASK-001-ATTEMPT-001",
                         "runtime_timeout_seconds": None,
@@ -1741,6 +1742,7 @@ class M0RuntimeTests(unittest.TestCase):
                         "result_status": "completed",
                         "runtime_adapter": "FakeRuntimeAdapter",
                         "runtime_model": None,
+                        "runtime_profile_source": "explicit_runtime_adapter",
                         "runtime_sandbox": None,
                         "runtime_session_id": "SESSION-TASK-002-ATTEMPT-001",
                         "runtime_timeout_seconds": None,
@@ -1785,6 +1787,7 @@ class M0RuntimeTests(unittest.TestCase):
 
             self.assertEqual(session["runtime_adapter"], "CodexRuntimeAdapter")
             self.assertEqual(session["runtime_model"], "gpt-runtime-config")
+            self.assertEqual(session["runtime_profile_source"], "explicit_runtime_adapter")
             self.assertEqual(session["runtime_sandbox"], "read-only")
             self.assertEqual(session["runtime_timeout_seconds"], 30)
 
@@ -1832,6 +1835,7 @@ class M0RuntimeTests(unittest.TestCase):
             recorded = json.loads(recorded_path.read_text(encoding="utf-8"))
 
             self.assertEqual(session["runtime_adapter"], "CodexRuntimeAdapter")
+            self.assertEqual(session["runtime_profile_source"], "agent_runtime_profile")
             self.assertEqual(session["runtime_model"], "core-profile-model")
             self.assertEqual(session["runtime_sandbox"], "read-only")
             self.assertEqual(session["runtime_timeout_seconds"], 30)
@@ -1884,6 +1888,7 @@ class M0RuntimeTests(unittest.TestCase):
             recorded = json.loads(recorded_path.read_text(encoding="utf-8"))
 
             self.assertEqual(session["runtime_adapter"], "CodexRuntimeAdapter")
+            self.assertEqual(session["runtime_profile_source"], "role_runtime_profile")
             self.assertEqual(session["runtime_model"], "role-profile-model")
             self.assertEqual(session["runtime_sandbox"], "read-only")
             self.assertEqual(session["runtime_timeout_seconds"], 45)
