@@ -180,6 +180,9 @@ def validate_taskpack(taskpack_dir):
             errors.append(f"{task_id} write_scope must be a non-empty list")
         else:
             for scope in write_scope:
+                if not isinstance(scope, str):
+                    errors.append(f"{task_id} write_scope entries must be strings")
+                    continue
                 if scope in {".", "./", "*", "**", "/"}:
                     errors.append("write_scope must not include repository root")
                 if Path(scope).is_absolute():
