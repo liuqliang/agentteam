@@ -81,6 +81,8 @@ The implementation has already proven these layers:
     Python AST symbol summaries, task-scoped `repo_context.v1` packages,
     dispatch payload paths, Codex prompt references, and conservative cache
     reuse for clean same-HEAD repositories.
+22. Repo-context observability with attempt-level `repo_context_path` replay,
+    SQLite state-index visibility, and a CLI `repo-contexts` drilldown view.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -371,11 +373,47 @@ Acceptance:
 
 Remaining follow-up work:
 
-- add observability views that show which repo context package was attached to
-  each attempt;
 - measure whether live Codex workers actually inspect and use selected files;
 - add language-aware extractors through compilers, LSPs, Tree-sitter, ctags, or
   build-system queries only after the bounded MVP proves useful.
+
+### M33: Repo Context Observability
+
+Goal: make M32 context attachment inspectable without opening raw mailbox files
+or guessing from filenames.
+
+Status: M33a implemented. Dispatch events now record `repo_context_path` when a
+repo context is attached, event replay restores that field onto attempt state,
+the SQLite state index exposes it on attempts, and runtime observability has a
+`repo-contexts` drilldown view.
+
+Scope:
+
+- include `repo_context_path` and `repo_context_schema_version` on
+  `message_dispatched` events when present in the dispatch payload;
+- restore repo context fields into attempt state during event replay;
+- include `repo_context_path` in the SQLite `attempts` state-index table;
+- add `build_runtime_observability(..., view="repo-contexts")`;
+- add CLI support for `--observability-view repo-contexts`;
+- summarize selected files, selection reasons, omitted count, warnings, and
+  repo-map manifest path without embedding source bodies.
+
+Acceptance:
+
+- a completed run with `project_root` exposes the attached repo context path in
+  replayed attempt state and in the SQLite state index;
+- the `repo-contexts` view links repo context files back to attempt ids;
+- the CLI can print the same view as JSON;
+- deterministic tests cover direct API and CLI behavior.
+
+Remaining follow-up work:
+
+- add a live Codex smoke that checks whether the worker actually reads the
+  attached repo context file;
+- expose context effectiveness signals such as selected-file hit rate after
+  diff audit;
+- decide whether role context packages should automatically reference repo
+  context summaries or remain separate prompt sections.
 
 ## Longer-Term Route
 
@@ -418,6 +456,5 @@ Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
 The next recommended step is to validate repo-context effectiveness in live
-Codex worker runs and add observability for selected context packages. Inflight
-migration remains a separate M29 decision gate because it changes ownership of
-already leased work.
+Codex worker runs. Inflight migration remains a separate M29 decision gate
+because it changes ownership of already leased work.

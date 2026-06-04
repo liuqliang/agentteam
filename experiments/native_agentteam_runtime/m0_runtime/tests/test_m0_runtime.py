@@ -754,6 +754,56 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(context["repo_context_schema_version"], "repo_context.v1")
             self.assertEqual(context["selected_files"][0]["path"], "pkg/module.py")
 
+    def test_repo_context_path_is_recorded_on_attempt_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "pkg" / "module.py").write_text(
+                "def build_worker():\n    return 'worker'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "pkg/module.py"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add module"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            task = _backlog_task("TASK-001", write_scope=["generated/"])
+            task["objective"] = "Update build_worker behavior in pkg/module.py"
+            task["read_scope"] = ["pkg/"]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[task],
+            )
+
+            run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            snapshot = replay_events(output_dir / "events.jsonl")
+            state_index = read_scheduler_state_index(output_dir)
+            context_path = output_dir / "repo_contexts" / "ATTEMPT-001-repo_map_agent.json"
+
+            self.assertEqual(
+                snapshot["attempts"]["ATTEMPT-001"]["repo_context_path"],
+                str(context_path),
+            )
+            self.assertEqual(
+                state_index["attempts"][0]["repo_context_path"],
+                str(context_path),
+            )
+
     def test_scheduler_loop_runs_ready_tasks_until_idle(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1410,12 +1460,14 @@ class M0RuntimeTests(unittest.TestCase):
                     {
                         "attempt_id": "TASK-001-ATTEMPT-001",
                         "attempt_status": "completed",
+                        "repo_context_path": None,
                         "task_id": "TASK-001",
                         "validation_status": "accepted",
                     },
                     {
                         "attempt_id": "TASK-002-ATTEMPT-001",
                         "attempt_status": "completed",
+                        "repo_context_path": None,
                         "task_id": "TASK-002",
                         "validation_status": "accepted",
                     },
@@ -4241,6 +4293,58 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(sessions_view["runtime_sessions"][0]["session_status"], "stopped")
             self.assertEqual(workers_view["workers"], [])
 
+    def test_runtime_observability_reports_repo_context_packages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "pkg" / "module.py").write_text(
+                "def build_worker():\n    return 'worker'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "pkg/module.py"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add module"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            task = _backlog_task("TASK-001", write_scope=["generated/"])
+            task["objective"] = "Update build_worker behavior in pkg/module.py"
+            task["read_scope"] = ["pkg/"]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[task],
+            )
+
+            run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            repo_contexts_view = build_runtime_observability(
+                output_dir,
+                view="repo-contexts",
+            )
+            repo_context = repo_contexts_view["repo_contexts"][0]
+
+            self.assertEqual(repo_contexts_view["view"], "repo-contexts")
+            self.assertEqual(repo_contexts_view["repo_context_count"], 1)
+            self.assertEqual(repo_context["attempt_id"], "ATTEMPT-001")
+            self.assertEqual(repo_context["task_id"], "TASK-001")
+            self.assertEqual(repo_context["agent_role"], "repo_map_agent")
+            self.assertEqual(repo_context["selected_file_count"], 2)
+            self.assertEqual(repo_context["selected_files"][0]["path"], "pkg/module.py")
+            self.assertIn("repo_map_manifest_path", repo_context)
+
     def test_cli_can_show_runtime_observability_event_view(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -4290,6 +4394,72 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["view"], "events")
             self.assertEqual(summary["event_count"], root_event_count)
             self.assertEqual(summary["events"][-1]["event_type"], "backlog_updated")
+
+    def test_cli_can_show_runtime_observability_repo_contexts_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "pkg" / "module.py").write_text(
+                "def build_worker():\n    return 'worker'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "pkg/module.py"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add module"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            task = _backlog_task("TASK-001", write_scope=["generated/"])
+            task["objective"] = "Update build_worker behavior in pkg/module.py"
+            task["read_scope"] = ["pkg/"]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[task],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--output-dir",
+                    str(output_dir),
+                    "--show-runtime-observability",
+                    "--observability-view",
+                    "repo-contexts",
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["view"], "repo-contexts")
+            self.assertEqual(summary["repo_context_count"], 1)
+            self.assertEqual(
+                summary["repo_contexts"][0]["selected_files"][0]["path"],
+                "pkg/module.py",
+            )
 
     def test_runtime_observability_reports_current_milestone_and_decomposition(self):
         with tempfile.TemporaryDirectory() as tmp:

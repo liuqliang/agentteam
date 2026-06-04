@@ -14,6 +14,7 @@ OBSERVABILITY_VIEWS = {
     "sessions",
     "workers",
     "integration-queue",
+    "repo-contexts",
 }
 
 
@@ -58,6 +59,13 @@ def build_runtime_observability(output_dir, view="summary"):
             **base,
             "integration_queue": integration_queue,
             "integration_queue_items": integration_queue["items"],
+        }
+    if view == "repo-contexts":
+        repo_contexts = _read_repo_contexts(output_dir, state_index["attempts"])
+        return {
+            **base,
+            "repo_context_count": len(repo_contexts),
+            "repo_contexts": repo_contexts,
         }
 
     return {
@@ -136,6 +144,55 @@ def _read_worker_registry(output_dir):
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
     return {"workers": []}
+
+
+def _read_repo_contexts(output_dir, attempts=None):
+    repo_context_dir = Path(output_dir) / "repo_contexts"
+    if not repo_context_dir.exists():
+        return []
+    attempt_by_context_path = {
+        attempt.get("repo_context_path"): attempt
+        for attempt in attempts or []
+        if attempt.get("repo_context_path")
+    }
+    contexts = []
+    for path in sorted(repo_context_dir.glob("*.json")):
+        try:
+            context = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            contexts.append({"path": str(path), "read_status": "invalid_json"})
+            continue
+        selected_files = context.get("selected_files", [])
+        attempt = attempt_by_context_path.get(str(path), {})
+        contexts.append(
+            {
+                "path": str(path),
+                "read_status": "ok",
+                "repo_context_schema_version": context.get(
+                    "repo_context_schema_version"
+                ),
+                "attempt_id": attempt.get("attempt_id"),
+                "task_id": context.get("task_id"),
+                "agent_role": context.get("agent_role"),
+                "selected_file_count": len(selected_files),
+                "selected_files": [
+                    {
+                        "path": selected_file.get("path"),
+                        "language": selected_file.get("language"),
+                        "category": selected_file.get("category"),
+                        "selection_reasons": selected_file.get(
+                            "selection_reasons",
+                            [],
+                        ),
+                    }
+                    for selected_file in selected_files
+                ],
+                "omitted_file_count": context.get("omitted_file_count", 0),
+                "repo_map_manifest_path": context.get("repo_map_manifest_path"),
+                "warning_count": len(context.get("warnings", [])),
+            }
+        )
+    return contexts
 
 
 def _read_scheduler_state(output_dir):

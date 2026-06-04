@@ -47,6 +47,7 @@ def main(argv=None):
             "sessions",
             "workers",
             "integration-queue",
+            "repo-contexts",
         ],
         default="summary",
         help="Read-only runtime observability view to print.",

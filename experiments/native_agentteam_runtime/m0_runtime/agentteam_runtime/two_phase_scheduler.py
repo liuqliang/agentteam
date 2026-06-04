@@ -10,6 +10,7 @@ from .m0_runtime import (
     _create_git_worktree,
     _event,
     _find_idle_agent,
+    _message_context_event_fields,
     _read_json,
     _repo_context_fields,
     _role_context_fields,
@@ -411,6 +412,7 @@ class TwoPhaseFileScheduler:
                         "task_id": task["task_id"],
                         "attempt_id": attempt_id,
                         "lease_id": lease_id,
+                        **_message_context_event_fields(message["payload"]),
                     },
                 ),
                 self._event(

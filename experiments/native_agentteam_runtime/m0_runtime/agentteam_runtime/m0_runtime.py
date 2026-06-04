@@ -572,6 +572,7 @@ def run_simulation(
                 "task_id": task["task_id"],
                 "attempt_id": attempt_id,
                 "lease_id": lease_id,
+                **_message_context_event_fields(message["payload"]),
             },
         )
         append_event(
@@ -1144,8 +1145,9 @@ def rebuild_sqlite_state_index(db_path, events_path):
                 attempt_id,
                 task_id,
                 attempt_status,
-                validation_status
-            ) values(?, ?, ?, ?)
+                validation_status,
+                repo_context_path
+            ) values(?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1153,6 +1155,7 @@ def rebuild_sqlite_state_index(db_path, events_path):
                     attempt_state.get("task_id"),
                     attempt_state.get("attempt_status"),
                     attempt_state.get("validation_status"),
+                    attempt_state.get("repo_context_path"),
                 )
                 for attempt_id, attempt_state in sorted(snapshot["attempts"].items())
             ],
@@ -1258,7 +1261,12 @@ def read_sqlite_state_index(db_path, events_path=None):
         attempts = _fetch_sqlite_dicts(
             connection,
             """
-            select attempt_id, task_id, attempt_status, validation_status
+            select
+                attempt_id,
+                task_id,
+                attempt_status,
+                validation_status,
+                repo_context_path
             from attempts
             order by attempt_id
             """,
@@ -1315,6 +1323,15 @@ def _fetch_sqlite_dicts(connection, query):
     return [dict(row) for row in connection.execute(query)]
 
 
+def _ensure_sqlite_column(connection, table, column, column_type):
+    columns = {
+        row[1]
+        for row in connection.execute(f"pragma table_info({table})").fetchall()
+    }
+    if column not in columns:
+        connection.execute(f"alter table {table} add column {column} {column_type}")
+
+
 def _sqlite_state_index_is_stale(db_path, events_path):
     try:
         if _sqlite_missing_required_tables(db_path):
@@ -1345,12 +1362,20 @@ def _sqlite_missing_required_tables(db_path):
             row[1]
             for row in connection.execute("pragma table_info(runtime_sessions)").fetchall()
         }
+        attempt_columns = {
+            row[1]
+            for row in connection.execute("pragma table_info(attempts)").fetchall()
+        }
     required_runtime_session_columns = {
         "runtime_model",
         "runtime_sandbox",
         "runtime_timeout_seconds",
     }
-    return not required_runtime_session_columns.issubset(runtime_session_columns)
+    required_attempt_columns = {"repo_context_path"}
+    return not (
+        required_runtime_session_columns.issubset(runtime_session_columns)
+        and required_attempt_columns.issubset(attempt_columns)
+    )
 
 
 def _create_sqlite_state_schema(connection):
@@ -1368,10 +1393,12 @@ def _create_sqlite_state_schema(connection):
             attempt_id text primary key,
             task_id text,
             attempt_status text,
-            validation_status text
+            validation_status text,
+            repo_context_path text
         )
         """
     )
+    _ensure_sqlite_column(connection, "attempts", "repo_context_path", "text")
     connection.execute(
         """
         create table if not exists leases(
@@ -1453,6 +1480,15 @@ def replay_events(events_path):
             attempt_state = snapshot["attempts"].setdefault(attempt_id, {})
             attempt_state["attempt_status"] = "dispatched"
             attempt_state.setdefault("task_id", task_id)
+        elif event["event_type"] == "message_dispatched":
+            attempt_state = snapshot["attempts"].setdefault(attempt_id, {})
+            attempt_state.setdefault("task_id", task_id)
+            if payload.get("repo_context_path"):
+                attempt_state["repo_context_path"] = payload["repo_context_path"]
+            if payload.get("repo_context_schema_version"):
+                attempt_state["repo_context_schema_version"] = payload[
+                    "repo_context_schema_version"
+                ]
         elif event["event_type"] == "worktree_created":
             snapshot["attempts"].setdefault(attempt_id, {})["worktree_id"] = payload["worktree_id"]
             snapshot["attempts"].setdefault(attempt_id, {})["worktree_path"] = payload[
@@ -1758,6 +1794,17 @@ def _role_context_fields(agent_pool, agent, output_dir, attempt_id):
         "role_context_path": str(context_path),
         "role_context_schema_version": "role_context.v1",
     }
+
+
+def _message_context_event_fields(payload):
+    fields = {}
+    if payload.get("repo_context_path"):
+        fields["repo_context_path"] = payload["repo_context_path"]
+    if payload.get("repo_context_schema_version"):
+        fields["repo_context_schema_version"] = payload[
+            "repo_context_schema_version"
+        ]
+    return fields
 
 
 def _repo_context_fields(project_root, output_dir, task, agent, attempt_id):
