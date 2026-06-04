@@ -4543,6 +4543,34 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(sessions_view["runtime_sessions"][0]["session_status"], "stopped")
             self.assertEqual(workers_view["workers"], [])
 
+    def test_runtime_observability_reports_runtime_profile_source_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+
+            run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            summary = build_runtime_observability(output_dir)
+
+            self.assertEqual(
+                summary["runtime_profile_source_counts"],
+                {"explicit_runtime_adapter": 2},
+            )
+
     def test_runtime_observability_reports_repo_context_packages(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

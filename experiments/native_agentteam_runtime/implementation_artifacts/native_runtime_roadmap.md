@@ -301,7 +301,8 @@ settings onto every agent entry.
 
 Status: implemented for the current route. M31a added runtime profiles, M31b
 added prompt contracts, M31c added bounded role context packages, and M31d
-exposes effective runtime profile source in session state.
+exposes effective runtime profile source in session state. M31e adds runtime
+profile source counts to the observability summary.
 
 Scope:
 
@@ -316,6 +317,8 @@ Scope:
   payloads;
 - record the effective runtime profile source on runtime sessions for state
   index and observability queries;
+- summarize runtime profile source counts in the default runtime observability
+  view;
 - keep Codex as the only live LLM backend on this route;
 - keep CLI/default Codex command settings usable as local environment defaults.
 
@@ -332,6 +335,7 @@ Acceptance:
 - runtime session state can distinguish explicit adapters, factories,
   agent-level profiles, role-level profiles, defaults, and the fallback fake
   adapter, plus the two-phase external mailbox adapter path;
+- the default observability summary reports runtime profile source counts;
 - agent pool schemas accept role runtime profiles, prompt contracts, and
   context packages.
 

@@ -84,6 +84,10 @@ def build_runtime_observability(output_dir, view="summary"):
             snapshot["runtime_sessions"].values(),
             "session_status",
         ),
+        "runtime_profile_source_counts": _count_values(
+            snapshot["runtime_sessions"].values(),
+            "runtime_profile_source",
+        ),
         "integration_queue_counts": _count_values(
             integration_queue["items"],
             "queue_status",
