@@ -525,8 +525,8 @@ Goal: move from isolated runtime capabilities to a small but complete
 implementation workflow that can prove whether the current Codex-only route is
 usable on real code changes.
 
-Status: M36a implemented and completed once against the local Codex CLI. M36b
-remains the next pilot slice.
+Status: M36a and M36b implemented. Both have completed once against the local
+Codex CLI.
 
 Scope:
 
@@ -541,6 +541,13 @@ Scope:
   fast-forward merge the verified batch back to the source repository, and run
   source-repo verification again;
 - support exact-file `write_scope` entries as well as directory write scopes;
+- M36b adds `agentteam_runtime.live_codex_multifile_pipeline_smoke`, also gated
+  by `AGENTTEAM_RUN_LIVE_CODEX=1`;
+- create a small multi-file fixture where the worker must implement
+  `src/toc.py` and update `docs/guide.md` while tests live under `tests/`;
+- verify multi-file exact write scopes, repo context selection, role context
+  consumption, patch capture, batch verification, and source merge on the same
+  pipeline as M36a;
 - keep deterministic fake-Codex coverage in normal tests while leaving real
   Codex calls opt-in.
 
@@ -553,14 +560,15 @@ Acceptance:
   passing source-repo tests;
 - exact-file write scopes such as `src/text_utils.py` are accepted when the
   changed file matches exactly;
+- a multi-file task can report and merge exactly `docs/guide.md` and
+  `src/toc.py`, with unit tests confirming that generated documentation content
+  matches source behavior;
 - normal unit tests still require no live model call.
 
 Remaining follow-up work:
 
-- M36b should use a small multi-file task, such as a Markdown table-of-contents
-  updater with source, tests, and docs, to validate that repo-context selection,
-  candidate tests, patch batching, and verified merge remain stable beyond a
-  single-file fixture.
+- select the first non-fixture pilot repository or add one more workflow
+  capability if the fixture-level live results expose a blocker.
 
 ## Longer-Term Route
 
@@ -602,6 +610,7 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is M36b: run a small multi-file implementation pilot
-before broadening language import coverage. Inflight migration remains a
-separate M29 decision gate because it changes ownership of already leased work.
+The next recommended step is to select the first non-fixture pilot repository
+or add the smallest missing workflow capability that blocks such a pilot.
+Inflight migration remains a separate M29 decision gate because it changes
+ownership of already leased work.

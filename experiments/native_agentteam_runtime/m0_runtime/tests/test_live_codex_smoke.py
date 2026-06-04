@@ -356,6 +356,80 @@ class LiveCodexSmokeTests(unittest.TestCase):
                 (Path(summary["repo_path"]) / "src" / "text_utils.py").exists()
             )
 
+    def test_live_codex_multifile_pipeline_smoke_skips_without_env_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "multifile-pipeline-smoke"
+            env = os.environ.copy()
+            env.pop("AGENTTEAM_RUN_LIVE_CODEX", None)
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.live_codex_multifile_pipeline_smoke",
+                    "--output-dir",
+                    str(output_dir),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["status"], "skipped")
+            self.assertEqual(summary["reason"], "set AGENTTEAM_RUN_LIVE_CODEX=1")
+            self.assertFalse(output_dir.exists())
+
+    def test_live_codex_multifile_pipeline_smoke_runs_with_fake_codex_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "multifile-pipeline-smoke"
+            fake_codex = tmp_path / "fake_multifile_pipeline_codex.py"
+            _write_fake_multifile_pipeline_codex(fake_codex)
+            env = os.environ.copy()
+            env["AGENTTEAM_RUN_LIVE_CODEX"] = "1"
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.live_codex_multifile_pipeline_smoke",
+                    "--output-dir",
+                    str(output_dir),
+                    "--codex-command",
+                    sys.executable,
+                    str(fake_codex),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            expected_files = ["docs/guide.md", "src/toc.py"]
+            guide_text = (Path(summary["repo_path"]) / "docs" / "guide.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["validation_status"], "accepted")
+            self.assertEqual(summary["integration_queue_status"], "pending")
+            self.assertEqual(summary["batch_status"], "verified")
+            self.assertEqual(summary["verification_status"], "passed")
+            self.assertEqual(summary["merge_status"], "merged")
+            self.assertEqual(sorted(summary["changed_files"]), expected_files)
+            self.assertEqual(sorted(summary["actual_changed_files"]), expected_files)
+            self.assertTrue(summary["repo_context_path"])
+            self.assertTrue(summary["role_context_path"])
+            self.assertTrue(summary["source_repo_tests_passed"])
+            self.assertIn("- [Install](#install)", guide_text)
+            self.assertIn("  - [Linux Setup](#linux-setup)", guide_text)
+
 
 def _write_fake_codex(path, changed_file="generated/live_codex_smoke.json"):
     path.write_text(
@@ -416,6 +490,94 @@ def _write_fake_pipeline_codex(path):
                 "    'output': {",
                 "        'adapter': 'codex',",
                 "        'mode': 'fake_pipeline',",
+                "        'selected_paths': selected_paths,",
+                "        'repo_context_path': str(repo_context_path),",
+                "        'role_context_path': str(role_context_path),",
+                "    },",
+                "}), encoding='utf-8')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_fake_multifile_pipeline_codex(path):
+    changed_files = ["docs/guide.md", "src/toc.py"]
+    path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                "import sys",
+                "args = sys.argv[1:]",
+                "prompt = sys.stdin.read()",
+                "output_path = pathlib.Path(args[args.index('--output-last-message') + 1])",
+                "worktree = pathlib.Path(args[args.index('-C') + 1])",
+                "mailbox = json.loads(prompt.rsplit('Mailbox message:', 1)[1].strip())",
+                "repo_context_path = pathlib.Path(mailbox['payload']['repo_context_path'])",
+                "role_context_path = pathlib.Path(mailbox['payload']['role_context_path'])",
+                "repo_context = json.loads(repo_context_path.read_text(encoding='utf-8'))",
+                "json.loads(role_context_path.read_text(encoding='utf-8'))",
+                "selected_paths = [entry['path'] for entry in repo_context['selected_files']]",
+                "toc_source = worktree / 'src' / 'toc.py'",
+                "toc_source.write_text('\\n'.join([",
+                "    'import re',",
+                "    '',",
+                "    'def _slugify(title):',",
+                "    \"    return re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')\",",
+                "    '',",
+                "    'def build_toc(markdown_text):',",
+                "    '    lines = []',",
+                "    '    in_toc = False',",
+                "    '    for raw_line in markdown_text.splitlines():',",
+                "    '        line = raw_line.strip()',",
+                "    \"        if line == '<!-- TOC:start -->':\",",
+                "    '            in_toc = True',",
+                "    '            continue',",
+                "    \"        if line == '<!-- TOC:end -->':\",",
+                "    '            in_toc = False',",
+                "    '            continue',",
+                "    '        if in_toc:',",
+                "    '            continue',",
+                "    \"        if raw_line.startswith('## '):\",",
+                "    '            title = raw_line[3:].strip()',",
+                "    '            lines.append(f\\'- [{title}](#{_slugify(title)})\\')',",
+                "    \"        elif raw_line.startswith('### '):\",",
+                "    '            title = raw_line[4:].strip()',",
+                "    '            lines.append(f\\'  - [{title}](#{_slugify(title)})\\')',",
+                "    '    return lines',",
+                "    '',",
+                "]), encoding='utf-8')",
+                "guide = worktree / 'docs' / 'guide.md'",
+                "guide.write_text('\\n'.join([",
+                "    '# Agent Guide',",
+                "    '',",
+                "    '<!-- TOC:start -->',",
+                "    '- [Install](#install)',",
+                "    '  - [Linux Setup](#linux-setup)',",
+                "    '- [Usage Tips](#usage-tips)',",
+                "    '<!-- TOC:end -->',",
+                "    '',",
+                "    '## Install',",
+                "    '',",
+                "    'Install the tool locally.',",
+                "    '',",
+                "    '### Linux Setup',",
+                "    '',",
+                "    'Use the standard Python runtime.',",
+                "    '',",
+                "    '## Usage Tips',",
+                "    '',",
+                "    'Keep generated artifacts small.',",
+                "    '',",
+                "]), encoding='utf-8')",
+                "output_path.parent.mkdir(parents=True, exist_ok=True)",
+                "output_path.write_text(json.dumps({",
+                "    'result_status': 'completed',",
+                f"    'changed_files': {changed_files!r},",
+                "    'output': {",
+                "        'adapter': 'codex',",
+                "        'mode': 'fake_multifile_pipeline',",
                 "        'selected_paths': selected_paths,",
                 "        'repo_context_path': str(repo_context_path),",
                 "        'role_context_path': str(role_context_path),",
