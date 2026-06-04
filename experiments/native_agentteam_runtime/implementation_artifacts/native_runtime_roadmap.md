@@ -83,6 +83,9 @@ The implementation has already proven these layers:
     reuse for clean same-HEAD repositories.
 22. Repo-context observability with attempt-level `repo_context_path` replay,
     SQLite state-index visibility, and a CLI `repo-contexts` drilldown view.
+23. Repo-context quality improvements beginning with candidate test selection
+    derived from selected source files, Python imports, test paths, and task
+    objective tokens.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -421,6 +424,38 @@ Acceptance:
 - deterministic tests cover direct API, CLI behavior, env-gated smoke skipping,
   fake-Codex repo context consumption, and diff-audit hit metrics.
 
+### M34: Repo Context Selection Quality
+
+Goal: improve repository context usefulness while preserving bounded context
+packages and deterministic scheduler authority.
+
+Status: M34a implemented. Repo context packages now include `candidate_tests`
+for selected source files. The first implementation uses Python imports, test
+path tokens, selected source modules, and task objective tokens.
+
+Scope:
+
+- keep source-file selection and test-candidate selection as separate context
+  fields;
+- infer Python module names from selected source paths;
+- rank test files higher when they import a selected module;
+- add path-name and objective-token matches as weaker signals;
+- keep unsupported languages on the existing inventory-only fallback path.
+
+Acceptance:
+
+- a task selecting `pkg/module.py` can report `tests/test_module.py` as a
+  candidate test when the test imports `pkg.module`;
+- candidate tests do not consume the `selected_files` budget;
+- no compiler, LSP, or live model call is required.
+
+Remaining follow-up work:
+
+- improve source ranking with more explicit symbol/path weighting;
+- add candidate tests to `repo-contexts` observability summaries if operators
+  need them outside the raw context file;
+- add language-specific extractors behind conservative fallbacks.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -461,8 +496,7 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to improve repository context selection quality
-without changing the scheduler authority model. Candidate slices include test
-candidate selection, better path/symbol ranking, and language-aware extractors
-behind conservative fallbacks. Inflight migration remains a separate M29
-decision gate because it changes ownership of already leased work.
+The next recommended step is to improve source ranking with more explicit
+symbol/path weighting, then add language-aware extractors behind conservative
+fallbacks. Inflight migration remains a separate M29 decision gate because it
+changes ownership of already leased work.

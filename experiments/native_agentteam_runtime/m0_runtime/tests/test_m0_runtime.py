@@ -373,6 +373,73 @@ class M0RuntimeTests(unittest.TestCase):
                 [entry["path"] for entry in context["selected_files"]],
             )
 
+    def test_repo_context_reports_candidate_tests_for_selected_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "runtime"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "tests").mkdir()
+            (repo / "pkg" / "module.py").write_text(
+                "def build_worker():\n    return 'worker'\n",
+                encoding="utf-8",
+            )
+            (repo / "tests" / "test_module.py").write_text(
+                "\n".join(
+                    [
+                        "from pkg.module import build_worker",
+                        "",
+                        "def test_build_worker():",
+                        "    assert build_worker() == 'worker'",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "pkg/module.py", "tests/test_module.py"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "add source and test"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            task = {
+                "task_id": "TASK-CTX-TESTS-001",
+                "objective": "Update build_worker behavior in pkg/module.py",
+                "read_scope": ["pkg/"],
+                "write_scope": ["pkg/module.py"],
+            }
+
+            context = build_repo_context(
+                repo,
+                output_dir,
+                task,
+                agent_role="repo_map_agent",
+                max_files=1,
+            )
+
+            self.assertEqual(context["selected_files"][0]["path"], "pkg/module.py")
+            self.assertEqual(
+                context["candidate_tests"],
+                [
+                    {
+                        "path": "tests/test_module.py",
+                        "language": "python",
+                        "selection_reasons": [
+                            "imports_selected_module",
+                            "path_match",
+                            "objective",
+                        ],
+                    }
+                ],
+            )
+
     def test_task_proposal_normalizes_valid_generated_tasks(self):
         proposal = {
             "milestone_id": "M21",

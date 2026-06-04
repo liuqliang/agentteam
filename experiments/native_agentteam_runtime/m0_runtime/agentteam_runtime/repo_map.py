@@ -173,6 +173,12 @@ def build_repo_context(
     }
     ranked = _rank_inventory_files(repo_map["inventory"]["files"], symbol_by_path, task)
     selected = ranked[:max_files]
+    candidate_tests = _candidate_tests(
+        repo_map["inventory"]["files"],
+        symbol_by_path,
+        selected,
+        task,
+    )
     context = {
         "repo_context_schema_version": REPO_CONTEXT_SCHEMA_VERSION,
         "repo_context_path": str(context_path),
@@ -185,6 +191,7 @@ def build_repo_context(
             _context_file_entry(entry, symbol_by_path.get(entry["path"]), score, reasons)
             for score, reasons, entry in selected
         ],
+        "candidate_tests": candidate_tests,
         "omitted_file_count": max(0, len(ranked) - len(selected)),
         "warnings": repo_map["manifest"]["warnings"],
     }
@@ -264,6 +271,91 @@ def _context_file_entry(entry, symbols, score, reasons):
             "classes": symbols["classes"],
         }
     return context_entry
+
+
+def _candidate_tests(inventory_files, symbol_by_path, selected, task):
+    selected_modules = _selected_python_modules(selected)
+    selected_path_tokens = _selected_path_tokens(selected)
+    objective_tokens = _objective_tokens(task.get("objective"))
+    candidates = []
+    for entry in inventory_files:
+        if entry["category"] != "test":
+            continue
+        symbols = symbol_by_path.get(entry["path"], {})
+        score = 0
+        reasons = []
+        if _test_imports_selected_module(symbols, selected_modules):
+            score += 100
+            reasons.append("imports_selected_module")
+        if _test_path_matches_selected_source(entry["path"], selected_path_tokens):
+            score += 20
+            reasons.append("path_match")
+        if _matches_objective(entry["path"], symbols, objective_tokens):
+            score += 10
+            reasons.append("objective")
+        if score:
+            candidates.append((score, entry, reasons))
+
+    candidates.sort(key=lambda item: (-item[0], item[1]["path"]))
+    return [
+        {
+            "path": entry["path"],
+            "language": entry["language"],
+            "selection_reasons": reasons,
+        }
+        for score, entry, reasons in candidates
+    ]
+
+
+def _selected_python_modules(selected):
+    modules = set()
+    for score, reasons, entry in selected:
+        if entry["language"] != "python" or entry["category"] == "test":
+            continue
+        modules.add(_python_module_name(entry["path"]))
+    return modules
+
+
+def _selected_path_tokens(selected):
+    tokens = set()
+    for score, reasons, entry in selected:
+        if entry["category"] == "test":
+            continue
+        tokens.update(_path_tokens(entry["path"]))
+    return tokens
+
+
+def _python_module_name(path):
+    path_obj = Path(path)
+    parts = list(path_obj.with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
+def _path_tokens(path):
+    tokens = set()
+    for part in Path(path).with_suffix("").parts:
+        tokens.update(token for token in re.split(r"[^A-Za-z0-9]+|_", part) if token)
+    return {token.lower() for token in tokens}
+
+
+def _test_imports_selected_module(symbols, selected_modules):
+    if not selected_modules:
+        return False
+    imports = symbols.get("imports", [])
+    return any(
+        imported == module or imported.startswith(f"{module}.")
+        for imported in imports
+        for module in selected_modules
+    )
+
+
+def _test_path_matches_selected_source(path, selected_path_tokens):
+    if not selected_path_tokens:
+        return False
+    test_tokens = _path_tokens(path)
+    return bool(test_tokens & selected_path_tokens)
 
 
 def _path_in_scopes(path, scopes):
