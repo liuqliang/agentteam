@@ -25,12 +25,211 @@ def _init_repo(path):
     subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
+def _test_env():
+    import os
+
+    env = os.environ.copy()
+    runtime_root = str(Path(__file__).resolve().parents[1])
+    current = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = runtime_root if not current else f"{runtime_root}:{current}"
+    return env
+
+
 def _arg_value(args, flag):
     index = args.index(flag)
     return args[index + 1]
 
 
 class TaskpackTests(unittest.TestCase):
+    def test_agentteam_cli_draft_and_validate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+
+            draft_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "draft",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Draft through CLI.",
+                    "--draft-root",
+                    str(drafts),
+                    "--taskpack-id",
+                    "cli-draft",
+                    "--author-runtime",
+                    "fake",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(draft_completed.returncode, 0, draft_completed.stderr)
+            draft_summary = json.loads(draft_completed.stdout)
+            self.assertEqual(draft_summary["taskpack_id"], "cli-draft")
+
+            validate_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "validate",
+                    str(drafts / "cli-draft"),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(validate_completed.returncode, 0, validate_completed.stderr)
+            self.assertEqual(json.loads(validate_completed.stdout)["status"], "accepted")
+
+    def test_agentteam_cli_freeze_after_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            _init_repo(repo)
+
+            draft_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "draft",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Freeze through CLI.",
+                    "--draft-root",
+                    str(drafts),
+                    "--taskpack-id",
+                    "cli-freeze",
+                    "--author-runtime",
+                    "fake",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(draft_completed.returncode, 0, draft_completed.stderr)
+
+            freeze_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "freeze",
+                    str(drafts / "cli-freeze"),
+                    "--frozen-root",
+                    str(frozen_root),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(freeze_completed.returncode, 0, freeze_completed.stderr)
+            freeze_summary = json.loads(freeze_completed.stdout)
+            self.assertEqual(freeze_summary["manifest"]["taskpack_id"], "cli-freeze")
+            self.assertTrue((frozen_root / "cli-freeze" / "manifest.json").exists())
+
+    def test_agentteam_cli_run_fake_frozen_taskpack_one_shot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_from_goal(
+                project_root=repo,
+                goal="Run fake frozen taskpack through CLI.",
+                draft_root=drafts,
+                author_runtime="fake",
+                taskpack_id="cli-run-fake",
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+            taskpack_path = taskpack_dir / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["runtime"]["default_backend"] = "fake"
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+            agent_pool_path = taskpack_dir / "agent_pool.json"
+            agent_pool = json.loads(agent_pool_path.read_text(encoding="utf-8"))
+            agent_pool["role_runtime_profiles"]["implementation_worker"]["adapter"] = "fake"
+            agent_pool_path.write_text(json.dumps(agent_pool), encoding="utf-8")
+            backlog_path = taskpack_dir / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["write_scope"] = ["generated/"]
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+            frozen = freeze_taskpack(taskpack_dir, frozen_root)
+
+            run_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "run",
+                    frozen["frozen_taskpack_dir"],
+                    "--run-root",
+                    str(run_root),
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(run_completed.returncode, 0, run_completed.stderr)
+            run_summary = json.loads(run_completed.stdout)
+            self.assertEqual(run_summary["scheduler_status"], "idle")
+            self.assertEqual(
+                run_summary["snapshot"]["tasks"]["TASK-CLI_RUN_FAKE-001"]["task_status"],
+                "done",
+            )
+
+    def test_agentteam_cli_failure_returns_json_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_taskpack = Path(tmp) / "missing"
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "validate",
+                    str(missing_taskpack),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(completed.stdout, "")
+            error = json.loads(completed.stderr)
+            self.assertEqual(error["status"], "error")
+            self.assertIn("missing", error["error"])
+
     def test_fake_taskpack_author_drafts_safe_taskpack(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
