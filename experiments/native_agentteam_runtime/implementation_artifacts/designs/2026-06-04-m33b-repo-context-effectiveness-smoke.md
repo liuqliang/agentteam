@@ -65,3 +65,26 @@ This smoke proves that the repo context path is usable by a worker process. It
 does not yet measure whether arbitrary live Codex runs consistently prefer
 selected files, nor does it compute selected-file hit rate from diff audit.
 Those are follow-up observability metrics.
+
+## Live Run Evidence
+
+On 2026-06-04, the gated smoke was run against the local Codex CLI
+`codex-cli 0.132.0`:
+
+```bash
+AGENTTEAM_RUN_LIVE_CODEX=1 \
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.live_codex_repo_context_smoke \
+  --output-dir /tmp/agentteam-live-codex-repo-context-m33c \
+  --timeout-seconds 300
+```
+
+The run completed with:
+
+- `status`: `completed`;
+- `validation_status`: `accepted`;
+- `expected_selected_file`: `pkg/context_target.py`;
+- `reported_selected_file`: `pkg/context_target.py`;
+- `changed_files`: `generated/live_codex_repo_context_smoke.json`;
+- runtime adapter: `CodexRuntimeAdapter`;
+- runtime sandbox: `workspace-write`.

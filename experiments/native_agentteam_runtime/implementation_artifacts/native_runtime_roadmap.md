@@ -389,7 +389,8 @@ field onto attempt state, the SQLite state index exposes it on attempts,
 runtime observability has a `repo-contexts` drilldown view, and a gated
 repo-context Codex smoke can verify that a worker reads the attached context
 package. The `repo-contexts` view also reports selected-file hit metrics from
-diff audit.
+diff audit. The gated repo-context smoke has also completed successfully against
+the local Codex CLI in a controlled run.
 
 Scope:
 
@@ -419,8 +420,6 @@ Acceptance:
 
 Remaining follow-up work:
 
-- run the gated repo-context smoke against the real Codex CLI in a controlled
-  local environment;
 - decide whether role context packages should automatically reference repo
   context summaries or remain separate prompt sections.
 
@@ -464,8 +463,7 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to run the gated repo-context smoke against the
-real Codex CLI in a controlled local environment and decide whether role context
-packages should reference repo context summaries automatically. Inflight
-migration remains a separate M29 decision gate because it changes ownership of
-already leased work.
+The next recommended step is to decide whether role context packages should
+reference repo context summaries automatically or remain separate prompt
+sections. Inflight migration remains a separate M29 decision gate because it
+changes ownership of already leased work.
