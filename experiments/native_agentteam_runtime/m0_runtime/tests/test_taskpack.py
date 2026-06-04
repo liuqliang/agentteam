@@ -211,6 +211,46 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn("write_scope", str(raised.exception))
 
+    def test_validate_taskpack_rejects_root_wide_glob_write_scope(self):
+        cases = ["**/*", "./**", "./**/*"]
+        for index, write_scope in enumerate(cases):
+            with self.subTest(write_scope=write_scope):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    repo = tmp_path / "repo"
+                    drafts = tmp_path / "drafts"
+                    _init_repo(repo)
+                    result = draft_taskpack_files(
+                        project_root=repo,
+                        goal="Reject broad glob write scope.",
+                        draft_root=drafts,
+                        taskpack_id=f"root-glob-write-scope-{index}",
+                        write_scope=[write_scope],
+                    )
+
+                    with self.assertRaises(TaskpackValidationError) as raised:
+                        validate_taskpack(result["taskpack_dir"])
+
+                    self.assertIn("write_scope", str(raised.exception))
+
+    def test_validate_taskpack_accepts_scoped_glob_write_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Accept scoped glob write scope.",
+                draft_root=drafts,
+                taskpack_id="scoped-glob-write-scope",
+                write_scope=["src/**/*.py"],
+            )
+
+            validation = validate_taskpack(result["taskpack_dir"])
+
+            self.assertEqual(validation["status"], "accepted")
+
     def test_validate_taskpack_rejects_missing_taskpack_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -464,6 +504,61 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn("depends_on", str(raised.exception))
 
+    def test_validate_taskpack_rejects_unknown_dependency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject unknown dependency.",
+                draft_root=drafts,
+                taskpack_id="unknown-dependency",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["task_id"] = "TASK-A"
+            backlog["items"][0]["depends_on"] = ["TASK-MISSING"]
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            message = str(raised.exception)
+            self.assertTrue("depends_on" in message or "unknown" in message)
+
+    def test_validate_taskpack_rejects_dependency_cycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject dependency cycle.",
+                draft_root=drafts,
+                taskpack_id="dependency-cycle",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            task_a = dict(backlog["items"][0])
+            task_b = dict(backlog["items"][0])
+            task_a["task_id"] = "TASK-A"
+            task_a["depends_on"] = ["TASK-B"]
+            task_b["task_id"] = "TASK-B"
+            task_b["depends_on"] = ["TASK-A"]
+            backlog["items"] = [task_a, task_b]
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            message = str(raised.exception)
+            self.assertTrue("cycle" in message or "depends_on" in message)
+
     def test_validate_taskpack_rejects_invalid_write_scope_without_type_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -536,3 +631,83 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(manifest["status"], "frozen")
             self.assertEqual(len(manifest["digest_sha256"]), 64)
             self.assertTrue((frozen_dir / "taskpack.yaml").exists())
+
+    def test_freeze_taskpack_rejects_extra_draft_file_without_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject extra draft files.",
+                draft_root=drafts,
+                taskpack_id="extra-draft-file",
+                write_scope=["src/"],
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+            (taskpack_dir / "extra.txt").write_text("not inventoried\n", encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError):
+                freeze_taskpack(taskpack_dir, frozen_root)
+
+            self.assertFalse((frozen_root / "extra-draft-file").exists())
+
+    def test_freeze_taskpack_rejects_symlink_in_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject symlink artifacts.",
+                draft_root=drafts,
+                taskpack_id="symlink-draft-file",
+                write_scope=["src/"],
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+            symlink_path = taskpack_dir / "link.json"
+            try:
+                symlink_path.symlink_to(taskpack_dir / "backlog.json")
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink creation unsupported: {exc}")
+
+            with self.assertRaises(TaskpackValidationError):
+                freeze_taskpack(taskpack_dir, frozen_root)
+
+    def test_freeze_taskpack_honors_companion_mapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Freeze mapped companion artifacts.",
+                draft_root=drafts,
+                taskpack_id="mapped-companion",
+                write_scope=["src/"],
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+            nested_dir = taskpack_dir / "nested"
+            nested_dir.mkdir()
+            (taskpack_dir / "backlog.json").replace(nested_dir / "backlog.json")
+            taskpack_path = taskpack_dir / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["files"]["backlog"] = "nested/backlog.json"
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+
+            validation = validate_taskpack(taskpack_dir)
+            self.assertEqual(validation["status"], "accepted")
+
+            frozen = freeze_taskpack(taskpack_dir, frozen_root)
+            frozen_dir = Path(frozen["frozen_taskpack_dir"])
+            manifest = json.loads((frozen_dir / "manifest.json").read_text(encoding="utf-8"))
+
+            self.assertTrue((frozen_dir / "nested" / "backlog.json").exists())
+            self.assertFalse((frozen_dir / "backlog.json").exists())
+            self.assertEqual(len(manifest["digest_sha256"]), 64)

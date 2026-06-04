@@ -191,6 +191,7 @@ def validate_taskpack(taskpack_dir):
         elif not items:
             errors.append("backlog must contain at least one task")
     seen_task_ids = set()
+    dependency_graph = {}
     for item in items:
         if not isinstance(item, dict):
             errors.append("backlog.items entries must be objects")
@@ -204,6 +205,7 @@ def validate_taskpack(taskpack_dir):
             if task_id in seen_task_ids:
                 errors.append(f"duplicate task_id: {task_id}")
             seen_task_ids.add(task_id)
+            dependency_graph.setdefault(task_id, [])
         write_scope = item.get("write_scope", [])
         if not isinstance(write_scope, list) or not write_scope:
             errors.append(f"{task_id_label} write_scope must be a non-empty list")
@@ -220,6 +222,8 @@ def validate_taskpack(taskpack_dir):
                     errors.append(f"{task_id_label} write_scope must be repository-relative: {scope}")
                 elif _write_scope_is_repository_root(scope_path):
                     errors.append("write_scope must not include repository root")
+                elif _write_scope_is_root_wide_glob(scope_path):
+                    errors.append(f"{task_id_label} write_scope must not include repository-wide glob: {scope}")
                 elif _write_scope_escapes_repository(scope_path):
                     errors.append(f"{task_id_label} write_scope must stay inside repository: {scope}")
         depends_on = item.get("depends_on", [])
@@ -232,6 +236,10 @@ def validate_taskpack(taskpack_dir):
                     continue
                 if dependency == task_id:
                     errors.append(f"{task_id_label} must not depend on itself")
+                if task_id in dependency_graph:
+                    dependency_graph[task_id].append(dependency)
+
+    _validate_dependency_graph(dependency_graph, seen_task_ids, errors)
 
     if not isinstance(verification, dict):
         errors.append("verification must be an object")
@@ -249,6 +257,7 @@ def validate_taskpack(taskpack_dir):
 
 
 def freeze_taskpack(taskpack_dir, frozen_root):
+    taskpack_dir = Path(taskpack_dir).resolve()
     validation = validate_taskpack(taskpack_dir)
     taskpack_id = validation["taskpack_id"]
     frozen_root = Path(frozen_root).resolve()
@@ -256,13 +265,19 @@ def freeze_taskpack(taskpack_dir, frozen_root):
     _require_contained_path(frozen_dir, frozen_root, "frozen_taskpack_dir")
     if frozen_dir.exists():
         raise TaskpackValidationError(f"frozen taskpack already exists: {frozen_dir}")
-    shutil.copytree(taskpack_dir, frozen_dir)
+    inventory = _build_taskpack_artifact_inventory(taskpack_dir)
+    _validate_taskpack_artifact_inventory(taskpack_dir, inventory)
+
+    for relative_path, source_path in inventory:
+        destination_path = frozen_dir / relative_path
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination_path)
 
     frozen_taskpack = _read_json(frozen_dir / "taskpack.yaml")
     frozen_taskpack["status"] = "frozen"
     _write_json(frozen_dir / "taskpack.yaml", frozen_taskpack)
 
-    digest = _digest_taskpack_files(frozen_dir)
+    digest = _digest_taskpack_files(frozen_dir, [relative_path for relative_path, _source_path in inventory])
     manifest = {
         "manifest_schema_version": "taskpack_manifest.v1",
         "taskpack_id": taskpack_id,
@@ -333,8 +348,67 @@ def _require_contained_path(path, root, field_name):
         raise TaskpackValidationError(f"{field_name} must stay inside {root}") from exc
 
 
+def _build_taskpack_artifact_inventory(taskpack_dir):
+    taskpack_dir = Path(taskpack_dir).resolve()
+    taskpack_path = taskpack_dir / "taskpack.yaml"
+    taskpack = _read_json(taskpack_path)
+    if not isinstance(taskpack, dict):
+        raise TaskpackValidationError("taskpack must be an object")
+    files = taskpack.get("files", {})
+    if not isinstance(files, dict):
+        raise TaskpackValidationError("taskpack files must be an object")
+
+    artifacts = [
+        taskpack_path,
+        _resolve_companion_artifact_path(
+            taskpack_dir, files.get("agent_pool", "agent_pool.json"), "files.agent_pool"
+        ),
+        _resolve_companion_artifact_path(taskpack_dir, files.get("backlog", "backlog.json"), "files.backlog"),
+        _resolve_companion_artifact_path(
+            taskpack_dir, files.get("verification", "verification.json"), "files.verification"
+        ),
+        taskpack_dir / "README.md",
+    ]
+
+    inventory = []
+    seen_relative_paths = set()
+    for source_path in artifacts:
+        source_path = Path(source_path)
+        relative_path = source_path.resolve().relative_to(taskpack_dir)
+        if relative_path in seen_relative_paths:
+            raise TaskpackValidationError(f"duplicate taskpack artifact path: {relative_path.as_posix()}")
+        seen_relative_paths.add(relative_path)
+        inventory.append((relative_path, source_path))
+    return inventory
+
+
+def _validate_taskpack_artifact_inventory(taskpack_dir, inventory):
+    taskpack_dir = Path(taskpack_dir).resolve()
+    inventory_paths = {relative_path for relative_path, _source_path in inventory}
+
+    for relative_path, source_path in inventory:
+        if not source_path.exists():
+            raise TaskpackValidationError(f"taskpack artifact is missing: {relative_path.as_posix()}")
+        if source_path.is_symlink():
+            raise TaskpackValidationError(f"taskpack artifact must not be a symlink: {relative_path.as_posix()}")
+        if not source_path.is_file():
+            raise TaskpackValidationError(f"taskpack artifact must be a regular file: {relative_path.as_posix()}")
+
+    for path in taskpack_dir.rglob("*"):
+        relative_path = path.relative_to(taskpack_dir)
+        if path.is_symlink():
+            raise TaskpackValidationError(f"taskpack directory must not contain symlinks: {relative_path.as_posix()}")
+        if path.is_file() and relative_path not in inventory_paths:
+            raise TaskpackValidationError(f"unexpected taskpack artifact: {relative_path.as_posix()}")
+
+
 def _write_scope_is_repository_root(scope_path):
     return scope_path == Path(".") or not scope_path.parts
+
+
+def _write_scope_is_root_wide_glob(scope_path):
+    parts = scope_path.parts
+    return bool(parts) and parts[0] == "**"
 
 
 def _write_scope_escapes_repository(scope_path):
@@ -361,11 +435,53 @@ def _is_git_repo(path):
     return completed.returncode == 0 and completed.stdout.strip() == "true"
 
 
-def _digest_taskpack_files(taskpack_dir):
+def _validate_dependency_graph(dependency_graph, task_ids, errors):
+    for task_id, dependencies in dependency_graph.items():
+        for dependency in dependencies:
+            if dependency not in task_ids:
+                errors.append(f"{task_id} depends_on references unknown task_id: {dependency}")
+
+    cycle = _find_dependency_cycle(dependency_graph, task_ids)
+    if cycle:
+        errors.append(f"depends_on cycle detected: {' -> '.join(cycle)}")
+
+
+def _find_dependency_cycle(dependency_graph, task_ids):
+    visiting = set()
+    visited = set()
+    stack = []
+
+    def visit(task_id):
+        if task_id in visiting:
+            return stack[stack.index(task_id) :] + [task_id]
+        if task_id in visited:
+            return None
+
+        visiting.add(task_id)
+        stack.append(task_id)
+        for dependency in dependency_graph.get(task_id, []):
+            if dependency in task_ids:
+                cycle = visit(dependency)
+                if cycle:
+                    return cycle
+        stack.pop()
+        visiting.remove(task_id)
+        visited.add(task_id)
+        return None
+
+    for task_id in dependency_graph:
+        cycle = visit(task_id)
+        if cycle:
+            return cycle
+    return None
+
+
+def _digest_taskpack_files(taskpack_dir, relative_paths):
     hasher = hashlib.sha256()
-    for name in ["taskpack.yaml", "agent_pool.json", "backlog.json", "verification.json", "README.md"]:
-        path = Path(taskpack_dir) / name
-        hasher.update(name.encode("utf-8"))
+    for relative_path in relative_paths:
+        path = Path(taskpack_dir) / relative_path
+        path_key = relative_path.as_posix()
+        hasher.update(path_key.encode("utf-8"))
         hasher.update(b"\0")
         hasher.update(path.read_bytes())
         hasher.update(b"\0")
