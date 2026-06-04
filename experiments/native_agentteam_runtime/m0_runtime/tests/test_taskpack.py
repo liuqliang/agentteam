@@ -152,6 +152,52 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn("write_scope must not include repository root", str(raised.exception))
 
+    def test_validate_taskpack_rejects_missing_project_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject missing project root.",
+                draft_root=drafts,
+                taskpack_id="missing-project-root",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            del taskpack["project_root"]
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("project_root", str(raised.exception))
+
+    def test_validate_taskpack_rejects_invalid_write_scope_without_type_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject invalid write scope.",
+                draft_root=drafts,
+                taskpack_id="invalid-write-scope",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["write_scope"] = None
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("write_scope must be a non-empty list", str(raised.exception))
+
     def test_validate_and_freeze_taskpack_writes_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

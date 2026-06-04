@@ -149,13 +149,15 @@ def validate_taskpack(taskpack_dir):
     taskpack = loaded["taskpack"]
     backlog = loaded["backlog"]
     verification = loaded["verification"]
-    project_root = Path(taskpack.get("project_root", ""))
+    project_root_value = taskpack.get("project_root")
 
     if taskpack.get("taskpack_schema_version") != TASKPACK_SCHEMA_VERSION:
         errors.append("taskpack_schema_version must be taskpack.v1")
-    if not project_root.exists():
+    if not isinstance(project_root_value, str) or not project_root_value:
+        errors.append("project_root must be a non-empty string")
+    elif not Path(project_root_value).exists():
         errors.append("project_root does not exist")
-    elif not _is_git_repo(project_root):
+    elif not _is_git_repo(Path(project_root_value)):
         errors.append("project_root must be a git repository")
     if taskpack.get("status") not in {"draft", "frozen"}:
         errors.append("status must be draft or frozen")
@@ -176,11 +178,12 @@ def validate_taskpack(taskpack_dir):
         write_scope = item.get("write_scope", [])
         if not isinstance(write_scope, list) or not write_scope:
             errors.append(f"{task_id} write_scope must be a non-empty list")
-        for scope in write_scope:
-            if scope in {".", "./", "*", "**", "/"}:
-                errors.append("write_scope must not include repository root")
-            if Path(scope).is_absolute():
-                errors.append(f"{task_id} write_scope must be repository-relative: {scope}")
+        else:
+            for scope in write_scope:
+                if scope in {".", "./", "*", "**", "/"}:
+                    errors.append("write_scope must not include repository root")
+                if Path(scope).is_absolute():
+                    errors.append(f"{task_id} write_scope must be repository-relative: {scope}")
         for dependency in item.get("depends_on", []):
             if dependency == task_id:
                 errors.append(f"{task_id} must not depend on itself")
