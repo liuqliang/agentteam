@@ -749,6 +749,78 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn("required_role", str(raised.exception))
 
+    def test_validate_taskpack_rejects_non_object_role_runtime_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject malformed role runtime profiles.",
+                draft_root=drafts,
+                taskpack_id="malformed-role-runtime-profiles",
+                write_scope=["src/"],
+            )
+            agent_pool_path = Path(result["taskpack_dir"]) / "agent_pool.json"
+            agent_pool = json.loads(agent_pool_path.read_text(encoding="utf-8"))
+            agent_pool["role_runtime_profiles"] = []
+            agent_pool_path.write_text(json.dumps(agent_pool), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("role_runtime_profiles", str(raised.exception))
+
+    def test_validate_taskpack_rejects_malformed_role_runtime_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject malformed role runtime profile.",
+                draft_root=drafts,
+                taskpack_id="malformed-role-runtime-profile",
+                write_scope=["src/"],
+            )
+            agent_pool_path = Path(result["taskpack_dir"]) / "agent_pool.json"
+            agent_pool = json.loads(agent_pool_path.read_text(encoding="utf-8"))
+            agent_pool["role_runtime_profiles"]["implementation_worker"] = {"adapter": "unknown"}
+            agent_pool_path.write_text(json.dumps(agent_pool), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("role_runtime_profiles", str(raised.exception))
+
+    def test_validate_taskpack_rejects_malformed_optional_role_maps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject malformed optional role maps.",
+                draft_root=drafts,
+                taskpack_id="malformed-optional-role-maps",
+                write_scope=["src/"],
+            )
+            agent_pool_path = Path(result["taskpack_dir"]) / "agent_pool.json"
+            agent_pool = json.loads(agent_pool_path.read_text(encoding="utf-8"))
+            agent_pool["role_prompt_contracts"] = []
+            agent_pool["role_context_packages"] = []
+            agent_pool_path.write_text(json.dumps(agent_pool), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            message = str(raised.exception)
+            self.assertIn("role_prompt_contracts", message)
+            self.assertIn("role_context_packages", message)
+
     def test_freeze_taskpack_rejects_extra_draft_file_without_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

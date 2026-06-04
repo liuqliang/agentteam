@@ -386,6 +386,10 @@ def _validate_agent_pool(agent_pool, errors):
         errors.append("agent_pool.agents must be a non-empty list")
         return idle_agent_roles
 
+    _validate_role_runtime_profiles(agent_pool.get("role_runtime_profiles"), errors)
+    _validate_optional_role_object_map(agent_pool.get("role_prompt_contracts"), "role_prompt_contracts", errors)
+    _validate_optional_role_object_map(agent_pool.get("role_context_packages"), "role_context_packages", errors)
+
     for index, agent in enumerate(agents):
         label = f"agent_pool.agents[{index}]"
         if not isinstance(agent, dict):
@@ -397,6 +401,46 @@ def _validate_agent_pool(agent_pool, errors):
         if agent.get("status") == "idle" and _is_non_empty_string(agent.get("role")):
             idle_agent_roles.add(agent["role"])
     return idle_agent_roles
+
+
+def _validate_role_runtime_profiles(role_runtime_profiles, errors):
+    if role_runtime_profiles is None:
+        return
+    if not isinstance(role_runtime_profiles, dict):
+        errors.append("role_runtime_profiles must be an object")
+        return
+
+    for role, profile in role_runtime_profiles.items():
+        label = f"role_runtime_profiles[{role}]"
+        if not isinstance(profile, dict):
+            errors.append(f"{label} must be an object")
+            continue
+
+        adapter = profile.get("adapter")
+        if adapter is not None and adapter not in {"fake", "shell", "codex"}:
+            errors.append(f"{label}.adapter must be fake, shell, or codex")
+
+        command = profile.get("command")
+        if command is not None:
+            if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+                errors.append(f"{label}.command must be a non-empty string array")
+
+        timeout_seconds = profile.get("timeout_seconds")
+        if timeout_seconds is not None:
+            if not isinstance(timeout_seconds, int) or timeout_seconds < 1:
+                errors.append(f"{label}.timeout_seconds must be an integer >= 1")
+
+
+def _validate_optional_role_object_map(value, field_name, errors):
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        errors.append(f"{field_name} must be an object")
+        return
+
+    for role, role_value in value.items():
+        if not isinstance(role_value, dict):
+            errors.append(f"{field_name}[{role}] must be an object")
 
 
 def _build_taskpack_artifact_inventory(taskpack_dir):
