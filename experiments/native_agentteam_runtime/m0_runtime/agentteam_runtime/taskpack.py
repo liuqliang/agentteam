@@ -407,8 +407,8 @@ def _write_scope_is_repository_root(scope_path):
 
 
 def _write_scope_is_root_wide_glob(scope_path):
-    parts = scope_path.parts
-    return bool(parts) and parts[0] == "**"
+    parts = tuple(part for part in scope_path.parts if part != ".")
+    return parts in {("*",), ("**",), ("**", "*")}
 
 
 def _write_scope_escapes_repository(scope_path):
@@ -498,7 +498,11 @@ def _write_json(path, value):
 
 
 def _read_json(path):
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    path = Path(path)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise TaskpackValidationError(f"invalid json in {path.name}: {exc.msg}") from exc
 
 
 def _render_readme(taskpack, backlog, verification):

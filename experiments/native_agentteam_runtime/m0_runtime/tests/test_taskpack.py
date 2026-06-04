@@ -154,6 +154,28 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn("taskpack", str(raised.exception))
 
+    def test_validate_taskpack_rejects_invalid_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject invalid JSON.",
+                draft_root=drafts,
+                taskpack_id="invalid-json",
+                write_scope=["src/"],
+            )
+            verification_path = Path(result["taskpack_dir"]) / "verification.json"
+            verification_path.write_text("{", encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            message = str(raised.exception)
+            self.assertTrue("verification.json" in message or "invalid json" in message)
+
     def test_validate_taskpack_rejects_broad_write_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -212,7 +234,7 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("write_scope", str(raised.exception))
 
     def test_validate_taskpack_rejects_root_wide_glob_write_scope(self):
-        cases = ["**/*", "./**", "./**/*"]
+        cases = ["./*", "**/*", "./**", "./**/*"]
         for index, write_scope in enumerate(cases):
             with self.subTest(write_scope=write_scope):
                 with tempfile.TemporaryDirectory() as tmp:
