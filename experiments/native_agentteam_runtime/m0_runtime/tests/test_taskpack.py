@@ -152,6 +152,97 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn("write_scope must not include repository root", str(raised.exception))
 
+    def test_validate_taskpack_rejects_parent_relative_write_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject parent-relative write scope.",
+                draft_root=drafts,
+                taskpack_id="parent-write-scope",
+                write_scope=["../outside"],
+            )
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("write_scope", str(raised.exception))
+
+    def test_validate_taskpack_rejects_missing_taskpack_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject missing taskpack id.",
+                draft_root=drafts,
+                taskpack_id="missing-taskpack-id",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            del taskpack["taskpack_id"]
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("taskpack_id", str(raised.exception))
+
+    def test_validate_taskpack_rejects_unsafe_taskpack_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject unsafe taskpack id.",
+                draft_root=drafts,
+                taskpack_id="unsafe-taskpack-id",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["taskpack_id"] = "../escaped"
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("taskpack_id", str(raised.exception))
+
+    def test_freeze_taskpack_rejects_unsafe_taskpack_id_without_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            escaped = tmp_path / "escaped"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject unsafe freeze target.",
+                draft_root=drafts,
+                taskpack_id="unsafe-freeze-id",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["taskpack_id"] = "../escaped"
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                freeze_taskpack(result["taskpack_dir"], frozen_root)
+
+            self.assertIn("taskpack_id", str(raised.exception))
+            self.assertFalse(escaped.exists())
+
     def test_validate_taskpack_rejects_missing_project_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -174,6 +265,72 @@ class TaskpackTests(unittest.TestCase):
                 validate_taskpack(result["taskpack_dir"])
 
             self.assertIn("project_root", str(raised.exception))
+
+    def test_validate_taskpack_rejects_missing_verification_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject missing verification file.",
+                draft_root=drafts,
+                taskpack_id="missing-verification",
+                write_scope=["src/"],
+            )
+            (Path(result["taskpack_dir"]) / "verification.json").unlink()
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("verification", str(raised.exception))
+
+    def test_validate_taskpack_rejects_non_list_backlog_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject malformed backlog items.",
+                draft_root=drafts,
+                taskpack_id="malformed-backlog-items",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"] = {"task_id": "TASK"}
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("backlog.items", str(raised.exception))
+
+    def test_validate_taskpack_rejects_non_string_task_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject malformed task id.",
+                draft_root=drafts,
+                taskpack_id="malformed-task-id",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["task_id"] = ["TASK"]
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("task_id", str(raised.exception))
 
     def test_validate_taskpack_rejects_invalid_write_scope_without_type_error(self):
         with tempfile.TemporaryDirectory() as tmp:
