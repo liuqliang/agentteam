@@ -8,7 +8,7 @@ from pathlib import Path
 
 TASKPACK_SCHEMA_VERSION = "taskpack.v1"
 DEFAULT_WORKER_ROLE = "implementation_worker"
-TASKPACK_RUNTIME_BACKENDS = {"fake", "shell", "codex"}
+TASKPACK_TRANSLATABLE_RUNTIME_BACKENDS = {"fake", "codex"}
 TASKPACK_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 
 
@@ -402,8 +402,8 @@ def _validate_taskpack_runtime_backend(runtime):
         raise TaskpackValidationError("runtime must be an object")
 
     backend = runtime.get("default_backend")
-    if backend not in TASKPACK_RUNTIME_BACKENDS:
-        raise TaskpackValidationError("runtime.default_backend must be fake, shell, or codex")
+    if backend not in TASKPACK_TRANSLATABLE_RUNTIME_BACKENDS:
+        raise TaskpackValidationError("runtime.default_backend must be fake or codex")
     return backend
 
 

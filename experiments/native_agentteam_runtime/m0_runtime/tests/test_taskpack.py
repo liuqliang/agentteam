@@ -1122,6 +1122,33 @@ class TaskpackTests(unittest.TestCase):
                     self.assertIn("runtime", str(raised.exception))
                     self.assertFalse((run_root / taskpack_id).exists())
 
+    def test_build_taskpack_runtime_args_rejects_shell_backend_without_run_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject shell runtime launch.",
+                draft_root=drafts,
+                taskpack_id="shell-runtime-backend",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["runtime"]["default_backend"] = "shell"
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                build_taskpack_runtime_args(frozen["frozen_taskpack_dir"], run_root=run_root)
+
+            self.assertIn("runtime", str(raised.exception))
+            self.assertFalse((run_root / "shell-runtime-backend").exists())
+
     def test_build_taskpack_runtime_args_rejects_invalid_launch_metadata_without_run_dir(self):
         cases = [
             ("missing-project-root", "taskpack.yaml", lambda value: value.pop("project_root")),
