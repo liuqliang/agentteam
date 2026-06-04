@@ -2056,8 +2056,17 @@ def _scoped_id(kind, number, id_prefix=None, width=3):
 
 
 def _changed_files_in_scope(changed_files, task):
-    write_scope = [scope.rstrip("/") + "/" for scope in task.get("write_scope", [])]
-    return all(any(path.startswith(scope) for scope in write_scope) for path in changed_files)
+    write_scope = [scope for scope in task.get("write_scope", []) if scope]
+    return all(
+        any(_path_matches_write_scope(path, scope) for scope in write_scope)
+        for path in changed_files
+    )
+
+
+def _path_matches_write_scope(path, scope):
+    if path == scope:
+        return True
+    return path.startswith(scope.rstrip("/") + "/")
 
 
 def _validate_runtime_result(runtime_result, task):

@@ -5223,6 +5223,20 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertEqual(outcome["failure_category"], "scope_violation")
         self.assertFalse(outcome["retryable"])
 
+    def test_attempt_outcome_accepts_exact_file_write_scope(self):
+        task = {"write_scope": ["pkg/module.py"]}
+        result = {
+            "result_status": "completed",
+            "changed_files": ["pkg/module.py"],
+            "output": {},
+        }
+
+        outcome = classify_attempt_outcome(result, task)
+
+        self.assertEqual(outcome["validation_status"], "accepted")
+        self.assertIsNone(outcome["failure_category"])
+        self.assertFalse(outcome["retryable"])
+
     def test_attempt_outcome_classifies_timeout_as_retryable(self):
         task = {"write_scope": ["generated/"]}
         result = {"result_status": "timed_out", "changed_files": [], "output": {}}

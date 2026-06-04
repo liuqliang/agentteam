@@ -285,6 +285,77 @@ class LiveCodexSmokeTests(unittest.TestCase):
             self.assertTrue(summary["repo_context_path"])
             self.assertTrue(summary["expected_file_exists"])
 
+    def test_live_codex_pipeline_smoke_skips_without_env_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "pipeline-smoke"
+            env = os.environ.copy()
+            env.pop("AGENTTEAM_RUN_LIVE_CODEX", None)
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.live_codex_pipeline_smoke",
+                    "--output-dir",
+                    str(output_dir),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["status"], "skipped")
+            self.assertEqual(summary["reason"], "set AGENTTEAM_RUN_LIVE_CODEX=1")
+            self.assertFalse(output_dir.exists())
+
+    def test_live_codex_pipeline_smoke_runs_with_fake_codex_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "pipeline-smoke"
+            fake_codex = tmp_path / "fake_pipeline_codex.py"
+            _write_fake_pipeline_codex(fake_codex)
+            env = os.environ.copy()
+            env["AGENTTEAM_RUN_LIVE_CODEX"] = "1"
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.live_codex_pipeline_smoke",
+                    "--output-dir",
+                    str(output_dir),
+                    "--codex-command",
+                    sys.executable,
+                    str(fake_codex),
+                ],
+                check=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["validation_status"], "accepted")
+            self.assertEqual(summary["integration_queue_status"], "pending")
+            self.assertEqual(summary["batch_status"], "verified")
+            self.assertEqual(summary["verification_status"], "passed")
+            self.assertEqual(summary["merge_status"], "merged")
+            self.assertEqual(summary["changed_files"], ["src/text_utils.py"])
+            self.assertEqual(summary["actual_changed_files"], ["src/text_utils.py"])
+            self.assertTrue(summary["repo_context_path"])
+            self.assertTrue(summary["role_context_path"])
+            self.assertTrue(summary["source_repo_tests_passed"])
+            self.assertTrue(
+                (Path(summary["repo_path"]) / "src" / "text_utils.py").exists()
+            )
+
 
 def _write_fake_codex(path, changed_file="generated/live_codex_smoke.json"):
     path.write_text(
@@ -305,6 +376,50 @@ def _write_fake_codex(path, changed_file="generated/live_codex_smoke.json"):
                 "    'result_status': 'completed',",
                 f"    'changed_files': [{changed_file!r}],",
                 "    'output': {'adapter': 'codex', 'mode': 'fake'}",
+                "}), encoding='utf-8')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_fake_pipeline_codex(path):
+    changed_file = "src/text_utils.py"
+    path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                "import sys",
+                "args = sys.argv[1:]",
+                "prompt = sys.stdin.read()",
+                "output_path = pathlib.Path(args[args.index('--output-last-message') + 1])",
+                "worktree = pathlib.Path(args[args.index('-C') + 1])",
+                "mailbox = json.loads(prompt.rsplit('Mailbox message:', 1)[1].strip())",
+                "repo_context_path = pathlib.Path(mailbox['payload']['repo_context_path'])",
+                "role_context_path = pathlib.Path(mailbox['payload']['role_context_path'])",
+                "repo_context = json.loads(repo_context_path.read_text(encoding='utf-8'))",
+                "selected_paths = [entry['path'] for entry in repo_context['selected_files']]",
+                f"target = worktree / {changed_file!r}",
+                "target.write_text('\\n'.join([",
+                "    'import re',",
+                "    '',",
+                "    'def normalize_slug(text):',",
+                "    \"    normalized = re.sub(r'[^a-z0-9]+', '-', text.lower())\",",
+                "    \"    return normalized.strip('-')\",",
+                "    '',",
+                "]), encoding='utf-8')",
+                "output_path.parent.mkdir(parents=True, exist_ok=True)",
+                "output_path.write_text(json.dumps({",
+                "    'result_status': 'completed',",
+                f"    'changed_files': [{changed_file!r}],",
+                "    'output': {",
+                "        'adapter': 'codex',",
+                "        'mode': 'fake_pipeline',",
+                "        'selected_paths': selected_paths,",
+                "        'repo_context_path': str(repo_context_path),",
+                "        'role_context_path': str(role_context_path),",
+                "    },",
                 "}), encoding='utf-8')",
             ]
         ),

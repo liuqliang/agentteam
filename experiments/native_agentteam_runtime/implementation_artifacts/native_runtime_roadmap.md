@@ -86,6 +86,9 @@ The implementation has already proven these layers:
 23. Repo-context quality improvements beginning with candidate test selection
     derived from selected source files, Python imports, test paths, and task
     objective tokens.
+24. A gated live-Codex pipeline smoke that exercises one real implementation
+    attempt through repo context, role context, patch capture, integration
+    queue, batch verification, verified merge, and source-repo verification.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -516,6 +519,49 @@ Remaining follow-up work:
 - add CommonJS and re-export import signals if repository evidence shows they
   are needed.
 
+### M36: End-To-End Implementation Pilot
+
+Goal: move from isolated runtime capabilities to a small but complete
+implementation workflow that can prove whether the current Codex-only route is
+usable on real code changes.
+
+Status: M36a implemented and completed once against the local Codex CLI. M36b
+remains the next pilot slice.
+
+Scope:
+
+- M36a adds `agentteam_runtime.live_codex_pipeline_smoke`, gated by
+  `AGENTTEAM_RUN_LIVE_CODEX=1`;
+- create a temporary Python repository with a failing stdlib `unittest` suite;
+- dispatch one implementation task with role context and repo context paths;
+- require the Codex worker to edit exactly one source file and report that file
+  in `changed_files`;
+- accept the result only after diff audit and write-scope validation;
+- queue the accepted patch, apply it in a batch worktree, run verification,
+  fast-forward merge the verified batch back to the source repository, and run
+  source-repo verification again;
+- support exact-file `write_scope` entries as well as directory write scopes;
+- keep deterministic fake-Codex coverage in normal tests while leaving real
+  Codex calls opt-in.
+
+Acceptance:
+
+- the smoke skips without the live gate and creates no output directory;
+- with a fake Codex command, the pipeline reports accepted validation, pending
+  integration queue status, verified batch status, passed verification, merged
+  batch status, exact changed files, repo context path, role context path, and
+  passing source-repo tests;
+- exact-file write scopes such as `src/text_utils.py` are accepted when the
+  changed file matches exactly;
+- normal unit tests still require no live model call.
+
+Remaining follow-up work:
+
+- M36b should use a small multi-file task, such as a Markdown table-of-contents
+  updater with source, tests, and docs, to validate that repo-context selection,
+  candidate tests, patch batching, and verified merge remain stable beyond a
+  single-file fixture.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -556,7 +602,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to improve JS/TS import coverage only when
-repository evidence shows CommonJS or re-export patterns are blocking candidate
-test selection. Inflight migration remains a separate M29 decision gate because
-it changes ownership of already leased work.
+The next recommended step is M36b: run a small multi-file implementation pilot
+before broadening language import coverage. Inflight migration remains a
+separate M29 decision gate because it changes ownership of already leased work.
