@@ -75,7 +75,7 @@ def _draft_with_codex(
         raise TaskpackValidationError("codex taskpack draft_root must not overlap the target repository")
 
     repo_status_before = _git_status_signature(project_root)
-    if repo_status_before:
+    if repo_status_before["status"]:
         raise TaskpackValidationError("codex taskpack author requires a clean target repository")
 
     taskpack_dir.mkdir(parents=True, exist_ok=False)
@@ -261,7 +261,7 @@ def _raise_if_target_repo_modified(project_root, repo_status_before):
 
 
 def _git_status_signature(project_root):
-    completed = subprocess.run(
+    status = subprocess.run(
         [
             "git",
             "-C",
@@ -275,9 +275,26 @@ def _git_status_signature(project_root):
         text=True,
         check=False,
     )
+    if status.returncode != 0:
+        raise TaskpackValidationError(f"failed to inspect target repository status: {status.stderr.strip()}")
+    return {
+        "head": _git_optional_output(project_root, ["rev-parse", "--verify", "HEAD"]),
+        "branch": _git_optional_output(project_root, ["rev-parse", "--abbrev-ref", "HEAD"]),
+        "status": tuple(status.stdout.splitlines()),
+    }
+
+
+def _git_optional_output(project_root, args):
+    completed = subprocess.run(
+        ["git", "-C", str(project_root), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
     if completed.returncode != 0:
-        raise TaskpackValidationError(f"failed to inspect target repository status: {completed.stderr.strip()}")
-    return tuple(completed.stdout.splitlines())
+        return None
+    return completed.stdout.strip()
 
 
 def _write_json(path, value):

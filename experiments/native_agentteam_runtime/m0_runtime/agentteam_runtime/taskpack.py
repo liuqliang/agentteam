@@ -181,6 +181,10 @@ def validate_taskpack(taskpack_dir):
         errors.append("status must be draft or frozen")
     if not _is_non_empty_string(taskpack.get("goal")):
         errors.append("goal must be a non-empty string")
+    try:
+        _validate_taskpack_runtime_backend(taskpack.get("runtime"))
+    except TaskpackValidationError as exc:
+        errors.append(str(exc))
 
     idle_agent_roles = _validate_agent_pool(agent_pool, errors)
 
@@ -328,6 +332,7 @@ def build_taskpack_runtime_args(
     taskpack = loaded["taskpack"]
     if taskpack.get("status") != "frozen":
         raise TaskpackValidationError("taskpack must be frozen before runtime launch")
+    validate_taskpack(taskpack_dir)
 
     taskpack_id = _validate_existing_taskpack_id(taskpack.get("taskpack_id"))
     files = taskpack.get("files", {})
@@ -482,6 +487,8 @@ def _validate_agent_pool(agent_pool, errors):
         for field_name in ["agent_id", "role", "status", "inbox_path"]:
             if not _is_non_empty_string(agent.get(field_name)):
                 errors.append(f"{label}.{field_name} must be a non-empty string")
+        if "runtime_profile" in agent:
+            _validate_taskpack_runtime_profile(agent.get("runtime_profile"), f"{label}.runtime_profile", errors)
         if agent.get("status") == "idle" and _is_non_empty_string(agent.get("role")):
             idle_agent_roles.add(agent["role"])
     return idle_agent_roles
@@ -500,19 +507,33 @@ def _validate_role_runtime_profiles(role_runtime_profiles, errors):
             errors.append(f"{label} must be an object")
             continue
 
-        adapter = profile.get("adapter")
-        if adapter is not None and adapter not in {"fake", "shell", "codex"}:
-            errors.append(f"{label}.adapter must be fake, shell, or codex")
+        _validate_taskpack_runtime_profile(profile, label, errors)
 
-        command = profile.get("command")
-        if command is not None:
-            if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
-                errors.append(f"{label}.command must be a non-empty string array")
 
-        timeout_seconds = profile.get("timeout_seconds")
-        if timeout_seconds is not None:
-            if not isinstance(timeout_seconds, int) or timeout_seconds < 1:
-                errors.append(f"{label}.timeout_seconds must be an integer >= 1")
+def _validate_taskpack_runtime_profile(profile, label, errors):
+    if not isinstance(profile, dict):
+        errors.append(f"{label} must be an object")
+        return
+
+    adapter = profile.get("adapter")
+    if adapter is not None and adapter not in TASKPACK_TRANSLATABLE_RUNTIME_BACKENDS:
+        errors.append(f"{label}.adapter must be fake or codex")
+
+    if "command" in profile:
+        errors.append(f"{label}.command is not allowed in taskpacks")
+
+    timeout_seconds = profile.get("timeout_seconds")
+    if timeout_seconds is not None:
+        if not isinstance(timeout_seconds, int) or timeout_seconds < 1:
+            errors.append(f"{label}.timeout_seconds must be an integer >= 1")
+
+    model = profile.get("model")
+    if model is not None and not _is_non_empty_string(model):
+        errors.append(f"{label}.model must be a non-empty string")
+
+    sandbox = profile.get("sandbox")
+    if sandbox is not None and not _is_non_empty_string(sandbox):
+        errors.append(f"{label}.sandbox must be a non-empty string")
 
 
 def _validate_optional_role_object_map(value, field_name, errors):

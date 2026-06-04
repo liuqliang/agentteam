@@ -455,6 +455,105 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("modified the target repository", str(raised.exception))
             self.assertIn(changed_file, status.stdout)
 
+    def test_codex_taskpack_author_rejects_committed_target_repo_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            taskpack_dir = drafts / "committed-side-effect"
+            fake_codex = tmp_path / "fake_committing_author.py"
+            changed_file = "codex-committed-side-effect.txt"
+            _init_repo(repo)
+            fake_codex.write_text(
+                "\n".join(
+                    [
+                        "import json",
+                        "import pathlib",
+                        "import subprocess",
+                        "import sys",
+                        "repo = pathlib.Path(sys.argv[1]).resolve()",
+                        "taskpack_dir = pathlib.Path(sys.argv[2]).resolve()",
+                        f"changed_file = {changed_file!r}",
+                        "(repo / changed_file).write_text('changed\\n', encoding='utf-8')",
+                        "subprocess.run(['git', 'add', changed_file], cwd=repo, check=True)",
+                        (
+                            "subprocess.run(['git', 'commit', '-m', 'codex side effect'], "
+                            "cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)"
+                        ),
+                        "taskpack_id = taskpack_dir.name",
+                        "task_id = 'TASK-COMMITTED-SIDE-EFFECT-001'",
+                        "taskpack = {",
+                        "    'taskpack_schema_version': 'taskpack.v1',",
+                        "    'taskpack_id': taskpack_id,",
+                        "    'status': 'draft',",
+                        "    'project_root': str(repo),",
+                        "    'goal': 'Improve fixture behavior.',",
+                        "    'runtime': {'default_backend': 'codex'},",
+                        (
+                            "    'policy': {'allow_merge': False, "
+                            "'merge_requires_verified_integration': True},"
+                        ),
+                        (
+                            "    'files': {'agent_pool': 'agent_pool.json', "
+                            "'backlog': 'backlog.json', 'verification': 'verification.json'},"
+                        ),
+                        "}",
+                        "agent_pool = {",
+                        "    'scheduler_agent_id': 'agent-scheduler',",
+                        "    'role_runtime_profiles': {'implementation_worker': {'adapter': 'codex'}},",
+                        "    'agents': [{",
+                        "        'agent_id': 'agent-implementation-worker-1',",
+                        "        'role': 'implementation_worker',",
+                        "        'status': 'idle',",
+                        "        'inbox_path': 'mailboxes/agent-implementation-worker-1/inbox.jsonl',",
+                        "    }],",
+                        "}",
+                        "backlog = {'backlog_id': 'BL-committed-side-effect', 'items': [{",
+                        "    'task_id': task_id,",
+                        "    'milestone_id': 'TASKPACK-M0',",
+                        "    'objective': 'Improve fixture behavior.',",
+                        "    'backlog_status': 'ready',",
+                        "    'risk_target': 'L1',",
+                        "    'depends_on': [],",
+                        "    'read_scope': ['.'],",
+                        "    'write_scope': ['src/'],",
+                        "    'required_role': 'implementation_worker',",
+                        "    'blockers': [],",
+                        "}]}",
+                        (
+                            "verification = {'verification_schema_version': "
+                            "'taskpack_verification.v1', 'command': ['python3', '-m', "
+                            "'unittest', 'discover'], 'success_criteria': ['tests pass']}"
+                        ),
+                        "for name, payload in [",
+                        "    ('taskpack.yaml', taskpack),",
+                        "    ('agent_pool.json', agent_pool),",
+                        "    ('backlog.json', backlog),",
+                        "    ('verification.json', verification),",
+                        "]:",
+                        (
+                            "    (taskpack_dir / name).write_text(json.dumps(payload), "
+                            "encoding='utf-8')"
+                        ),
+                        "(taskpack_dir / 'README.md').write_text('# committed-side-effect\\n', encoding='utf-8')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                draft_taskpack_from_goal(
+                    project_root=repo,
+                    goal="Improve fixture behavior.",
+                    draft_root=drafts,
+                    author_runtime="codex",
+                    taskpack_id="committed-side-effect",
+                    codex_command=["python3", str(fake_codex), str(repo), str(taskpack_dir)],
+                    codex_timeout_seconds=5,
+                )
+
+            self.assertIn("modified the target repository", str(raised.exception))
+
     def test_draft_taskpack_files_writes_expected_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1226,6 +1325,62 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn("role_runtime_profiles", str(raised.exception))
 
+    def test_validate_taskpack_rejects_taskpack_runtime_profile_launch_commands(self):
+        cases = [
+            (
+                "role-shell-profile",
+                lambda agent_pool: agent_pool["role_runtime_profiles"].__setitem__(
+                    "implementation_worker",
+                    {"adapter": "shell", "command": ["bash", "-lc", "echo unsafe"]},
+                ),
+            ),
+            (
+                "role-codex-command-profile",
+                lambda agent_pool: agent_pool["role_runtime_profiles"].__setitem__(
+                    "implementation_worker",
+                    {"adapter": "codex", "command": ["bash", "-lc", "echo unsafe"]},
+                ),
+            ),
+            (
+                "agent-shell-profile",
+                lambda agent_pool: agent_pool["agents"][0].__setitem__(
+                    "runtime_profile",
+                    {"adapter": "shell", "command": ["bash", "-lc", "echo unsafe"]},
+                ),
+            ),
+            (
+                "agent-codex-command-profile",
+                lambda agent_pool: agent_pool["agents"][0].__setitem__(
+                    "runtime_profile",
+                    {"adapter": "codex", "command": ["bash", "-lc", "echo unsafe"]},
+                ),
+            ),
+        ]
+        for taskpack_id, mutate_agent_pool in cases:
+            with self.subTest(taskpack_id=taskpack_id):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    repo = tmp_path / "repo"
+                    drafts = tmp_path / "drafts"
+                    _init_repo(repo)
+                    result = draft_taskpack_files(
+                        project_root=repo,
+                        goal="Reject launch command injection.",
+                        draft_root=drafts,
+                        taskpack_id=taskpack_id,
+                        write_scope=["src/"],
+                    )
+                    agent_pool_path = Path(result["taskpack_dir"]) / "agent_pool.json"
+                    agent_pool = json.loads(agent_pool_path.read_text(encoding="utf-8"))
+                    mutate_agent_pool(agent_pool)
+                    agent_pool_path.write_text(json.dumps(agent_pool), encoding="utf-8")
+
+                    with self.assertRaises(TaskpackValidationError) as raised:
+                        validate_taskpack(result["taskpack_dir"])
+
+                    message = str(raised.exception)
+                    self.assertTrue("adapter" in message or "command" in message)
+
     def test_validate_taskpack_rejects_malformed_optional_role_maps(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1513,6 +1668,41 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(_arg_value(args, "--backlog"), str(frozen_dir / "backlog.json"))
             self.assertTrue((run_root / "default-runtime-files").exists())
 
+    def test_validate_taskpack_rejects_invalid_runtime_metadata(self):
+        cases = [
+            ("non-object-validate-runtime", []),
+            ("missing-validate-runtime-backend", {}),
+            ("unknown-validate-runtime-backend", {"default_backend": "unknown"}),
+            ("shell-validate-runtime-backend", {"default_backend": "shell"}),
+        ]
+        for taskpack_id, runtime in cases:
+            with self.subTest(taskpack_id=taskpack_id):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    repo = tmp_path / "repo"
+                    drafts = tmp_path / "drafts"
+                    frozen_root = tmp_path / "frozen"
+                    _init_repo(repo)
+                    result = draft_taskpack_files(
+                        project_root=repo,
+                        goal="Reject invalid runtime metadata.",
+                        draft_root=drafts,
+                        taskpack_id=taskpack_id,
+                        write_scope=["src/"],
+                    )
+                    taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+                    taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+                    taskpack["runtime"] = runtime
+                    taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+
+                    with self.assertRaises(TaskpackValidationError) as raised:
+                        validate_taskpack(result["taskpack_dir"])
+
+                    self.assertIn("runtime", str(raised.exception))
+                    with self.assertRaises(TaskpackValidationError):
+                        freeze_taskpack(result["taskpack_dir"], frozen_root)
+                    self.assertFalse((frozen_root / taskpack_id).exists())
+
     def test_build_taskpack_runtime_args_rejects_invalid_runtime_without_run_dir(self):
         cases = [
             ("non-object-runtime", []),
@@ -1535,11 +1725,11 @@ class TaskpackTests(unittest.TestCase):
                         taskpack_id=taskpack_id,
                         write_scope=["src/"],
                     )
-                    taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+                    frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+                    taskpack_path = Path(frozen["frozen_taskpack_dir"]) / "taskpack.yaml"
                     taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
                     taskpack["runtime"] = runtime
                     taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
-                    frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
 
                     with self.assertRaises(TaskpackValidationError) as raised:
                         build_taskpack_runtime_args(frozen["frozen_taskpack_dir"], run_root=run_root)
@@ -1562,17 +1752,49 @@ class TaskpackTests(unittest.TestCase):
                 taskpack_id="shell-runtime-backend",
                 write_scope=["src/"],
             )
-            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+            taskpack_path = Path(frozen["frozen_taskpack_dir"]) / "taskpack.yaml"
             taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
             taskpack["runtime"]["default_backend"] = "shell"
             taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
-            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
 
             with self.assertRaises(TaskpackValidationError) as raised:
                 build_taskpack_runtime_args(frozen["frozen_taskpack_dir"], run_root=run_root)
 
             self.assertIn("runtime", str(raised.exception))
             self.assertFalse((run_root / "shell-runtime-backend").exists())
+
+    def test_build_taskpack_runtime_args_rejects_tampered_runtime_profile_without_run_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject tampered frozen runtime profile.",
+                draft_root=drafts,
+                taskpack_id="tampered-runtime-profile",
+                write_scope=["src/"],
+            )
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+            frozen_dir = Path(frozen["frozen_taskpack_dir"])
+            agent_pool_path = frozen_dir / "agent_pool.json"
+            agent_pool = json.loads(agent_pool_path.read_text(encoding="utf-8"))
+            agent_pool["role_runtime_profiles"]["implementation_worker"] = {
+                "adapter": "shell",
+                "command": ["bash", "-lc", "echo unsafe"],
+            }
+            agent_pool_path.write_text(json.dumps(agent_pool), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                build_taskpack_runtime_args(frozen_dir, run_root=run_root)
+
+            message = str(raised.exception)
+            self.assertTrue("adapter" in message or "command" in message)
+            self.assertFalse((run_root / "tampered-runtime-profile").exists())
 
     def test_build_taskpack_runtime_args_rejects_invalid_launch_metadata_without_run_dir(self):
         cases = [
