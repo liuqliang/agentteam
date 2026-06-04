@@ -23,6 +23,8 @@ def main(argv=None):
         parser = _build_parser()
         args = parser.parse_args(argv)
         result = args.handler(args)
+        if isinstance(result, int):
+            return result
         if result is not None:
             _print_json(result, stream=sys.stdout)
         return 0
@@ -156,13 +158,7 @@ def _handle_run(args):
     if completed.stderr:
         sys.stderr.write(completed.stderr)
         sys.stderr.flush()
-    if completed.returncode != 0:
-        raise AgentTeamCliError(
-            "agentteam_runtime.cli failed",
-            exit_code=completed.returncode,
-            command=command,
-        )
-    return None
+    return completed.returncode
 
 
 def _print_json(payload, stream):

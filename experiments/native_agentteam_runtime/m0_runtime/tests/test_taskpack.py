@@ -205,6 +205,98 @@ class TaskpackTests(unittest.TestCase):
                 "done",
             )
 
+    def test_agentteam_cli_run_forwards_child_failure_exit_and_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            wrapper_run_root = tmp_path / "wrapper-runs"
+            direct_run_root = tmp_path / "direct-runs"
+            _init_repo(repo)
+            result = draft_taskpack_from_goal(
+                project_root=repo,
+                goal="Forward child runtime CLI failure.",
+                draft_root=drafts,
+                author_runtime="fake",
+                taskpack_id="cli-child-failure",
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+            taskpack_path = taskpack_dir / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["runtime"]["default_backend"] = "fake"
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+            agent_pool_path = taskpack_dir / "agent_pool.json"
+            agent_pool = json.loads(agent_pool_path.read_text(encoding="utf-8"))
+            agent_pool["role_runtime_profiles"]["implementation_worker"]["adapter"] = "fake"
+            agent_pool_path.write_text(json.dumps(agent_pool), encoding="utf-8")
+            frozen = freeze_taskpack(taskpack_dir, frozen_root)
+
+            direct_args = build_taskpack_runtime_args(
+                frozen["frozen_taskpack_dir"],
+                run_root=direct_run_root,
+                max_inflight=0,
+            )
+            direct_completed = subprocess.run(
+                ["python3", "-m", "agentteam_runtime.cli", *direct_args],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(direct_completed.returncode, 2, direct_completed.stderr)
+            self.assertIn("--max-inflight must be at least 1", direct_completed.stderr)
+
+            wrapper_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "run",
+                    frozen["frozen_taskpack_dir"],
+                    "--run-root",
+                    str(wrapper_run_root),
+                    "--max-inflight",
+                    "0",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(wrapper_completed.returncode, direct_completed.returncode)
+            self.assertEqual(wrapper_completed.stdout, direct_completed.stdout)
+            self.assertEqual(wrapper_completed.stderr, direct_completed.stderr)
+
+    def test_agentteam_cli_run_prelaunch_failure_returns_json_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            missing_taskpack = tmp_path / "missing"
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "run",
+                    str(missing_taskpack),
+                    "--run-root",
+                    str(tmp_path / "runs"),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(completed.stdout, "")
+            error = json.loads(completed.stderr)
+            self.assertEqual(error["status"], "error")
+            self.assertIn("missing", error["error"])
+
     def test_agentteam_cli_failure_returns_json_stderr(self):
         with tempfile.TemporaryDirectory() as tmp:
             missing_taskpack = Path(tmp) / "missing"
