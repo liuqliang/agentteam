@@ -299,6 +299,65 @@ class M0RuntimeTests(unittest.TestCase):
             )
             self.assertNotIn("SECRET_BODY_MARKER", json.dumps(repo_map["symbols"]))
 
+    def test_repo_map_extracts_typescript_symbol_summaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "runtime"
+            _init_git_repo(repo)
+            (repo / "src").mkdir()
+            (repo / "src" / "service.ts").write_text(
+                "\n".join(
+                    [
+                        "import React from 'react';",
+                        "import { createClient } from './client';",
+                        "",
+                        "const SECRET_BODY_MARKER = 'hidden';",
+                        "",
+                        "export class DashboardService {",
+                        "  loadData() {",
+                        "    return createClient();",
+                        "  }",
+                        "}",
+                        "",
+                        "export function buildDashboard() {",
+                        "  return new DashboardService();",
+                        "}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "src/service.ts"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add service"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            repo_map = build_repository_map(repo, output_dir)
+
+            symbols_by_path = {
+                file_symbols["path"]: file_symbols
+                for file_symbols in repo_map["symbols"]["files"]
+            }
+            service = symbols_by_path["src/service.ts"]
+            self.assertEqual(service["imports"], ["react", "./client"])
+            self.assertEqual(service["functions"], [{"name": "buildDashboard", "line": 12}])
+            self.assertEqual(
+                service["classes"],
+                [
+                    {
+                        "name": "DashboardService",
+                        "line": 6,
+                        "methods": [{"name": "loadData", "line": 7}],
+                    }
+                ],
+            )
+            self.assertNotIn("SECRET_BODY_MARKER", json.dumps(repo_map["symbols"]))
+
     def test_repo_context_selects_files_inside_task_scopes(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

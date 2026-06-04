@@ -463,6 +463,40 @@ Remaining follow-up work:
 
 - add language-specific extractors behind conservative fallbacks.
 
+### M35: Language-Aware Symbol Extractors
+
+Goal: broaden repository context usefulness beyond Python while keeping the
+repo map deterministic and dependency-light.
+
+Status: M35a implemented. The repo map now extracts lightweight JavaScript and
+TypeScript symbol summaries with conservative regex scanning. Python continues
+to use the standard-library AST extractor.
+
+Scope:
+
+- keep the shared `repo_symbols.v1` shape: imports, top-level functions,
+  classes, and methods;
+- extract ES module imports, exported or top-level function declarations, class
+  declarations, and simple class methods for JavaScript and TypeScript files;
+- update the symbol extraction version so clean-cache reuse does not mix old
+  Python-only summaries with multi-language summaries;
+- keep unsupported languages on inventory-only fallback until they have a
+  dedicated extractor.
+
+Acceptance:
+
+- a tracked `.ts` source file appears in `symbols.json`;
+- extracted summaries include imports, exported function declarations, class
+  declarations, and methods with line numbers;
+- symbol summaries do not embed source bodies;
+- no Node, LSP, Tree-sitter, compiler, or live model call is required.
+
+Remaining follow-up work:
+
+- add CommonJS and re-export import signals if repository evidence shows they
+  are needed;
+- add language-specific module mapping for JS/TS candidate test selection.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -503,6 +537,7 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to add language-aware extractors behind
-conservative fallbacks. Inflight migration remains a separate M29 decision gate
-because it changes ownership of already leased work.
+The next recommended step is to use the new JS/TS symbol summaries in candidate
+test selection, starting with module mapping for adjacent test files and ES
+module imports. Inflight migration remains a separate M29 decision gate because
+it changes ownership of already leased work.

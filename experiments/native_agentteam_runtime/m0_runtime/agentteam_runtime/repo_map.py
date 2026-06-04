@@ -11,7 +11,28 @@ REPO_MAP_SCHEMA_VERSION = "repo_map.v1"
 REPO_INVENTORY_SCHEMA_VERSION = "repo_inventory.v1"
 REPO_CONTEXT_SCHEMA_VERSION = "repo_context.v1"
 REPO_SYMBOLS_SCHEMA_VERSION = "repo_symbols.v1"
-SYMBOL_EXTRACTION_VERSION = "python_ast.v1"
+SYMBOL_EXTRACTION_VERSION = "python_ast_js_ts_regex.v1"
+
+JAVASCRIPT_IMPORT_RE = re.compile(
+    r"^\s*import(?:\s+type)?(?:\s+[^'\";]+?\s+from\s+)?[\"']([^\"']+)[\"']"
+)
+JAVASCRIPT_FUNCTION_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\("
+)
+JAVASCRIPT_CLASS_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?class\s+([A-Za-z_$][\w$]*)\b"
+)
+JAVASCRIPT_METHOD_RE = re.compile(
+    r"^\s*(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{?"
+)
+JAVASCRIPT_METHOD_SKIP_NAMES = {
+    "catch",
+    "constructor",
+    "for",
+    "if",
+    "switch",
+    "while",
+}
 
 
 def build_repository_map(project_root, output_dir, max_file_bytes=65536):
@@ -484,7 +505,8 @@ def _inventory_entry(project_root, relative_path, max_file_bytes, warnings):
 def _build_symbols(project_root, inventory_files, max_file_bytes, warnings):
     symbol_files = []
     for inventory_entry in inventory_files:
-        if inventory_entry["language"] != "python":
+        language = inventory_entry["language"]
+        if language not in {"python", "javascript", "typescript"}:
             continue
         if inventory_entry["size_bytes"] > max_file_bytes:
             warnings.append(
@@ -496,9 +518,18 @@ def _build_symbols(project_root, inventory_files, max_file_bytes, warnings):
                 }
             )
             continue
-        symbol_files.append(
-            _python_symbol_summary(project_root, inventory_entry["path"], warnings)
-        )
+        if language == "python":
+            symbol_files.append(
+                _python_symbol_summary(project_root, inventory_entry["path"], warnings)
+            )
+        else:
+            symbol_files.append(
+                _javascript_symbol_summary(
+                    project_root,
+                    inventory_entry["path"],
+                    warnings,
+                )
+            )
 
     return {
         "symbols_schema_version": REPO_SYMBOLS_SCHEMA_VERSION,
@@ -568,6 +599,83 @@ def _python_classes(tree):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 methods.append({"name": child.name, "line": child.lineno})
         classes.append({"name": node.name, "line": node.lineno, "methods": methods})
+    return classes
+
+
+def _javascript_symbol_summary(project_root, relative_path, warnings):
+    file_path = project_root / relative_path
+    try:
+        source = file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        warnings.append(
+            {
+                "path": relative_path,
+                "warning": "javascript_symbol_decode_failed",
+                "message": str(exc),
+            }
+        )
+        return None
+    except FileNotFoundError:
+        warnings.append({"path": relative_path, "warning": "missing_during_symbol_scan"})
+        return None
+
+    return {
+        "path": relative_path,
+        "imports": _javascript_imports(source),
+        "functions": _javascript_top_level_functions(source),
+        "classes": _javascript_classes(source),
+    }
+
+
+def _javascript_imports(source):
+    imports = []
+    for line in source.splitlines():
+        match = JAVASCRIPT_IMPORT_RE.match(line)
+        if match:
+            _append_unique(imports, match.group(1))
+    return imports
+
+
+def _javascript_top_level_functions(source):
+    functions = []
+    for line_number, line in enumerate(source.splitlines(), start=1):
+        match = JAVASCRIPT_FUNCTION_RE.match(line)
+        if match:
+            functions.append({"name": match.group(1), "line": line_number})
+    return functions
+
+
+def _javascript_classes(source):
+    classes = []
+    current_class = None
+    class_brace_depth = 0
+    for line_number, line in enumerate(source.splitlines(), start=1):
+        if current_class is not None:
+            method_match = JAVASCRIPT_METHOD_RE.match(line)
+            if method_match:
+                method_name = method_match.group(1)
+                if method_name not in JAVASCRIPT_METHOD_SKIP_NAMES:
+                    current_class["methods"].append(
+                        {"name": method_name, "line": line_number}
+                    )
+            class_brace_depth += line.count("{") - line.count("}")
+            if class_brace_depth <= 0:
+                current_class = None
+                class_brace_depth = 0
+            continue
+
+        class_match = JAVASCRIPT_CLASS_RE.match(line)
+        if not class_match:
+            continue
+        current_class = {
+            "name": class_match.group(1),
+            "line": line_number,
+            "methods": [],
+        }
+        classes.append(current_class)
+        class_brace_depth = line.count("{") - line.count("}")
+        if class_brace_depth <= 0:
+            class_brace_depth = 1
     return classes
 
 
