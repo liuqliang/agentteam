@@ -169,7 +169,6 @@ class M0RuntimeTests(unittest.TestCase):
                 "import os\n\n\ndef run():\n    return os.getcwd()\n",
                 encoding="utf-8",
             )
-            (repo / "notes.tmp").write_text("not tracked\n", encoding="utf-8")
             subprocess.run(["git", "add", "pkg/module.py"], cwd=repo, check=True)
             subprocess.run(
                 ["git", "commit", "-m", "add module"],
@@ -196,7 +195,55 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(files["pkg/module.py"]["language"], "python")
             self.assertEqual(files["pkg/module.py"]["category"], "source")
             self.assertEqual(len(files["pkg/module.py"]["sha256"]), 64)
-            self.assertNotIn("notes.tmp", files)
+
+    def test_repo_map_reuses_cache_for_clean_same_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "runtime"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "pkg" / "module.py").write_text(
+                "def run():\n    return 'ok'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "pkg/module.py"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add module"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            first = build_repository_map(repo, output_dir)
+            second = build_repository_map(repo, output_dir)
+
+            self.assertEqual(first["manifest"]["cache_status"], "rebuilt")
+            self.assertEqual(second["manifest"]["cache_status"], "reused")
+            self.assertEqual(second["manifest"]["repo_commit"], _git_rev_parse(repo, "HEAD"))
+            self.assertEqual(second["manifest"]["working_tree_state"], "clean")
+            self.assertEqual(first["inventory"], second["inventory"])
+            self.assertEqual(first["symbols"], second["symbols"])
+
+    def test_repo_map_rebuilds_cache_for_dirty_or_unversioned_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "runtime"
+            _init_git_repo(repo)
+
+            first = build_repository_map(repo, output_dir)
+            (repo / "scratch.py").write_text("print('untracked')\n", encoding="utf-8")
+            second = build_repository_map(repo, output_dir)
+
+            files = {entry["path"]: entry for entry in second["inventory"]["files"]}
+            warnings = [warning["warning"] for warning in second["manifest"]["warnings"]]
+            self.assertEqual(first["manifest"]["cache_status"], "rebuilt")
+            self.assertEqual(second["manifest"]["cache_status"], "rebuilt")
+            self.assertEqual(second["manifest"]["working_tree_state"], "dirty_or_unversioned")
+            self.assertIn("working_tree_dirty", warnings)
+            self.assertNotIn("scratch.py", files)
 
     def test_repo_map_extracts_python_symbol_summaries(self):
         with tempfile.TemporaryDirectory() as tmp:

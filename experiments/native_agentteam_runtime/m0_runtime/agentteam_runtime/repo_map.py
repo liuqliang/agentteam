@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 
 
@@ -23,6 +24,32 @@ def build_repository_map(project_root, output_dir, max_file_bytes=65536):
     inventory_path = repo_map_dir / "inventory.json"
     symbols_path = repo_map_dir / "symbols.json"
     manifest_path = repo_map_dir / "manifest.json"
+    inventory_options = {
+        "max_file_bytes": max_file_bytes,
+    }
+    repo_commit = _git_stdout(project_root, ["rev-parse", "HEAD"])
+    working_tree_state, dirty_status = _working_tree_state(project_root)
+    cached = _load_reusable_repo_map(
+        project_root,
+        manifest_path,
+        inventory_path,
+        symbols_path,
+        repo_commit,
+        working_tree_state,
+        inventory_options,
+    )
+    if cached:
+        return cached
+
+    if working_tree_state == "dirty_or_unversioned":
+        warnings.append(
+            {
+                "warning": "working_tree_dirty",
+                "status_count": len(dirty_status),
+                "status_sample": dirty_status[:20],
+            }
+        )
+
     tracked_files = _tracked_files(project_root, warnings)
     inventory = {
         "inventory_schema_version": REPO_INVENTORY_SCHEMA_VERSION,
@@ -41,6 +68,9 @@ def build_repository_map(project_root, output_dir, max_file_bytes=65536):
         "repo_map_schema_version": REPO_MAP_SCHEMA_VERSION,
         "project_root": str(project_root),
         "scan_status": "degraded" if warnings else "ok",
+        "cache_status": "rebuilt",
+        "repo_commit": repo_commit,
+        "working_tree_state": working_tree_state,
         "warning_count": len(warnings),
         "warnings": warnings,
         "inventory_path": str(inventory_path),
@@ -48,15 +78,62 @@ def build_repository_map(project_root, output_dir, max_file_bytes=65536):
         "inventory_file_count": len(inventory["files"]),
         "symbol_file_count": len(symbols["files"]),
         "symbol_extraction_version": SYMBOL_EXTRACTION_VERSION,
-        "inventory_options": {
-            "max_file_bytes": max_file_bytes,
-        },
+        "inventory_options": inventory_options,
     }
 
     _write_json(inventory_path, inventory)
     _write_json(symbols_path, symbols)
     _write_json(manifest_path, manifest)
 
+    return {
+        "manifest": manifest,
+        "inventory": inventory,
+        "symbols": symbols,
+        "paths": {
+            "inventory_path": str(inventory_path),
+            "symbols_path": str(symbols_path),
+            "manifest_path": str(manifest_path),
+        },
+    }
+
+
+def _load_reusable_repo_map(
+    project_root,
+    manifest_path,
+    inventory_path,
+    symbols_path,
+    repo_commit,
+    working_tree_state,
+    inventory_options,
+):
+    if working_tree_state != "clean" or not repo_commit:
+        return None
+    if not manifest_path.exists() or not inventory_path.exists() or not symbols_path.exists():
+        return None
+    try:
+        previous_manifest = _read_json(manifest_path)
+        inventory = _read_json(inventory_path)
+        symbols = _read_json(symbols_path)
+    except (json.JSONDecodeError, OSError):
+        return None
+    if previous_manifest.get("repo_map_schema_version") != REPO_MAP_SCHEMA_VERSION:
+        return None
+    if previous_manifest.get("project_root") != str(project_root):
+        return None
+    if previous_manifest.get("repo_commit") != repo_commit:
+        return None
+    if previous_manifest.get("working_tree_state") != "clean":
+        return None
+    if previous_manifest.get("inventory_options") != inventory_options:
+        return None
+    if previous_manifest.get("symbol_extraction_version") != SYMBOL_EXTRACTION_VERSION:
+        return None
+
+    manifest = deepcopy(previous_manifest)
+    manifest["cache_status"] = "reused"
+    manifest["repo_commit"] = repo_commit
+    manifest["working_tree_state"] = working_tree_state
+    _write_json(manifest_path, manifest)
     return {
         "manifest": manifest,
         "inventory": inventory,
@@ -454,6 +531,27 @@ def _run(command, cwd=None):
         )
     except FileNotFoundError as exc:
         return _MissingCommandResult(str(exc))
+
+
+def _git_stdout(project_root, arguments):
+    completed = _run(["git", "-C", str(project_root), *arguments])
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() or None
+
+
+def _working_tree_state(project_root):
+    completed = _run(["git", "-C", str(project_root), "status", "--porcelain"])
+    if completed.returncode != 0:
+        return "unknown", []
+    status = completed.stdout.splitlines()
+    if status:
+        return "dirty_or_unversioned", status
+    return "clean", []
+
+
+def _read_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def _write_json(path, payload):
