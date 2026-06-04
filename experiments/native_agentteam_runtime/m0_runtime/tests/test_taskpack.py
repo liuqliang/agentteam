@@ -133,6 +133,27 @@ class TaskpackTests(unittest.TestCase):
                     with self.assertRaises(TaskpackValidationError):
                         load_taskpack(taskpack_dir)
 
+    def test_load_taskpack_rejects_non_object_taskpack_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject malformed taskpack document.",
+                draft_root=drafts,
+                taskpack_id="malformed-taskpack-yaml",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack_path.write_text("[]", encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                load_taskpack(result["taskpack_dir"])
+
+            self.assertIn("taskpack", str(raised.exception))
+
     def test_validate_taskpack_rejects_broad_write_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -151,6 +172,25 @@ class TaskpackTests(unittest.TestCase):
                 validate_taskpack(result["taskpack_dir"])
 
             self.assertIn("write_scope must not include repository root", str(raised.exception))
+
+    def test_validate_taskpack_rejects_normalized_root_write_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject normalized root write scope.",
+                draft_root=drafts,
+                taskpack_id="normalized-root-write-scope",
+                write_scope=["./."],
+            )
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("write_scope", str(raised.exception))
 
     def test_validate_taskpack_rejects_parent_relative_write_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -266,6 +306,52 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn("project_root", str(raised.exception))
 
+    def test_validate_taskpack_rejects_file_project_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject file project root.",
+                draft_root=drafts,
+                taskpack_id="file-project-root",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["project_root"] = str(repo / "README.md")
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("project_root", str(raised.exception))
+
+    def test_validate_taskpack_rejects_non_string_goal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject malformed goal.",
+                draft_root=drafts,
+                taskpack_id="malformed-goal",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["goal"] = ["not", "a", "string"]
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("goal", str(raised.exception))
+
     def test_validate_taskpack_rejects_missing_verification_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -331,6 +417,52 @@ class TaskpackTests(unittest.TestCase):
                 validate_taskpack(result["taskpack_dir"])
 
             self.assertIn("task_id", str(raised.exception))
+
+    def test_validate_taskpack_rejects_invalid_depends_on_without_type_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject malformed dependencies.",
+                draft_root=drafts,
+                taskpack_id="malformed-depends-on",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["depends_on"] = None
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("depends_on", str(raised.exception))
+
+    def test_validate_taskpack_rejects_non_string_dependency_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject malformed dependency entries.",
+                draft_root=drafts,
+                taskpack_id="malformed-dependency-entry",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["depends_on"] = [123]
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("depends_on", str(raised.exception))
 
     def test_validate_taskpack_rejects_invalid_write_scope_without_type_error(self):
         with tempfile.TemporaryDirectory() as tmp:

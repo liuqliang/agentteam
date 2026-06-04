@@ -121,6 +121,8 @@ def draft_taskpack_files(
 def load_taskpack(taskpack_dir):
     taskpack_dir = Path(taskpack_dir).resolve()
     taskpack = _read_json(taskpack_dir / "taskpack.yaml")
+    if not isinstance(taskpack, dict):
+        raise TaskpackValidationError("taskpack must be an object")
     files = taskpack.get("files", {})
     if not isinstance(files, dict):
         raise TaskpackValidationError("taskpack files must be an object")
@@ -154,8 +156,6 @@ def validate_taskpack(taskpack_dir):
     taskpack = loaded["taskpack"]
     backlog = loaded["backlog"]
     verification = loaded["verification"]
-    if not isinstance(taskpack, dict):
-        raise TaskpackValidationError("taskpack must be an object")
     project_root_value = taskpack.get("project_root")
     taskpack_id = None
 
@@ -167,14 +167,18 @@ def validate_taskpack(taskpack_dir):
         errors.append(str(exc))
     if not isinstance(project_root_value, str) or not project_root_value:
         errors.append("project_root must be a non-empty string")
-    elif not Path(project_root_value).exists():
-        errors.append("project_root does not exist")
-    elif not _is_git_repo(Path(project_root_value)):
-        errors.append("project_root must be a git repository")
+    else:
+        project_root = Path(project_root_value)
+        if not project_root.exists():
+            errors.append("project_root does not exist")
+        elif not project_root.is_dir():
+            errors.append("project_root must be a directory or git repository")
+        elif not _is_git_repo(project_root):
+            errors.append("project_root must be a git repository")
     if taskpack.get("status") not in {"draft", "frozen"}:
         errors.append("status must be draft or frozen")
-    if not taskpack.get("goal"):
-        errors.append("goal must be non-empty")
+    if not _is_non_empty_string(taskpack.get("goal")):
+        errors.append("goal must be a non-empty string")
 
     if not isinstance(backlog, dict):
         errors.append("backlog must be an object")
@@ -208,17 +212,26 @@ def validate_taskpack(taskpack_dir):
                 if not isinstance(scope, str):
                     errors.append(f"{task_id_label} write_scope entries must be strings")
                     continue
-                if scope in {"", ".", "./", "*", "**", "/"}:
+                if scope in {"", "*", "**", "/"}:
                     errors.append("write_scope must not include repository root")
                     continue
                 scope_path = Path(scope)
                 if scope_path.is_absolute():
                     errors.append(f"{task_id_label} write_scope must be repository-relative: {scope}")
+                elif _write_scope_is_repository_root(scope_path):
+                    errors.append("write_scope must not include repository root")
                 elif _write_scope_escapes_repository(scope_path):
                     errors.append(f"{task_id_label} write_scope must stay inside repository: {scope}")
-        for dependency in item.get("depends_on", []):
-            if dependency == task_id:
-                errors.append(f"{task_id_label} must not depend on itself")
+        depends_on = item.get("depends_on", [])
+        if not isinstance(depends_on, list):
+            errors.append(f"{task_id_label} depends_on must be a list")
+        else:
+            for dependency in depends_on:
+                if not isinstance(dependency, str):
+                    errors.append(f"{task_id_label} depends_on entries must be strings")
+                    continue
+                if dependency == task_id:
+                    errors.append(f"{task_id_label} must not depend on itself")
 
     if not isinstance(verification, dict):
         errors.append("verification must be an object")
@@ -281,6 +294,10 @@ def _validate_existing_taskpack_id(taskpack_id):
     return _normalize_taskpack_id(taskpack_id, "")
 
 
+def _is_non_empty_string(value):
+    return isinstance(value, str) and bool(value)
+
+
 def _string_list(value, default, field_name):
     if value is None:
         return list(default)
@@ -314,6 +331,10 @@ def _require_contained_path(path, root, field_name):
         path.relative_to(root)
     except ValueError as exc:
         raise TaskpackValidationError(f"{field_name} must stay inside {root}") from exc
+
+
+def _write_scope_is_repository_root(scope_path):
+    return scope_path == Path(".") or not scope_path.parts
 
 
 def _write_scope_escapes_repository(scope_path):
