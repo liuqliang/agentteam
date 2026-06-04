@@ -121,6 +121,49 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("clean", str(raised.exception))
             self.assertFalse(marker.exists())
 
+    def test_codex_taskpack_author_reports_target_repo_change_on_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            fake_codex = tmp_path / "fake_timeout_author.py"
+            changed_file = "codex-timeout-side-effect.txt"
+            _init_repo(repo)
+            fake_codex.write_text(
+                "\n".join(
+                    [
+                        "import pathlib",
+                        "import sys",
+                        "import time",
+                        "repo = pathlib.Path(sys.argv[1])",
+                        f"(repo / {changed_file!r}).write_text('changed\\n', encoding='utf-8')",
+                        "time.sleep(10)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                draft_taskpack_from_goal(
+                    project_root=repo,
+                    goal="Improve fixture behavior.",
+                    draft_root=drafts,
+                    author_runtime="codex",
+                    taskpack_id="timeout-side-effect",
+                    codex_command=["python3", str(fake_codex), str(repo)],
+                    codex_timeout_seconds=1,
+                )
+
+            status = subprocess.run(
+                ["git", "-C", str(repo), "status", "--porcelain=v1", "--untracked-files=all"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertIn("modified the target repository", str(raised.exception))
+            self.assertIn(changed_file, status.stdout)
+
     def test_draft_taskpack_files_writes_expected_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -117,6 +117,7 @@ def _draft_with_codex(
                 "stderr": exc.stderr or "",
             },
         )
+        _raise_if_target_repo_modified(project_root, repo_status_before)
         raise TaskpackValidationError("codex taskpack author timed out") from exc
 
     _write_json(
@@ -129,9 +130,7 @@ def _draft_with_codex(
         },
     )
 
-    repo_status_after = _git_status_signature(project_root)
-    if repo_status_after != repo_status_before:
-        raise TaskpackValidationError("codex taskpack author modified the target repository")
+    _raise_if_target_repo_modified(project_root, repo_status_before)
     if completed.returncode != 0:
         raise TaskpackValidationError(f"codex taskpack author failed with exit code {completed.returncode}")
 
@@ -253,6 +252,12 @@ def _path_is_relative_to(path, root):
     except ValueError:
         return False
     return True
+
+
+def _raise_if_target_repo_modified(project_root, repo_status_before):
+    repo_status_after = _git_status_signature(project_root)
+    if repo_status_after != repo_status_before:
+        raise TaskpackValidationError("codex taskpack author modified the target repository")
 
 
 def _git_status_signature(project_root):
