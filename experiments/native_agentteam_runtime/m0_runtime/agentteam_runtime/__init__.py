@@ -39,6 +39,7 @@ _EXPORTS = {
     "build_taskpack_runtime_args": (".taskpack", "build_taskpack_runtime_args"),
     "classify_attempt_outcome": (".m0_runtime", "classify_attempt_outcome"),
     "draft_taskpack_files": (".taskpack", "draft_taskpack_files"),
+    "draft_taskpack_from_goal": (".taskpack_author", "draft_taskpack_from_goal"),
     "freeze_taskpack": (".taskpack", "freeze_taskpack"),
     "load_taskpack": (".taskpack", "load_taskpack"),
     "normalize_task_proposal": (".task_proposal", "normalize_task_proposal"),

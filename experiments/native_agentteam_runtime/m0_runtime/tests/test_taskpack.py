@@ -8,6 +8,7 @@ from agentteam_runtime import (
     TaskpackValidationError,
     build_taskpack_runtime_args,
     draft_taskpack_files,
+    draft_taskpack_from_goal,
     freeze_taskpack,
     load_taskpack,
     validate_taskpack,
@@ -30,6 +31,63 @@ def _arg_value(args, flag):
 
 
 class TaskpackTests(unittest.TestCase):
+    def test_fake_taskpack_author_drafts_safe_taskpack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+
+            result = draft_taskpack_from_goal(
+                project_root=repo,
+                goal="Improve fixture behavior.",
+                draft_root=drafts,
+                author_runtime="fake",
+                taskpack_id="fake-authored",
+            )
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            self.assertEqual(loaded["taskpack"]["taskpack_id"], "fake-authored")
+            self.assertEqual(loaded["backlog"]["items"][0]["required_role"], "implementation_worker")
+            self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
+
+    def test_fake_taskpack_author_draft_can_be_frozen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            _init_repo(repo)
+
+            result = draft_taskpack_from_goal(
+                project_root=repo,
+                goal="Improve fixture behavior.",
+                draft_root=drafts,
+                author_runtime="fake",
+                taskpack_id="fake-freezable",
+            )
+
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+
+            self.assertEqual(frozen["manifest"]["taskpack_id"], "fake-freezable")
+            self.assertTrue((Path(frozen["frozen_taskpack_dir"]) / "manifest.json").exists())
+
+    def test_taskpack_author_rejects_unsupported_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+
+            with self.assertRaises(TaskpackValidationError):
+                draft_taskpack_from_goal(
+                    project_root=repo,
+                    goal="Improve fixture behavior.",
+                    draft_root=drafts,
+                    author_runtime="human",
+                    taskpack_id="unsupported-author",
+                )
+
     def test_draft_taskpack_files_writes_expected_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
