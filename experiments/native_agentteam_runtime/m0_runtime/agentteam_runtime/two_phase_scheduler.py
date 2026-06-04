@@ -310,7 +310,13 @@ class TwoPhaseFileScheduler:
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
                 **_role_prompt_fields(agent_pool, agent, task),
-                **_role_context_fields(agent_pool, agent, step_dir, attempt_id),
+                **_role_context_fields(
+                    agent_pool,
+                    agent,
+                    step_dir,
+                    attempt_id,
+                    project_root=self.project_root,
+                ),
                 **_repo_context_fields(
                     self.project_root,
                     self.output_dir,

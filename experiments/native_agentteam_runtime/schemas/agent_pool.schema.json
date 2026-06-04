@@ -89,6 +89,9 @@
               "minLength": 1
             },
             "minItems": 1
+          },
+          "include_repo_map_references": {
+            "type": "boolean"
           }
         }
       }

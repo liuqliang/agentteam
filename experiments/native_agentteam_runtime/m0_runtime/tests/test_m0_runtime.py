@@ -948,6 +948,66 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertLessEqual(source["excerpt_chars"], 80)
             self.assertNotIn("TAIL_SHOULD_BE_OMITTED", json.dumps(context))
 
+    def test_run_simulation_role_context_can_reference_repo_map_without_embedding_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "pkg" / "module.py").write_text(
+                "SECRET_SOURCE_BODY = 'do-not-embed'\n\n"
+                "def build_worker():\n"
+                "    return SECRET_SOURCE_BODY\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "pkg/module.py"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add module"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_agent_pool_with_role_context_packages(
+                agent_pool_path,
+                role_context_packages={
+                    "repo_map_agent": {
+                        "context_notes": ["Read repo map references only as navigation."],
+                        "include_repo_map_references": True,
+                    }
+                },
+            )
+
+            run_simulation(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            message = _read_first_jsonl(
+                output_dir / "mailboxes" / "agent-repo-map" / "inbox.jsonl"
+            )
+            context_path = Path(message["payload"]["role_context_path"])
+            context = json.loads(context_path.read_text(encoding="utf-8"))
+            repo_map_reference = context["repo_map_reference"]
+
+            self.assertTrue(Path(repo_map_reference["manifest_path"]).exists())
+            self.assertTrue(Path(repo_map_reference["inventory_path"]).exists())
+            self.assertTrue(Path(repo_map_reference["symbols_path"]).exists())
+            self.assertEqual(
+                repo_map_reference["boundary"],
+                "navigation_reference_only",
+            )
+            self.assertIn("repo_context_path", repo_map_reference["read_policy"])
+            self.assertNotIn("SECRET_SOURCE_BODY", json.dumps(context))
+            self.assertNotIn("do-not-embed", json.dumps(context))
+
     def test_run_simulation_dispatch_includes_repo_context_path_when_project_root_is_available(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

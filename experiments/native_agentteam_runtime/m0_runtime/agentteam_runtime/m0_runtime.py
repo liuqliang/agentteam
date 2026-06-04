@@ -8,7 +8,11 @@ from pathlib import Path
 
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
 from .planner_context import build_artifact_context
-from .repo_map import build_repo_context, REPO_CONTEXT_SCHEMA_VERSION
+from .repo_map import (
+    build_repo_context,
+    build_repository_map,
+    REPO_CONTEXT_SCHEMA_VERSION,
+)
 
 
 class SystemClock:
@@ -518,7 +522,13 @@ def run_simulation(
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
                 **_role_prompt_fields(agent_pool, agent, task),
-                **_role_context_fields(agent_pool, agent, output_dir, attempt_id),
+                **_role_context_fields(
+                    agent_pool,
+                    agent,
+                    output_dir,
+                    attempt_id,
+                    project_root=project_root,
+                ),
                 **_repo_context_fields(project_root, output_dir, task, agent, attempt_id),
             },
         }
@@ -1833,11 +1843,17 @@ def _role_prompt_contract(agent_pool, agent):
     return deepcopy(contract) if contract else None
 
 
-def _role_context_fields(agent_pool, agent, output_dir, attempt_id):
+def _role_context_fields(agent_pool, agent, output_dir, attempt_id, project_root=None):
     package = _role_context_package(agent_pool, agent)
     if not package:
         return {}
-    context_path = _write_role_context_package(output_dir, attempt_id, agent, package)
+    context_path = _write_role_context_package(
+        output_dir,
+        attempt_id,
+        agent,
+        package,
+        project_root=project_root,
+    )
     return {
         "role_context_path": str(context_path),
         "role_context_schema_version": "role_context.v1",
@@ -1883,7 +1899,13 @@ def _role_context_package(agent_pool, agent):
     return deepcopy(package) if package else None
 
 
-def _write_role_context_package(output_dir, attempt_id, agent, package):
+def _write_role_context_package(
+    output_dir,
+    attempt_id,
+    agent,
+    package,
+    project_root=None,
+):
     context_notes = _role_context_string_list(package, "context_notes")
     artifact_paths = _role_context_string_list(package, "context_artifacts")
     context = {
@@ -1892,6 +1914,13 @@ def _write_role_context_package(output_dir, attempt_id, agent, package):
         "agent_role": agent.get("role"),
         "context_notes": context_notes,
     }
+    repo_map_reference = _role_context_repo_map_reference(
+        package,
+        project_root,
+        output_dir,
+    )
+    if repo_map_reference:
+        context["repo_map_reference"] = repo_map_reference
     if artifact_paths:
         context["artifact_context"] = build_artifact_context(
             artifact_paths,
@@ -1905,6 +1934,28 @@ def _write_role_context_package(output_dir, attempt_id, agent, package):
     context_path.parent.mkdir(parents=True, exist_ok=True)
     context_path.write_text(json.dumps(context, sort_keys=True), encoding="utf-8")
     return context_path
+
+
+def _role_context_repo_map_reference(package, project_root, output_dir):
+    include_references = package.get("include_repo_map_references", False)
+    if not isinstance(include_references, bool):
+        raise ValueError(
+            "role context package include_repo_map_references must be a boolean"
+        )
+    if not include_references or not project_root:
+        return None
+    repo_map = build_repository_map(project_root, output_dir)
+    return {
+        "boundary": "navigation_reference_only",
+        "manifest_path": repo_map["paths"]["manifest_path"],
+        "inventory_path": repo_map["paths"]["inventory_path"],
+        "symbols_path": repo_map["paths"]["symbols_path"],
+        "read_policy": (
+            "Use repo map paths for coarse repository navigation only. "
+            "For task-specific implementation file selection, read "
+            "repo_context_path from the dispatch payload when present."
+        ),
+    }
 
 
 def _role_context_string_list(package, key):

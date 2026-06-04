@@ -302,7 +302,9 @@ settings onto every agent entry.
 Status: implemented for the current route. M31a added runtime profiles, M31b
 added prompt contracts, M31c added bounded role context packages, and M31d
 exposes effective runtime profile source in session state. M31e adds runtime
-profile source counts to the observability summary.
+profile source counts to the observability summary. M31f allows role context
+packages to reference repo map files as navigation pointers without embedding
+repo content.
 
 Scope:
 
@@ -319,6 +321,8 @@ Scope:
   index and observability queries;
 - summarize runtime profile source counts in the default runtime observability
   view;
+- optionally add repo map manifest, inventory, and symbol-map references to a
+  role context package as navigation pointers;
 - keep Codex as the only live LLM backend on this route;
 - keep CLI/default Codex command settings usable as local environment defaults.
 
@@ -336,13 +340,15 @@ Acceptance:
   agent-level profiles, role-level profiles, defaults, and the fallback fake
   adapter, plus the two-phase external mailbox adapter path;
 - the default observability summary reports runtime profile source counts;
+- a role context package can point to repo map artifacts without including
+  source bodies or task-specific selected files;
 - agent pool schemas accept role runtime profiles, prompt contracts, and
   context packages.
 
 Remaining follow-up work:
 
-- generate role context packages from repository maps and verification summaries
-  instead of only explicit artifact paths.
+- add verification-summary references to role context packages once integration
+  batch summaries have a stable compact index.
 
 ### M32: Repository Map Context Generation
 
