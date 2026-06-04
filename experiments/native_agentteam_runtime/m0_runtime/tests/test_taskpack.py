@@ -255,6 +255,28 @@ class TaskpackTests(unittest.TestCase):
 
                     self.assertIn("write_scope", str(raised.exception))
 
+    def test_validate_taskpack_rejects_root_prefix_wildcard_write_scope(self):
+        cases = ["*.py", "*/*.py", "*/**/*"]
+        for index, write_scope in enumerate(cases):
+            with self.subTest(write_scope=write_scope):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    repo = tmp_path / "repo"
+                    drafts = tmp_path / "drafts"
+                    _init_repo(repo)
+                    result = draft_taskpack_files(
+                        project_root=repo,
+                        goal="Reject root-prefix wildcard write scope.",
+                        draft_root=drafts,
+                        taskpack_id=f"root-prefix-wildcard-{index}",
+                        write_scope=[write_scope],
+                    )
+
+                    with self.assertRaises(TaskpackValidationError) as raised:
+                        validate_taskpack(result["taskpack_dir"])
+
+                    self.assertIn("write_scope", str(raised.exception))
+
     def test_validate_taskpack_accepts_scoped_glob_write_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -480,6 +502,35 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn("task_id", str(raised.exception))
 
+    def test_validate_taskpack_rejects_malformed_task_runtime_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject malformed task runtime fields.",
+                draft_root=drafts,
+                taskpack_id="malformed-task-runtime-fields",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            item = backlog["items"][0]
+            del item["objective"]
+            item["required_role"] = ""
+            item["read_scope"] = "src/"
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            message = str(raised.exception)
+            self.assertIn("objective", message)
+            self.assertIn("required_role", message)
+            self.assertIn("read_scope", message)
+
     def test_validate_taskpack_rejects_invalid_depends_on_without_type_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -653,6 +704,50 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(manifest["status"], "frozen")
             self.assertEqual(len(manifest["digest_sha256"]), 64)
             self.assertTrue((frozen_dir / "taskpack.yaml").exists())
+
+    def test_validate_taskpack_rejects_non_object_agent_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject malformed agent pool.",
+                draft_root=drafts,
+                taskpack_id="malformed-agent-pool",
+                write_scope=["src/"],
+            )
+            agent_pool_path = Path(result["taskpack_dir"]) / "agent_pool.json"
+            agent_pool_path.write_text("[]", encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("agent_pool", str(raised.exception))
+
+    def test_validate_taskpack_rejects_missing_agent_for_required_role(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject missing required role agent.",
+                draft_root=drafts,
+                taskpack_id="missing-required-role-agent",
+                write_scope=["src/"],
+            )
+            agent_pool_path = Path(result["taskpack_dir"]) / "agent_pool.json"
+            agent_pool = json.loads(agent_pool_path.read_text(encoding="utf-8"))
+            agent_pool["agents"][0]["role"] = "different-role"
+            agent_pool_path.write_text(json.dumps(agent_pool), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("required_role", str(raised.exception))
 
     def test_freeze_taskpack_rejects_extra_draft_file_without_output(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -154,6 +154,7 @@ def validate_taskpack(taskpack_dir):
 
     errors = []
     taskpack = loaded["taskpack"]
+    agent_pool = loaded["agent_pool"]
     backlog = loaded["backlog"]
     verification = loaded["verification"]
     project_root_value = taskpack.get("project_root")
@@ -179,6 +180,8 @@ def validate_taskpack(taskpack_dir):
         errors.append("status must be draft or frozen")
     if not _is_non_empty_string(taskpack.get("goal")):
         errors.append("goal must be a non-empty string")
+
+    idle_agent_roles = _validate_agent_pool(agent_pool, errors)
 
     if not isinstance(backlog, dict):
         errors.append("backlog must be an object")
@@ -206,6 +209,25 @@ def validate_taskpack(taskpack_dir):
                 errors.append(f"duplicate task_id: {task_id}")
             seen_task_ids.add(task_id)
             dependency_graph.setdefault(task_id, [])
+        required_role = item.get("required_role")
+        if not _is_non_empty_string(item.get("objective")):
+            errors.append(f"{task_id_label} objective must be a non-empty string")
+        if not _is_non_empty_string(required_role):
+            errors.append(f"{task_id_label} required_role must be a non-empty string")
+        elif required_role not in idle_agent_roles:
+            errors.append(f"{task_id_label} required_role has no idle agent: {required_role}")
+        read_scope = item.get("read_scope")
+        if not isinstance(read_scope, list) or not read_scope:
+            errors.append(f"{task_id_label} read_scope must be a non-empty list")
+        elif not all(isinstance(scope, str) for scope in read_scope):
+            errors.append(f"{task_id_label} read_scope entries must be strings")
+        if not _is_non_empty_string(item.get("backlog_status")):
+            errors.append(f"{task_id_label} backlog_status must be a non-empty string")
+        blockers = item.get("blockers")
+        if not isinstance(blockers, list):
+            errors.append(f"{task_id_label} blockers must be a list")
+        elif not all(isinstance(blocker, str) for blocker in blockers):
+            errors.append(f"{task_id_label} blockers entries must be strings")
         write_scope = item.get("write_scope", [])
         if not isinstance(write_scope, list) or not write_scope:
             errors.append(f"{task_id_label} write_scope must be a non-empty list")
@@ -224,6 +246,8 @@ def validate_taskpack(taskpack_dir):
                     errors.append("write_scope must not include repository root")
                 elif _write_scope_is_root_wide_glob(scope_path):
                     errors.append(f"{task_id_label} write_scope must not include repository-wide glob: {scope}")
+                elif _write_scope_has_root_prefix_wildcard(scope_path):
+                    errors.append(f"{task_id_label} write_scope must not use root-prefix wildcard: {scope}")
                 elif _write_scope_escapes_repository(scope_path):
                     errors.append(f"{task_id_label} write_scope must stay inside repository: {scope}")
         depends_on = item.get("depends_on", [])
@@ -348,6 +372,33 @@ def _require_contained_path(path, root, field_name):
         raise TaskpackValidationError(f"{field_name} must stay inside {root}") from exc
 
 
+def _validate_agent_pool(agent_pool, errors):
+    idle_agent_roles = set()
+    if not isinstance(agent_pool, dict):
+        errors.append("agent_pool must be an object")
+        return idle_agent_roles
+
+    if not _is_non_empty_string(agent_pool.get("scheduler_agent_id")):
+        errors.append("agent_pool.scheduler_agent_id must be a non-empty string")
+
+    agents = agent_pool.get("agents")
+    if not isinstance(agents, list) or not agents:
+        errors.append("agent_pool.agents must be a non-empty list")
+        return idle_agent_roles
+
+    for index, agent in enumerate(agents):
+        label = f"agent_pool.agents[{index}]"
+        if not isinstance(agent, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        for field_name in ["agent_id", "role", "status", "inbox_path"]:
+            if not _is_non_empty_string(agent.get(field_name)):
+                errors.append(f"{label}.{field_name} must be a non-empty string")
+        if agent.get("status") == "idle" and _is_non_empty_string(agent.get("role")):
+            idle_agent_roles.add(agent["role"])
+    return idle_agent_roles
+
+
 def _build_taskpack_artifact_inventory(taskpack_dir):
     taskpack_dir = Path(taskpack_dir).resolve()
     taskpack_path = taskpack_dir / "taskpack.yaml"
@@ -409,6 +460,11 @@ def _write_scope_is_repository_root(scope_path):
 def _write_scope_is_root_wide_glob(scope_path):
     parts = tuple(part for part in scope_path.parts if part != ".")
     return parts in {("*",), ("**",), ("**", "*")}
+
+
+def _write_scope_has_root_prefix_wildcard(scope_path):
+    parts = tuple(part for part in scope_path.parts if part != ".")
+    return bool(parts) and ("*" in parts[0] or "?" in parts[0])
 
 
 def _write_scope_escapes_repository(scope_path):
