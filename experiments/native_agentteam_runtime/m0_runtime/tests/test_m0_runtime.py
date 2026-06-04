@@ -440,6 +440,50 @@ class M0RuntimeTests(unittest.TestCase):
                 ],
             )
 
+    def test_repo_context_ranks_symbol_match_above_path_only_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "runtime"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "pkg" / "a_build_worker_notes.py").write_text(
+                "def helper():\n    return 'notes'\n",
+                encoding="utf-8",
+            )
+            (repo / "pkg" / "module.py").write_text(
+                "def build_worker():\n    return 'worker'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "pkg/a_build_worker_notes.py", "pkg/module.py"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "add ranking fixtures"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            task = {
+                "task_id": "TASK-CTX-RANK-001",
+                "objective": "Update build_worker behavior.",
+                "read_scope": ["pkg/"],
+                "write_scope": [],
+            }
+
+            context = build_repo_context(
+                repo,
+                output_dir,
+                task,
+                agent_role="repo_map_agent",
+                max_files=1,
+            )
+
+            self.assertEqual(context["selected_files"][0]["path"], "pkg/module.py")
+
     def test_task_proposal_normalizes_valid_generated_tasks(self):
         proposal = {
             "milestone_id": "M21",

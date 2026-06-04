@@ -245,8 +245,13 @@ def _rank_inventory_files(inventory_files, symbol_by_path, task):
         if _path_in_scopes(path, read_scope):
             score += 50
             reasons.append("read_scope")
-        if _matches_objective(path, symbol_by_path.get(path), objective_tokens):
-            score += 10
+        objective_score = _objective_match_score(
+            path,
+            symbol_by_path.get(path),
+            objective_tokens,
+        )
+        if objective_score:
+            score += objective_score
             reasons.append("objective")
         ranked.append((score, reasons, entry))
     ranked.sort(key=lambda item: (-item[0], item[2]["path"]))
@@ -396,6 +401,32 @@ def _matches_objective(path, symbols, objective_tokens):
         return False
     haystack = _objective_haystack(path, symbols)
     return any(token in haystack for token in objective_tokens)
+
+
+def _objective_match_score(path, symbols, objective_tokens):
+    if not objective_tokens:
+        return 0
+    score = 0
+    if _tokens_match_values(objective_tokens, _symbol_match_values(symbols)):
+        score += 40
+    if _tokens_match_values(objective_tokens, [path.lower()]):
+        score += 10
+    return score
+
+
+def _symbol_match_values(symbols):
+    if not symbols:
+        return []
+    values = [symbol.lower() for symbol in symbols.get("imports", [])]
+    values.extend(function["name"].lower() for function in symbols.get("functions", []))
+    for class_symbols in symbols.get("classes", []):
+        values.append(class_symbols["name"].lower())
+        values.extend(method["name"].lower() for method in class_symbols["methods"])
+    return values
+
+
+def _tokens_match_values(tokens, values):
+    return any(token in value for token in tokens for value in values)
 
 
 def _objective_haystack(path, symbols):

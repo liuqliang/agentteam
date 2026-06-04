@@ -429,9 +429,10 @@ Acceptance:
 Goal: improve repository context usefulness while preserving bounded context
 packages and deterministic scheduler authority.
 
-Status: M34a implemented. Repo context packages now include `candidate_tests`
-for selected source files. The first implementation uses Python imports, test
-path tokens, selected source modules, and task objective tokens.
+Status: M34a-M34b implemented. Repo context packages now include
+`candidate_tests` for selected source files. Source ranking also gives stronger
+weight to objective matches against Python symbols than to path-only objective
+matches.
 
 Scope:
 
@@ -440,6 +441,8 @@ Scope:
 - infer Python module names from selected source paths;
 - rank test files higher when they import a selected module;
 - add path-name and objective-token matches as weaker signals;
+- rank selected source files with weighted objective signals: symbol/import
+  matches outrank path-only matches;
 - keep unsupported languages on the existing inventory-only fallback path.
 
 Acceptance:
@@ -447,11 +450,12 @@ Acceptance:
 - a task selecting `pkg/module.py` can report `tests/test_module.py` as a
   candidate test when the test imports `pkg.module`;
 - candidate tests do not consume the `selected_files` budget;
+- a source file defining an objective-matched symbol outranks a path-only file
+  with the same objective term;
 - no compiler, LSP, or live model call is required.
 
 Remaining follow-up work:
 
-- improve source ranking with more explicit symbol/path weighting;
 - add candidate tests to `repo-contexts` observability summaries if operators
   need them outside the raw context file;
 - add language-specific extractors behind conservative fallbacks.
@@ -496,7 +500,8 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to improve source ranking with more explicit
-symbol/path weighting, then add language-aware extractors behind conservative
-fallbacks. Inflight migration remains a separate M29 decision gate because it
-changes ownership of already leased work.
+The next recommended step is to add candidate tests to `repo-contexts`
+observability summaries if operators need them outside the raw context file,
+then add language-aware extractors behind conservative fallbacks. Inflight
+migration remains a separate M29 decision gate because it changes ownership of
+already leased work.
