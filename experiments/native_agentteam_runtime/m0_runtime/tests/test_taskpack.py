@@ -41,6 +41,52 @@ def _arg_value(args, flag):
 
 
 class TaskpackTests(unittest.TestCase):
+    def test_agentteam_cli_submit_fake_one_shot_runs_full_flow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "taskpacks"
+            _init_repo(repo)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "submit",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Submit fake one-shot taskpack.",
+                    "--work-root",
+                    str(work_root),
+                    "--taskpack-id",
+                    "cli-submit-fake",
+                    "--author-runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["taskpack_id"], "cli-submit-fake")
+            self.assertEqual(summary["validation"]["status"], "accepted")
+            self.assertEqual(summary["runtime"], "fake")
+            self.assertTrue((work_root / "drafts" / "cli-submit-fake").exists())
+            self.assertTrue((work_root / "frozen" / "cli-submit-fake" / "manifest.json").exists())
+            self.assertEqual(summary["run"]["scheduler_status"], "idle")
+            self.assertEqual(
+                summary["run"]["snapshot"]["tasks"]["TASK-CLI_SUBMIT_FAKE-001"]["task_status"],
+                "done",
+            )
+
     def test_agentteam_cli_draft_and_validate(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

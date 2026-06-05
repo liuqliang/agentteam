@@ -86,6 +86,27 @@ not the primary operator interface.
 The taskpack path turns a target repository plus a human goal into runtime
 artifacts that the scheduler can consume.
 
+For the normal operator path, use `submit`. It drafts, validates, freezes, and
+runs the taskpack in one command:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.agentteam submit \
+  --project-root /path/to/repo \
+  --goal "optimize the target behavior under an explicit metric" \
+  --work-root /tmp/agentteam-taskpacks \
+  --taskpack-id example-taskpack \
+  --author-runtime fake \
+  --one-shot
+```
+
+`submit --runtime auto` is the default. It runs fake-authored taskpacks with the
+`fake` runtime for smoke tests, and Codex-authored taskpacks with the `codex`
+runtime for live work. Use `--runtime fake` or `--runtime codex` to make that
+choice explicit.
+
+For explicit review before execution, run the lower-level commands separately:
+
 1. Draft a taskpack:
 
 ```bash
@@ -125,10 +146,11 @@ python3 -m agentteam_runtime.agentteam run \
   --one-shot
 ```
 
-Successful `taskpack` commands print JSON to stdout. Draft, validation, freeze,
-and pre-launch failures print JSON to stderr and exit `1`. After pre-launch
-translation succeeds, `run` delegates to `agentteam_runtime.cli` and forwards
-that child process's stdout, stderr, and exit code.
+Successful `submit` and `taskpack` commands print JSON to stdout. Draft,
+validation, freeze, and pre-launch failures print JSON to stderr and exit `1`.
+After pre-launch translation succeeds, `run` delegates to `agentteam_runtime.cli`
+and forwards that child process's stdout, stderr, and exit code. `submit`
+captures the delegated run output and includes it in its JSON summary.
 
 `--author-runtime fake` creates deterministic fixture taskpacks for tests and
 smoke runs. `--author-runtime codex` asks the Codex CLI to author the draft. The
