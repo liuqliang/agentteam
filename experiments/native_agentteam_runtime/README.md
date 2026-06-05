@@ -176,11 +176,22 @@ python3 -m agentteam_runtime.agentteam resume \
   --operator liuql
 ```
 
-`resume --interactive` prints the waiting question to stderr, reads your answer
-from stdin, writes `operator_answer_received`, clears the task blocker in the
-two-phase scheduler state, and appends a `backlog_updated` event with
-`task_status: "ready"`. The next dispatch payload includes `operator_guidance`
-with the recorded question id, answer, and operator.
+`resume --interactive` prints the waiting question to stderr and accepts either
+plain answer text or a small command loop before the final answer:
+
+- `/task` prints the blocked backlog item, objective, risk, role, scopes, and
+  blockers.
+- `/why` prints the worker question, options, and reason.
+- `/events` prints recent related scheduler events.
+- `/context` prints task, reason, and event context together.
+- `/answer <text>` submits the final answer. Plain text without a slash also
+  submits the answer.
+
+After the answer is submitted, the runtime writes `operator_answer_received`,
+clears the task blocker in the two-phase scheduler state, and appends a
+`backlog_updated` event with `task_status: "ready"`. The next dispatch payload
+includes `operator_guidance` with the recorded question id, answer, and
+operator.
 
 For scripts, answer a known question id directly:
 

@@ -296,7 +296,8 @@ def _handle_answer(args):
 def _handle_resume(args):
     if not args.interactive:
         raise AgentTeamCliError("--interactive is required for resume", missing_argument="--interactive")
-    waiting_gates = _waiting_manual_gates(args.run_dir)
+    resume_context = _load_resume_context(args.run_dir)
+    waiting_gates = _waiting_manual_gates_from_snapshot(resume_context["snapshot"])
     if not waiting_gates:
         return {
             "resume_status": "no_waiting_manual_gate",
@@ -307,7 +308,7 @@ def _handle_resume(args):
 
     answered = []
     for gate in waiting_gates:
-        answer = _prompt_manual_gate_answer(gate)
+        answer = _prompt_manual_gate_answer(gate, resume_context)
         answered.append(
             answer_manual_gate(
                 args.run_dir,
@@ -349,8 +350,40 @@ def _submit_status_from_run(run):
 
 
 def _waiting_manual_gates(run_dir):
-    events_path = Path(run_dir) / "events.jsonl"
-    snapshot = replay_events(events_path)
+    snapshot = _load_resume_context(run_dir)["snapshot"]
+    return _waiting_manual_gates_from_snapshot(snapshot)
+
+
+def _load_resume_context(run_dir):
+    run_dir = Path(run_dir)
+    events_path = run_dir / "events.jsonl"
+    return {
+        "run_dir": run_dir,
+        "events": _read_jsonl(events_path),
+        "snapshot": replay_events(events_path),
+        "state": _read_json_if_exists(run_dir / "state" / "two_phase_scheduler_state.json"),
+    }
+
+
+def _read_jsonl(path):
+    records = []
+    if not path.exists():
+        return records
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+
+def _read_json_if_exists(path):
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _waiting_manual_gates_from_snapshot(snapshot):
     manual_gates = snapshot.get("manual_gates", {})
     if not isinstance(manual_gates, dict):
         return []
@@ -361,7 +394,52 @@ def _waiting_manual_gates(run_dir):
     ]
 
 
-def _prompt_manual_gate_answer(gate):
+def _prompt_manual_gate_answer(gate, resume_context=None):
+    resume_context = resume_context or {"events": [], "state": {}}
+    _write_manual_gate_header(gate)
+    _write_manual_gate_commands()
+    while True:
+        sys.stderr.write("Answer or command: ")
+        sys.stderr.flush()
+        line = sys.stdin.readline()
+        if line == "":
+            raise AgentTeamCliError(
+                "interactive input ended before manual gate was answered",
+                question_id=gate.get("question_id"),
+            )
+        value = line.strip()
+        if not value:
+            sys.stderr.write("Answer is required.\n")
+            sys.stderr.flush()
+            continue
+        if not value.startswith("/"):
+            return value
+        command, _separator, argument = value.partition(" ")
+        command = command.lower()
+        argument = argument.strip()
+        if command == "/answer":
+            if argument:
+                return argument
+            return _prompt_text("Final answer", required=True)
+        if command in {"/help", "/?"}:
+            _write_manual_gate_commands()
+        elif command == "/task":
+            _write_manual_gate_task(gate, resume_context)
+        elif command == "/why":
+            _write_manual_gate_why(gate)
+        elif command == "/events":
+            _write_manual_gate_events(gate, resume_context)
+        elif command == "/context":
+            _write_manual_gate_task(gate, resume_context)
+            _write_manual_gate_why(gate)
+            _write_manual_gate_events(gate, resume_context)
+        else:
+            sys.stderr.write(f"Unknown command: {command}\n")
+            _write_manual_gate_commands()
+        sys.stderr.flush()
+
+
+def _write_manual_gate_header(gate):
     sys.stderr.write(f"Manual gate {gate['question_id']}\n")
     task_id = gate.get("task_id")
     if task_id:
@@ -375,7 +453,114 @@ def _prompt_manual_gate_answer(gate):
     if reason:
         sys.stderr.write(f"Reason: {reason}\n")
     sys.stderr.flush()
-    return _prompt_text("Answer", required=True)
+
+
+def _write_manual_gate_commands():
+    sys.stderr.write(
+        "Commands: /task, /why, /events, /context, /answer <text>, /help. "
+        "Plain text also submits the answer.\n"
+    )
+    sys.stderr.flush()
+
+
+def _write_manual_gate_task(gate, resume_context):
+    task = _task_for_gate(gate, resume_context)
+    sys.stderr.write("Task context:\n")
+    if not task:
+        task_id = gate.get("task_id") or "unknown"
+        sys.stderr.write(f"- Task id: {task_id}\n")
+        sys.stderr.write("- Scheduler task state was not found.\n")
+        return
+    fields = [
+        ("Task id", task.get("task_id")),
+        ("Status", task.get("backlog_status") or task.get("task_status")),
+        ("Milestone", task.get("milestone_id")),
+        ("Objective", task.get("objective")),
+        ("Risk", task.get("risk_target")),
+        ("Required role", task.get("required_role")),
+        ("Read scope", _compact_list(task.get("read_scope"))),
+        ("Write scope", _compact_list(task.get("write_scope"))),
+        ("Blockers", _compact_list(task.get("blockers"))),
+    ]
+    for label, value in fields:
+        if value:
+            sys.stderr.write(f"- {label}: {value}\n")
+
+
+def _write_manual_gate_why(gate):
+    sys.stderr.write("Gate reason:\n")
+    question = gate.get("question") or "Worker requested operator guidance before continuing."
+    sys.stderr.write(f"- Question: {question}\n")
+    options = gate.get("options") or []
+    if options:
+        sys.stderr.write(f"- Options: {', '.join(str(option) for option in options)}\n")
+    reason = gate.get("reason")
+    if reason:
+        sys.stderr.write(f"- Reason: {reason}\n")
+
+
+def _write_manual_gate_events(gate, resume_context, limit=8):
+    events = _related_events(gate, resume_context, limit=limit)
+    sys.stderr.write("Recent related events:\n")
+    if not events:
+        sys.stderr.write("- No related events found.\n")
+        return
+    for event in events:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        details = [
+            f"event={event.get('event_type') or 'unknown'}",
+            f"sequence={event.get('sequence')}",
+        ]
+        task_id = payload.get("task_id")
+        attempt_id = payload.get("attempt_id")
+        question_id = payload.get("question_id")
+        if task_id:
+            details.append(f"task={task_id}")
+        if attempt_id:
+            details.append(f"attempt={attempt_id}")
+        if question_id:
+            details.append(f"question={question_id}")
+        sys.stderr.write(f"- {' '.join(str(detail) for detail in details if detail)}\n")
+
+
+def _task_for_gate(gate, resume_context):
+    task_id = gate.get("task_id")
+    if not task_id:
+        return None
+    state = resume_context.get("state") if isinstance(resume_context, dict) else {}
+    backlog = state.get("backlog") if isinstance(state, dict) else {}
+    items = backlog.get("items") if isinstance(backlog, dict) else []
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict) and item.get("task_id") == task_id:
+                return item
+    return None
+
+
+def _related_events(gate, resume_context, limit=8):
+    task_id = gate.get("task_id")
+    question_id = gate.get("question_id")
+    events = resume_context.get("events", []) if isinstance(resume_context, dict) else []
+    related = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if (task_id and payload.get("task_id") == task_id) or (
+            question_id and payload.get("question_id") == question_id
+        ):
+            related.append(event)
+    return related[-limit:]
+
+
+def _compact_list(value):
+    if not value:
+        return None
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value) if value else None
+    return str(value)
 
 
 def _complete_submit_args(args):

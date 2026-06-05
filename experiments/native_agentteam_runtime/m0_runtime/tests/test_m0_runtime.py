@@ -5592,6 +5592,81 @@ class M0RuntimeTests(unittest.TestCase):
                 "Yes, continue with the CLI resume route.",
             )
 
+    def test_agentteam_resume_interactive_supports_context_commands_before_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "blocked",
+                [],
+                {
+                    "manual_gate": {
+                        "question": "Which context-aware route should runtime take?",
+                        "options": ["minimal", "expanded"],
+                        "reason": "Worker cannot choose between two operator-visible routes.",
+                    }
+                },
+            )
+            scheduler.collect_ready_results()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "resume",
+                    "--run-dir",
+                    str(output_dir),
+                    "--interactive",
+                    "--operator",
+                    "liuql",
+                ],
+                input=(
+                    "/task\n"
+                    "/why\n"
+                    "/events\n"
+                    "/context\n"
+                    "/answer Use the context-aware answer.\n"
+                ),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertIn("Commands:", completed.stderr)
+            self.assertIn("TASK-001", completed.stderr)
+            self.assertIn("Create generated repo index for TASK-001.", completed.stderr)
+            self.assertIn(
+                "Worker cannot choose between two operator-visible routes.",
+                completed.stderr,
+            )
+            self.assertIn("manual_gate_required", completed.stderr)
+            self.assertEqual(summary["resume_status"], "answered_manual_gate")
+            self.assertEqual(summary["answered_count"], 1)
+            self.assertEqual(
+                snapshot["manual_gates"]["Q-TASK-001-ATTEMPT-001"]["answer"],
+                "Use the context-aware answer.",
+            )
+
     def test_accepted_patch_is_queued_without_auto_integration(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
