@@ -87,6 +87,54 @@ class TaskpackTests(unittest.TestCase):
                 "done",
             )
 
+    def test_agentteam_cli_submit_interactive_prompts_for_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "taskpacks"
+            _init_repo(repo)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "submit",
+                    "--interactive",
+                ],
+                input="\n".join(
+                    [
+                        str(repo),
+                        "Submit interactive fake taskpack.",
+                        str(work_root),
+                        "cli-submit-interactive",
+                        "fake",
+                        "auto",
+                        "y",
+                        "n",
+                    ]
+                )
+                + "\n",
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertIn("Project root", completed.stderr)
+            self.assertIn("Goal", completed.stderr)
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["taskpack_id"], "cli-submit-interactive")
+            self.assertEqual(summary["runtime"], "fake")
+            self.assertEqual(summary["run"]["scheduler_status"], "idle")
+            self.assertEqual(
+                summary["run"]["snapshot"]["tasks"]["TASK-CLI_SUBMIT_INTERACTIVE-001"]["task_status"],
+                "done",
+            )
+
     def test_agentteam_cli_draft_and_validate(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

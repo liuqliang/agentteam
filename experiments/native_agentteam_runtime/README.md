@@ -87,7 +87,16 @@ The taskpack path turns a target repository plus a human goal into runtime
 artifacts that the scheduler can consume.
 
 For the normal operator path, use `submit`. It drafts, validates, freezes, and
-runs the taskpack in one command:
+runs the taskpack in one command. For manual use, start the interactive form and
+answer the prompts:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.agentteam submit --interactive
+```
+
+Interactive prompts are written to stderr, so stdout remains the final JSON
+summary. For scripts and repeatable runs, pass the same inputs as flags:
 
 ```bash
 PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \

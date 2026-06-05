@@ -61,9 +61,14 @@ def _build_parser():
 
 def _add_submit_parser(subcommands):
     parser = subcommands.add_parser("submit", help="Draft, validate, freeze, and run a taskpack.")
-    parser.add_argument("--project-root", required=True, help="Git repository root for the target project.")
-    parser.add_argument("--goal", required=True, help="Human-readable taskpack goal.")
-    parser.add_argument("--work-root", required=True, help="Directory for drafts, frozen taskpacks, and runs.")
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Prompt for submit inputs interactively. Prompts are written to stderr.",
+    )
+    parser.add_argument("--project-root", help="Git repository root for the target project.")
+    parser.add_argument("--goal", help="Human-readable taskpack goal.")
+    parser.add_argument("--work-root", help="Directory for drafts, frozen taskpacks, and runs.")
     parser.add_argument("--taskpack-id", help="Optional safe taskpack id slug.")
     parser.add_argument(
         "--author-runtime",
@@ -182,6 +187,7 @@ def _handle_taskpack_freeze(args):
 
 
 def _handle_submit(args):
+    _complete_submit_args(args)
     work_root = Path(args.work_root).resolve()
     draft_root = work_root / "drafts"
     frozen_root = work_root / "frozen"
@@ -251,6 +257,100 @@ def _handle_run(args):
         sys.stderr.write(completed.stderr)
         sys.stderr.flush()
     return completed.returncode
+
+
+def _complete_submit_args(args):
+    if args.interactive:
+        _prompt_submit_args(args)
+        return
+
+    _require_submit_arg(args.project_root, "--project-root")
+    _require_submit_arg(args.goal, "--goal")
+    _require_submit_arg(args.work_root, "--work-root")
+
+
+def _prompt_submit_args(args):
+    args.project_root = _prompt_text("Project root", default=args.project_root, required=True)
+    args.goal = _prompt_text("Goal", default=args.goal, required=True)
+    args.work_root = _prompt_text(
+        "Work root",
+        default=args.work_root or "/tmp/agentteam-taskpacks",
+        required=True,
+    )
+    args.taskpack_id = _prompt_text(
+        "Taskpack id",
+        default=args.taskpack_id,
+        display_default="auto" if args.taskpack_id is None else None,
+        required=False,
+    )
+    args.author_runtime = _prompt_choice(
+        "Author runtime",
+        choices=["fake", "codex"],
+        default=args.author_runtime,
+    )
+    args.runtime = _prompt_choice(
+        "Runtime",
+        choices=["auto", "fake", "codex"],
+        default=args.runtime,
+    )
+    args.one_shot = _prompt_bool("One shot", default=True)
+    args.commit_verified_integration = _prompt_bool(
+        "Commit verified integration",
+        default=args.commit_verified_integration,
+    )
+
+
+def _require_submit_arg(value, flag):
+    if value:
+        return
+    raise AgentTeamCliError(f"{flag} is required unless --interactive is set", missing_argument=flag)
+
+
+def _prompt_text(label, default=None, display_default=None, required=False):
+    shown_default = display_default if display_default is not None else default
+    while True:
+        suffix = f" [{shown_default}]" if shown_default else ""
+        sys.stderr.write(f"{label}{suffix}: ")
+        sys.stderr.flush()
+        line = sys.stdin.readline()
+        if line == "":
+            raise AgentTeamCliError("interactive input ended before submit was complete", prompt=label)
+        value = line.strip()
+        if value:
+            return value
+        if default is not None or not required:
+            return default
+        sys.stderr.write(f"{label} is required.\n")
+        sys.stderr.flush()
+
+
+def _prompt_choice(label, choices, default):
+    choices_label = "/".join(choices)
+    while True:
+        value = _prompt_text(f"{label} ({choices_label})", default=default, required=True)
+        if value in choices:
+            return value
+        sys.stderr.write(f"{label} must be one of: {choices_label}.\n")
+        sys.stderr.flush()
+
+
+def _prompt_bool(label, default):
+    default_label = "Y/n" if default else "y/N"
+    while True:
+        sys.stderr.write(f"{label} [{default_label}]: ")
+        sys.stderr.flush()
+        line = sys.stdin.readline()
+        if line == "":
+            raise AgentTeamCliError("interactive input ended before submit was complete", prompt=label)
+        value = line.strip().lower()
+        if not value:
+            return default
+        if value in {"y", "yes", "true", "1"}:
+            return True
+        if value in {"n", "no", "false", "0"}:
+            return False
+        sys.stderr.write(f"{label} must be y or n.\n")
+        sys.stderr.flush()
 
 
 def _run_frozen_taskpack(
