@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .m0_runtime import answer_manual_gate
+from .m0_runtime import answer_manual_gate, replay_events
 from .taskpack import build_taskpack_runtime_args, freeze_taskpack, validate_taskpack
 from .taskpack_author import draft_taskpack_from_goal
 
@@ -58,6 +58,7 @@ def _build_parser():
     _add_taskpack_freeze_parser(taskpack_subcommands)
     _add_run_parser(subcommands)
     _add_answer_parser(subcommands)
+    _add_resume_parser(subcommands)
     return parser
 
 
@@ -177,6 +178,18 @@ def _add_answer_parser(subcommands):
     parser.set_defaults(handler=_handle_answer)
 
 
+def _add_resume_parser(subcommands):
+    parser = subcommands.add_parser("resume", help="Interactively answer waiting runtime manual gates.")
+    parser.add_argument("--run-dir", required=True, help="Runtime output directory containing events.jsonl.")
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Prompt for answers to waiting manual gates. Prompts are written to stderr.",
+    )
+    parser.add_argument("--operator", default="operator", help="Operator identity recorded in the event log.")
+    parser.set_defaults(handler=_handle_resume)
+
+
 def _handle_taskpack_draft(args):
     return draft_taskpack_from_goal(
         project_root=args.project_root,
@@ -280,6 +293,38 @@ def _handle_answer(args):
     )
 
 
+def _handle_resume(args):
+    if not args.interactive:
+        raise AgentTeamCliError("--interactive is required for resume", missing_argument="--interactive")
+    waiting_gates = _waiting_manual_gates(args.run_dir)
+    if not waiting_gates:
+        return {
+            "resume_status": "no_waiting_manual_gate",
+            "answered_count": 0,
+            "answered": [],
+            "run_dir": str(Path(args.run_dir).resolve()),
+        }
+
+    answered = []
+    for gate in waiting_gates:
+        answer = _prompt_manual_gate_answer(gate)
+        answered.append(
+            answer_manual_gate(
+                args.run_dir,
+                gate["question_id"],
+                answer,
+                operator=args.operator,
+            )
+        )
+
+    return {
+        "resume_status": "answered_manual_gate",
+        "answered_count": len(answered),
+        "answered": answered,
+        "run_dir": str(Path(args.run_dir).resolve()),
+    }
+
+
 def _submit_status_from_run(run):
     if not isinstance(run, dict):
         return "completed"
@@ -301,6 +346,36 @@ def _submit_status_from_run(run):
     ):
         return "blocked"
     return "completed"
+
+
+def _waiting_manual_gates(run_dir):
+    events_path = Path(run_dir) / "events.jsonl"
+    snapshot = replay_events(events_path)
+    manual_gates = snapshot.get("manual_gates", {})
+    if not isinstance(manual_gates, dict):
+        return []
+    return [
+        gate
+        for _question_id, gate in sorted(manual_gates.items())
+        if isinstance(gate, dict) and gate.get("gate_status") == "waiting"
+    ]
+
+
+def _prompt_manual_gate_answer(gate):
+    sys.stderr.write(f"Manual gate {gate['question_id']}\n")
+    task_id = gate.get("task_id")
+    if task_id:
+        sys.stderr.write(f"Task: {task_id}\n")
+    question = gate.get("question") or "Worker requested operator guidance before continuing."
+    sys.stderr.write(f"Question: {question}\n")
+    options = gate.get("options") or []
+    if options:
+        sys.stderr.write(f"Options: {', '.join(options)}\n")
+    reason = gate.get("reason")
+    if reason:
+        sys.stderr.write(f"Reason: {reason}\n")
+    sys.stderr.flush()
+    return _prompt_text("Answer", required=True)
 
 
 def _complete_submit_args(args):
