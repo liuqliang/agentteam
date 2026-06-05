@@ -182,6 +182,15 @@ def _add_resume_parser(subcommands):
     parser = subcommands.add_parser("resume", help="Interactively answer waiting runtime manual gates.")
     parser.add_argument("--run-dir", required=True, help="Runtime output directory containing events.jsonl.")
     parser.add_argument(
+        "--question-id",
+        help="Optional manual gate question id. When omitted, all waiting gates are prompted in order.",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List waiting manual gates as JSON without answering them.",
+    )
+    parser.add_argument(
         "--interactive",
         action="store_true",
         help="Prompt for answers to waiting manual gates. Prompts are written to stderr.",
@@ -294,17 +303,20 @@ def _handle_answer(args):
 
 
 def _handle_resume(args):
+    resume_context = _load_resume_context(args.run_dir)
+    all_waiting_gates = _waiting_manual_gates_from_snapshot(resume_context["snapshot"])
+    if args.list:
+        return _waiting_manual_gates_summary(args.run_dir, all_waiting_gates)
     if not args.interactive:
         raise AgentTeamCliError("--interactive is required for resume", missing_argument="--interactive")
-    resume_context = _load_resume_context(args.run_dir)
-    waiting_gates = _waiting_manual_gates_from_snapshot(resume_context["snapshot"])
-    if not waiting_gates:
+    if not all_waiting_gates:
         return {
             "resume_status": "no_waiting_manual_gate",
             "answered_count": 0,
             "answered": [],
             "run_dir": str(Path(args.run_dir).resolve()),
         }
+    waiting_gates = _selected_waiting_manual_gates(args.question_id, all_waiting_gates)
 
     answered = []
     for gate in waiting_gates:
@@ -323,6 +335,25 @@ def _handle_resume(args):
         "answered_count": len(answered),
         "answered": answered,
         "run_dir": str(Path(args.run_dir).resolve()),
+    }
+
+
+def _waiting_manual_gates_summary(run_dir, waiting_gates):
+    return {
+        "resume_status": "waiting_manual_gates",
+        "waiting_count": len(waiting_gates),
+        "waiting": [
+            {
+                "question_id": gate.get("question_id"),
+                "task_id": gate.get("task_id"),
+                "attempt_id": gate.get("attempt_id"),
+                "question": gate.get("question"),
+                "options": gate.get("options", []),
+                "reason": gate.get("reason"),
+            }
+            for gate in waiting_gates
+        ],
+        "run_dir": str(Path(run_dir).resolve()),
     }
 
 
@@ -394,6 +425,23 @@ def _waiting_manual_gates_from_snapshot(snapshot):
     ]
 
 
+def _selected_waiting_manual_gates(question_id, waiting_gates):
+    if not question_id:
+        return waiting_gates
+    for gate in waiting_gates:
+        if gate.get("question_id") == question_id:
+            return [gate]
+    raise AgentTeamCliError(
+        "manual gate question id is not waiting",
+        question_id=question_id,
+        waiting_question_ids=[
+            gate.get("question_id")
+            for gate in waiting_gates
+            if gate.get("question_id")
+        ],
+    )
+
+
 def _prompt_manual_gate_answer(gate, resume_context=None):
     resume_context = resume_context or {"events": [], "state": {}}
     _write_manual_gate_header(gate)
@@ -423,6 +471,8 @@ def _prompt_manual_gate_answer(gate, resume_context=None):
             return _prompt_text("Final answer", required=True)
         if command in {"/help", "/?"}:
             _write_manual_gate_commands()
+        elif command in {"/gates", "/list"}:
+            _write_waiting_manual_gates(resume_context)
         elif command == "/task":
             _write_manual_gate_task(gate, resume_context)
         elif command == "/why":
@@ -457,10 +507,24 @@ def _write_manual_gate_header(gate):
 
 def _write_manual_gate_commands():
     sys.stderr.write(
-        "Commands: /task, /why, /events, /context, /answer <text>, /help. "
+        "Commands: /gates, /task, /why, /events, /context, /answer <text>, /help. "
         "Plain text also submits the answer.\n"
     )
     sys.stderr.flush()
+
+
+def _write_waiting_manual_gates(resume_context):
+    snapshot = resume_context.get("snapshot", {}) if isinstance(resume_context, dict) else {}
+    waiting_gates = _waiting_manual_gates_from_snapshot(snapshot)
+    sys.stderr.write("Waiting manual gates:\n")
+    if not waiting_gates:
+        sys.stderr.write("- No waiting manual gates.\n")
+        return
+    for gate in waiting_gates:
+        question_id = gate.get("question_id") or "unknown"
+        task_id = gate.get("task_id") or "unknown"
+        question = gate.get("question") or "Worker requested operator guidance before continuing."
+        sys.stderr.write(f"- {question_id} task={task_id} question={question}\n")
 
 
 def _write_manual_gate_task(gate, resume_context):

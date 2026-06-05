@@ -5667,6 +5667,213 @@ class M0RuntimeTests(unittest.TestCase):
                 "Use the context-aware answer.",
             )
 
+    def test_agentteam_resume_interactive_can_answer_selected_manual_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/task-002/"]),
+                ],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+            scheduler.dispatch_ready()
+            first = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                first["outbox_path"],
+                first["message_id"],
+                first["task_id"],
+                first["attempt_id"],
+                first["lease_id"],
+                "blocked",
+                [],
+                {"manual_gate": {"question": "Resolve the first gate."}},
+            )
+            scheduler.collect_ready_results()
+            scheduler.dispatch_ready()
+            second = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                second["outbox_path"],
+                second["message_id"],
+                second["task_id"],
+                second["attempt_id"],
+                second["lease_id"],
+                "blocked",
+                [],
+                {"manual_gate": {"question": "Resolve the second gate."}},
+            )
+            scheduler.collect_ready_results()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "resume",
+                    "--run-dir",
+                    str(output_dir),
+                    "--interactive",
+                    "--question-id",
+                    "Q-TASK-002-ATTEMPT-001",
+                    "--operator",
+                    "liuql",
+                ],
+                input="/gates\n/answer Answer only the second gate.\n",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertIn("Waiting manual gates:", completed.stderr)
+            self.assertIn("Q-TASK-001-ATTEMPT-001", completed.stderr)
+            self.assertIn("Q-TASK-002-ATTEMPT-001", completed.stderr)
+            self.assertEqual(summary["resume_status"], "answered_manual_gate")
+            self.assertEqual(summary["answered_count"], 1)
+            self.assertEqual(
+                summary["answered"][0]["question_id"],
+                "Q-TASK-002-ATTEMPT-001",
+            )
+            self.assertEqual(
+                snapshot["manual_gates"]["Q-TASK-001-ATTEMPT-001"]["gate_status"],
+                "waiting",
+            )
+            self.assertEqual(
+                snapshot["manual_gates"]["Q-TASK-002-ATTEMPT-001"]["answer"],
+                "Answer only the second gate.",
+            )
+
+    def test_agentteam_resume_interactive_rejects_unknown_selected_manual_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "blocked",
+                [],
+                {"manual_gate": {"question": "Choose the valid gate."}},
+            )
+            scheduler.collect_ready_results()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "resume",
+                    "--run-dir",
+                    str(output_dir),
+                    "--interactive",
+                    "--question-id",
+                    "Q-UNKNOWN",
+                    "--operator",
+                    "liuql",
+                ],
+                input="This should not be consumed.\n",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 1)
+            payload = json.loads(completed.stderr)
+
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["question_id"], "Q-UNKNOWN")
+            self.assertEqual(
+                payload["waiting_question_ids"],
+                ["Q-TASK-001-ATTEMPT-001"],
+            )
+
+    def test_agentteam_resume_list_prints_waiting_manual_gates_without_answering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "blocked",
+                [],
+                {
+                    "manual_gate": {
+                        "question": "List this waiting gate.",
+                        "reason": "Operator wants to inspect before answering.",
+                    }
+                },
+            )
+            scheduler.collect_ready_results()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "resume",
+                    "--run-dir",
+                    str(output_dir),
+                    "--list",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertEqual(summary["resume_status"], "waiting_manual_gates")
+            self.assertEqual(summary["waiting_count"], 1)
+            self.assertEqual(
+                summary["waiting"][0]["question_id"],
+                "Q-TASK-001-ATTEMPT-001",
+            )
+            self.assertEqual(summary["waiting"][0]["task_id"], "TASK-001")
+            self.assertEqual(summary["waiting"][0]["question"], "List this waiting gate.")
+            self.assertEqual(
+                snapshot["manual_gates"]["Q-TASK-001-ATTEMPT-001"]["gate_status"],
+                "waiting",
+            )
+
     def test_accepted_patch_is_queued_without_auto_integration(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

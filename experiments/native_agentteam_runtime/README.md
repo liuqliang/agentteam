@@ -179,6 +179,7 @@ python3 -m agentteam_runtime.agentteam resume \
 `resume --interactive` prints the waiting question to stderr and accepts either
 plain answer text or a small command loop before the final answer:
 
+- `/gates` prints all waiting manual gates in the run.
 - `/task` prints the blocked backlog item, objective, risk, role, scopes, and
   blockers.
 - `/why` prints the worker question, options, and reason.
@@ -186,6 +187,12 @@ plain answer text or a small command loop before the final answer:
 - `/context` prints task, reason, and event context together.
 - `/answer <text>` submits the final answer. Plain text without a slash also
   submits the answer.
+
+When multiple gates are waiting, use `--question-id Q-TASK-001-ATTEMPT-001` to
+answer only that gate. If the id is not currently waiting, the command exits
+with JSON on stderr that includes the available `waiting_question_ids`.
+To inspect waiting gates without answering, run the same command with `--list`
+and omit `--interactive`; it prints a JSON summary to stdout.
 
 After the answer is submitted, the runtime writes `operator_answer_received`,
 clears the task blocker in the two-phase scheduler state, and appends a
