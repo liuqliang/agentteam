@@ -306,7 +306,7 @@ def _handle_resume(args):
     resume_context = _load_resume_context(args.run_dir)
     all_waiting_gates = _waiting_manual_gates_from_snapshot(resume_context["snapshot"])
     if args.list:
-        return _waiting_manual_gates_summary(args.run_dir, all_waiting_gates)
+        return _waiting_manual_gates_summary(args.run_dir, all_waiting_gates, resume_context)
     if not args.interactive:
         raise AgentTeamCliError("--interactive is required for resume", missing_argument="--interactive")
     if not all_waiting_gates:
@@ -338,23 +338,33 @@ def _handle_resume(args):
     }
 
 
-def _waiting_manual_gates_summary(run_dir, waiting_gates):
+def _waiting_manual_gates_summary(run_dir, waiting_gates, resume_context=None):
     return {
         "resume_status": "waiting_manual_gates",
         "waiting_count": len(waiting_gates),
         "waiting": [
-            {
-                "question_id": gate.get("question_id"),
-                "task_id": gate.get("task_id"),
-                "attempt_id": gate.get("attempt_id"),
-                "question": gate.get("question"),
-                "options": gate.get("options", []),
-                "reason": gate.get("reason"),
-            }
+            _manual_gate_summary_item(gate, resume_context or {})
             for gate in waiting_gates
         ],
         "run_dir": str(Path(run_dir).resolve()),
     }
+
+
+def _manual_gate_summary_item(gate, resume_context):
+    task = _task_for_gate(gate, resume_context)
+    item = {
+        "question_id": gate.get("question_id"),
+        "task_id": gate.get("task_id"),
+        "attempt_id": gate.get("attempt_id"),
+        "question": gate.get("question"),
+        "options": gate.get("options", []),
+        "reason": gate.get("reason"),
+    }
+    if task:
+        item["objective"] = task.get("objective")
+        item["risk_target"] = task.get("risk_target")
+        item["backlog_status"] = task.get("backlog_status")
+    return item
 
 
 def _submit_status_from_run(run):
@@ -524,7 +534,10 @@ def _write_waiting_manual_gates(resume_context):
         question_id = gate.get("question_id") or "unknown"
         task_id = gate.get("task_id") or "unknown"
         question = gate.get("question") or "Worker requested operator guidance before continuing."
-        sys.stderr.write(f"- {question_id} task={task_id} question={question}\n")
+        task = _task_for_gate(gate, resume_context)
+        risk = f" risk={task['risk_target']}" if task and task.get("risk_target") else ""
+        objective = f" objective={task['objective']}" if task and task.get("objective") else ""
+        sys.stderr.write(f"- {question_id} task={task_id}{risk}{objective} question={question}\n")
 
 
 def _write_manual_gate_task(gate, resume_context):

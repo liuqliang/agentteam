@@ -192,7 +192,8 @@ When multiple gates are waiting, use `--question-id Q-TASK-001-ATTEMPT-001` to
 answer only that gate. If the id is not currently waiting, the command exits
 with JSON on stderr that includes the available `waiting_question_ids`.
 To inspect waiting gates without answering, run the same command with `--list`
-and omit `--interactive`; it prints a JSON summary to stdout.
+and omit `--interactive`; it prints a JSON summary to stdout with question ids,
+task ids, task objectives, risk targets, and worker questions when available.
 
 After the answer is submitted, the runtime writes `operator_answer_received`,
 clears the task blocker in the two-phase scheduler state, and appends a

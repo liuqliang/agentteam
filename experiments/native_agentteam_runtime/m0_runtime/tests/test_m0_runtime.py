@@ -5870,6 +5870,11 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["waiting"][0]["task_id"], "TASK-001")
             self.assertEqual(summary["waiting"][0]["question"], "List this waiting gate.")
             self.assertEqual(
+                summary["waiting"][0]["objective"],
+                "Create generated repo index for TASK-001.",
+            )
+            self.assertEqual(summary["waiting"][0]["risk_target"], "L0")
+            self.assertEqual(
                 snapshot["manual_gates"]["Q-TASK-001-ATTEMPT-001"]["gate_status"],
                 "waiting",
             )
