@@ -92,6 +92,10 @@ def build_runtime_observability(output_dir, view="summary"):
             integration_queue["items"],
             "queue_status",
         ),
+        "manual_gate_counts": _count_values(
+            snapshot.get("manual_gates", {}).values(),
+            "gate_status",
+        ),
         "worker_counts": _count_values(
             worker_registry.get("workers", []),
             "worker_status",

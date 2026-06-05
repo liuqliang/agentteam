@@ -68,6 +68,8 @@
         "integration_commit_evaluated",
         "artifact_update_proposed",
         "artifact_update_integrated",
+        "manual_gate_required",
+        "operator_answer_received",
         "attempt_timed_out",
         "attempt_cancelled",
         "recovery_routed"

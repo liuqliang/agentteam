@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .m0_runtime import answer_manual_gate
 from .taskpack import build_taskpack_runtime_args, freeze_taskpack, validate_taskpack
 from .taskpack_author import draft_taskpack_from_goal
 
@@ -56,6 +57,7 @@ def _build_parser():
     _add_taskpack_validate_parser(taskpack_subcommands)
     _add_taskpack_freeze_parser(taskpack_subcommands)
     _add_run_parser(subcommands)
+    _add_answer_parser(subcommands)
     return parser
 
 
@@ -166,6 +168,15 @@ def _add_run_parser(subcommands):
     parser.set_defaults(handler=_handle_run)
 
 
+def _add_answer_parser(subcommands):
+    parser = subcommands.add_parser("answer", help="Answer a runtime manual gate and resume its task.")
+    parser.add_argument("--run-dir", required=True, help="Runtime output directory containing events.jsonl.")
+    parser.add_argument("--question-id", required=True, help="Manual gate question id to answer.")
+    parser.add_argument("--answer", required=True, help="Operator answer text.")
+    parser.add_argument("--operator", default="operator", help="Operator identity recorded in the event log.")
+    parser.set_defaults(handler=_handle_answer)
+
+
 def _handle_taskpack_draft(args):
     return draft_taskpack_from_goal(
         project_root=args.project_root,
@@ -224,14 +235,15 @@ def _handle_submit(args):
             stderr=completed.stderr,
         )
 
+    run = _json_or_output(completed.stdout)
     return {
-        "status": "completed",
+        "status": _submit_status_from_run(run),
         "taskpack_id": draft["taskpack_id"],
         "runtime": runtime_backend,
         "draft": draft,
         "validation": validation,
         "freeze": frozen,
-        "run": _json_or_output(completed.stdout),
+        "run": run,
         "paths": {
             "work_root": str(work_root),
             "draft_root": str(draft_root),
@@ -257,6 +269,38 @@ def _handle_run(args):
         sys.stderr.write(completed.stderr)
         sys.stderr.flush()
     return completed.returncode
+
+
+def _handle_answer(args):
+    return answer_manual_gate(
+        args.run_dir,
+        args.question_id,
+        args.answer,
+        operator=args.operator,
+    )
+
+
+def _submit_status_from_run(run):
+    if not isinstance(run, dict):
+        return "completed"
+    snapshot = run.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return "completed"
+    manual_gates = snapshot.get("manual_gates", {})
+    if isinstance(manual_gates, dict) and any(
+        gate.get("gate_status") == "waiting"
+        for gate in manual_gates.values()
+        if isinstance(gate, dict)
+    ):
+        return "manual_gate_required"
+    tasks = snapshot.get("tasks", {})
+    if isinstance(tasks, dict) and any(
+        task.get("task_status") == "blocked"
+        for task in tasks.values()
+        if isinstance(task, dict)
+    ):
+        return "blocked"
+    return "completed"
 
 
 def _complete_submit_args(args):

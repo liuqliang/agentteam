@@ -31,6 +31,7 @@ _EXPORTS = {
     "ShellRuntimeAdapter": (".m0_runtime", "ShellRuntimeAdapter"),
     "TaskpackValidationError": (".taskpack", "TaskpackValidationError"),
     "TwoPhaseFileScheduler": (".two_phase_scheduler", "TwoPhaseFileScheduler"),
+    "answer_manual_gate": (".m0_runtime", "answer_manual_gate"),
     "audit_worktree_diff": (".m0_runtime", "audit_worktree_diff"),
     "build_planner_context": (".planner_context", "build_planner_context"),
     "build_repo_context": (".repo_map", "build_repo_context"),

@@ -161,6 +161,27 @@ After pre-launch translation succeeds, `run` delegates to `agentteam_runtime.cli
 and forwards that child process's stdout, stderr, and exit code. `submit`
 captures the delegated run output and includes it in its JSON summary.
 
+If a runtime worker cannot safely continue without operator guidance, it returns
+`result_status: "blocked"` with `output.manual_gate.question`. The two-phase
+scheduler records `manual_gate_required`, blocks the task with the generated
+question id, and `submit` reports `status: "manual_gate_required"` when a
+waiting gate is present. Answer the gate from another terminal:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.agentteam answer \
+  --run-dir /tmp/agentteam-taskpacks/runs/example-taskpack \
+  --question-id Q-TASK-001-ATTEMPT-001 \
+  --answer "Choose the minimal CLI operator-answer route first." \
+  --operator liuql
+```
+
+The answer writes `operator_answer_received`, clears the task blocker in the
+two-phase scheduler state, and appends a `backlog_updated` event with
+`task_status: "ready"`. Restarting the same run can then dispatch the task
+again. The next dispatch payload includes `operator_guidance` with the recorded
+question id, answer, and operator.
+
 `--author-runtime fake` creates deterministic fixture taskpacks for tests and
 smoke runs. `--author-runtime codex` asks the Codex CLI to author the draft. The
 Codex author path requires a clean target Git repository, writes scratch context

@@ -20,6 +20,7 @@ from agentteam_runtime import (
     FileMailboxWorker,
     ShellRuntimeAdapter,
     TwoPhaseFileScheduler,
+    answer_manual_gate,
     audit_worktree_diff,
     build_planner_context,
     build_repo_context,
@@ -5323,6 +5324,196 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue(patch_path.exists())
             self.assertEqual(result["attempts"][0]["patch_path"], str(patch_path))
             self.assertIn("generated/patch_result.json", patch_path.read_text(encoding="utf-8"))
+
+    def test_two_phase_scheduler_records_manual_gate_for_blocked_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+
+            dispatch = scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "blocked",
+                [],
+                {
+                    "manual_gate": {
+                        "question": "Should runtime implement Feishu notification first?",
+                        "options": ["yes", "no"],
+                        "reason": "Worker needs operator direction.",
+                    }
+                },
+            )
+
+            collect = scheduler.collect_ready_results()
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            manual_gate = [
+                event for event in events if event["event_type"] == "manual_gate_required"
+            ][0]
+            state_task = scheduler.state["backlog"]["items"][0]
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertEqual(dispatch["dispatched_task_ids"], ["TASK-001"])
+            self.assertEqual(collect["results"][0]["validation_status"], "rejected")
+            self.assertEqual(manual_gate["payload"]["question_id"], "Q-TASK-001-ATTEMPT-001")
+            self.assertEqual(
+                manual_gate["payload"]["question"],
+                "Should runtime implement Feishu notification first?",
+            )
+            self.assertEqual(manual_gate["payload"]["options"], ["yes", "no"])
+            self.assertEqual(state_task["backlog_status"], "blocked")
+            self.assertEqual(state_task["blockers"], ["Q-TASK-001-ATTEMPT-001"])
+            self.assertEqual(snapshot["manual_gates"]["Q-TASK-001-ATTEMPT-001"]["gate_status"], "waiting")
+
+    def test_operator_answer_resumes_manual_gate_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "blocked",
+                [],
+                {"manual_gate": {"question": "Pick the next architecture route."}},
+            )
+            scheduler.collect_ready_results()
+
+            answer = answer_manual_gate(
+                output_dir,
+                "Q-TASK-001-ATTEMPT-001",
+                "Use the CLI operator answer route first.",
+                operator="liuql",
+                clock=FixedClock(),
+            )
+            resumed = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+            dispatch = resumed.dispatch_ready()
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertEqual(answer["answer_status"], "accepted")
+            self.assertEqual(answer["task_id"], "TASK-001")
+            self.assertEqual(resumed.state["backlog"]["items"][0]["backlog_status"], "ready")
+            self.assertEqual(resumed.state["backlog"]["items"][0]["blockers"], [])
+            self.assertEqual(dispatch["dispatched_task_ids"], ["TASK-001"])
+            self.assertEqual(
+                snapshot["manual_gates"]["Q-TASK-001-ATTEMPT-001"]["gate_status"],
+                "answered",
+            )
+            self.assertEqual(
+                snapshot["manual_gates"]["Q-TASK-001-ATTEMPT-001"]["answer"],
+                "Use the CLI operator answer route first.",
+            )
+            resumed_inflight = resumed.state["inflight_attempts"][0]
+            resumed_message = json.loads(
+                Path(resumed_inflight["step_dir"])
+                .joinpath("mailboxes/agent-repo-map/inbox.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[0]
+            )
+            self.assertEqual(
+                resumed_message["payload"]["operator_guidance"],
+                [
+                    {
+                        "question_id": "Q-TASK-001-ATTEMPT-001",
+                        "answer": "Use the CLI operator answer route first.",
+                        "operator": "liuql",
+                    }
+                ],
+            )
+
+    def test_agentteam_answer_cli_resumes_manual_gate_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "blocked",
+                [],
+                {"manual_gate": {"question": "Which route should the runtime take?"}},
+            )
+            scheduler.collect_ready_results()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "answer",
+                    "--run-dir",
+                    str(output_dir),
+                    "--question-id",
+                    "Q-TASK-001-ATTEMPT-001",
+                    "--answer",
+                    "Resume with the minimal operator answer CLI.",
+                    "--operator",
+                    "liuql",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            resumed = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+
+            self.assertEqual(summary["answer_status"], "accepted")
+            self.assertEqual(summary["question_id"], "Q-TASK-001-ATTEMPT-001")
+            self.assertEqual(resumed.state["backlog"]["items"][0]["backlog_status"], "ready")
+            self.assertEqual(resumed.state["backlog"]["items"][0]["blockers"], [])
 
     def test_accepted_patch_is_queued_without_auto_integration(self):
         with tempfile.TemporaryDirectory() as tmp:

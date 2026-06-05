@@ -345,6 +345,8 @@ class CodexRuntimeAdapter:
                 "The JSON object must have this shape:",
                 '{"result_status":"completed|blocked|failed|cancelled","changed_files":["path"],"output":{}}',
                 "All changed_files entries must be relative paths inside the declared write_scope.",
+                "Use result_status blocked only when operator guidance is required before continuing.",
+                "For blocked results, include output.manual_gate with question, optional options, and optional reason.",
                 "Mailbox message:",
                 json.dumps(message, sort_keys=True),
             ]
@@ -1252,6 +1254,135 @@ def rebuild_sqlite_state_index(db_path, events_path):
     return str(db_path)
 
 
+def answer_manual_gate(output_dir, question_id, answer, operator="operator", clock=None):
+    if not question_id:
+        raise ValueError("question_id must be a non-empty string")
+    if not answer:
+        raise ValueError("answer must be a non-empty string")
+    if not operator:
+        raise ValueError("operator must be a non-empty string")
+
+    clock = clock or SystemClock()
+    output_dir = Path(output_dir)
+    events_path = output_dir / "events.jsonl"
+    state_path = output_dir / "state" / "two_phase_scheduler_state.json"
+    if not events_path.exists():
+        raise FileNotFoundError(f"missing runtime events: {events_path}")
+    if not state_path.exists():
+        raise FileNotFoundError(f"missing two-phase scheduler state: {state_path}")
+
+    events = list(_read_jsonl(events_path))
+    gate_event = _find_manual_gate_event(events, question_id)
+    if gate_event is None:
+        raise ValueError(f"manual gate question not found: {question_id}")
+    if _manual_gate_has_answer(events, question_id):
+        return {
+            "answer_status": "already_answered",
+            "question_id": question_id,
+            "task_id": gate_event["payload"]["task_id"],
+            "events_path": str(events_path),
+            "state_path": str(state_path),
+        }
+
+    task_id = gate_event["payload"]["task_id"]
+    state = _read_json(state_path)
+    task = _state_task_by_id(state, task_id)
+    task["backlog_status"] = "ready"
+    task["blockers"] = []
+    guidance = task.setdefault("operator_guidance", [])
+    guidance.append(
+        {
+            "question_id": question_id,
+            "answer": answer,
+            "operator": operator,
+        }
+    )
+    state["scheduler_status"] = "running"
+    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+    sequence = _next_event_sequence(events)
+    now = clock.now()
+    run_id = gate_event.get("run_id")
+    step_id = f"OPERATOR-ANSWER-{question_id}"
+    answer_event = {
+        **_event(
+            sequence,
+            now,
+            "operator_answer_received",
+            operator,
+            "agent-scheduler",
+            f"operator-answer:{question_id}",
+            f"operator:{question_id}",
+            {
+                "question_id": question_id,
+                "task_id": task_id,
+                "answer": answer,
+                "answer_status": "accepted",
+                "operator": operator,
+            },
+        ),
+        "run_id": run_id,
+        "step_id": step_id,
+    }
+    backlog_event = {
+        **_event(
+            sequence + 1,
+            now,
+            "backlog_updated",
+            "agent-scheduler",
+            None,
+            f"backlog-ready:{task_id}:{question_id}",
+            f"operator:{question_id}",
+            {
+                "task_id": task_id,
+                "task_status": "ready",
+                "update_type": "operator_answer_applied",
+                "question_id": question_id,
+                "blockers": [],
+            },
+        ),
+        "run_id": run_id,
+        "step_id": step_id,
+    }
+    _append_jsonl(events_path, [answer_event, backlog_event])
+    rebuild_sqlite_state_index(output_dir / "state" / "scheduler_state.sqlite", events_path)
+    return {
+        "answer_status": "accepted",
+        "question_id": question_id,
+        "task_id": task_id,
+        "events_path": str(events_path),
+        "state_path": str(state_path),
+    }
+
+
+def _find_manual_gate_event(events, question_id):
+    for event in reversed(events):
+        if event.get("event_type") != "manual_gate_required":
+            continue
+        if event.get("payload", {}).get("question_id") == question_id:
+            return event
+    return None
+
+
+def _manual_gate_has_answer(events, question_id):
+    return any(
+        event.get("event_type") == "operator_answer_received"
+        and event.get("payload", {}).get("question_id") == question_id
+        for event in events
+    )
+
+
+def _state_task_by_id(state, task_id):
+    for task in state.get("backlog", {}).get("items", []):
+        if task.get("task_id") == task_id:
+            return task
+    raise ValueError(f"task not found in two-phase scheduler state: {task_id}")
+
+
+def _next_event_sequence(events):
+    return max((event.get("sequence", 0) for event in events), default=0) + 1
+
+
 def read_scheduler_state_index(output_dir):
     output_dir = Path(output_dir)
     db_path = output_dir / "state" / "scheduler_state.sqlite"
@@ -1473,6 +1604,7 @@ def replay_events(events_path):
         "leases": {},
         "runtime_sessions": {},
         "integration_queue": {},
+        "manual_gates": {},
     }
     for event in _read_jsonl(events_path):
         payload = event["payload"]
@@ -1580,6 +1712,34 @@ def replay_events(events_path):
             )
             if lease_id in snapshot["leases"]:
                 snapshot["leases"][lease_id]["lease_status"] = "released"
+        elif event["event_type"] == "manual_gate_required":
+            question_id = payload["question_id"]
+            snapshot["manual_gates"][question_id] = {
+                "question_id": question_id,
+                "gate_status": "waiting",
+                "task_id": task_id,
+                "attempt_id": attempt_id,
+                "lease_id": lease_id,
+                "question": payload.get("question"),
+                "options": payload.get("options", []),
+                "reason": payload.get("reason"),
+            }
+            snapshot["tasks"].setdefault(task_id, {})["task_status"] = "blocked"
+            snapshot["tasks"].setdefault(task_id, {})["blockers"] = [question_id]
+        elif event["event_type"] == "operator_answer_received":
+            question_id = payload["question_id"]
+            gate = snapshot["manual_gates"].setdefault(
+                question_id,
+                {"question_id": question_id},
+            )
+            gate.update(
+                {
+                    "gate_status": "answered",
+                    "answer": payload["answer"],
+                    "operator": payload.get("operator"),
+                    "answer_status": payload.get("answer_status"),
+                }
+            )
         elif event["event_type"] == "integration_queued":
             queue_status = payload.get("integration_queue_status", "pending")
             queue_item = _integration_queue_snapshot_item(snapshot, task_id, attempt_id)
@@ -1690,6 +1850,8 @@ def replay_events(events_path):
                     ] = queue_status
         elif event["event_type"] == "backlog_updated":
             snapshot["tasks"].setdefault(task_id, {})["task_status"] = payload["task_status"]
+            if "blockers" in payload:
+                snapshot["tasks"].setdefault(task_id, {})["blockers"] = payload["blockers"]
 
     return snapshot
 

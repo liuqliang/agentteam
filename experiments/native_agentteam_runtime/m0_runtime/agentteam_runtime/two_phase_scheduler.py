@@ -309,6 +309,7 @@ class TwoPhaseFileScheduler:
                 "objective": task["objective"],
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
+                **_operator_guidance_fields(task),
                 **_role_prompt_fields(agent_pool, agent, task),
                 **_role_context_fields(
                     agent_pool,
@@ -483,6 +484,11 @@ class TwoPhaseFileScheduler:
             else None
         )
         outcome = classify_attempt_outcome(runtime_result, task, diff_audit=diff_audit)
+        manual_gate = (
+            _manual_gate_payload(inflight, runtime_result)
+            if runtime_result["result_status"] == "blocked"
+            else None
+        )
         retry_allowed = (
             outcome["retryable"]
             and inflight["attempt_number"] < self.state["max_attempts"]
@@ -610,6 +616,20 @@ class TwoPhaseFileScheduler:
                         **_decomposition_validation_payload(result),
                     },
                 ),
+                *(
+                    [
+                        self._event(
+                            "manual_gate_required",
+                            "agent-scheduler",
+                            inflight["agent_id"],
+                            f"manual-gate:{manual_gate['question_id']}",
+                            inflight["correlation_id"],
+                            manual_gate,
+                        )
+                    ]
+                    if manual_gate
+                    else []
+                ),
                 *integration_events,
                 *decomposition_events,
                 *(
@@ -629,6 +649,28 @@ class TwoPhaseFileScheduler:
                         )
                     ]
                     if outcome["validation_status"] == "accepted"
+                    else []
+                ),
+                *(
+                    [
+                        self._event(
+                            "backlog_updated",
+                            "agent-scheduler",
+                            None,
+                            f"backlog-blocked:{inflight['task_id']}:{manual_gate['question_id']}",
+                            inflight["correlation_id"],
+                            {
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "task_status": "blocked",
+                                "lease_id": inflight["lease_id"],
+                                "update_type": "manual_gate_required",
+                                "question_id": manual_gate["question_id"],
+                                "blockers": [manual_gate["question_id"]],
+                            },
+                        )
+                    ]
+                    if manual_gate
                     else []
                 ),
                 *(
@@ -659,6 +701,7 @@ class TwoPhaseFileScheduler:
             outcome["validation_status"],
             outcome["failure_category"],
             retry_allowed,
+            manual_gate_question_id=manual_gate["question_id"] if manual_gate else None,
         )
         self.state["steps"].append(
             {
@@ -1071,6 +1114,7 @@ class TwoPhaseFileScheduler:
         validation_status,
         failure_category,
         retry_allowed,
+        manual_gate_question_id=None,
     ):
         task = self._task_by_id(task_id)
         if validation_status == "accepted":
@@ -1081,7 +1125,9 @@ class TwoPhaseFileScheduler:
             task["blockers"] = []
         else:
             task["backlog_status"] = "blocked"
-            task["blockers"] = [failure_category or "validation_rejected"]
+            task["blockers"] = [
+                manual_gate_question_id or failure_category or "validation_rejected"
+            ]
 
     def _next_attempt_number(self, task_id):
         attempt_numbers = [
@@ -1183,6 +1229,66 @@ def _decomposition_wave_from_task_id(task_id):
 
 def _is_terminal_backlog_status(task):
     return task.get("backlog_status") in {"done", "blocked"}
+
+
+def _manual_gate_payload(inflight, runtime_result):
+    output = runtime_result.get("output") if isinstance(runtime_result, dict) else {}
+    if not isinstance(output, dict):
+        output = {}
+    manual_gate = output.get("manual_gate")
+    if not isinstance(manual_gate, dict):
+        manual_gate = {}
+    question = _first_non_empty_string(
+        manual_gate.get("question"),
+        output.get("question"),
+        "Worker requested operator guidance before continuing.",
+    )
+    options = manual_gate.get("options", [])
+    if not isinstance(options, list) or not all(isinstance(option, str) for option in options):
+        options = []
+    return {
+        "task_id": inflight["task_id"],
+        "attempt_id": inflight["attempt_id"],
+        "lease_id": inflight["lease_id"],
+        "question_id": f"Q-{inflight['attempt_id']}",
+        "gate_status": "waiting",
+        "question": question,
+        "options": options,
+        "reason": _first_non_empty_string(
+            manual_gate.get("reason"),
+            output.get("reason"),
+            None,
+        ),
+        "guidance_scope": _first_non_empty_string(
+            manual_gate.get("guidance_scope"),
+            "next_attempt",
+        ),
+    }
+
+
+def _operator_guidance_fields(task):
+    guidance = task.get("operator_guidance")
+    if not guidance:
+        return {}
+    if not isinstance(guidance, list):
+        return {}
+    safe_guidance = [
+        {
+            "question_id": item.get("question_id"),
+            "answer": item.get("answer"),
+            "operator": item.get("operator"),
+        }
+        for item in guidance
+        if isinstance(item, dict)
+    ]
+    return {"operator_guidance": safe_guidance} if safe_guidance else {}
+
+
+def _first_non_empty_string(*values):
+    for value in values:
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _runtime_result_from_outbox(outbox_path, source_message_id):
