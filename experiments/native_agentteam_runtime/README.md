@@ -85,8 +85,11 @@ For repeated local use, install a user-level command:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The installer creates `~/.local/bin/agentteam` as a symlink to the repository
-launcher. It does not write project profiles or secrets.
+The installer copies a stable launcher to `~/.local/bin/agentteam` and records
+the development checkout path in `~/.local/share/agentteam/launcher.json`. For
+projects with an active versioned release, the launcher reads the project
+profile and loads that release runtime before falling back to the development
+checkout. It does not write project profiles or secrets.
 
 ## Taskpack Authoring Flow
 
@@ -189,6 +192,49 @@ validation, freeze, and pre-launch failures print JSON to stderr and exit `1`.
 After pre-launch translation succeeds, `run` delegates to `agentteam_runtime.cli`
 and forwards that child process's stdout, stderr, and exit code. `submit`
 captures the delegated run output and includes it in its JSON summary.
+
+## Operator Control
+
+Use these commands from the target project or pass `--project-root` explicitly:
+
+```bash
+agentteam status --project-root /path/to/repo
+agentteam watch --project-root /path/to/repo --max-lines 20
+agentteam stop --project-root /path/to/repo
+agentteam stop --project-root /path/to/repo --stale
+agentteam continue --project-root /path/to/repo --taskpack example-taskpack
+```
+
+`status` and `taskpack list` are liveness-aware. A raw scheduler state of
+`running` is reported as `running-alive` only when a registered worker PID is
+still alive; otherwise it is `running-stale`. `watch` is read-only and prints
+compact progress lines. `stop` is scoped to the selected run: it writes
+registered stop files and signals only registered worker PIDs and owned
+descendants. It never searches for process names such as `codex`.
+
+To clean old taskpacks, start with a dry run:
+
+```bash
+agentteam taskpack delete --project-root /path/to/repo --taskpack old-id --dry-run
+agentteam taskpack delete --project-root /path/to/repo --taskpack old-id --delete-run --force
+```
+
+Deletion is scoped to the profile `work_root`. A run directory is never deleted
+unless both `--delete-run` and `--force` are present.
+
+Versioned framework updates are side-by-side releases under the project
+`work_root`:
+
+```bash
+agentteam update --project-root /path/to/repo --status
+agentteam update --project-root /path/to/repo --from /path/to/agentteam/checkout --release-id m37-local
+agentteam update --project-root /path/to/repo --rollback previous-release-id
+```
+
+`update --from` requires a clean source checkout, copies the launcher and runtime
+package into `<work_root>/releases/<release-id>`, and switches `active.json` for
+future commands. Existing run state is not rewritten. New runs record
+`runtime_release_id` and `runtime_release_root` when an active release exists.
 
 If a runtime worker cannot safely continue without operator guidance, it returns
 `result_status: "blocked"` with `output.manual_gate.question`. The two-phase

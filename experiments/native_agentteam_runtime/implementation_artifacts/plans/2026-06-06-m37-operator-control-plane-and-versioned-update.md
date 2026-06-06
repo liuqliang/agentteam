@@ -110,7 +110,7 @@
 - [x] Update the local launcher so installed copies can read the active release pointer and prepend the active release runtime to `PYTHONPATH`.
 - [x] Update `scripts/install-local.sh` so `~/.local/bin/agentteam` is a stable launcher, not a symlink into the mutable development worktree.
 - [x] Keep development execution from the repository root working for tests.
-- [ ] Document the new usage: `agentteam update --from <checkout>`, `agentteam update --status`, and rollback.
+- [x] Document the new usage: `agentteam update --from <checkout>`, `agentteam update --status`, and rollback.
 - [x] Run full runtime tests and launcher smoke tests.
 - [ ] Commit with `feat: install stable release launcher`.
 
@@ -121,10 +121,10 @@
 - Modify: `experiments/native_agentteam_runtime/implementation_artifacts/native_runtime_roadmap.md`
 - Modify: `experiments/native_agentteam_runtime/README.md`
 
-- [ ] Update runtime behavior docs with liveness states, watch output, stop safety rules, and release update semantics.
-- [ ] Update the roadmap status for M37 after implementation evidence is available.
-- [ ] Add operator examples for `status`, `taskpack list`, `watch`, `stop`, and `update`.
-- [ ] Run `git diff --check`.
+- [x] Update runtime behavior docs with liveness states, watch output, stop safety rules, and release update semantics.
+- [x] Update the roadmap status for M37 after implementation evidence is available.
+- [x] Add operator examples for `status`, `taskpack list`, `watch`, `stop`, and `update`.
+- [x] Run `git diff --check`.
 - [ ] Commit with `docs: document operator control plane`.
 
 ### Task 8: Taskpack Delete
@@ -138,7 +138,7 @@
 - [x] Write a failing test for deleting a frozen taskpack while its run exists. Assert the command refuses unless `--delete-run --force` is supplied.
 - [x] Implement deletion scoped to the profile `work_root` only: drafts, frozen taskpacks, and optionally runs. Never delete arbitrary absolute paths supplied by the operator.
 - [x] Add JSON and human output with deleted path counts and skipped paths.
-- [ ] Document the safe cleanup workflow for old frozen taskpacks and runs.
+- [x] Document the safe cleanup workflow for old frozen taskpacks and runs.
 - [x] Run focused taskpack delete tests, full runtime tests, and `git diff --check`.
 - [ ] Commit with `feat: add taskpack delete`.
 

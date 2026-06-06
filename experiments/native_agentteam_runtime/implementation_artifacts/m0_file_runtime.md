@@ -2553,6 +2553,35 @@ remain possible after credentials and result extraction contracts are defined.
 
 These are not semantic omissions. They are deferred implementation mechanics.
 
+## M37 Operator Control Plane
+
+The local launcher now supports a project-scoped operator control plane:
+
+- `agentteam status` reads the latest or selected run and reports both the raw
+  scheduler status and `liveness_status`. Liveness is `running-alive` only when
+  registered worker PIDs are alive; stale `running` state is reported as
+  `running-stale`.
+- `agentteam taskpack list` uses the same liveness-aware run status.
+- `agentteam watch` is read-only. It prints compact progress lines from the run
+  state and event log and can stop after `--max-lines`.
+- `agentteam stop` writes registered stop files and signals only registered
+  worker PIDs plus owned descendants. `--stale` performs state cleanup only and
+  does not terminate live processes.
+- Feishu notifications use a sparse allowlist. Manual gates remain supported,
+  and two-phase `run_started`, `run_completed`, and `run_timed_out` events can
+  produce run-level notification telemetry.
+- `agentteam update` installs immutable releases under
+  `<work_root>/releases/<release-id>` and changes only the active release
+  pointer for future commands. Existing run bindings are preserved.
+- The repository launcher checks the target project profile and active release
+  pointer before falling back to the development checkout.
+- `agentteam taskpack delete` is scoped to `drafts/<id>`, `frozen/<id>`, and,
+  only with `--delete-run --force`, `runs/<id>`.
+
+Known M37 follow-up work: generate explicit `integration_blocked` and
+`run_stale_detected` notification events, and broaden release lifecycle
+telemetry around activate/rollback operations.
+
 ## Next Preconditions
 
 Before the next backend milestone, the next design/code step should define:

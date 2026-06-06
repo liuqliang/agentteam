@@ -572,6 +572,9 @@ Remaining follow-up work:
 
 ### M37: Operator Control Plane And Versioned Update
 
+Status: implemented in the native-runtime branch, with follow-up notification
+event types still listed below.
+
 Goal: make long-running operation understandable and controllable while allowing
 the AgentTeam framework itself to be updated without breaking active runs.
 
@@ -600,6 +603,13 @@ Acceptance:
 - Feishu receives only sparse run-level notifications by default;
 - update installs immutable releases, switches the active release for future
   commands, and leaves existing run release bindings unchanged.
+- taskpack delete supports dry-run cleanup and requires explicit run deletion.
+
+Remaining follow-up:
+
+- emit dedicated `integration_blocked` and `run_stale_detected` events for the
+  sparse notification policy;
+- add more lifecycle telemetry for release activate/rollback.
 
 ## Longer-Term Route
 
