@@ -1634,6 +1634,60 @@ class TaskpackTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("AgentTeam operator CLI", completed.stdout)
 
+    def test_repo_root_agentteam_launcher_dispatches_active_release_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            release_root = work_root / "releases" / "fixture-release"
+            runtime_package = release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+            launcher = Path(__file__).resolve().parents[4] / "agentteam"
+            repo.mkdir()
+            (repo / ".agentteam").mkdir()
+            (repo / ".agentteam" / "profile.json").write_text(
+                json.dumps(
+                    {
+                        "profile_schema_version": "agentteam_profile.v1",
+                        "project_key": "launcher-release",
+                        "work_root": str(work_root),
+                        "author_runtime": "fake",
+                        "default_runtime": "fake",
+                        "one_shot": True,
+                        "max_inflight": 2,
+                        "max_attempts": 1,
+                        "commit_verified_integration": False,
+                        "notification_project": "launcher-release",
+                        "feishu": {"enabled": False, "webhook_env": None, "signing_secret_env": None},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runtime_package.mkdir(parents=True)
+            (runtime_package / "__init__.py").write_text("", encoding="utf-8")
+            (runtime_package / "agentteam.py").write_text(
+                "def main(argv=None):\n    print('active release runtime marker')\n    return 0\n",
+                encoding="utf-8",
+            )
+            (work_root / "releases").mkdir(parents=True, exist_ok=True)
+            (work_root / "releases" / "active.json").write_text(
+                json.dumps({"release_id": "fixture-release", "release_root": str(release_root)}),
+                encoding="utf-8",
+            )
+            env = _test_env()
+            env.pop("PYTHONPATH", None)
+
+            completed = subprocess.run(
+                [str(launcher), "status", "--project-root", str(repo)],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout.strip(), "active release runtime marker")
+
     def test_repo_root_agentteam_launcher_start_runs_without_pythonpath(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

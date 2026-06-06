@@ -106,12 +106,12 @@
 - Modify: `experiments/native_agentteam_runtime/README.md`
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py`
 
-- [ ] Write a failing test that installs a fixture active release pointer and asserts the repository-root launcher dispatches through the active release runtime path.
-- [ ] Update the local launcher so installed copies can read the active release pointer and prepend the active release runtime to `PYTHONPATH`.
-- [ ] Update `scripts/install-local.sh` so `~/.local/bin/agentteam` is a stable launcher, not a symlink into the mutable development worktree.
-- [ ] Keep development execution from the repository root working for tests.
+- [x] Write a failing test that installs a fixture active release pointer and asserts the repository-root launcher dispatches through the active release runtime path.
+- [x] Update the local launcher so installed copies can read the active release pointer and prepend the active release runtime to `PYTHONPATH`.
+- [x] Update `scripts/install-local.sh` so `~/.local/bin/agentteam` is a stable launcher, not a symlink into the mutable development worktree.
+- [x] Keep development execution from the repository root working for tests.
 - [ ] Document the new usage: `agentteam update --from <checkout>`, `agentteam update --status`, and rollback.
-- [ ] Run full runtime tests and manually smoke `agentteam update --status`.
+- [x] Run full runtime tests and launcher smoke tests.
 - [ ] Commit with `feat: install stable release launcher`.
 
 ### Task 7: Documentation And Roadmap Sync
