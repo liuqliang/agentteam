@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -531,6 +532,169 @@ class TaskpackTests(unittest.TestCase):
                 "last_worker: implementation-worker-1 stopped exit_code=-15 stopped_by=terminated",
                 status_completed.stdout,
             )
+
+    def test_agentteam_cli_taskpack_list_shows_frozen_taskpacks_and_run_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "list-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            start_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Create listed frozen taskpack.",
+                    "--taskpack-id",
+                    "listed-run",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(start_completed.returncode, 0, start_completed.stderr)
+            extra = draft_taskpack_from_goal(
+                project_root=repo,
+                goal="Create listed frozen taskpack without run.",
+                draft_root=work_root / "drafts",
+                author_runtime="fake",
+                taskpack_id="listed-not-run",
+            )
+            freeze_taskpack(extra["taskpack_dir"], work_root / "frozen")
+
+            list_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "list",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(list_completed.returncode, 0, list_completed.stderr)
+            self.assertIn("project: list-project", list_completed.stdout)
+            self.assertIn("frozen_count: 2", list_completed.stdout)
+            self.assertIn("listed-run", list_completed.stdout)
+            self.assertIn("run_status=idle", list_completed.stdout)
+            self.assertIn("listed-not-run", list_completed.stdout)
+            self.assertIn("run_status=not_run", list_completed.stdout)
+
+    def test_agentteam_cli_continue_runs_existing_frozen_taskpack_without_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "continue-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            start_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Create frozen taskpack for continue.",
+                    "--taskpack-id",
+                    "cli-continue",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(start_completed.returncode, 0, start_completed.stderr)
+            shutil.rmtree(work_root / "drafts" / "cli-continue")
+
+            continue_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "continue",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "cli-continue",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(continue_completed.returncode, 0, continue_completed.stderr)
+            summary = json.loads(continue_completed.stdout)
+            self.assertEqual(summary["continue_status"], "continued")
+            self.assertEqual(summary["taskpack_id"], "cli-continue")
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["run"]["scheduler_status"], "idle")
 
     def test_repo_root_agentteam_launcher_invokes_cli_help(self):
         launcher = Path(__file__).resolve().parents[4] / "agentteam"

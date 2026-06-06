@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .m0_runtime import answer_manual_gate, replay_events
@@ -68,7 +69,9 @@ def _build_parser():
     _add_taskpack_draft_parser(taskpack_subcommands)
     _add_taskpack_validate_parser(taskpack_subcommands)
     _add_taskpack_freeze_parser(taskpack_subcommands)
+    _add_taskpack_list_parser(taskpack_subcommands)
     _add_run_parser(subcommands)
+    _add_continue_parser(subcommands)
     _add_answer_parser(subcommands)
     _add_resume_parser(subcommands)
     _add_status_parser(subcommands)
@@ -248,6 +251,14 @@ def _add_taskpack_freeze_parser(subcommands):
     parser.set_defaults(handler=_handle_taskpack_freeze)
 
 
+def _add_taskpack_list_parser(subcommands):
+    parser = subcommands.add_parser("list", help="List frozen taskpacks for a project.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--work-root", help="Override the project profile work root.")
+    parser.add_argument("--json", action="store_true", help="Print taskpacks as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_taskpack_list)
+
+
 def _add_run_parser(subcommands):
     parser = subcommands.add_parser("run", help="Run a frozen taskpack through agentteam_runtime.cli.")
     parser.add_argument("frozen_taskpack_dir", help="Frozen taskpack directory to run.")
@@ -266,6 +277,29 @@ def _add_run_parser(subcommands):
     )
     _add_notification_args(parser)
     parser.set_defaults(handler=_handle_run)
+
+
+def _add_continue_parser(subcommands):
+    parser = subcommands.add_parser("continue", help="Continue an existing frozen taskpack run.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--taskpack", help="Frozen taskpack id to continue. Defaults to latest run id.")
+    parser.add_argument("--run-dir", help="Existing run directory to continue. Defaults to the selected taskpack run.")
+    parser.add_argument(
+        "--one-shot",
+        action="store_true",
+        default=None,
+        help="Use the one-shot scheduler path for this continue run.",
+    )
+    parser.add_argument("--max-inflight", type=int, help="Override maximum daemon inflight attempts.")
+    parser.add_argument("--max-attempts", type=int, help="Override maximum attempts per task.")
+    parser.add_argument(
+        "--commit-verified-integration",
+        action="store_true",
+        default=None,
+        help="Commit integration worktree changes after verification passes.",
+    )
+    _add_notification_args(parser, notification_project_default=None)
+    parser.set_defaults(handler=_handle_continue)
 
 
 def _add_notification_args(parser, notification_project_default="agentteam"):
@@ -340,6 +374,65 @@ def _handle_taskpack_validate(args):
 
 def _handle_taskpack_freeze(args):
     return freeze_taskpack(args.taskpack_dir, args.frozen_root)
+
+
+def _handle_taskpack_list(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    if args.work_root:
+        profile = {**profile, "work_root": str(Path(args.work_root).resolve())}
+    summary = _frozen_taskpack_list_summary(profile)
+    if args.json:
+        return summary
+    _write_taskpack_list_text(summary)
+    return 0
+
+
+def _frozen_taskpack_list_summary(profile):
+    work_root = Path(profile["work_root"]).resolve()
+    frozen_root = work_root / "frozen"
+    run_root = work_root / "runs"
+    taskpacks = []
+    if frozen_root.exists():
+        for frozen_dir in sorted(path for path in frozen_root.iterdir() if path.is_dir()):
+            taskpack = _read_json_if_exists(frozen_dir / "taskpack.yaml")
+            taskpack_id = taskpack.get("taskpack_id") if isinstance(taskpack, dict) else None
+            taskpack_id = taskpack_id or frozen_dir.name
+            run_dir = run_root / taskpack_id
+            item = {
+                "taskpack_id": taskpack_id,
+                "goal": taskpack.get("goal") if isinstance(taskpack, dict) else None,
+                "frozen_dir": str(frozen_dir.resolve()),
+                "run_dir": str(run_dir.resolve()) if run_dir.exists() else None,
+                "run_status": "not_run",
+            }
+            if run_dir.exists():
+                item["run_status"] = _build_run_status_summary(profile, run_dir)["status"]
+            taskpacks.append(item)
+    return {
+        "project": profile.get("project_key") or "unknown",
+        "frozen_root": str(frozen_root),
+        "frozen_count": len(taskpacks),
+        "taskpacks": taskpacks,
+    }
+
+
+def _write_taskpack_list_text(summary):
+    lines = [
+        f"project: {summary['project']}",
+        f"frozen_count: {summary['frozen_count']}",
+    ]
+    for item in summary["taskpacks"]:
+        details = [
+            f"- {item['taskpack_id']}",
+            f"run_status={item['run_status']}",
+            f"frozen_dir={item['frozen_dir']}",
+        ]
+        if item.get("run_dir"):
+            details.append(f"run_dir={item['run_dir']}")
+        lines.append(" ".join(details))
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
 
 
 def _handle_init(args):
@@ -464,6 +557,136 @@ def _handle_run(args):
         sys.stderr.write(completed.stderr)
         sys.stderr.flush()
     return completed.returncode
+
+
+def _handle_continue(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    work_root = Path(profile["work_root"]).resolve()
+    taskpack_id = _continue_taskpack_id(args, profile)
+    frozen_dir = (work_root / "frozen" / taskpack_id).resolve()
+    run_dir = Path(args.run_dir).resolve() if args.run_dir else (work_root / "runs" / taskpack_id).resolve()
+    run_root = run_dir.parent.resolve()
+    _require_existing_frozen_and_run(taskpack_id, frozen_dir, run_dir)
+
+    _write_progress(f"profile loaded: {profile.get('project_key') or project_root.name}")
+    _write_progress(f"continuing taskpack: {taskpack_id}")
+    lease_refresh = _refresh_inflight_leases(run_dir)
+    completed = _run_frozen_taskpack(
+        frozen_dir,
+        run_root=run_root,
+        one_shot=_override_or_profile(args.one_shot, profile.get("one_shot", False)),
+        max_inflight=args.max_inflight or profile.get("max_inflight", 2),
+        max_attempts=args.max_attempts or profile.get("max_attempts", 1),
+        commit_verified_integration=_override_or_profile(
+            args.commit_verified_integration,
+            profile.get("commit_verified_integration", False),
+        ),
+        notification_project=args.notification_project
+        or profile.get("notification_project")
+        or profile.get("project_key")
+        or "agentteam",
+        feishu_webhook_env=_profile_feishu_value(args, profile, "webhook_env"),
+        feishu_signing_secret_env=_profile_feishu_value(args, profile, "signing_secret_env"),
+    )
+    if completed.returncode != 0:
+        raise AgentTeamCliError(
+            "agentteam continue run step failed",
+            step="run",
+            taskpack_id=taskpack_id,
+            exit_code=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+    run = _json_or_output(completed.stdout)
+    _write_progress(f"run {_run_progress_status(run)}")
+    return {
+        "continue_status": "continued",
+        "status": _submit_status_from_run(run),
+        "taskpack_id": taskpack_id,
+        "lease_refresh": lease_refresh,
+        "run": run,
+        "paths": {
+            "work_root": str(work_root),
+            "frozen_taskpack_dir": str(frozen_dir),
+            "run_dir": str(run_dir),
+        },
+    }
+
+
+def _continue_taskpack_id(args, profile):
+    if args.taskpack:
+        taskpack_id = args.taskpack
+    elif args.run_dir:
+        taskpack_id = Path(args.run_dir).resolve().name
+    else:
+        taskpack_id = _latest_run_dir(profile).name
+    if not taskpack_id:
+        raise AgentTeamCliError("taskpack id is required for continue")
+    if args.run_dir and Path(args.run_dir).resolve().name != taskpack_id:
+        raise AgentTeamCliError(
+            "run directory name must match taskpack id",
+            taskpack_id=taskpack_id,
+            run_dir=str(Path(args.run_dir).resolve()),
+        )
+    return taskpack_id
+
+
+def _require_existing_frozen_and_run(taskpack_id, frozen_dir, run_dir):
+    if not frozen_dir.exists():
+        raise AgentTeamCliError(
+            "frozen taskpack not found",
+            taskpack_id=taskpack_id,
+            frozen_taskpack_dir=str(frozen_dir),
+        )
+    if not (frozen_dir / "taskpack.yaml").exists():
+        raise AgentTeamCliError(
+            "frozen taskpack is missing taskpack.yaml",
+            taskpack_id=taskpack_id,
+            frozen_taskpack_dir=str(frozen_dir),
+        )
+    if not run_dir.exists():
+        raise AgentTeamCliError(
+            "run not found for frozen taskpack",
+            taskpack_id=taskpack_id,
+            run_dir=str(run_dir),
+        )
+
+
+def _refresh_inflight_leases(run_dir):
+    state_path = Path(run_dir) / "state" / "two_phase_scheduler_state.json"
+    state = _read_json_if_exists(state_path)
+    attempts = state.get("inflight_attempts") if isinstance(state, dict) else None
+    if not isinstance(attempts, list) or not attempts:
+        return {"refreshed_count": 0}
+    lease_timeout = state.get("lease_timeout_seconds", 3600)
+    if not isinstance(lease_timeout, int) or lease_timeout < 0:
+        lease_timeout = 3600
+    expires_at = _format_utc_timestamp(datetime.now(UTC) + timedelta(seconds=max(lease_timeout, 60)))
+    refreshed_count = 0
+    for attempt in attempts:
+        if isinstance(attempt, dict):
+            attempt["lease_expires_at"] = expires_at
+            refreshed_count += 1
+    if refreshed_count:
+        state["scheduler_status"] = "running"
+        _write_json(state_path, state)
+    return {"refreshed_count": refreshed_count, "lease_expires_at": expires_at}
+
+
+def _profile_feishu_value(args, profile, field):
+    arg_name = f"feishu_{field}"
+    arg_value = getattr(args, arg_name, None)
+    if arg_value is not None:
+        return arg_value
+    feishu = profile.get("feishu") if isinstance(profile.get("feishu"), dict) else {}
+    if not feishu.get("enabled"):
+        return None
+    return feishu.get(field)
+
+
+def _format_utc_timestamp(timestamp):
+    return timestamp.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _handle_status(args):
