@@ -2565,7 +2565,7 @@ def _event(
 def _create_git_worktree(project_root, output_dir, attempt_id, worktree_id):
     project_root = Path(project_root)
     worktree_path = Path(output_dir) / "worktrees" / worktree_id
-    branch = f"agentteam/{attempt_id}"
+    branch = _worktree_branch_name(output_dir, attempt_id)
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["git", "-C", str(project_root), "worktree", "add", "-b", branch, str(worktree_path), "HEAD"],
@@ -2575,6 +2575,27 @@ def _create_git_worktree(project_root, output_dir, attempt_id, worktree_id):
         text=True,
     )
     return worktree_path, branch
+
+
+def _worktree_branch_name(output_dir, attempt_id):
+    output_dir = Path(output_dir)
+    if output_dir.parent.name == "steps" and output_dir.parent.parent.name:
+        run_component = output_dir.parent.parent.name
+    else:
+        run_component = output_dir.name
+    return "agentteam/{run}/{attempt}".format(
+        run=_safe_git_ref_component(run_component),
+        attempt=_safe_git_ref_component(attempt_id),
+    )
+
+
+def _safe_git_ref_component(value):
+    component = "".join(
+        char if char.isalnum() or char in {".", "_", "-"} else "-"
+        for char in str(value)
+    )
+    component = component.strip(".-")
+    return component or "run"
 
 
 def _remove_git_worktree(project_root, worktree_path):

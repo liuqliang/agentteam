@@ -2389,12 +2389,47 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["processed_task_ids"], ["TASK-001", "TASK-002"])
             self.assertEqual(
                 branches,
-                ["agentteam/TASK-001-ATTEMPT-001", "agentteam/TASK-002-ATTEMPT-001"],
+                ["agentteam/run/TASK-001-ATTEMPT-001", "agentteam/run/TASK-002-ATTEMPT-001"],
             )
             self.assertEqual(
                 worktree_ids,
                 ["WT-TASK-001-ATTEMPT-001", "WT-TASK-002-ATTEMPT-001"],
             )
+
+    def test_scheduler_loop_uses_run_scoped_worktree_branches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir_a = tmp_path / "run-a"
+            output_dir_b = tmp_path / "run-b"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-001", write_scope=["generated/task-001/"])],
+            )
+
+            first = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir_a,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+            second = run_scheduler_loop(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir_b,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=FakeRuntimeAdapter(),
+            )
+
+            self.assertEqual(first["scheduler_status"], "idle")
+            self.assertEqual(second["scheduler_status"], "idle")
+            self.assertEqual(first["steps"][0]["result"]["branch"], "agentteam/run-a/TASK-001-ATTEMPT-001")
+            self.assertEqual(second["steps"][0]["result"]["branch"], "agentteam/run-b/TASK-001-ATTEMPT-001")
 
     def test_replay_reconstructs_done_task_only_after_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
