@@ -23,6 +23,12 @@ from .profile import (
     profile_path_for_project,
     write_project_profile,
 )
+from .release_manager import (
+    activate_release,
+    install_release_from_checkout,
+    record_active_release_for_run,
+    update_status,
+)
 from .taskpack import build_taskpack_runtime_args, freeze_taskpack, validate_taskpack
 from .taskpack_author import draft_taskpack_from_goal
 
@@ -83,6 +89,7 @@ def _build_parser():
     _add_resume_parser(subcommands)
     _add_watch_parser(subcommands)
     _add_stop_parser(subcommands)
+    _add_update_parser(subcommands)
     _add_status_parser(subcommands)
     return parser
 
@@ -393,6 +400,19 @@ def _add_status_parser(subcommands):
     parser.set_defaults(handler=_handle_status)
 
 
+def _add_update_parser(subcommands):
+    parser = subcommands.add_parser("update", help="Manage side-by-side AgentTeam runtime releases.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--status", action="store_true", help="Show active release, known releases, and run bindings.")
+    action.add_argument("--from", dest="source_checkout", help="Install and activate a release from a clean checkout.")
+    action.add_argument("--activate", help="Activate an already installed release id.")
+    action.add_argument("--rollback", help="Activate an older release id.")
+    parser.add_argument("--release-id", help="Release id to use with --from. Defaults to git commit.")
+    parser.add_argument("--json", action="store_true", help="Print update result as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_update)
+
+
 def _handle_taskpack_draft(args):
     return draft_taskpack_from_goal(
         project_root=args.project_root,
@@ -558,11 +578,16 @@ def _handle_submit(args):
         )
 
     run = _json_or_output(completed.stdout)
+    release_record = _record_run_release(
+        run_root / frozen["manifest"]["taskpack_id"],
+        {"work_root": str(work_root)},
+    )
     _progress(progress, f"run {_run_progress_status(run)}")
     return {
         "status": _submit_status_from_run(run),
         "taskpack_id": draft["taskpack_id"],
         "runtime": runtime_backend,
+        "runtime_release": release_record,
         "draft": draft,
         "validation": validation,
         "freeze": frozen,
@@ -637,12 +662,14 @@ def _handle_continue(args):
             stderr=completed.stderr,
         )
     run = _json_or_output(completed.stdout)
+    release_record = _record_run_release(run_dir, profile)
     _write_progress(f"run {_run_progress_status(run)}")
     return {
         "continue_status": "continued",
         "status": _submit_status_from_run(run),
         "taskpack_id": taskpack_id,
         "lease_refresh": lease_refresh,
+        "runtime_release": release_record,
         "run": run,
         "paths": {
             "work_root": str(work_root),
@@ -735,6 +762,42 @@ def _handle_status(args):
     if args.json:
         return summary
     _write_status_text(summary)
+    return 0
+
+
+def _handle_update(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    work_root = Path(profile["work_root"]).resolve()
+    if args.status:
+        summary = update_status(profile)
+    elif args.source_checkout:
+        summary = install_release_from_checkout(
+            args.source_checkout,
+            work_root,
+            release_id=args.release_id,
+            activate=True,
+        )
+        summary["project"] = profile.get("project_key") or "unknown"
+    elif args.activate:
+        summary = {
+            "update_status": "activated",
+            "project": profile.get("project_key") or "unknown",
+            "active_release": activate_release(work_root, args.activate),
+            "known_releases": update_status(profile)["known_releases"],
+        }
+    elif args.rollback:
+        summary = {
+            "update_status": "rollback_activated",
+            "project": profile.get("project_key") or "unknown",
+            "active_release": activate_release(work_root, args.rollback, update_status="rollback_activated"),
+            "known_releases": update_status(profile)["known_releases"],
+        }
+    else:
+        raise AgentTeamCliError("update action is required")
+    if args.json:
+        return summary
+    _write_update_text(summary)
     return 0
 
 
@@ -887,6 +950,39 @@ def _watch_should_stop(summary):
     if liveness_status in {"running-alive"}:
         return False
     return status in {"idle", "stopped", "completed", "failed"} or liveness_status == "running-stale"
+
+
+def _write_update_text(summary):
+    lines = [
+        f"update_status: {summary['update_status']}",
+    ]
+    if summary.get("project"):
+        lines.insert(0, f"project: {summary['project']}")
+    active = summary.get("active_release") or {}
+    lines.append(f"active_release: {active.get('release_id') or 'none'}")
+    if active.get("release_root"):
+        lines.append(f"active_release_root: {active['release_root']}")
+    known = summary.get("known_releases") or []
+    lines.append(f"known_releases: {len(known)}")
+    unmanaged = summary.get("unmanaged_runs")
+    if unmanaged is not None:
+        lines.append(f"unmanaged_runs: {len(unmanaged)}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _record_run_release(run_dir, profile):
+    work_root = profile.get("work_root") if isinstance(profile, dict) else None
+    if not work_root:
+        return {"recorded": False, "reason": "missing_work_root"}
+    try:
+        return record_active_release_for_run(run_dir, work_root)
+    except Exception as exc:
+        return {
+            "recorded": False,
+            "reason": "record_failed",
+            "error": str(exc),
+        }
 
 
 def _selected_run_dir(args, profile, command_name):

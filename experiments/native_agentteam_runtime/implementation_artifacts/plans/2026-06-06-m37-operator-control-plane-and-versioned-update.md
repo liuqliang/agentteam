@@ -87,15 +87,15 @@
 - Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/profile.py`
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py`
 
-- [ ] Write failing tests for creating a release from a clean fixture checkout into `<work-root>/releases/<release-id>` with a `manifest.json`.
-- [ ] Write failing tests for `agentteam update --status` showing active release, known releases, active runs by release, and unmanaged active runs.
-- [ ] Write failing tests for `agentteam update --from <checkout>` activating a new release without changing an existing run's recorded release id.
-- [ ] Implement immutable release install: copy the launcher and runtime package into a release directory, write `manifest.json`, and refuse dirty source checkouts by default.
-- [ ] Implement active release pointer as JSON, not an in-place runtime overwrite.
-- [ ] Add `agentteam update --status`, `--from`, `--activate`, and `--rollback`.
-- [ ] Record `runtime_release_id` and `runtime_release_root` for new `start` and `continue` launches.
-- [ ] Report active unmanaged development-worktree runs as warnings.
-- [ ] Run focused tests, full taskpack tests, and `compileall`.
+- [x] Write failing tests for creating a release from a clean fixture checkout into `<work-root>/releases/<release-id>` with a `manifest.json`.
+- [x] Write failing tests for `agentteam update --status` showing active release, known releases, active runs by release, and unmanaged active runs.
+- [x] Write failing tests for `agentteam update --from <checkout>` activating a new release without changing an existing run's recorded release id.
+- [x] Implement immutable release install: copy the launcher and runtime package into a release directory, write `manifest.json`, and refuse dirty source checkouts by default.
+- [x] Implement active release pointer as JSON, not an in-place runtime overwrite.
+- [x] Add `agentteam update --status`, `--from`, `--activate`, and `--rollback`.
+- [x] Record `runtime_release_id` and `runtime_release_root` for new `start` and `continue` launches.
+- [x] Report active unmanaged development-worktree runs as warnings.
+- [x] Run focused tests, full taskpack tests, and `compileall`.
 - [ ] Commit with `feat: add versioned agentteam update`.
 
 ### Task 6: Stable Local Launcher
