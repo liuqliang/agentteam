@@ -570,6 +570,37 @@ Remaining follow-up work:
 - select the first non-fixture pilot repository or add one more workflow
   capability if the fixture-level live results expose a blocker.
 
+### M37: Operator Control Plane And Versioned Update
+
+Goal: make long-running operation understandable and controllable while allowing
+the AgentTeam framework itself to be updated without breaking active runs.
+
+Status: proposed.
+
+Scope:
+
+- make `agentteam status` and `agentteam taskpack list` distinguish true live
+  runs from stale `running` state;
+- add `agentteam watch` for compact terminal progress and important runtime
+  events;
+- add scoped `agentteam stop` and stale cleanup without killing unrelated Codex
+  sessions;
+- expand Feishu notification policy from manual gates to sparse run-level
+  operator events;
+- add `agentteam update` as a side-by-side release installer for future runs,
+  not an in-place overwrite of code used by active runs;
+- record the runtime release id on new runs and warn when a run was started from
+  an unmanaged development worktree.
+
+Acceptance:
+
+- liveness-aware status reports `running-alive` versus `running-stale`;
+- watch can show progress without mutating the run;
+- stop can stop a scoped fake worker run and clean stale state safely;
+- Feishu receives only sparse run-level notifications by default;
+- update installs immutable releases, switches the active release for future
+  commands, and leaves existing run release bindings unchanged.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -610,7 +641,7 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to select the first non-fixture pilot repository
-or add the smallest missing workflow capability that blocks such a pilot.
-Inflight migration remains a separate M29 decision gate because it changes
-ownership of already leased work.
+The next recommended step is M37. It addresses the operator visibility and
+safe-update gap discovered during the first non-fixture pilot attempt. Inflight
+migration remains a separate M29 decision gate because it changes ownership of
+already leased work.
