@@ -146,6 +146,14 @@ PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
 python3 -m agentteam_runtime.agentteam submit --interactive
 ```
 
+To see the command map and choose the right operator command, run:
+
+```bash
+agentteam help
+agentteam help stop
+agentteam help taskpack
+```
+
 For explicit review before execution, run the lower-level commands separately:
 
 1. Draft a taskpack:

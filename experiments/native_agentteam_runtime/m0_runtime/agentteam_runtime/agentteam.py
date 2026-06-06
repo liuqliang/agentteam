@@ -45,6 +45,95 @@ class JsonArgumentParser(argparse.ArgumentParser):
         raise AgentTeamCliError(message)
 
 
+_HELP_COMMANDS = [
+    {
+        "name": "init",
+        "summary": "Create or update the project AgentTeam profile.",
+        "examples": ["agentteam init --interactive"],
+    },
+    {
+        "name": "start",
+        "summary": "Author a taskpack from a goal, freeze it, and run it.",
+        "examples": ["agentteam start", "agentteam start --goal \"optimize this repo\""],
+    },
+    {
+        "name": "status",
+        "summary": "Show the latest run state, including liveness and workers.",
+        "examples": ["agentteam status --project-root <repo>"],
+    },
+    {
+        "name": "watch",
+        "summary": "Print compact read-only progress lines for a run.",
+        "examples": ["agentteam watch --project-root <repo> --max-lines 20"],
+    },
+    {
+        "name": "stop",
+        "summary": "Stop or clean up an existing run safely.",
+        "examples": [
+            "agentteam stop --project-root <repo>",
+            "agentteam stop --project-root <repo> --stale",
+        ],
+        "notes": [
+            "Signals only registered worker PIDs and owned descendants.",
+            "--stale cleans stale state without terminating live processes.",
+        ],
+    },
+    {
+        "name": "continue",
+        "summary": "Resume an existing frozen taskpack run.",
+        "examples": ["agentteam continue --project-root <repo> --taskpack <id>"],
+    },
+    {
+        "name": "resume",
+        "summary": "Interactively answer waiting manual gates.",
+        "examples": ["agentteam resume --run-dir <run> --interactive"],
+    },
+    {
+        "name": "answer",
+        "summary": "Answer one manual gate directly by question id.",
+        "examples": ["agentteam answer --run-dir <run> --question-id <id> --answer <text>"],
+    },
+    {
+        "name": "taskpack",
+        "summary": "Draft, validate, freeze, list, and delete taskpacks.",
+        "examples": [
+            "agentteam taskpack list --project-root <repo>",
+            "agentteam taskpack delete --project-root <repo> --taskpack <id> --dry-run",
+            "agentteam taskpack delete --project-root <repo> --taskpack <id> --delete-run --force",
+        ],
+        "subcommands": [
+            "draft: create a taskpack from a goal without running it",
+            "validate: validate a draft or frozen taskpack",
+            "freeze: freeze an accepted draft for execution",
+            "list: list frozen taskpacks and liveness-aware run status",
+            "delete: remove draft/frozen taskpack files; run deletion requires --delete-run --force",
+        ],
+    },
+    {
+        "name": "update",
+        "summary": "Manage side-by-side AgentTeam runtime releases.",
+        "examples": [
+            "agentteam update --project-root <repo> --status",
+            "agentteam update --project-root <repo> --from <checkout> --release-id <id>",
+            "agentteam update --project-root <repo> --rollback <release-id>",
+        ],
+    },
+    {
+        "name": "submit",
+        "summary": "Lower-level command that drafts, freezes, and runs in one JSON flow.",
+        "examples": ["agentteam submit --interactive"],
+    },
+    {
+        "name": "run",
+        "summary": "Lower-level command that runs an already frozen taskpack directory.",
+        "examples": ["agentteam run <frozen-taskpack-dir> --run-root <runs-dir>"],
+    },
+]
+
+
+_HELP_BY_NAME = {item["name"]: item for item in _HELP_COMMANDS}
+
+
 def main(argv=None):
     try:
         parser = _build_parser()
@@ -78,6 +167,7 @@ def _build_parser():
         parser_class=JsonArgumentParser,
     )
     _add_submit_parser(subcommands)
+    _add_help_parser(subcommands)
     _add_init_parser(subcommands)
     _add_start_parser(subcommands)
     _add_taskpack_draft_parser(taskpack_subcommands)
@@ -94,6 +184,12 @@ def _build_parser():
     _add_update_parser(subcommands)
     _add_status_parser(subcommands)
     return parser
+
+
+def _add_help_parser(subcommands):
+    parser = subcommands.add_parser("help", help="Show AgentTeam command guidance.")
+    parser.add_argument("topic", nargs="?", help="Optional command name, for example: stop or taskpack.")
+    parser.set_defaults(handler=_handle_help)
 
 
 def _add_submit_parser(subcommands):
@@ -437,6 +533,72 @@ def _handle_taskpack_draft(args):
         codex_command=args.codex_command,
         codex_timeout_seconds=args.codex_timeout_seconds,
     )
+
+
+def _handle_help(args):
+    if args.topic:
+        topic = args.topic.strip()
+        details = _HELP_BY_NAME.get(topic)
+        if not details:
+            raise AgentTeamCliError(
+                "unknown help topic",
+                topic=topic,
+                available=[item["name"] for item in _HELP_COMMANDS],
+            )
+        _write_help_detail(details)
+        return 0
+    _write_help_index()
+    return 0
+
+
+def _write_help_index():
+    lines = [
+        "AgentTeam commands",
+        "",
+        "Common workflow:",
+        "  1. agentteam init --interactive",
+        "  2. agentteam start",
+        "  3. agentteam status",
+        "  4. agentteam watch",
+        "  5. agentteam stop or agentteam continue when needed",
+        "",
+        "Commands:",
+    ]
+    width = max(len(item["name"]) for item in _HELP_COMMANDS)
+    for item in _HELP_COMMANDS:
+        lines.append(f"  {item['name']:<{width}}  {item['summary']}")
+    lines.extend(
+        [
+            "",
+            "Run `agentteam help <command>` for details.",
+            "Run `agentteam <command> --help` for exact flags.",
+        ]
+    )
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _write_help_detail(details):
+    lines = [
+        f"agentteam {details['name']}",
+        f"Meaning: {details['summary']}",
+    ]
+    subcommands = details.get("subcommands") or []
+    if subcommands:
+        lines.extend(["", "Subcommands:"])
+        lines.extend(f"  - {item}" for item in subcommands)
+    examples = details.get("examples") or []
+    if examples:
+        lines.extend(["", "Examples:"])
+        lines.extend(f"  {item}" for item in examples)
+    notes = details.get("notes") or []
+    if notes:
+        lines.extend(["", "Notes:"])
+        lines.extend(f"  - {item}" for item in notes)
+    lines.append("")
+    lines.append(f"Run `agentteam {details['name']} --help` for exact flags.")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
 
 
 def _handle_taskpack_validate(args):

@@ -1695,6 +1695,40 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(state["runtime_release_id"], "active-release")
             self.assertEqual(state["runtime_release_root"], str(release_root))
 
+    def test_agentteam_cli_help_lists_commands_and_command_details(self):
+        help_completed = subprocess.run(
+            ["python3", "-m", "agentteam_runtime.agentteam", "help"],
+            env=_test_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        stop_completed = subprocess.run(
+            ["python3", "-m", "agentteam_runtime.agentteam", "help", "stop"],
+            env=_test_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(help_completed.returncode, 0, help_completed.stderr)
+        self.assertIn("AgentTeam commands", help_completed.stdout)
+        self.assertIn("init", help_completed.stdout)
+        self.assertIn("start", help_completed.stdout)
+        self.assertIn("status", help_completed.stdout)
+        self.assertIn("watch", help_completed.stdout)
+        self.assertIn("stop", help_completed.stdout)
+        self.assertIn("taskpack", help_completed.stdout)
+        self.assertIn("update", help_completed.stdout)
+        self.assertIn("agentteam help <command>", help_completed.stdout)
+        self.assertEqual(stop_completed.returncode, 0, stop_completed.stderr)
+        self.assertIn("agentteam stop", stop_completed.stdout)
+        self.assertIn("Stop or clean up an existing run", stop_completed.stdout)
+        self.assertIn("agentteam stop --project-root <repo>", stop_completed.stdout)
+        self.assertIn("--stale", stop_completed.stdout)
+
     def test_agentteam_cli_continue_runs_existing_frozen_taskpack_without_draft(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
