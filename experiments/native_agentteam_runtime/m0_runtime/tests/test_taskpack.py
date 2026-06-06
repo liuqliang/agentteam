@@ -190,6 +190,45 @@ class TaskpackTests(unittest.TestCase):
             self.assertNotIn("https://open.feishu.cn", serialized)
             self.assertNotIn("secret-token", serialized)
 
+    def test_agentteam_cli_init_keeps_project_git_status_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "clean-profile",
+                    "--author-runtime",
+                    "codex",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            status = subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=repo,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(status.stdout, "")
+            exclude = (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+            self.assertIn(".agentteam/", exclude)
+
     def test_agentteam_cli_start_uses_project_profile_to_submit_fake_taskpack(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

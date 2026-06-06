@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 PROFILE_SCHEMA_VERSION = "agentteam_profile.v1"
+LOCAL_PROFILE_EXCLUDE_PATTERN = ".agentteam/"
 
 
 class AgentTeamProfileError(RuntimeError):
@@ -70,12 +71,34 @@ def build_project_profile(
 
 
 def write_project_profile(project_root, profile, force=False):
+    project_root = Path(project_root).resolve()
     path = profile_path_for_project(project_root)
     if path.exists() and not force:
         raise AgentTeamProfileError(f"AgentTeam profile already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(profile, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    ensure_project_profile_git_excluded(project_root)
     return path
+
+
+def ensure_project_profile_git_excluded(project_root):
+    exclude_path = Path(project_root).resolve() / ".git" / "info" / "exclude"
+    if not exclude_path.exists():
+        return None
+    content = exclude_path.read_text(encoding="utf-8")
+    patterns = [
+        line.strip()
+        for line in content.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if LOCAL_PROFILE_EXCLUDE_PATTERN in patterns:
+        return exclude_path
+    suffix = "" if content.endswith("\n") or not content else "\n"
+    exclude_path.write_text(
+        content + suffix + LOCAL_PROFILE_EXCLUDE_PATTERN + "\n",
+        encoding="utf-8",
+    )
+    return exclude_path
 
 
 def load_project_profile(project_root):
