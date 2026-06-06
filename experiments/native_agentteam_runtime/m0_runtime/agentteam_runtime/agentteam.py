@@ -542,6 +542,9 @@ def _build_run_status_summary(profile, run_dir):
     state = _read_json_if_exists(run_dir / "state" / "two_phase_scheduler_state.json")
     if not state:
         state = _read_json_if_exists(run_dir / "state" / "scheduler_state.json")
+    worker_registry = _read_json_if_exists(run_dir / "state" / "worker_process_registry.json")
+    if not worker_registry:
+        worker_registry = _read_json_if_exists(run_dir / "state" / "worker_registry.json")
     task_counts = _status_task_counts(snapshot, state)
     integration_counts = _status_integration_counts(snapshot)
     manual_gate_count = _waiting_manual_gate_count(snapshot)
@@ -551,6 +554,9 @@ def _build_run_status_summary(profile, run_dir):
         "status": _status_run_state(snapshot, state),
         "tasks": task_counts,
         "integration": integration_counts,
+        "inflight": _status_inflight_attempts(state),
+        "workers": _status_worker_counts(worker_registry),
+        "last_worker": _status_last_worker(worker_registry),
         "manual_gates": manual_gate_count,
         "last_failure": _status_last_failure(snapshot, state),
         "run_dir": str(run_dir),
@@ -569,8 +575,18 @@ def _write_status_text(summary):
             f"{summary['tasks']['blocked']} blocked"
         ),
         f"integration: {summary['integration']['blocked']} blocked",
+        f"inflight: {summary['inflight']['total']}",
         f"manual_gates: {summary['manual_gates']}",
     ]
+    if summary["workers"]["total"]:
+        lines.append(
+            "workers: "
+            f"{summary['workers']['stopped']} stopped, "
+            f"{summary['workers']['running']} running, "
+            f"{summary['workers']['quarantined']} quarantined"
+        )
+    if summary.get("last_worker"):
+        lines.append(f"last_worker: {summary['last_worker']}")
     if summary.get("last_failure"):
         lines.append(f"last_failure: {summary['last_failure']}")
     lines.append(f"run_dir: {summary['run_dir']}")
@@ -612,6 +628,18 @@ def _status_task_counts(snapshot, state):
     }
 
 
+def _status_inflight_attempts(state):
+    attempts = state.get("inflight_attempts") if isinstance(state, dict) else None
+    if not isinstance(attempts, list):
+        return {"total": 0, "tasks": []}
+    tasks = [
+        attempt.get("task_id")
+        for attempt in attempts
+        if isinstance(attempt, dict) and attempt.get("task_id")
+    ]
+    return {"total": len(attempts), "tasks": tasks}
+
+
 def _status_integration_counts(snapshot):
     queue = snapshot.get("integration_queue") if isinstance(snapshot, dict) else None
     if not isinstance(queue, dict):
@@ -637,6 +665,41 @@ def _waiting_manual_gate_count(snapshot):
         for gate in gates.values()
         if isinstance(gate, dict) and gate.get("gate_status") == "waiting"
     )
+
+
+def _status_worker_counts(worker_registry):
+    workers = worker_registry.get("workers") if isinstance(worker_registry, dict) else None
+    if not isinstance(workers, list):
+        return {"total": 0, "stopped": 0, "running": 0, "quarantined": 0}
+    statuses = [
+        worker.get("worker_status")
+        for worker in workers
+        if isinstance(worker, dict)
+    ]
+    running_statuses = {"running", "started", "idle", "busy"}
+    return {
+        "total": len(workers),
+        "stopped": sum(1 for status in statuses if status == "stopped"),
+        "running": sum(1 for status in statuses if status in running_statuses),
+        "quarantined": sum(1 for status in statuses if status == "quarantined"),
+    }
+
+
+def _status_last_worker(worker_registry):
+    workers = worker_registry.get("workers") if isinstance(worker_registry, dict) else None
+    if not isinstance(workers, list) or not workers:
+        return None
+    worker = workers[-1]
+    if not isinstance(worker, dict):
+        return None
+    worker_id = worker.get("worker_agent_id") or worker.get("worker_id") or "unknown-worker"
+    worker_status = worker.get("worker_status") or "unknown"
+    details = [f"{worker_id} {worker_status}"]
+    if worker.get("exit_code") is not None:
+        details.append(f"exit_code={worker['exit_code']}")
+    if worker.get("stopped_by"):
+        details.append(f"stopped_by={worker['stopped_by']}")
+    return " ".join(details)
 
 
 def _status_last_failure(snapshot, state):

@@ -9,6 +9,7 @@ from pathlib import Path
 
 TASKPACK_SCHEMA_VERSION = "taskpack.v1"
 DEFAULT_WORKER_ROLE = "implementation_worker"
+DEFAULT_DAEMON_MAX_STEPS = 45000
 TASKPACK_TRANSLATABLE_RUNTIME_BACKENDS = {"fake", "codex"}
 TASKPACK_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 
@@ -343,6 +344,7 @@ def build_taskpack_runtime_args(
     daemon=True,
     max_inflight=2,
     max_attempts=1,
+    max_steps=DEFAULT_DAEMON_MAX_STEPS,
     commit_verified_integration=False,
 ):
     taskpack_dir = Path(frozen_taskpack_dir).resolve()
@@ -391,6 +393,7 @@ def build_taskpack_runtime_args(
     if daemon:
         args.extend(["--daemon-run-until-idle", "--daemon-two-phase-worker-pool"])
         args.extend(["--max-inflight", str(max_inflight), "--max-attempts", str(max_attempts)])
+        args.extend(["--max-steps", str(max_steps)])
     else:
         args.append("--run-until-idle")
     args.extend(["--runtime", runtime_backend])

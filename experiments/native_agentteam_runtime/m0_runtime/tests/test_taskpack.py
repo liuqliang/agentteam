@@ -429,8 +429,108 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("latest_run: cli-status-run", status_completed.stdout)
             self.assertIn("status: idle", status_completed.stdout)
             self.assertIn("tasks: 1 done, 0 blocked", status_completed.stdout)
+            self.assertIn("inflight: 0", status_completed.stdout)
             self.assertIn("manual_gates: 0", status_completed.stdout)
             self.assertIn(str((work_root / "runs" / "cli-status-run").resolve()), status_completed.stdout)
+
+    def test_agentteam_cli_status_reports_inflight_and_stopped_workers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "inflight-run"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "status-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            (run_dir / "state").mkdir(parents=True)
+            (run_dir / "state" / "two_phase_scheduler_state.json").write_text(
+                json.dumps(
+                    {
+                        "scheduler_status": "max_ticks_reached",
+                        "backlog": {
+                            "items": [
+                                {
+                                    "task_id": "optimize-pipeline",
+                                    "backlog_status": "ready",
+                                }
+                            ]
+                        },
+                        "inflight_attempts": [
+                            {
+                                "task_id": "optimize-pipeline",
+                                "attempt_id": "ATTEMPT-001",
+                                "agent_id": "implementation-worker-1",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "state" / "worker_process_registry.json").write_text(
+                json.dumps(
+                    {
+                        "registry_status": "stopped",
+                        "workers": [
+                            {
+                                "worker_agent_id": "implementation-worker-1",
+                                "worker_status": "stopped",
+                                "exit_code": -15,
+                                "stopped_by": "terminated",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            status_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(status_completed.returncode, 0, status_completed.stderr)
+            self.assertIn("latest_run: inflight-run", status_completed.stdout)
+            self.assertIn("status: max_ticks_reached", status_completed.stdout)
+            self.assertIn("inflight: 1", status_completed.stdout)
+            self.assertIn("workers: 1 stopped, 0 running, 0 quarantined", status_completed.stdout)
+            self.assertIn(
+                "last_worker: implementation-worker-1 stopped exit_code=-15 stopped_by=terminated",
+                status_completed.stdout,
+            )
 
     def test_repo_root_agentteam_launcher_invokes_cli_help(self):
         launcher = Path(__file__).resolve().parents[4] / "agentteam"
@@ -2370,6 +2470,7 @@ class TaskpackTests(unittest.TestCase):
             )
             self.assertIn("--daemon-run-until-idle", args)
             self.assertIn("--daemon-two-phase-worker-pool", args)
+            self.assertEqual(_arg_value(args, "--max-steps"), "45000")
             self.assertIn("--integrate-accepted-patch", args)
             self.assertNotIn("--commit-verified-integration", args)
             self.assertTrue((run_root / "runtime-args").exists())
