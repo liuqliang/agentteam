@@ -294,6 +294,143 @@ class TaskpackTests(unittest.TestCase):
             self.assertTrue((work_root / "drafts" / "cli-start-profile").exists())
             self.assertEqual(summary["run"]["scheduler_status"], "idle")
 
+    def test_agentteam_cli_start_prints_progress_to_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "progress-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Show progress while starting.",
+                    "--taskpack-id",
+                    "cli-start-progress",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            json.loads(completed.stdout)
+            self.assertIn("[agentteam] profile loaded: progress-project", completed.stderr)
+            self.assertIn("[agentteam] authoring taskpack with fake", completed.stderr)
+            self.assertIn("[agentteam] draft accepted: cli-start-progress", completed.stderr)
+            self.assertIn("[agentteam] frozen taskpack created: cli-start-progress", completed.stderr)
+            self.assertIn("[agentteam] runtime started:", completed.stderr)
+            self.assertIn("[agentteam] run idle", completed.stderr)
+
+    def test_agentteam_cli_status_summarizes_latest_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "status-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            start_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Create a run for status.",
+                    "--taskpack-id",
+                    "cli-status-run",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(start_completed.returncode, 0, start_completed.stderr)
+
+            status_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(status_completed.returncode, 0, status_completed.stderr)
+            self.assertIn("project: status-project", status_completed.stdout)
+            self.assertIn("latest_run: cli-status-run", status_completed.stdout)
+            self.assertIn("status: idle", status_completed.stdout)
+            self.assertIn("tasks: 1 done, 0 blocked", status_completed.stdout)
+            self.assertIn("manual_gates: 0", status_completed.stdout)
+            self.assertIn(str((work_root / "runs" / "cli-status-run").resolve()), status_completed.stdout)
+
     def test_repo_root_agentteam_launcher_invokes_cli_help(self):
         launcher = Path(__file__).resolve().parents[4] / "agentteam"
 

@@ -71,6 +71,7 @@ def _build_parser():
     _add_run_parser(subcommands)
     _add_answer_parser(subcommands)
     _add_resume_parser(subcommands)
+    _add_status_parser(subcommands)
     return parser
 
 
@@ -313,6 +314,14 @@ def _add_resume_parser(subcommands):
     parser.set_defaults(handler=_handle_resume)
 
 
+def _add_status_parser(subcommands):
+    parser = subcommands.add_parser("status", help="Show the latest AgentTeam run status for a project.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--run-dir", help="Specific run directory to summarize. Defaults to latest profile run.")
+    parser.add_argument("--json", action="store_true", help="Print status as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_status)
+
+
 def _handle_taskpack_draft(args):
     return draft_taskpack_from_goal(
         project_root=args.project_root,
@@ -358,9 +367,11 @@ def _handle_start(args):
         profile = _prompt_project_profile(args, project_root)
         profile_path = write_project_profile(project_root, profile, force=False)
 
+    _write_progress(f"profile loaded: {profile.get('project_key') or project_root.name}")
     goal = args.goal or _prompt_text("Goal", required=True)
     submit_args = _submit_args_from_profile(args, project_root, profile)
     submit_args.goal = goal
+    submit_args.progress = True
     result = _handle_submit(submit_args)
     result["profile"] = {
         "profile_path": str(profile_path.resolve()),
@@ -376,7 +387,9 @@ def _handle_submit(args):
     frozen_root = work_root / "frozen"
     run_root = work_root / "runs"
     runtime_backend = _submit_runtime_backend(args.runtime, args.author_runtime)
+    progress = bool(getattr(args, "progress", False))
 
+    _progress(progress, f"authoring taskpack with {args.author_runtime}")
     draft = draft_taskpack_from_goal(
         project_root=args.project_root,
         goal=args.goal,
@@ -386,10 +399,13 @@ def _handle_submit(args):
         codex_command=args.codex_command,
         codex_timeout_seconds=args.codex_timeout_seconds,
     )
+    _progress(progress, f"draft accepted: {draft['taskpack_id']}")
     taskpack_dir = Path(draft["taskpack_dir"])
     _set_taskpack_runtime_backend(taskpack_dir, runtime_backend)
     validation = validate_taskpack(taskpack_dir)
     frozen = freeze_taskpack(taskpack_dir, frozen_root)
+    _progress(progress, f"frozen taskpack created: {frozen['manifest']['taskpack_id']}")
+    _progress(progress, f"runtime started: {run_root / frozen['manifest']['taskpack_id']}")
     completed = _run_frozen_taskpack(
         frozen["frozen_taskpack_dir"],
         run_root=run_root,
@@ -411,6 +427,7 @@ def _handle_submit(args):
         )
 
     run = _json_or_output(completed.stdout)
+    _progress(progress, f"run {_run_progress_status(run)}")
     return {
         "status": _submit_status_from_run(run),
         "taskpack_id": draft["taskpack_id"],
@@ -447,6 +464,17 @@ def _handle_run(args):
         sys.stderr.write(completed.stderr)
         sys.stderr.flush()
     return completed.returncode
+
+
+def _handle_status(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    run_dir = Path(args.run_dir).resolve() if args.run_dir else _latest_run_dir(profile)
+    summary = _build_run_status_summary(profile, run_dir)
+    if args.json:
+        return summary
+    _write_status_text(summary)
+    return 0
 
 
 def _handle_answer(args):
@@ -494,6 +522,157 @@ def _handle_resume(args):
     }
 
 
+def _latest_run_dir(profile):
+    work_root = profile.get("work_root")
+    if not work_root:
+        raise AgentTeamCliError("profile is missing work_root")
+    run_root = Path(work_root) / "runs"
+    if not run_root.exists():
+        raise AgentTeamCliError("no AgentTeam runs found", run_root=str(run_root))
+    run_dirs = [path for path in run_root.iterdir() if path.is_dir()]
+    if not run_dirs:
+        raise AgentTeamCliError("no AgentTeam runs found", run_root=str(run_root))
+    return max(run_dirs, key=lambda path: path.stat().st_mtime)
+
+
+def _build_run_status_summary(profile, run_dir):
+    run_dir = Path(run_dir).resolve()
+    events_path = run_dir / "events.jsonl"
+    snapshot = replay_events(events_path) if events_path.exists() else {}
+    state = _read_json_if_exists(run_dir / "state" / "two_phase_scheduler_state.json")
+    if not state:
+        state = _read_json_if_exists(run_dir / "state" / "scheduler_state.json")
+    task_counts = _status_task_counts(snapshot, state)
+    integration_counts = _status_integration_counts(snapshot)
+    manual_gate_count = _waiting_manual_gate_count(snapshot)
+    summary = {
+        "project": profile.get("project_key") or "unknown",
+        "latest_run": run_dir.name,
+        "status": _status_run_state(snapshot, state),
+        "tasks": task_counts,
+        "integration": integration_counts,
+        "manual_gates": manual_gate_count,
+        "last_failure": _status_last_failure(snapshot, state),
+        "run_dir": str(run_dir),
+    }
+    return summary
+
+
+def _write_status_text(summary):
+    lines = [
+        f"project: {summary['project']}",
+        f"latest_run: {summary['latest_run']}",
+        f"status: {summary['status']}",
+        (
+            "tasks: "
+            f"{summary['tasks']['done']} done, "
+            f"{summary['tasks']['blocked']} blocked"
+        ),
+        f"integration: {summary['integration']['blocked']} blocked",
+        f"manual_gates: {summary['manual_gates']}",
+    ]
+    if summary.get("last_failure"):
+        lines.append(f"last_failure: {summary['last_failure']}")
+    lines.append(f"run_dir: {summary['run_dir']}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _status_run_state(snapshot, state):
+    if isinstance(state, dict) and state.get("scheduler_status"):
+        return state["scheduler_status"]
+    tasks = snapshot.get("tasks") if isinstance(snapshot, dict) else None
+    if isinstance(tasks, dict) and tasks:
+        return "idle"
+    return "unknown"
+
+
+def _status_task_counts(snapshot, state):
+    statuses = []
+    tasks = snapshot.get("tasks") if isinstance(snapshot, dict) else None
+    if isinstance(tasks, dict) and tasks:
+        statuses = [
+            task.get("task_status")
+            for task in tasks.values()
+            if isinstance(task, dict)
+        ]
+    if not statuses and isinstance(state, dict):
+        backlog = state.get("backlog") if isinstance(state.get("backlog"), dict) else {}
+        items = backlog.get("items") if isinstance(backlog.get("items"), list) else []
+        statuses = [
+            item.get("task_status") or item.get("backlog_status")
+            for item in items
+            if isinstance(item, dict)
+        ]
+    return {
+        "total": len([status for status in statuses if status]),
+        "done": sum(1 for status in statuses if status == "done"),
+        "blocked": sum(1 for status in statuses if status == "blocked"),
+        "ready": sum(1 for status in statuses if status == "ready"),
+    }
+
+
+def _status_integration_counts(snapshot):
+    queue = snapshot.get("integration_queue") if isinstance(snapshot, dict) else None
+    if not isinstance(queue, dict):
+        return {"total": 0, "blocked": 0, "verified": 0}
+    statuses = [
+        item.get("queue_status") or item.get("integration_queue_status")
+        for item in queue.values()
+        if isinstance(item, dict)
+    ]
+    return {
+        "total": len([status for status in statuses if status]),
+        "blocked": sum(1 for status in statuses if status == "blocked"),
+        "verified": sum(1 for status in statuses if status == "verified"),
+    }
+
+
+def _waiting_manual_gate_count(snapshot):
+    gates = snapshot.get("manual_gates") if isinstance(snapshot, dict) else None
+    if not isinstance(gates, dict):
+        return 0
+    return sum(
+        1
+        for gate in gates.values()
+        if isinstance(gate, dict) and gate.get("gate_status") == "waiting"
+    )
+
+
+def _status_last_failure(snapshot, state):
+    attempts = snapshot.get("attempts") if isinstance(snapshot, dict) else None
+    if isinstance(attempts, dict):
+        for attempt in reversed(list(attempts.values())):
+            if not isinstance(attempt, dict):
+                continue
+            failure = _attempt_failure_summary(attempt)
+            if failure:
+                return failure
+    if isinstance(state, dict):
+        for step in reversed(state.get("steps", [])):
+            if isinstance(step, dict):
+                failure = _attempt_failure_summary(step.get("result", {}))
+                if failure:
+                    return failure
+    return None
+
+
+def _attempt_failure_summary(attempt):
+    if not isinstance(attempt, dict):
+        return None
+    stderr = attempt.get("integration_verification_stderr") or attempt.get("stderr") or ""
+    if isinstance(stderr, str):
+        for line in stderr.splitlines():
+            stripped = line.strip()
+            if "ModuleNotFoundError" in stripped or "FAILED" in stripped:
+                return stripped
+    for key in ["failure_category", "integration_verification_status", "validation_status"]:
+        value = attempt.get(key)
+        if value and value not in {"accepted", "completed"}:
+            return str(value)
+    return None
+
+
 def _waiting_manual_gates_summary(run_dir, waiting_gates, resume_context=None):
     return {
         "resume_status": "waiting_manual_gates",
@@ -521,6 +700,26 @@ def _manual_gate_summary_item(gate, resume_context):
         item["risk_target"] = task.get("risk_target")
         item["backlog_status"] = task.get("backlog_status")
     return item
+
+
+def _progress(enabled, message):
+    if enabled:
+        _write_progress(message)
+
+
+def _write_progress(message):
+    sys.stderr.write(f"[agentteam] {message}\n")
+    sys.stderr.flush()
+
+
+def _run_progress_status(run):
+    if not isinstance(run, dict):
+        return "completed"
+    for key in ["scheduler_status", "daemon_status", "status"]:
+        value = run.get(key)
+        if value:
+            return str(value)
+    return _submit_status_from_run(run)
 
 
 def _submit_status_from_run(run):
