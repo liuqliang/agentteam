@@ -82,6 +82,7 @@ def draft_taskpack_files(
                 "role": DEFAULT_WORKER_ROLE,
                 "status": "idle",
                 "inbox_path": "mailboxes/agent-implementation-worker-1/inbox.jsonl",
+                "outbox_path": "mailboxes/agent-implementation-worker-1/outbox.jsonl",
             }
         ],
     }
@@ -521,7 +522,7 @@ def _validate_agent_pool(agent_pool, errors):
         if not isinstance(agent, dict):
             errors.append(f"{label} must be an object")
             continue
-        for field_name in ["agent_id", "role", "status", "inbox_path"]:
+        for field_name in ["agent_id", "role", "status", "inbox_path", "outbox_path"]:
             if not _is_non_empty_string(agent.get(field_name)):
                 errors.append(f"{label}.{field_name} must be a non-empty string")
         if "runtime_profile" in agent:

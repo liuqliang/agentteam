@@ -257,6 +257,8 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
                 agent_id = agent.get("agent_id")
                 if agent_id and not agent.get("inbox_path"):
                     agent["inbox_path"] = f"mailboxes/{agent_id}/inbox.jsonl"
+                if agent_id and not agent.get("outbox_path"):
+                    agent["outbox_path"] = f"mailboxes/{agent_id}/outbox.jsonl"
         _write_json(agent_pool_path, agent_pool)
 
     backlog_path = taskpack_dir / files.get("backlog", "backlog.json")

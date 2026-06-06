@@ -829,6 +829,10 @@ class TaskpackTests(unittest.TestCase):
                 agent_pool["agents"][0]["inbox_path"],
                 "mailboxes/implementation-worker-1/inbox.jsonl",
             )
+            self.assertEqual(
+                agent_pool["agents"][0]["outbox_path"],
+                "mailboxes/implementation-worker-1/outbox.jsonl",
+            )
             self.assertEqual(backlog["items"][0]["task_id"], "runtime-optimization-audit-001")
             self.assertEqual(backlog["items"][0]["objective"], "Audit and optimize runtime path")
             self.assertEqual(backlog["items"][0]["backlog_status"], "ready")
