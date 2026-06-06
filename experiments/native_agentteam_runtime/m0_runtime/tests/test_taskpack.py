@@ -14,6 +14,7 @@ from agentteam_runtime import (
     validate_taskpack,
 )
 from agentteam_runtime.taskpack_author import _command_list
+from agentteam_runtime.taskpack_author import _canonicalize_codex_taskpack_files
 
 
 def _init_repo(path):
@@ -698,6 +699,82 @@ class TaskpackTests(unittest.TestCase):
 
     def test_codex_taskpack_author_default_command_allows_non_git_draft_root(self):
         self.assertEqual(_command_list(None), ["codex", "exec", "--skip-git-repo-check"])
+
+    def test_codex_taskpack_author_canonicalizes_common_schema_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "codex-aliases"
+            _init_repo(repo)
+            taskpack_dir.mkdir(parents=True)
+            (taskpack_dir / "taskpack.yaml").write_text(
+                json.dumps(
+                    {
+                        "taskpack_schema_version": "taskpack.v1",
+                        "taskpack_id": "codex-aliases",
+                        "status": "draft",
+                        "project_root": str(repo),
+                        "goal": "Improve existing project.",
+                        "runtime": {"default_backend": "codex"},
+                        "files": {
+                            "agent_pool": "agent_pool.json",
+                            "backlog": "backlog.json",
+                            "verification": "verification.json",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "agent_pool.json").write_text(
+                json.dumps(
+                    {
+                        "agents": [
+                            {
+                                "agent_id": "implementation-worker-1",
+                                "role": "implementation_worker",
+                                "status": "idle",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "backlog.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "runtime-optimization-audit-001",
+                                "title": "Audit and optimize runtime path",
+                                "status": "ready",
+                                "required_role": "implementation_worker",
+                                "read_scope": ["README.md"],
+                                "write_scope": ["src/runtime.py"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "verification.json").write_text(
+                json.dumps({"command": ["python3", "-m", "unittest", "discover"]}),
+                encoding="utf-8",
+            )
+
+            _canonicalize_codex_taskpack_files(taskpack_dir)
+
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
+            agent_pool = json.loads((taskpack_dir / "agent_pool.json").read_text(encoding="utf-8"))
+            backlog = json.loads((taskpack_dir / "backlog.json").read_text(encoding="utf-8"))
+            self.assertEqual(agent_pool["scheduler_agent_id"], "agent-scheduler")
+            self.assertEqual(
+                agent_pool["agents"][0]["inbox_path"],
+                "mailboxes/implementation-worker-1/inbox.jsonl",
+            )
+            self.assertEqual(backlog["items"][0]["task_id"], "runtime-optimization-audit-001")
+            self.assertEqual(backlog["items"][0]["objective"], "Audit and optimize runtime path")
+            self.assertEqual(backlog["items"][0]["backlog_status"], "ready")
+            self.assertEqual(backlog["items"][0]["blockers"], [])
 
     def test_codex_taskpack_author_rejects_dirty_repo_before_running_codex(self):
         with tempfile.TemporaryDirectory() as tmp:

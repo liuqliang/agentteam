@@ -140,6 +140,7 @@ def _draft_with_codex(
         raise TaskpackValidationError(f"codex taskpack author failed with exit code {completed.returncode}")
 
     _verify_required_taskpack_files(taskpack_dir)
+    _canonicalize_codex_taskpack_files(taskpack_dir)
     validate_taskpack(taskpack_dir)
     return {
         "taskpack_dir": str(taskpack_dir),
@@ -238,6 +239,43 @@ def _verify_required_taskpack_files(taskpack_dir):
         )
 
 
+def _canonicalize_codex_taskpack_files(taskpack_dir):
+    taskpack_dir = Path(taskpack_dir)
+    taskpack = _read_json(taskpack_dir / "taskpack.yaml")
+    files = taskpack.get("files") if isinstance(taskpack.get("files"), dict) else {}
+
+    agent_pool_path = taskpack_dir / files.get("agent_pool", "agent_pool.json")
+    agent_pool = _read_json(agent_pool_path)
+    if isinstance(agent_pool, dict):
+        if not agent_pool.get("scheduler_agent_id"):
+            agent_pool["scheduler_agent_id"] = "agent-scheduler"
+        agents = agent_pool.get("agents")
+        if isinstance(agents, list):
+            for agent in agents:
+                if not isinstance(agent, dict):
+                    continue
+                agent_id = agent.get("agent_id")
+                if agent_id and not agent.get("inbox_path"):
+                    agent["inbox_path"] = f"mailboxes/{agent_id}/inbox.jsonl"
+        _write_json(agent_pool_path, agent_pool)
+
+    backlog_path = taskpack_dir / files.get("backlog", "backlog.json")
+    backlog = _read_json(backlog_path)
+    if isinstance(backlog, dict) and isinstance(backlog.get("items"), list):
+        for item in backlog["items"]:
+            if not isinstance(item, dict):
+                continue
+            if not item.get("task_id") and item.get("item_id"):
+                item["task_id"] = item["item_id"]
+            if not item.get("objective") and item.get("title"):
+                item["objective"] = item["title"]
+            if not item.get("backlog_status") and item.get("status"):
+                item["backlog_status"] = item["status"]
+            if "blockers" not in item:
+                item["blockers"] = []
+        _write_json(backlog_path, backlog)
+
+
 def _command_list(command):
     if command is None:
         return ["codex", "exec", "--skip-git-repo-check"]
@@ -304,3 +342,7 @@ def _git_optional_output(project_root, args):
 
 def _write_json(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _read_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
