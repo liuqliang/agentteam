@@ -47,13 +47,17 @@
 - Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py`
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py`
 
-- [ ] Write a failing test that starts a fake long-running worker process fixture, records its PID in a run registry, calls `agentteam stop --run-dir <run>`, and asserts the stop file is written and registry state becomes stopped.
-- [ ] Write a failing test for `agentteam stop --stale --project-root <repo>` that cleans a stale `running` state without trying to kill any process.
-- [ ] Implement `stop_run(run_dir, grace_seconds=5, force=False)` that writes registered stop files, waits for live registered PIDs, terminates only registered PIDs and descendants owned by the current user, and updates registry/state.
-- [ ] Implement `cleanup_stale_runs(profile)` that only mutates runs whose liveness summary is `running-stale`.
-- [ ] Add `agentteam stop` parser and JSON/human output.
-- [ ] Ensure stop never matches processes by name such as `codex`; it must use registry PIDs and descendant discovery only.
-- [ ] Run focused tests and verify no unrelated local Codex processes are touched.
+- [x] Support the Terminal A/B operator flow: Terminal A may be occupied by `agentteam start` or `agentteam continue`, while Terminal B can run `agentteam stop --project-root <repo>` without re-entering the goal.
+- [x] Stop defaults to the latest profile run, can target `--taskpack <id>` or `--run-dir <dir>`, writes registered stop files, and preserves run state so `agentteam continue --taskpack <id>` can resume later.
+- [x] Treat `--stale` as state cleanup only. It may repair stale `running` records whose registered PIDs are gone, but must not terminate live processes.
+- [x] Add a bounded control section in state/registry updates recording who requested stop, when it was requested, the previous scheduler status, and whether the run is `stopped` or still `stop_requested`.
+- [x] Write a failing test that starts a fake long-running worker process fixture, records its PID in a run registry, calls `agentteam stop --run-dir <run>`, and asserts the stop file is written and registry state becomes stopped.
+- [x] Write a failing test for `agentteam stop --stale --project-root <repo>` that cleans all stale `running` runs without trying to kill any process.
+- [x] Implement `stop_run(run_dir, grace_seconds=5, force=False)` that writes registered stop files, waits for live registered PIDs, terminates only registered PIDs and descendants owned by the current user, and updates registry/state.
+- [x] Implement `cleanup_stale_runs(profile)` that only mutates runs whose liveness summary is `running-stale`.
+- [x] Add `agentteam stop` parser and JSON/human output.
+- [x] Ensure stop never matches processes by name such as `codex`; it must use registry PIDs and descendant discovery only.
+- [x] Run focused tests and verify no unrelated local Codex processes are touched.
 - [ ] Commit with `feat: add scoped run stop`.
 
 ### Task 4: Run-Level Notifications
@@ -121,6 +125,21 @@
 - [ ] Run `git diff --check`.
 - [ ] Commit with `docs: document operator control plane`.
 
+### Task 8: Taskpack Delete
+
+**Files:**
+- Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py`
+- Modify: `experiments/native_agentteam_runtime/README.md`
+- Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py`
+
+- [ ] Write a failing test for `agentteam taskpack delete --project-root <repo> --taskpack <id> --dry-run` that reports draft/frozen/run paths without mutating them.
+- [ ] Write a failing test for deleting a frozen taskpack while its run exists. Assert the command refuses unless `--delete-run --force` is supplied.
+- [ ] Implement deletion scoped to the profile `work_root` only: drafts, frozen taskpacks, and optionally runs. Never delete arbitrary absolute paths supplied by the operator.
+- [ ] Add JSON and human output with deleted path counts and skipped paths.
+- [ ] Document the safe cleanup workflow for old frozen taskpacks and runs.
+- [ ] Run focused taskpack delete tests, full runtime tests, and `git diff --check`.
+- [ ] Commit with `feat: add taskpack delete`.
+
 ### Verification
 
 Run after each task:
@@ -138,4 +157,3 @@ env PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime python3 -m compil
 agentteam taskpack list --project-root /home/liuql/projects/verisilicon
 agentteam update --status
 ```
-

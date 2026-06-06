@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .m0_runtime import answer_manual_gate, replay_events
+from .operator_control import cleanup_stale_runs, stop_run
 from .profile import (
     AgentTeamProfileError,
     build_project_profile,
@@ -74,6 +75,7 @@ def _build_parser():
     _add_continue_parser(subcommands)
     _add_answer_parser(subcommands)
     _add_resume_parser(subcommands)
+    _add_stop_parser(subcommands)
     _add_status_parser(subcommands)
     return parser
 
@@ -346,6 +348,23 @@ def _add_resume_parser(subcommands):
     )
     parser.add_argument("--operator", default="operator", help="Operator identity recorded in the event log.")
     parser.set_defaults(handler=_handle_resume)
+
+
+def _add_stop_parser(subcommands):
+    parser = subcommands.add_parser("stop", help="Stop or clean up an existing AgentTeam run.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--taskpack", help="Run/taskpack id to stop. Defaults to latest run id.")
+    parser.add_argument("--run-dir", help="Existing run directory to stop. Defaults to selected profile run.")
+    parser.add_argument(
+        "--stale",
+        action="store_true",
+        help="Only repair stale running state whose registered PIDs are no longer alive.",
+    )
+    parser.add_argument("--grace-seconds", type=int, default=5, help="Seconds to wait after SIGTERM.")
+    parser.add_argument("--force", action="store_true", help="Send SIGKILL if registered PIDs do not exit.")
+    parser.add_argument("--operator", default="operator", help="Operator identity recorded in state updates.")
+    parser.add_argument("--json", action="store_true", help="Print stop result as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_stop)
 
 
 def _add_status_parser(subcommands):
@@ -743,6 +762,72 @@ def _handle_resume(args):
         "answered": answered,
         "run_dir": str(Path(args.run_dir).resolve()),
     }
+
+
+def _handle_stop(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    if args.stale and not args.taskpack and not args.run_dir:
+        summary = cleanup_stale_runs(profile, operator=args.operator)
+        summary["project"] = profile.get("project_key") or "unknown"
+    else:
+        run_dir = _selected_run_dir(args, profile, command_name="stop")
+        if not run_dir.exists():
+            raise AgentTeamCliError("run not found", run_dir=str(run_dir))
+        summary = stop_run(
+            run_dir,
+            grace_seconds=args.grace_seconds,
+            force=args.force,
+            stale_only=args.stale,
+            operator=args.operator,
+        )
+        summary["project"] = profile.get("project_key") or "unknown"
+    if args.json:
+        return summary
+    _write_stop_text(summary)
+    return 0
+
+
+def _selected_run_dir(args, profile, command_name):
+    work_root = Path(profile["work_root"]).resolve()
+    if args.taskpack:
+        taskpack_id = args.taskpack
+    elif args.run_dir:
+        taskpack_id = Path(args.run_dir).resolve().name
+    else:
+        taskpack_id = _latest_run_dir(profile).name
+    if not taskpack_id:
+        raise AgentTeamCliError(f"taskpack id is required for {command_name}")
+    if args.run_dir and Path(args.run_dir).resolve().name != taskpack_id:
+        raise AgentTeamCliError(
+            "run directory name must match taskpack id",
+            taskpack_id=taskpack_id,
+            run_dir=str(Path(args.run_dir).resolve()),
+        )
+    return Path(args.run_dir).resolve() if args.run_dir else (work_root / "runs" / taskpack_id).resolve()
+
+
+def _write_stop_text(summary):
+    lines = [
+        f"project: {summary.get('project') or 'unknown'}",
+        f"stop_status: {summary['stop_status']}",
+    ]
+    if "latest_run" in summary:
+        lines.insert(1, f"latest_run: {summary['latest_run']}")
+    workers = summary.get("workers")
+    if isinstance(workers, dict):
+        lines.append(
+            "workers: "
+            f"{workers.get('stopped', 0)} stopped, "
+            f"{workers.get('stop_requested', 0)} stop_requested, "
+            f"{workers.get('running', 0)} running"
+        )
+    if summary.get("run_dir"):
+        lines.append(f"run_dir: {summary['run_dir']}")
+    if summary.get("cleaned_count") is not None:
+        lines.append(f"cleaned_runs: {summary['cleaned_count']}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
 
 
 def _latest_run_dir(profile):
