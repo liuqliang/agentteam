@@ -2471,6 +2471,8 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("--daemon-run-until-idle", args)
             self.assertIn("--daemon-two-phase-worker-pool", args)
             self.assertEqual(_arg_value(args, "--max-steps"), "45000")
+            self.assertEqual(_arg_value(args, "--codex-timeout-seconds"), "1800")
+            self.assertEqual(_arg_value(args, "--lease-timeout-seconds"), "1860")
             self.assertIn("--integrate-accepted-patch", args)
             self.assertNotIn("--commit-verified-integration", args)
             self.assertTrue((run_root / "runtime-args").exists())

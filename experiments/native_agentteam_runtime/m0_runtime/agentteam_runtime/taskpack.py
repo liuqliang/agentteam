@@ -10,6 +10,8 @@ from pathlib import Path
 TASKPACK_SCHEMA_VERSION = "taskpack.v1"
 DEFAULT_WORKER_ROLE = "implementation_worker"
 DEFAULT_DAEMON_MAX_STEPS = 45000
+DEFAULT_CODEX_RUNTIME_TIMEOUT_SECONDS = 3600
+DEFAULT_LEASE_TIMEOUT_GRACE_SECONDS = 60
 TASKPACK_TRANSLATABLE_RUNTIME_BACKENDS = {"fake", "codex"}
 TASKPACK_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 
@@ -369,6 +371,11 @@ def build_taskpack_runtime_args(
         "files.backlog",
     )
     runtime_backend = _validate_taskpack_runtime_backend(taskpack.get("runtime"))
+    codex_timeout_seconds = (
+        _taskpack_codex_timeout_seconds(taskpack)
+        if runtime_backend == "codex"
+        else None
+    )
     project_root = taskpack.get("project_root")
     if not isinstance(project_root, str) or not project_root:
         raise TaskpackValidationError("project_root must be a non-empty string")
@@ -394,14 +401,34 @@ def build_taskpack_runtime_args(
         args.extend(["--daemon-run-until-idle", "--daemon-two-phase-worker-pool"])
         args.extend(["--max-inflight", str(max_inflight), "--max-attempts", str(max_attempts)])
         args.extend(["--max-steps", str(max_steps)])
+        if codex_timeout_seconds is not None:
+            args.extend(
+                [
+                    "--lease-timeout-seconds",
+                    str(codex_timeout_seconds + DEFAULT_LEASE_TIMEOUT_GRACE_SECONDS),
+                ]
+            )
     else:
         args.append("--run-until-idle")
     args.extend(["--runtime", runtime_backend])
+    if codex_timeout_seconds is not None:
+        args.extend(["--codex-timeout-seconds", str(codex_timeout_seconds)])
     args.append("--integrate-accepted-patch")
     args.extend(["--integration-verification-command-json", command_json])
     if commit_verified_integration:
         args.append("--commit-verified-integration")
     return args
+
+
+def _taskpack_codex_timeout_seconds(taskpack):
+    runtime = taskpack.get("runtime")
+    codex = runtime.get("codex") if isinstance(runtime, dict) else None
+    if not isinstance(codex, dict) or "timeout_seconds" not in codex:
+        return DEFAULT_CODEX_RUNTIME_TIMEOUT_SECONDS
+    timeout_seconds = codex.get("timeout_seconds")
+    if not isinstance(timeout_seconds, int) or timeout_seconds < 1:
+        raise TaskpackValidationError("runtime.codex.timeout_seconds must be an integer >= 1")
+    return timeout_seconds
 
 
 def _normalize_taskpack_id(taskpack_id, goal):

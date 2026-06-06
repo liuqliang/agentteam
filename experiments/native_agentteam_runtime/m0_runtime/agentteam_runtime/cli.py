@@ -461,8 +461,9 @@ def _run_supervised_two_phase_scheduler(
     )
     supervision = []
     tick_count = 0
+    stalled_wait_ticks = 0
     last_tick = None
-    for _ in range(args.max_steps):
+    while True:
         tick_count += 1
         supervision_result = worker_pool.supervise_once()
         supervision.append(supervision_result)
@@ -479,22 +480,39 @@ def _run_supervised_two_phase_scheduler(
                 "last_tick": last_tick,
             }
             break
-        if last_tick["tick_status"] == "waiting":
+        if _should_wait_for_running_inflight(last_tick, supervision_result["after"]):
+            stalled_wait_ticks = 0
             time.sleep(0.02)
-    else:
-        scheduler.state["scheduler_status"] = "max_ticks_reached"
-        scheduler._write_state()
-        result = {
-            **scheduler.summary(),
-            "scheduler_status": "max_ticks_reached",
-            "tick_count": tick_count,
-            "last_tick": last_tick,
-        }
+            continue
+        if last_tick["tick_status"] == "waiting":
+            stalled_wait_ticks += 1
+            if stalled_wait_ticks >= args.max_steps:
+                scheduler.state["scheduler_status"] = "max_ticks_reached"
+                scheduler._write_state()
+                result = {
+                    **scheduler.summary(),
+                    "scheduler_status": "max_ticks_reached",
+                    "tick_count": tick_count,
+                    "last_tick": last_tick,
+                }
+                break
+            time.sleep(0.02)
+        else:
+            stalled_wait_ticks = 0
     return {
         **result,
         "worker_pool_supervision": supervision,
         "worker_pool_health": worker_pool.health_check(),
     }
+
+
+def _should_wait_for_running_inflight(last_tick, pool_health):
+    if not isinstance(last_tick, dict) or last_tick.get("inflight_count", 0) <= 0:
+        return False
+    workers = pool_health.get("workers") if isinstance(pool_health, dict) else None
+    if not isinstance(workers, list):
+        return False
+    return any(worker.get("worker_status") == "running" for worker in workers)
 
 
 def _quarantined_agent_ids(pool_health):

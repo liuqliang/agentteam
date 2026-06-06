@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from agentteam_runtime import (
     CodexRuntimeAdapter,
@@ -37,6 +38,7 @@ from agentteam_runtime import (
     run_simulation,
     verify_integration_batch,
 )
+from agentteam_runtime.cli import _run_supervised_two_phase_scheduler
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -4447,6 +4449,101 @@ class M0RuntimeTests(unittest.TestCase):
                 {task["task_id"]: task["task_status"] for task in state["tasks"]},
                 {"TASK-001": "done", "TASK-002": "done"},
             )
+
+    def test_supervised_two_phase_scheduler_waits_past_max_steps_for_running_inflight_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                ],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+
+            class DelayedResultWorkerPool:
+                def __init__(self):
+                    self.calls = 0
+                    self.result_written = False
+
+                def supervise_once(self):
+                    self.calls += 1
+                    self._write_result_after_dispatch()
+                    health = self.health_check()
+                    return {
+                        "supervision_status": health["pool_status"],
+                        "restarted_count": 0,
+                        "before": health,
+                        "restart": {"restarted_count": 0},
+                        "after": health,
+                    }
+
+                def health_check(self):
+                    return {
+                        "pool_status": "running",
+                        "workers": [
+                            {
+                                "worker_agent_id": "agent-repo-map",
+                                "worker_status": "running",
+                            }
+                        ],
+                    }
+
+                def _write_result_after_dispatch(self):
+                    if self.result_written:
+                        return
+                    state_path = output_dir / "state" / "two_phase_scheduler_state.json"
+                    if not state_path.exists():
+                        return
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    inflight = state.get("inflight_attempts", [])
+                    if not inflight:
+                        return
+                    attempt = inflight[0]
+                    _append_runtime_result(
+                        attempt["outbox_path"],
+                        attempt["message_id"],
+                        attempt["task_id"],
+                        attempt["attempt_id"],
+                        attempt["lease_id"],
+                        "completed",
+                        [],
+                    )
+                    self.result_written = True
+
+            args = SimpleNamespace(
+                agent_pool=str(agent_pool_path),
+                backlog=str(backlog_path),
+                output_dir=str(output_dir),
+                project_root=None,
+                max_inflight=1,
+                max_attempts=1,
+                lease_timeout_seconds=900,
+                integrate_accepted_patch=False,
+                commit_verified_integration=False,
+                auto_decompose_backlog=False,
+                decomposition_milestone_id="M21",
+                decomposition_planner_role="task_planner",
+                decomposition_default_worker_role="repo_map_agent",
+                planner_context_artifact=[],
+                planner_context_excerpt_chars=1200,
+                max_steps=1,
+            )
+
+            result = _run_supervised_two_phase_scheduler(
+                args,
+                integration_verification_command=None,
+                worker_pool=DelayedResultWorkerPool(),
+                notification_sink=None,
+            )
+
+            self.assertEqual(result["scheduler_status"], "idle")
+            self.assertGreater(result["tick_count"], 1)
+            self.assertEqual(result["processed_task_ids"], ["TASK-001"])
+            self.assertEqual(result["inflight_count"], 0)
 
     def test_cli_two_phase_worker_pool_can_auto_decompose_with_fake_planner(self):
         with tempfile.TemporaryDirectory() as tmp:
