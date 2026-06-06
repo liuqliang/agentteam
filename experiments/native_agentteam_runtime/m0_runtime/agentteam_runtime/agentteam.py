@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -1029,13 +1030,23 @@ def _run_frozen_taskpack(
     if feishu_signing_secret_env:
         runtime_args.extend(["--feishu-signing-secret-env", feishu_signing_secret_env])
     command = [sys.executable, "-m", "agentteam_runtime.cli", *runtime_args]
+    env = _runtime_subprocess_env()
     return subprocess.run(
         command,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         check=False,
     )
+
+
+def _runtime_subprocess_env():
+    env = os.environ.copy()
+    runtime_root = str(Path(__file__).resolve().parents[1])
+    current = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = runtime_root if not current else f"{runtime_root}:{current}"
+    return env
 
 
 def _submit_runtime_backend(runtime, author_runtime):

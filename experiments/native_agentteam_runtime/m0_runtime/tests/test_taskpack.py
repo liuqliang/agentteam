@@ -308,6 +308,64 @@ class TaskpackTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("AgentTeam operator CLI", completed.stdout)
 
+    def test_repo_root_agentteam_launcher_start_runs_without_pythonpath(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            launcher = Path(__file__).resolve().parents[4] / "agentteam"
+            env = _test_env()
+            env.pop("PYTHONPATH", None)
+            _init_repo(repo)
+
+            init_completed = subprocess.run(
+                [
+                    str(launcher),
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "launcher-start",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+
+            completed = subprocess.run(
+                [
+                    str(launcher),
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Run launcher start without PYTHONPATH.",
+                    "--taskpack-id",
+                    "launcher-start-fake",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["taskpack_id"], "launcher-start-fake")
+            self.assertEqual(summary["run"]["scheduler_status"], "idle")
+
     def test_agentteam_cli_draft_and_validate(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
