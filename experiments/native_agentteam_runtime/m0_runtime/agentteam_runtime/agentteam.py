@@ -5,6 +5,15 @@ import sys
 from pathlib import Path
 
 from .m0_runtime import answer_manual_gate, replay_events
+from .profile import (
+    AgentTeamProfileError,
+    build_project_profile,
+    default_project_key,
+    default_work_root,
+    load_project_profile,
+    profile_path_for_project,
+    write_project_profile,
+)
 from .taskpack import build_taskpack_runtime_args, freeze_taskpack, validate_taskpack
 from .taskpack_author import draft_taskpack_from_goal
 
@@ -53,6 +62,8 @@ def _build_parser():
         parser_class=JsonArgumentParser,
     )
     _add_submit_parser(subcommands)
+    _add_init_parser(subcommands)
+    _add_start_parser(subcommands)
     _add_taskpack_draft_parser(taskpack_subcommands)
     _add_taskpack_validate_parser(taskpack_subcommands)
     _add_taskpack_freeze_parser(taskpack_subcommands)
@@ -110,6 +121,90 @@ def _add_submit_parser(subcommands):
         help="Optional Codex command prefix. Must appear last.",
     )
     parser.set_defaults(handler=_handle_submit)
+
+
+def _add_init_parser(subcommands):
+    parser = subcommands.add_parser("init", help="Create a project-local .agentteam profile.")
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Prompt for profile fields. Prompts are written to stderr.",
+    )
+    parser.add_argument("--project-root", help="Git repository root for the target project.")
+    parser.add_argument("--project-key", help="Stable key used for AgentTeam local storage.")
+    parser.add_argument("--work-root", help="Directory for drafts, frozen taskpacks, and runs.")
+    parser.add_argument(
+        "--author-runtime",
+        choices=["fake", "codex"],
+        default="codex",
+        help="Runtime used to author taskpacks for this project.",
+    )
+    parser.add_argument(
+        "--runtime",
+        choices=["auto", "fake", "codex"],
+        default="auto",
+        help="Runtime backend used to execute taskpacks for this project.",
+    )
+    parser.add_argument("--one-shot", action="store_true", help="Default to one-shot runtime execution.")
+    parser.add_argument("--max-inflight", type=int, default=2, help="Default maximum daemon inflight attempts.")
+    parser.add_argument("--max-attempts", type=int, default=1, help="Default maximum attempts per task.")
+    parser.add_argument(
+        "--commit-verified-integration",
+        action="store_true",
+        help="Default to committing integration worktree changes after verification passes.",
+    )
+    _add_notification_args(parser, notification_project_default=None)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing .agentteam/profile.json.",
+    )
+    parser.set_defaults(handler=_handle_init)
+
+
+def _add_start_parser(subcommands):
+    parser = subcommands.add_parser("start", help="Start AgentTeam from the current project profile.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--goal", help="Human-readable taskpack goal. Prompted when omitted.")
+    parser.add_argument("--taskpack-id", help="Optional safe taskpack id slug.")
+    parser.add_argument("--work-root", help="Override the profile work root for this run.")
+    parser.add_argument(
+        "--author-runtime",
+        choices=["fake", "codex"],
+        help="Override the profile taskpack author runtime.",
+    )
+    parser.add_argument(
+        "--runtime",
+        choices=["auto", "fake", "codex"],
+        help="Override the profile execution runtime.",
+    )
+    parser.add_argument(
+        "--codex-timeout-seconds",
+        type=int,
+        default=600,
+        help="Timeout for Codex taskpack authoring.",
+    )
+    parser.add_argument(
+        "--one-shot",
+        action="store_true",
+        default=None,
+        help="Use the one-shot scheduler path for this run.",
+    )
+    parser.add_argument("--max-inflight", type=int, help="Override maximum daemon inflight attempts.")
+    parser.add_argument("--max-attempts", type=int, help="Override maximum attempts per task.")
+    parser.add_argument(
+        "--commit-verified-integration",
+        action="store_true",
+        default=None,
+        help="Commit integration worktree changes after verification passes for this run.",
+    )
+    _add_notification_args(parser, notification_project_default=None)
+    parser.add_argument(
+        "--codex-command",
+        nargs=argparse.REMAINDER,
+        help="Optional Codex command prefix. Must appear last.",
+    )
+    parser.set_defaults(handler=_handle_start)
 
 
 def _add_taskpack_draft_parser(subcommands):
@@ -171,10 +266,10 @@ def _add_run_parser(subcommands):
     parser.set_defaults(handler=_handle_run)
 
 
-def _add_notification_args(parser):
+def _add_notification_args(parser, notification_project_default="agentteam"):
     parser.add_argument(
         "--notification-project",
-        default="agentteam",
+        default=notification_project_default,
         help="Project key recorded in outbound notification telemetry.",
     )
     parser.add_argument(
@@ -235,6 +330,42 @@ def _handle_taskpack_validate(args):
 
 def _handle_taskpack_freeze(args):
     return freeze_taskpack(args.taskpack_dir, args.frozen_root)
+
+
+def _handle_init(args):
+    project_root = Path(args.project_root or ".").resolve()
+    if args.interactive:
+        profile = _prompt_project_profile(args, project_root)
+    else:
+        profile = _profile_from_args(args, project_root)
+    profile_path = write_project_profile(project_root, profile, force=args.force)
+    return {
+        "status": "initialized",
+        "profile_path": str(profile_path),
+        "profile": profile,
+    }
+
+
+def _handle_start(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile_path = profile_path_for_project(project_root)
+    try:
+        profile = load_project_profile(project_root)
+    except AgentTeamProfileError as exc:
+        if not _prompt_bool(f"Create AgentTeam profile at {profile_path}", default=True):
+            raise AgentTeamCliError(str(exc), profile_path=str(profile_path)) from exc
+        profile = _prompt_project_profile(args, project_root)
+        profile_path = write_project_profile(project_root, profile, force=False)
+
+    goal = args.goal or _prompt_text("Goal", required=True)
+    submit_args = _submit_args_from_profile(args, project_root, profile)
+    submit_args.goal = goal
+    result = _handle_submit(submit_args)
+    result["profile"] = {
+        "profile_path": str(profile_path.resolve()),
+        "project_key": profile.get("project_key"),
+    }
+    return result
 
 
 def _handle_submit(args):
@@ -662,6 +793,120 @@ def _compact_list(value):
     if isinstance(value, list):
         return ", ".join(str(item) for item in value) if value else None
     return str(value)
+
+
+def _profile_from_args(args, project_root):
+    return build_project_profile(
+        project_root,
+        project_key=args.project_key,
+        work_root=args.work_root,
+        author_runtime=args.author_runtime,
+        default_runtime=args.runtime,
+        one_shot=args.one_shot,
+        max_inflight=args.max_inflight,
+        max_attempts=args.max_attempts,
+        commit_verified_integration=args.commit_verified_integration,
+        notification_project=args.notification_project,
+        feishu_enabled=bool(args.feishu_webhook_env),
+        feishu_webhook_env=args.feishu_webhook_env,
+        feishu_signing_secret_env=args.feishu_signing_secret_env,
+    )
+
+
+def _prompt_project_profile(args, project_root):
+    project_key = _prompt_text(
+        "Project key",
+        default=args.project_key or default_project_key(project_root),
+        required=True,
+    )
+    work_root = _prompt_text(
+        "Work root",
+        default=args.work_root or str(default_work_root(project_key)),
+        required=True,
+    )
+    author_runtime = _prompt_choice(
+        "Author runtime",
+        choices=["fake", "codex"],
+        default=args.author_runtime or "codex",
+    )
+    runtime = _prompt_choice(
+        "Runtime",
+        choices=["auto", "fake", "codex"],
+        default=args.runtime or "auto",
+    )
+    one_shot = _prompt_bool("One shot", default=bool(args.one_shot))
+    commit_verified_integration = _prompt_bool(
+        "Commit verified integration",
+        default=bool(args.commit_verified_integration),
+    )
+    feishu_enabled = _prompt_bool("Enable Feishu notifications", default=bool(args.feishu_webhook_env))
+    feishu_webhook_env = None
+    feishu_signing_secret_env = None
+    if feishu_enabled:
+        env_prefix = project_key.upper().replace("-", "_").replace(".", "_")
+        feishu_webhook_env = _prompt_text(
+            "Feishu webhook env",
+            default=args.feishu_webhook_env or f"AGENTTEAM_FEISHU_{env_prefix}_WEBHOOK",
+            required=True,
+        )
+        feishu_signing_secret_env = _prompt_text(
+            "Feishu signing secret env",
+            default=args.feishu_signing_secret_env,
+            display_default="none",
+            required=False,
+        )
+    return build_project_profile(
+        project_root,
+        project_key=project_key,
+        work_root=work_root,
+        author_runtime=author_runtime,
+        default_runtime=runtime,
+        one_shot=one_shot,
+        max_inflight=args.max_inflight or 2,
+        max_attempts=args.max_attempts or 1,
+        commit_verified_integration=commit_verified_integration,
+        notification_project=args.notification_project,
+        feishu_enabled=feishu_enabled,
+        feishu_webhook_env=feishu_webhook_env,
+        feishu_signing_secret_env=feishu_signing_secret_env,
+    )
+
+
+def _submit_args_from_profile(args, project_root, profile):
+    feishu = profile.get("feishu") if isinstance(profile.get("feishu"), dict) else {}
+    feishu_enabled = bool(feishu.get("enabled"))
+    return argparse.Namespace(
+        interactive=False,
+        project_root=str(project_root),
+        goal=args.goal,
+        work_root=args.work_root or profile.get("work_root"),
+        taskpack_id=args.taskpack_id,
+        author_runtime=args.author_runtime or profile.get("author_runtime", "codex"),
+        runtime=args.runtime or profile.get("default_runtime", "auto"),
+        codex_timeout_seconds=args.codex_timeout_seconds,
+        one_shot=_override_or_profile(args.one_shot, profile.get("one_shot", False)),
+        max_inflight=args.max_inflight or profile.get("max_inflight", 2),
+        max_attempts=args.max_attempts or profile.get("max_attempts", 1),
+        commit_verified_integration=_override_or_profile(
+            args.commit_verified_integration,
+            profile.get("commit_verified_integration", False),
+        ),
+        notification_project=args.notification_project
+        or profile.get("notification_project")
+        or profile.get("project_key")
+        or "agentteam",
+        feishu_webhook_env=args.feishu_webhook_env
+        if args.feishu_webhook_env is not None
+        else (feishu.get("webhook_env") if feishu_enabled else None),
+        feishu_signing_secret_env=args.feishu_signing_secret_env
+        if args.feishu_signing_secret_env is not None
+        else (feishu.get("signing_secret_env") if feishu_enabled else None),
+        codex_command=args.codex_command,
+    )
+
+
+def _override_or_profile(override, profile_value):
+    return profile_value if override is None else override
 
 
 def _complete_submit_args(args):

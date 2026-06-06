@@ -135,6 +135,138 @@ class TaskpackTests(unittest.TestCase):
                 "done",
             )
 
+    def test_agentteam_cli_init_writes_project_profile_without_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "fixture-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "codex",
+                    "--runtime",
+                    "auto",
+                    "--notification-project",
+                    "fixture-project",
+                    "--feishu-webhook-env",
+                    "AGENTTEAM_FEISHU_FIXTURE_WEBHOOK",
+                    "--feishu-signing-secret-env",
+                    "AGENTTEAM_FEISHU_FIXTURE_SECRET",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            profile_path = repo / ".agentteam" / "profile.json"
+            self.assertEqual(Path(summary["profile_path"]), profile_path)
+            self.assertTrue(profile_path.exists())
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            self.assertEqual(profile["profile_schema_version"], "agentteam_profile.v1")
+            self.assertEqual(profile["project_key"], "fixture-project")
+            self.assertEqual(profile["work_root"], str(work_root.resolve()))
+            self.assertEqual(profile["author_runtime"], "codex")
+            self.assertEqual(profile["default_runtime"], "auto")
+            self.assertEqual(profile["notification_project"], "fixture-project")
+            self.assertEqual(profile["feishu"]["webhook_env"], "AGENTTEAM_FEISHU_FIXTURE_WEBHOOK")
+            self.assertEqual(profile["feishu"]["signing_secret_env"], "AGENTTEAM_FEISHU_FIXTURE_SECRET")
+            serialized = json.dumps(profile, sort_keys=True)
+            self.assertNotIn("https://open.feishu.cn", serialized)
+            self.assertNotIn("secret-token", serialized)
+
+    def test_agentteam_cli_start_uses_project_profile_to_submit_fake_taskpack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "fixture-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "auto",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Start from project profile.",
+                    "--taskpack-id",
+                    "cli-start-profile",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["taskpack_id"], "cli-start-profile")
+            self.assertEqual(summary["runtime"], "fake")
+            self.assertEqual(summary["profile"]["profile_path"], str((repo / ".agentteam" / "profile.json").resolve()))
+            self.assertEqual(summary["paths"]["work_root"], str(work_root.resolve()))
+            self.assertTrue((work_root / "drafts" / "cli-start-profile").exists())
+            self.assertEqual(summary["run"]["scheduler_status"], "idle")
+
+    def test_repo_root_agentteam_launcher_invokes_cli_help(self):
+        launcher = Path(__file__).resolve().parents[4] / "agentteam"
+
+        completed = subprocess.run(
+            [str(launcher), "--help"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("AgentTeam operator CLI", completed.stdout)
+
     def test_agentteam_cli_draft_and_validate(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

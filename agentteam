@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+
+def main():
+    repo_root = Path(__file__).resolve().parent
+    runtime_root = repo_root / "experiments" / "native_agentteam_runtime" / "m0_runtime"
+    sys.path.insert(0, str(runtime_root))
+    from agentteam_runtime.agentteam import main as agentteam_main
+
+    return agentteam_main()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

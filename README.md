@@ -14,9 +14,37 @@ Build an artifact workflow with validators, bounded agents, change requests, tra
 ```text
 .
 ├── design/      # Current framework architecture, workflow SOPs, and archived design history
+├── experiments/ # Native AgentTeam runtime prototype and implementation artifacts
 ├── research/    # Multi-agent literature, tool mechanics, and design guidance
 └── srccode/     # Local reference source code and architecture notes
 ```
+
+## Local Runtime Prototype
+
+The native runtime experiment can be launched from this repository without
+manual `PYTHONPATH` setup:
+
+```bash
+./agentteam --help
+```
+
+For repeated local use, install a user-level command:
+
+```bash
+./scripts/install-local.sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then run AgentTeam from a target project:
+
+```bash
+cd /path/to/target-repo
+agentteam init --interactive
+agentteam start
+```
+
+The target project owns `.agentteam/profile.json`; AgentTeam runtime data should
+live under that profile's `work_root`, not inside the target repository.
 
 ## Design Documents
 

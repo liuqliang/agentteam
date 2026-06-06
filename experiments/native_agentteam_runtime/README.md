@@ -44,6 +44,7 @@ experiments/native_agentteam_runtime/
   m0_runtime/
     agentteam_runtime/
       agentteam.py
+      profile.py
       taskpack.py
       taskpack_author.py
   schemas/
@@ -70,49 +71,77 @@ M0 validates the scheduling model with files only:
 - a taskpack can be drafted, validated, frozen, and launched through the
   existing Python runtime CLI.
 
-The current implementation is still an experiment. It uses a module CLI rather
-than an installed `agentteam` executable:
+The current implementation is still an experiment, but it now has a thin
+repository launcher at the repo root:
 
 ```bash
-PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
-python3 -m agentteam_runtime.agentteam --help
+./agentteam --help
 ```
 
-Shell scripts in or around this experiment are development helpers. They are
-not the primary operator interface.
+For repeated local use, install a user-level command:
+
+```bash
+./scripts/install-local.sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+The installer creates `~/.local/bin/agentteam` as a symlink to the repository
+launcher. It does not write project profiles or secrets.
 
 ## Taskpack Authoring Flow
 
 The taskpack path turns a target repository plus a human goal into runtime
 artifacts that the scheduler can consume.
 
-For the normal operator path, use `submit`. It drafts, validates, freezes, and
-runs the taskpack in one command. For manual use, start the interactive form and
-answer the prompts:
+For the normal operator path, run AgentTeam from the target project. The first
+run creates a project-local `.agentteam/profile.json`; later runs reuse it:
+
+```bash
+cd /path/to/repo
+agentteam init --interactive
+agentteam start
+```
+
+The profile belongs to the target project, not this AgentTeam framework
+repository. It stores non-secret defaults such as `work_root`,
+`author_runtime`, `default_runtime`, and Feishu environment variable names.
+Runtime artifacts are written under the configured `work_root`, typically
+`~/.local/share/agentteam/<project-key>/`.
+
+For a scripted local smoke run without installing the command, use the launcher
+directly:
+
+```bash
+./agentteam init \
+  --project-root /path/to/repo \
+  --project-key example \
+  --work-root /tmp/agentteam-taskpacks \
+  --author-runtime fake \
+  --runtime auto \
+  --one-shot
+
+./agentteam start \
+  --project-root /path/to/repo \
+  --goal "optimize the target behavior under an explicit metric" \
+  --taskpack-id example-taskpack \
+  --one-shot
+```
+
+Interactive prompts are written to stderr, so stdout remains the final JSON
+summary. `start` loads `.agentteam/profile.json`, prompts for `--goal` when it
+is omitted, and then reuses the existing `submit` implementation.
+
+`default_runtime: auto` is the default. It runs fake-authored taskpacks with the
+`fake` runtime for smoke tests, and Codex-authored taskpacks with the `codex`
+runtime for live work. Use `--runtime fake` or `--runtime codex` to make that
+choice explicit.
+
+The lower-level module CLI remains available for development and debugging:
 
 ```bash
 PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
 python3 -m agentteam_runtime.agentteam submit --interactive
 ```
-
-Interactive prompts are written to stderr, so stdout remains the final JSON
-summary. For scripts and repeatable runs, pass the same inputs as flags:
-
-```bash
-PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
-python3 -m agentteam_runtime.agentteam submit \
-  --project-root /path/to/repo \
-  --goal "optimize the target behavior under an explicit metric" \
-  --work-root /tmp/agentteam-taskpacks \
-  --taskpack-id example-taskpack \
-  --author-runtime fake \
-  --one-shot
-```
-
-`submit --runtime auto` is the default. It runs fake-authored taskpacks with the
-`fake` runtime for smoke tests, and Codex-authored taskpacks with the `codex`
-runtime for live work. Use `--runtime fake` or `--runtime codex` to make that
-choice explicit.
 
 For explicit review before execution, run the lower-level commands separately:
 
