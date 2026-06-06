@@ -13,6 +13,7 @@ from agentteam_runtime import (
     load_taskpack,
     validate_taskpack,
 )
+from agentteam_runtime.taskpack_author import _command_list
 
 
 def _init_repo(path):
@@ -643,6 +644,9 @@ class TaskpackTests(unittest.TestCase):
                     author_runtime="human",
                     taskpack_id="unsupported-author",
                 )
+
+    def test_codex_taskpack_author_default_command_allows_non_git_draft_root(self):
+        self.assertEqual(_command_list(None), ["codex", "exec", "--skip-git-repo-check"])
 
     def test_codex_taskpack_author_rejects_dirty_repo_before_running_codex(self):
         with tempfile.TemporaryDirectory() as tmp:

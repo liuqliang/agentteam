@@ -235,7 +235,7 @@ def _verify_required_taskpack_files(taskpack_dir):
 
 def _command_list(command):
     if command is None:
-        return ["codex", "exec"]
+        return ["codex", "exec", "--skip-git-repo-check"]
     if isinstance(command, str):
         raise TaskpackValidationError("codex_command must be a list or tuple of strings, not a bare string")
     if not isinstance(command, (list, tuple)):
