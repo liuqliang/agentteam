@@ -278,12 +278,25 @@ def validate_taskpack(taskpack_dir):
         command = verification.get("command")
     if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
         errors.append("verification.command must be a non-empty string array")
-    elif command[0] not in {"python3", "python", "/bin/bash", "bash", "make"}:
+    elif not _verification_command_allowed(command[0], taskpack.get("project_root")):
         errors.append(f"verification command is not allowed: {command[0]}")
 
     if errors:
         raise TaskpackValidationError("; ".join(errors))
     return {"status": "accepted", "taskpack_id": taskpack_id, "errors": []}
+
+
+def _verification_command_allowed(executable, project_root):
+    if executable in {"python3", "python", "/bin/bash", "bash", "make"}:
+        return True
+    if not project_root:
+        return False
+    try:
+        executable_path = Path(executable).resolve()
+        relative = executable_path.relative_to(Path(project_root).resolve())
+    except ValueError:
+        return False
+    return relative.as_posix() in {".venv/bin/python", "venv/bin/python"} and executable_path.is_file()
 
 
 def freeze_taskpack(taskpack_dir, frozen_root):

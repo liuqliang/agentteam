@@ -838,6 +838,103 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(backlog["items"][0]["backlog_status"], "ready")
             self.assertEqual(backlog["items"][0]["blockers"], [])
 
+    def test_codex_taskpack_author_uses_project_venv_for_python_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "venv-command"
+            _init_repo(repo)
+            venv_python = repo / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            taskpack_dir.mkdir(parents=True)
+            (taskpack_dir / "taskpack.yaml").write_text(
+                json.dumps(
+                    {
+                        "taskpack_schema_version": "taskpack.v1",
+                        "taskpack_id": "venv-command",
+                        "status": "draft",
+                        "project_root": str(repo),
+                        "goal": "Use the project test environment.",
+                        "runtime": {"default_backend": "codex"},
+                        "files": {
+                            "agent_pool": "agent_pool.json",
+                            "backlog": "backlog.json",
+                            "verification": "verification.json",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "agent_pool.json").write_text(
+                json.dumps(
+                    {
+                        "scheduler_agent_id": "agent-scheduler",
+                        "agents": [
+                            {
+                                "agent_id": "implementation-worker-1",
+                                "role": "implementation_worker",
+                                "status": "idle",
+                                "inbox_path": "mailboxes/implementation-worker-1/inbox.jsonl",
+                                "outbox_path": "mailboxes/implementation-worker-1/outbox.jsonl",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "backlog.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "task_id": "TASK-VENV-001",
+                                "objective": "Use project venv.",
+                                "backlog_status": "ready",
+                                "required_role": "implementation_worker",
+                                "read_scope": ["gesture_recognition/tests"],
+                                "write_scope": ["gesture_recognition/"],
+                                "blockers": [],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "verification.json").write_text(
+                json.dumps(
+                    {
+                        "command": [
+                            "python3",
+                            "-m",
+                            "unittest",
+                            "discover",
+                            "-s",
+                            "gesture_recognition/tests",
+                            "-v",
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            _canonicalize_codex_taskpack_files(taskpack_dir)
+
+            verification = json.loads((taskpack_dir / "verification.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                verification["command"],
+                [
+                    str(venv_python.resolve()),
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "gesture_recognition/tests",
+                    "-v",
+                ],
+            )
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
+
     def test_codex_taskpack_author_rejects_dirty_repo_before_running_codex(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

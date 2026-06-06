@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -276,6 +277,59 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
             if "blockers" not in item:
                 item["blockers"] = []
         _write_json(backlog_path, backlog)
+
+    verification_path = taskpack_dir / files.get("verification", "verification.json")
+    verification = _read_json(verification_path)
+    if isinstance(verification, dict):
+        command = verification.get("command")
+        project_root = taskpack.get("project_root")
+        canonical_command = _canonical_verification_command(command, project_root)
+        if canonical_command != command:
+            verification["command"] = canonical_command
+            _write_json(verification_path, verification)
+
+
+def _canonical_verification_command(command, project_root):
+    if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
+        return command
+    project_python = _project_python(project_root)
+    if project_python is None:
+        return command
+    python_index = _python_command_index(command)
+    if python_index is None:
+        return command
+    canonical = list(command)
+    canonical[python_index] = str(project_python)
+    return canonical
+
+
+def _project_python(project_root):
+    if not project_root:
+        return None
+    root = Path(project_root)
+    candidates = [
+        root / ".venv" / "bin" / "python",
+        root / "venv" / "bin" / "python",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _python_command_index(command):
+    for index, part in enumerate(command[:3]):
+        if _is_python_command(part):
+            return index
+    return None
+
+
+def _is_python_command(value):
+    path = Path(value)
+    name = path.name
+    if value in {".venv/bin/python", "venv/bin/python"}:
+        return True
+    return bool(re.fullmatch(r"python(?:3(?:\.\d+)?)?", name))
 
 
 def _command_list(command):
