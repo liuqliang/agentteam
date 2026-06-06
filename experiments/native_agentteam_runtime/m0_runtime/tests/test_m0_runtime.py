@@ -211,6 +211,48 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertNotIn("secret-token", json.dumps(result["payload"], sort_keys=True))
         self.assertNotIn("demo", json.dumps(result["payload"], sort_keys=True))
 
+    def test_feishu_notification_sink_from_env_sends_run_completed(self):
+        from agentteam_runtime.notifications import build_feishu_notification_sink_from_env
+
+        calls = []
+
+        def fake_post(url, payload, timeout_seconds):
+            calls.append({"url": url, "payload": payload, "timeout_seconds": timeout_seconds})
+            return {"status_code": 200, "body": {"code": 0, "msg": "success"}}
+
+        sink = build_feishu_notification_sink_from_env(
+            webhook_env="AGENTTEAM_FEISHU_TEST_WEBHOOK",
+            project="agentteam",
+            env={
+                "AGENTTEAM_FEISHU_TEST_WEBHOOK": (
+                    "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token"
+                ),
+            },
+            http_post=fake_post,
+            clock=lambda: 1599360473,
+        )
+        result = sink.notify(
+            {
+                "event_id": "EVT-99",
+                "sequence": 99,
+                "event_type": "run_completed",
+                "correlation_id": "run:completed",
+                "payload": {
+                    "run_status": "completed",
+                    "task_done_count": 3,
+                    "task_blocked_count": 0,
+                },
+            },
+            {"run_dir": "/tmp/agentteam-run"},
+        )
+
+        self.assertEqual(result["event_type"], "notification_sent")
+        self.assertEqual(result["payload"]["source_event_type"], "run_completed")
+        self.assertEqual(result["payload"]["message_summary"], "run_completed completed")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("[AgentTeam] run_completed", calls[0]["payload"]["content"]["text"])
+        self.assertIn("Run dir: /tmp/agentteam-run", calls[0]["payload"]["content"]["text"])
+
     def test_two_phase_scheduler_notifies_manual_gate_after_canonical_event(self):
         class RecordingNotificationSink:
             def __init__(self):
@@ -293,6 +335,133 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 notification["payload"]["source_event_id"],
                 manual_gate["event_id"],
+            )
+
+    def test_two_phase_scheduler_notifies_allowed_run_level_event(self):
+        class RecordingNotificationSink:
+            def __init__(self):
+                self.calls = []
+
+            def notify(self, event, context):
+                self.calls.append({"event": event, "context": context})
+                return {
+                    "event_type": "notification_sent",
+                    "actor": "agent-notifier",
+                    "target_agent_id": None,
+                    "idempotency_key": f"notification:{event['event_id']}",
+                    "correlation_id": event["correlation_id"],
+                    "payload": {
+                        "provider": "feishu",
+                        "project": "agentteam",
+                        "source_event_type": event["event_type"],
+                        "source_event_id": event["event_id"],
+                        "source_event_sequence": event["sequence"],
+                        "notification_status": "sent",
+                        "message_summary": "run_completed completed",
+                    },
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            sink = RecordingNotificationSink()
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+                notification_sink=sink,
+            )
+            canonical_event = {
+                **scheduler._event(
+                    "run_completed",
+                    "agent-scheduler",
+                    None,
+                    "run:completed",
+                    "run:completed",
+                    {"run_status": "completed"},
+                ),
+                "event_id": "EVT-0099",
+                "sequence": 99,
+                "run_id": scheduler.run_id,
+                "step_id": "STEP-RUN",
+            }
+
+            scheduler._notify_canonical_events("STEP-RUN", [canonical_event])
+
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            notification = [
+                event for event in events if event["event_type"] == "notification_sent"
+            ][0]
+            self.assertEqual(len(sink.calls), 1)
+            self.assertEqual(sink.calls[0]["event"]["event_type"], "run_completed")
+            self.assertEqual(notification["payload"]["source_event_type"], "run_completed")
+
+    def test_two_phase_scheduler_emits_run_started_and_completed_notifications(self):
+        class RecordingNotificationSink:
+            def __init__(self):
+                self.calls = []
+
+            def notify(self, event, context):
+                self.calls.append({"event": event, "context": context})
+                return {
+                    "event_type": "notification_sent",
+                    "actor": "agent-notifier",
+                    "target_agent_id": None,
+                    "idempotency_key": f"notification:{event['event_id']}",
+                    "correlation_id": event["correlation_id"],
+                    "payload": {
+                        "provider": "feishu",
+                        "project": "agentteam",
+                        "source_event_type": event["event_type"],
+                        "source_event_id": event["event_id"],
+                        "source_event_sequence": event["sequence"],
+                        "notification_status": "sent",
+                        "message_summary": event["event_type"],
+                    },
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"], tasks=[])
+            sink = RecordingNotificationSink()
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+                notification_sink=sink,
+            )
+
+            summary = scheduler.run_until_idle(max_ticks=1, poll_interval_seconds=0)
+
+            self.assertEqual(summary["scheduler_status"], "idle")
+            self.assertEqual(
+                [call["event"]["event_type"] for call in sink.calls],
+                ["run_started", "run_completed"],
+            )
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                [event["event_type"] for event in events if event["event_type"].startswith("run_")],
+                ["run_started", "run_completed"],
+            )
+            self.assertEqual(
+                [
+                    event["payload"]["source_event_type"]
+                    for event in events
+                    if event["event_type"] == "notification_sent"
+                ],
+                ["run_started", "run_completed"],
             )
 
     def test_build_planner_context_summarizes_state_roles_and_scopes(self):

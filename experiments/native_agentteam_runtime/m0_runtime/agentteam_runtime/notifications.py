@@ -7,6 +7,20 @@ import time
 import urllib.request
 
 
+DEFAULT_NOTIFICATION_EVENT_TYPES = {
+    "run_started",
+    "run_completed",
+    "run_failed",
+    "run_timed_out",
+    "run_stopped",
+    "manual_gate_required",
+    "integration_blocked",
+    "run_stale_detected",
+    "update_activated",
+    "rollback_activated",
+}
+
+
 def build_feishu_notification_sink_from_env(
     webhook_env,
     signing_secret_env=None,
@@ -21,7 +35,7 @@ def build_feishu_notification_sink_from_env(
     if not webhook_url:
         return None
     signing_secret = env.get(signing_secret_env) if signing_secret_env else None
-    return FeishuManualGateNotificationSink(
+    return FeishuRunEventNotificationSink(
         FeishuWebhookNotifier(
             webhook_url=webhook_url,
             signing_secret=signing_secret,
@@ -43,17 +57,23 @@ def feishu_custom_bot_sign(timestamp, secret):
     return base64.b64encode(digest).decode("utf-8")
 
 
-class FeishuManualGateNotificationSink:
-    def __init__(self, notifier):
+class FeishuRunEventNotificationSink:
+    def __init__(self, notifier, allowed_event_types=None):
         self.notifier = notifier
+        self.allowed_event_types = set(allowed_event_types or DEFAULT_NOTIFICATION_EVENT_TYPES)
 
     def notify(self, event, context):
-        if event.get("event_type") != "manual_gate_required":
+        if event.get("event_type") not in self.allowed_event_types:
             return []
-        return self.notifier.notify_manual_gate(
+        return self.notifier.notify_event(
             event,
             run_dir=context.get("run_dir", "unknown"),
         )
+
+
+class FeishuManualGateNotificationSink(FeishuRunEventNotificationSink):
+    def __init__(self, notifier):
+        super().__init__(notifier, allowed_event_types={"manual_gate_required"})
 
 
 class FeishuWebhookNotifier:
@@ -76,7 +96,10 @@ class FeishuWebhookNotifier:
         self.message_limit = message_limit
 
     def notify_manual_gate(self, event, run_dir):
-        payload = self._manual_gate_payload(event, run_dir)
+        return self.notify_event(event, run_dir)
+
+    def notify_event(self, event, run_dir):
+        payload = self._event_payload(event, run_dir)
         try:
             response = self.http_post(self.webhook_url, payload, self.timeout_seconds)
         except Exception as exc:
@@ -100,13 +123,13 @@ class FeishuWebhookNotifier:
             error_summary=self._sanitize(f"status_code={status_code} body_code={body_code}"),
         )
 
-    def _manual_gate_payload(self, event, run_dir):
+    def _event_payload(self, event, run_dir):
         timestamp = str(int(self.clock()))
         payload = {
             "msg_type": "text",
             "content": {
                 "text": _bounded_text(
-                    _manual_gate_text(event, run_dir, self.project),
+                    _event_text(event, run_dir, self.project),
                     self.message_limit,
                 )
             },
@@ -124,10 +147,6 @@ class FeishuWebhookNotifier:
         error_class=None,
         error_summary=None,
     ):
-        source_payload = source_event.get("payload", {})
-        question_id = source_payload.get("question_id")
-        task_id = source_payload.get("task_id")
-        message_summary = f"manual gate {question_id} for {task_id}"
         payload = {
             "provider": "feishu",
             "project": self.project,
@@ -135,7 +154,7 @@ class FeishuWebhookNotifier:
             "source_event_id": source_event.get("event_id"),
             "source_event_sequence": source_event.get("sequence"),
             "notification_status": notification_status,
-            "message_summary": message_summary,
+            "message_summary": _event_message_summary(source_event),
         }
         if error_class:
             payload["error_class"] = error_class
@@ -190,6 +209,48 @@ def _manual_gate_text(event, run_dir, project):
         ]
     )
     return "\n".join(lines)
+
+
+def _event_text(event, run_dir, project):
+    if event.get("event_type") == "manual_gate_required":
+        return _manual_gate_text(event, run_dir, project)
+    payload = event.get("payload", {})
+    lines = [
+        f"[AgentTeam] {event.get('event_type', 'event')}",
+        f"Project: {project}",
+    ]
+    run_status = payload.get("run_status") or payload.get("scheduler_status")
+    if run_status:
+        lines.append(f"Status: {run_status}")
+    task_id = payload.get("task_id")
+    if task_id:
+        lines.append(f"Task: {task_id}")
+    failure = payload.get("failure_category") or payload.get("error_summary")
+    if failure:
+        lines.append(f"Failure: {failure}")
+    lines.extend(
+        [
+            f"Run dir: {run_dir}",
+            f"Summary: {_event_message_summary(event)}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _event_message_summary(event):
+    event_type = event.get("event_type", "event")
+    payload = event.get("payload", {})
+    if event_type == "manual_gate_required":
+        question_id = payload.get("question_id")
+        task_id = payload.get("task_id")
+        return f"manual gate {question_id} for {task_id}"
+    status = payload.get("run_status") or payload.get("scheduler_status") or payload.get("status")
+    if status:
+        return f"{event_type} {status}"
+    task_id = payload.get("task_id")
+    if task_id:
+        return f"{event_type} {task_id}"
+    return event_type
 
 
 def _bounded_text(value, limit):

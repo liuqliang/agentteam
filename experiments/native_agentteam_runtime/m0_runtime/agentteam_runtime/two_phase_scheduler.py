@@ -26,6 +26,7 @@ from .m0_runtime import (
     write_patch_artifact,
 )
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
+from .notifications import DEFAULT_NOTIFICATION_EVENT_TYPES
 from .planner_context import build_planner_context
 from .task_proposal import normalize_task_proposal
 
@@ -194,22 +195,35 @@ class TwoPhaseFileScheduler:
     def run_until_idle(self, max_ticks=100, poll_interval_seconds=0.02):
         if max_ticks < 1:
             raise ValueError("max_ticks must be at least 1")
+        self._emit_run_event_once(
+            "run_started",
+            self._run_event_payload("running", {"max_ticks": max_ticks}),
+        )
         tick_count = 0
         last_tick = None
         for _ in range(max_ticks):
             tick_count += 1
             last_tick = self.tick()
             if last_tick["tick_status"] == "idle":
-                return {
+                summary = {
                     **self.summary(),
                     "scheduler_status": "idle",
                     "tick_count": tick_count,
                     "last_tick": last_tick,
                 }
+                self._emit_run_event_once(
+                    "run_completed",
+                    self._run_event_payload("completed", {"tick_count": tick_count}),
+                )
+                return summary
             if last_tick["tick_status"] == "waiting":
                 time.sleep(poll_interval_seconds)
         self.state["scheduler_status"] = "max_ticks_reached"
         self._write_state()
+        self._emit_run_event_once(
+            "run_timed_out",
+            self._run_event_payload("max_ticks_reached", {"tick_count": tick_count}),
+        )
         return {
             **self.summary(),
             "scheduler_status": "max_ticks_reached",
@@ -1166,8 +1180,13 @@ class TwoPhaseFileScheduler:
         if not self.notification_sink:
             return []
         telemetry_events = []
+        allowed_event_types = getattr(
+            self.notification_sink,
+            "allowed_event_types",
+            DEFAULT_NOTIFICATION_EVENT_TYPES,
+        )
         for event in events:
-            if event.get("event_type") != "manual_gate_required":
+            if event.get("event_type") not in allowed_event_types:
                 continue
             try:
                 result = self.notification_sink.notify(
@@ -1204,6 +1223,40 @@ class TwoPhaseFileScheduler:
         if telemetry_events:
             return self._append_events(step_id, telemetry_events)
         return []
+
+    def _emit_run_event_once(self, event_type, payload):
+        run_event_ids = self.state.setdefault("run_event_ids", {})
+        if run_event_ids.get(event_type):
+            return []
+        canonical = self._append_events(
+            "STEP-RUN",
+            [
+                self._event(
+                    event_type,
+                    "agent-scheduler",
+                    None,
+                    f"{event_type}:{self.run_id}",
+                    f"run:{self.run_id}",
+                    payload,
+                )
+            ],
+        )
+        run_event_ids[event_type] = canonical[0]["event_id"]
+        self._write_state()
+        self._notify_canonical_events("STEP-RUN", canonical)
+        return canonical
+
+    def _run_event_payload(self, run_status, extra=None):
+        payload = {
+            "run_status": run_status,
+            "scheduler_status": self.state.get("scheduler_status"),
+            "processed_task_count": len(self.summary()["processed_task_ids"]),
+            "inflight_count": len(self.state["inflight_attempts"]),
+            "step_count": len(self.state["steps"]),
+        }
+        if extra:
+            payload.update(extra)
+        return payload
 
     def _notification_event_from_spec(self, spec, source_event):
         if "time" in spec:

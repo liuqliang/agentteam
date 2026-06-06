@@ -70,11 +70,13 @@
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py`
 
 - [ ] Write failing tests with a fake notification sink for `run_started`, `run_completed`, `run_failed`, `integration_blocked`, `manual_gate_required`, and `run_stale_detected`.
-- [ ] Generalize the current Feishu manual-gate sink into an event-policy sink that formats bounded text for allowed event types.
-- [ ] Keep default policy sparse: run start, run terminal state, failure, timeout, manual gate, integration blocked, stale detected, update activated, rollback activated.
-- [ ] Ensure task-completed notifications are disabled by default.
-- [ ] Ensure notification failures append telemetry but do not block scheduler progress.
-- [ ] Run notification tests and full runtime tests.
+- [x] Add focused tests for Feishu `run_completed`, scheduler run-level notification dispatch, and `run_started`/`run_completed` boundary events.
+- [x] Generalize the current Feishu manual-gate sink into an event-policy sink that formats bounded text for allowed event types.
+- [x] Keep default policy sparse: run start, run terminal state, failure, timeout, manual gate, integration blocked, stale detected, update activated, rollback activated.
+- [x] Ensure task-completed notifications are disabled by default.
+- [x] Ensure notification failures append telemetry but do not block scheduler progress.
+- [x] Emit `run_started`, `run_completed`, and `run_timed_out` from `TwoPhaseFileScheduler.run_until_idle`.
+- [x] Run notification tests and full runtime tests.
 - [ ] Commit with `feat: notify run-level operator events`.
 
 ### Task 5: Release Manager And Update Command
