@@ -7,6 +7,32 @@ from pathlib import Path
 
 
 _RUNNING_WORKER_STATUSES = {"running", "started", "idle", "busy"}
+_RUNNING_SCHEDULER_STATUSES = {"running", "waiting", "max_ticks_reached"}
+
+
+def build_run_liveness_summary(run_dir, profile=None):
+    run_dir = Path(run_dir).resolve()
+    state = _read_json_if_exists(_scheduler_state_path(run_dir))
+    registry = _read_json_if_exists(_worker_registry_path(run_dir))
+    workers = registry.get("workers") if isinstance(registry, dict) else []
+    if not isinstance(workers, list):
+        workers = []
+    scheduler_status = state.get("scheduler_status") if isinstance(state, dict) else None
+    registry_status = registry.get("registry_status") if isinstance(registry, dict) else None
+    processes = _process_counts(workers)
+    liveness_status = _liveness_status(
+        scheduler_status=scheduler_status,
+        registry_status=registry_status,
+        workers=workers,
+        processes=processes,
+    )
+    return {
+        "liveness_status": liveness_status,
+        "scheduler_status": scheduler_status,
+        "registry_status": registry_status,
+        "processes": processes,
+        "runtime_release": _runtime_release_summary(state, profile),
+    }
 
 
 def stop_run(run_dir, grace_seconds=5, force=False, stale_only=False, operator="operator"):
@@ -96,7 +122,7 @@ def cleanup_stale_runs(profile, operator="operator"):
 def _run_is_stale(state, registry, workers):
     scheduler_status = state.get("scheduler_status") if isinstance(state, dict) else None
     registry_status = registry.get("registry_status") if isinstance(registry, dict) else None
-    claims_running = scheduler_status in {"running", "waiting", "max_ticks_reached"} or registry_status == "running"
+    claims_running = scheduler_status in _RUNNING_SCHEDULER_STATUSES or registry_status == "running"
     if not claims_running:
         return False
     running_workers = [
@@ -108,6 +134,58 @@ def _run_is_stale(state, registry, workers):
     if not running_workers:
         return True
     return not any(_pid_is_running(_worker_pid(worker)) for worker in running_workers)
+
+
+def _liveness_status(scheduler_status, registry_status, workers, processes):
+    claims_running = (
+        scheduler_status in _RUNNING_SCHEDULER_STATUSES
+        or registry_status == "running"
+        or any(
+            isinstance(worker, dict)
+            and worker.get("worker_status") in _RUNNING_WORKER_STATUSES
+            for worker in workers
+        )
+    )
+    if claims_running:
+        return "running-alive" if processes["live"] else "running-stale"
+    return scheduler_status or registry_status or "unknown"
+
+
+def _process_counts(workers):
+    entries = []
+    for worker in workers:
+        if not isinstance(worker, dict):
+            continue
+        pid = _worker_pid(worker)
+        if not pid:
+            continue
+        live = _pid_is_running(pid)
+        entries.append(
+            {
+                "pid": pid,
+                "live": live,
+                "worker_agent_id": worker.get("worker_agent_id") or worker.get("worker_id"),
+                "worker_status": worker.get("worker_status"),
+            }
+        )
+    return {
+        "registered": len(entries),
+        "live": sum(1 for entry in entries if entry["live"]),
+        "stale": sum(1 for entry in entries if not entry["live"]),
+        "sample": entries[:5],
+    }
+
+
+def _runtime_release_summary(state, profile):
+    profile = profile or {}
+    state = state if isinstance(state, dict) else {}
+    release_id = state.get("runtime_release_id") or profile.get("runtime_release_id")
+    release_root = state.get("runtime_release_root") or profile.get("runtime_release_root")
+    return {
+        "id": release_id,
+        "root": release_root,
+        "managed": bool(release_id or release_root),
+    }
 
 
 def _cleanup_stale_worker(worker, now):

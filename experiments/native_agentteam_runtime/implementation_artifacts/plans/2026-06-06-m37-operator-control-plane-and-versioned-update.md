@@ -17,12 +17,12 @@
 - Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py`
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py`
 
-- [ ] Write a failing test that builds a run directory with `scheduler_status=running`, no inflight attempts, and a worker registry whose worker is stopped. Assert `agentteam status --json` reports `liveness_status=running-stale` and human status includes `stale`.
-- [ ] Write a failing test that builds a run directory with a live helper process recorded in `worker_process_registry.json`. Assert `agentteam status --json` reports `liveness_status=running-alive`.
-- [ ] Implement `operator_control.build_run_liveness_summary(run_dir, profile=None)` that reads scheduler state, worker registry, events replay, registered PIDs, and heartbeat timestamps.
-- [ ] Update `_build_run_status_summary` to include `liveness_status`, `runtime_release`, and a bounded `processes` summary.
-- [ ] Update `taskpack list` so `run_status` uses liveness-aware status instead of raw scheduler status.
-- [ ] Run focused tests, full taskpack tests, and `git diff --check`.
+- [x] Write a failing test that builds a run directory with `scheduler_status=running`, no inflight attempts, and a worker registry whose worker is stopped. Assert `agentteam status --json` reports `liveness_status=running-stale` and human status includes `stale`.
+- [x] Write a failing test that builds a run directory with a live helper process recorded in `worker_process_registry.json`. Assert `agentteam status --json` reports `liveness_status=running-alive`.
+- [x] Implement `operator_control.build_run_liveness_summary(run_dir, profile=None)` that reads scheduler state, worker registry, events replay, registered PIDs, and heartbeat timestamps.
+- [x] Update `_build_run_status_summary` to include `liveness_status`, `runtime_release`, and a bounded `processes` summary.
+- [x] Update `taskpack list` so `run_status` uses liveness-aware status instead of raw scheduler status.
+- [x] Run focused tests, full taskpack tests, and `git diff --check`.
 - [ ] Commit with `fix: report truthful run liveness`.
 
 ### Task 2: Watch Command

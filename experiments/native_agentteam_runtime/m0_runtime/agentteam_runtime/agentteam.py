@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .m0_runtime import answer_manual_gate, replay_events
-from .operator_control import cleanup_stale_runs, stop_run
+from .operator_control import build_run_liveness_summary, cleanup_stale_runs, stop_run
 from .profile import (
     AgentTeamProfileError,
     build_project_profile,
@@ -426,7 +426,8 @@ def _frozen_taskpack_list_summary(profile):
                 "run_status": "not_run",
             }
             if run_dir.exists():
-                item["run_status"] = _build_run_status_summary(profile, run_dir)["status"]
+                run_summary = _build_run_status_summary(profile, run_dir)
+                item["run_status"] = run_summary.get("liveness_status") or run_summary["status"]
             taskpacks.append(item)
     return {
         "project": profile.get("project_key") or "unknown",
@@ -853,6 +854,7 @@ def _build_run_status_summary(profile, run_dir):
     worker_registry = _read_json_if_exists(run_dir / "state" / "worker_process_registry.json")
     if not worker_registry:
         worker_registry = _read_json_if_exists(run_dir / "state" / "worker_registry.json")
+    liveness = build_run_liveness_summary(run_dir, profile=profile)
     task_counts = _status_task_counts(snapshot, state)
     integration_counts = _status_integration_counts(snapshot)
     manual_gate_count = _waiting_manual_gate_count(snapshot)
@@ -860,6 +862,9 @@ def _build_run_status_summary(profile, run_dir):
         "project": profile.get("project_key") or "unknown",
         "latest_run": run_dir.name,
         "status": _status_run_state(snapshot, state),
+        "liveness_status": liveness["liveness_status"],
+        "runtime_release": liveness["runtime_release"],
+        "processes": liveness["processes"],
         "tasks": task_counts,
         "integration": integration_counts,
         "inflight": _status_inflight_attempts(state),
@@ -877,6 +882,7 @@ def _write_status_text(summary):
         f"project: {summary['project']}",
         f"latest_run: {summary['latest_run']}",
         f"status: {summary['status']}",
+        f"liveness: {summary['liveness_status']}",
         (
             "tasks: "
             f"{summary['tasks']['done']} done, "

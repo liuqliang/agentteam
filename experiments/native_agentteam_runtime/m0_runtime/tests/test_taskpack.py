@@ -534,6 +534,173 @@ class TaskpackTests(unittest.TestCase):
                 status_completed.stdout,
             )
 
+    def test_agentteam_cli_status_reports_running_stale_liveness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "stale-run"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "status-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            (run_dir / "state").mkdir(parents=True)
+            (run_dir / "state" / "two_phase_scheduler_state.json").write_text(
+                json.dumps({"scheduler_status": "running", "inflight_attempts": []}),
+                encoding="utf-8",
+            )
+            (run_dir / "state" / "worker_process_registry.json").write_text(
+                json.dumps(
+                    {
+                        "registry_status": "stopped",
+                        "workers": [
+                            {
+                                "worker_agent_id": "implementation-worker-1",
+                                "worker_status": "stopped",
+                                "worker_pid": 999999999,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            json_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            text_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(json_completed.returncode, 0, json_completed.stderr)
+            summary = json.loads(json_completed.stdout)
+            self.assertEqual(summary["liveness_status"], "running-stale")
+            self.assertEqual(summary["processes"]["live"], 0)
+            self.assertEqual(text_completed.returncode, 0, text_completed.stderr)
+            self.assertIn("liveness: running-stale", text_completed.stdout)
+
+    def test_agentteam_cli_status_reports_running_alive_liveness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "alive-run"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "status-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            (run_dir / "state").mkdir(parents=True)
+            (run_dir / "state" / "two_phase_scheduler_state.json").write_text(
+                json.dumps({"scheduler_status": "running", "inflight_attempts": []}),
+                encoding="utf-8",
+            )
+            (run_dir / "state" / "worker_process_registry.json").write_text(
+                json.dumps(
+                    {
+                        "registry_status": "running",
+                        "workers": [
+                            {
+                                "worker_agent_id": "implementation-worker-1",
+                                "worker_status": "running",
+                                "worker_pid": os.getpid(),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            status_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(status_completed.returncode, 0, status_completed.stderr)
+            summary = json.loads(status_completed.stdout)
+            self.assertEqual(summary["liveness_status"], "running-alive")
+            self.assertEqual(summary["processes"]["live"], 1)
+
     def test_agentteam_cli_stop_marks_latest_run_stopped_and_writes_stop_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -975,6 +1142,88 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("run_status=idle", list_completed.stdout)
             self.assertIn("listed-not-run", list_completed.stdout)
             self.assertIn("run_status=not_run", list_completed.stdout)
+
+    def test_agentteam_cli_taskpack_list_uses_liveness_aware_run_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "stale-listed"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "list-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            taskpack = draft_taskpack_from_goal(
+                project_root=repo,
+                goal="Create stale listed frozen taskpack.",
+                draft_root=work_root / "drafts",
+                author_runtime="fake",
+                taskpack_id="stale-listed",
+            )
+            freeze_taskpack(taskpack["taskpack_dir"], work_root / "frozen")
+            (run_dir / "state").mkdir(parents=True)
+            (run_dir / "state" / "two_phase_scheduler_state.json").write_text(
+                json.dumps({"scheduler_status": "running", "inflight_attempts": []}),
+                encoding="utf-8",
+            )
+            (run_dir / "state" / "worker_process_registry.json").write_text(
+                json.dumps(
+                    {
+                        "registry_status": "stopped",
+                        "workers": [
+                            {
+                                "worker_agent_id": "implementation-worker-1",
+                                "worker_status": "stopped",
+                                "worker_pid": 999999999,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            list_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "list",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(list_completed.returncode, 0, list_completed.stderr)
+            self.assertIn("stale-listed", list_completed.stdout)
+            self.assertIn("run_status=running-stale", list_completed.stdout)
 
     def test_agentteam_cli_continue_runs_existing_frozen_taskpack_without_draft(self):
         with tempfile.TemporaryDirectory() as tmp:
