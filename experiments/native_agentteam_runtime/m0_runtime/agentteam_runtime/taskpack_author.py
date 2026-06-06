@@ -322,7 +322,7 @@ def _project_python(project_root):
     ]
     for candidate in candidates:
         if candidate.exists() and candidate.is_file():
-            return candidate.resolve()
+            return candidate
     return None
 
 

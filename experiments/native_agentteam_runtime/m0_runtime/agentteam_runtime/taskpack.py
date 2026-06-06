@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -291,9 +292,12 @@ def _verification_command_allowed(executable, project_root):
         return True
     if not project_root:
         return False
+    project_root_path = Path(os.path.abspath(project_root))
+    executable_path = Path(executable)
+    if not executable_path.is_absolute():
+        executable_path = project_root_path / executable_path
     try:
-        executable_path = Path(executable).resolve()
-        relative = executable_path.relative_to(Path(project_root).resolve())
+        relative = Path(os.path.abspath(executable_path)).relative_to(project_root_path)
     except ValueError:
         return False
     return relative.as_posix() in {".venv/bin/python", "venv/bin/python"} and executable_path.is_file()
