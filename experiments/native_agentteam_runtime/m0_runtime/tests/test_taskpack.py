@@ -629,6 +629,57 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(frozen["manifest"]["taskpack_id"], "fake-freezable")
             self.assertTrue((Path(frozen["frozen_taskpack_dir"]) / "manifest.json").exists())
 
+    def test_taskpack_author_uses_unique_implicit_id_when_default_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+
+            first = draft_taskpack_from_goal(
+                project_root=repo,
+                goal="优化现有比赛代码",
+                draft_root=drafts,
+                author_runtime="fake",
+            )
+            second = draft_taskpack_from_goal(
+                project_root=repo,
+                goal="优化现有比赛代码",
+                draft_root=drafts,
+                author_runtime="fake",
+            )
+
+            self.assertEqual(first["taskpack_id"], "taskpack")
+            self.assertEqual(second["taskpack_id"], "taskpack-2")
+            self.assertTrue((drafts / "taskpack").exists())
+            self.assertTrue((drafts / "taskpack-2").exists())
+
+    def test_taskpack_author_rejects_explicit_existing_taskpack_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+
+            draft_taskpack_from_goal(
+                project_root=repo,
+                goal="Create explicit taskpack.",
+                draft_root=drafts,
+                author_runtime="fake",
+                taskpack_id="explicit-repeat",
+            )
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                draft_taskpack_from_goal(
+                    project_root=repo,
+                    goal="Create explicit taskpack again.",
+                    draft_root=drafts,
+                    author_runtime="fake",
+                    taskpack_id="explicit-repeat",
+                )
+
+            self.assertIn("already exists", str(raised.exception))
+
     def test_taskpack_author_rejects_unsupported_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

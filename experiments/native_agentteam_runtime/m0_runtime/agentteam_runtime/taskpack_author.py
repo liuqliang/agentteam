@@ -5,8 +5,8 @@ from pathlib import Path
 from .repo_map import build_repository_map
 from .taskpack import (
     TaskpackValidationError,
-    _normalize_taskpack_id,
     _require_contained_path,
+    _resolve_draft_taskpack_id,
     draft_taskpack_files,
     validate_taskpack,
 )
@@ -63,7 +63,12 @@ def _draft_with_codex(
 ):
     project_root = Path(project_root).resolve()
     draft_root = Path(draft_root).resolve()
-    taskpack_id = _normalize_taskpack_id(taskpack_id, goal)
+    taskpack_id = _resolve_draft_taskpack_id(
+        taskpack_id,
+        goal,
+        draft_root,
+        extra_reserved_path_templates=[".{taskpack_id}-author"],
+    )
     taskpack_dir = (draft_root / taskpack_id).resolve()
     author_context_dir = (draft_root / f".{taskpack_id}-author").resolve()
     _require_contained_path(taskpack_dir, draft_root, "taskpack_dir")

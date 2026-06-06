@@ -29,7 +29,7 @@ def draft_taskpack_files(
 ):
     project_root = Path(project_root).resolve()
     draft_root = Path(draft_root).resolve()
-    taskpack_id = _normalize_taskpack_id(taskpack_id, goal)
+    taskpack_id = _resolve_draft_taskpack_id(taskpack_id, goal, draft_root)
     taskpack_dir = (draft_root / taskpack_id).resolve()
     _require_contained_path(taskpack_dir, draft_root, "taskpack_dir")
 
@@ -394,6 +394,43 @@ def _normalize_taskpack_id(taskpack_id, goal):
             "taskpack_id must be a safe lowercase slug containing only letters, numbers, and hyphens"
         )
     return taskpack_id
+
+
+def _resolve_draft_taskpack_id(taskpack_id, goal, draft_root, extra_reserved_path_templates=None):
+    draft_root = Path(draft_root)
+    explicit = taskpack_id is not None
+    base_id = _normalize_taskpack_id(taskpack_id, goal)
+    reserved_path_templates = list(extra_reserved_path_templates or [])
+    if explicit:
+        _raise_if_draft_id_reserved(base_id, draft_root, reserved_path_templates)
+        return base_id
+
+    for candidate in _candidate_taskpack_ids(base_id):
+        if not _draft_id_reserved(candidate, draft_root, reserved_path_templates):
+            return candidate
+    raise TaskpackValidationError(f"could not find an available taskpack id for base: {base_id}")
+
+
+def _candidate_taskpack_ids(base_id):
+    yield base_id
+    for index in range(2, 1000):
+        suffix = f"-{index}"
+        head = base_id[: 80 - len(suffix)].rstrip("-") or "taskpack"
+        yield f"{head}{suffix}"
+
+
+def _raise_if_draft_id_reserved(taskpack_id, draft_root, reserved_path_templates):
+    if _draft_id_reserved(taskpack_id, draft_root, reserved_path_templates):
+        raise TaskpackValidationError(f"taskpack draft already exists: {taskpack_id}")
+
+
+def _draft_id_reserved(taskpack_id, draft_root, reserved_path_templates):
+    if (draft_root / taskpack_id).exists():
+        return True
+    for template in reserved_path_templates:
+        if (draft_root / template.format(taskpack_id=taskpack_id)).exists():
+            return True
+    return False
 
 
 def _validate_existing_taskpack_id(taskpack_id):
