@@ -32,12 +32,12 @@
 - Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/operator_control.py`
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py`
 
-- [ ] Write a failing test for `agentteam watch --run-dir <run> --interval 0 --max-lines 1` that asserts one compact progress line is printed and the command exits without mutating state.
-- [ ] Add parser options `watch`, `--project-root`, `--taskpack`, `--run-dir`, `--interval`, `--max-lines`, and `--json-lines`.
-- [ ] Implement event cursor helpers that read only new `events.jsonl` records between ticks.
-- [ ] Print periodic human lines to stdout by default. Print event-specific lines immediately for dispatch, completion, blocked integration, manual gate, stopped, failed, and completed states.
-- [ ] Stop watching automatically when liveness is terminal, unless future options add follow behavior.
-- [ ] Run focused tests, full runtime tests, and `compileall`.
+- [x] Write a failing test for `agentteam watch --run-dir <run> --interval 0 --max-lines 1` that asserts one compact progress line is printed and the command exits without mutating state.
+- [x] Add parser options `watch`, `--project-root`, `--taskpack`, `--run-dir`, `--interval`, `--max-lines`, and `--json-lines`.
+- [x] Implement event cursor helpers that read only new `events.jsonl` records between ticks.
+- [x] Print periodic human lines to stdout by default. Print event-specific lines immediately for dispatch, completion, blocked integration, manual gate, stopped, failed, and completed states.
+- [x] Stop watching automatically when liveness is terminal, unless future options add follow behavior.
+- [x] Run focused tests, full runtime tests, and `compileall`.
 - [ ] Commit with `feat: add agentteam watch`.
 
 ### Task 3: Stop And Stale Cleanup

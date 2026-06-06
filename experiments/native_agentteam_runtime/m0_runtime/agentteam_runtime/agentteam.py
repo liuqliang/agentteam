@@ -3,11 +3,17 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .m0_runtime import answer_manual_gate, replay_events
-from .operator_control import build_run_liveness_summary, cleanup_stale_runs, stop_run
+from .operator_control import (
+    build_run_liveness_summary,
+    cleanup_stale_runs,
+    read_event_records_since,
+    stop_run,
+)
 from .profile import (
     AgentTeamProfileError,
     build_project_profile,
@@ -75,6 +81,7 @@ def _build_parser():
     _add_continue_parser(subcommands)
     _add_answer_parser(subcommands)
     _add_resume_parser(subcommands)
+    _add_watch_parser(subcommands)
     _add_stop_parser(subcommands)
     _add_status_parser(subcommands)
     return parser
@@ -365,6 +372,17 @@ def _add_stop_parser(subcommands):
     parser.add_argument("--operator", default="operator", help="Operator identity recorded in state updates.")
     parser.add_argument("--json", action="store_true", help="Print stop result as JSON instead of human text.")
     parser.set_defaults(handler=_handle_stop)
+
+
+def _add_watch_parser(subcommands):
+    parser = subcommands.add_parser("watch", help="Watch compact progress for an AgentTeam run.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--taskpack", help="Run/taskpack id to watch. Defaults to latest run id.")
+    parser.add_argument("--run-dir", help="Existing run directory to watch. Defaults to selected profile run.")
+    parser.add_argument("--interval", type=float, default=2.0, help="Seconds between progress lines.")
+    parser.add_argument("--max-lines", type=int, help="Maximum lines to print before exiting.")
+    parser.add_argument("--json-lines", action="store_true", help="Print progress as JSON lines.")
+    parser.set_defaults(handler=_handle_watch)
 
 
 def _add_status_parser(subcommands):
@@ -787,6 +805,88 @@ def _handle_stop(args):
         return summary
     _write_stop_text(summary)
     return 0
+
+
+def _handle_watch(args):
+    profile = _watch_profile(args)
+    run_dir = _watch_run_dir(args, profile)
+    if not run_dir.exists():
+        raise AgentTeamCliError("run not found", run_dir=str(run_dir))
+    max_lines = args.max_lines
+    if max_lines is None and args.interval <= 0:
+        max_lines = 1
+    cursor = 0
+    printed = 0
+    while max_lines is None or printed < max_lines:
+        summary = _build_run_status_summary(profile, run_dir)
+        cursor, events = read_event_records_since(run_dir / "events.jsonl", cursor, max_records=20)
+        _write_watch_line(summary, events, json_lines=args.json_lines)
+        printed += 1
+        if _watch_should_stop(summary):
+            break
+        if max_lines is not None and printed >= max_lines:
+            break
+        time.sleep(max(args.interval, 0))
+    return 0
+
+
+def _watch_profile(args):
+    if args.project_root:
+        return load_project_profile(Path(args.project_root).resolve())
+    if args.run_dir:
+        run_dir = Path(args.run_dir).resolve()
+        work_root = run_dir.parent.parent if run_dir.parent.name == "runs" else run_dir.parent
+        return {
+            "project_key": "unknown",
+            "work_root": str(work_root),
+        }
+    return load_project_profile(Path(".").resolve())
+
+
+def _watch_run_dir(args, profile):
+    if args.run_dir:
+        return Path(args.run_dir).resolve()
+    return _selected_run_dir(args, profile, command_name="watch")
+
+
+def _write_watch_line(summary, events, json_lines=False):
+    event_type = events[-1].get("event_type") if events else None
+    if json_lines:
+        _print_json(
+            {
+                "run": summary["latest_run"],
+                "status": summary["status"],
+                "liveness_status": summary["liveness_status"],
+                "tasks": summary["tasks"],
+                "inflight": summary["inflight"],
+                "manual_gates": summary["manual_gates"],
+                "event_type": event_type,
+                "run_dir": summary["run_dir"],
+            },
+            stream=sys.stdout,
+        )
+        return
+    pieces = [
+        f"run={summary['latest_run']}",
+        f"status={summary['status']}",
+        f"liveness={summary['liveness_status']}",
+        f"tasks={summary['tasks']['done']}/{summary['tasks']['total']}",
+        f"blocked={summary['tasks']['blocked']}",
+        f"inflight={summary['inflight']['total']}",
+        f"manual_gates={summary['manual_gates']}",
+    ]
+    if event_type:
+        pieces.append(f"event={event_type}")
+    sys.stdout.write(" ".join(pieces) + "\n")
+    sys.stdout.flush()
+
+
+def _watch_should_stop(summary):
+    status = summary.get("status")
+    liveness_status = summary.get("liveness_status")
+    if liveness_status in {"running-alive"}:
+        return False
+    return status in {"idle", "stopped", "completed", "failed"} or liveness_status == "running-stale"
 
 
 def _selected_run_dir(args, profile, command_name):

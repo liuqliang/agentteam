@@ -701,6 +701,70 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["liveness_status"], "running-alive")
             self.assertEqual(summary["processes"]["live"], 1)
 
+    def test_agentteam_cli_watch_prints_one_progress_line_without_mutating_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            run_dir = tmp_path / "runs" / "watch-run"
+            state_path = run_dir / "state" / "two_phase_scheduler_state.json"
+            registry_path = run_dir / "state" / "worker_process_registry.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "scheduler_status": "running",
+                        "backlog": {"items": [{"task_id": "watch-task", "backlog_status": "ready"}]},
+                        "inflight_attempts": [{"task_id": "watch-task", "attempt_id": "ATTEMPT-001"}],
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "registry_status": "stopped",
+                        "workers": [
+                            {
+                                "worker_agent_id": "implementation-worker-1",
+                                "worker_status": "stopped",
+                                "worker_pid": 999999999,
+                            }
+                        ],
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            before_state = state_path.read_text(encoding="utf-8")
+            before_registry = registry_path.read_text(encoding="utf-8")
+
+            watch_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "watch",
+                    "--run-dir",
+                    str(run_dir),
+                    "--interval",
+                    "0",
+                    "--max-lines",
+                    "1",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(watch_completed.returncode, 0, watch_completed.stderr)
+            self.assertEqual(len([line for line in watch_completed.stdout.splitlines() if line.strip()]), 1)
+            self.assertIn("run=watch-run", watch_completed.stdout)
+            self.assertIn("liveness=running-stale", watch_completed.stdout)
+            self.assertEqual(state_path.read_text(encoding="utf-8"), before_state)
+            self.assertEqual(registry_path.read_text(encoding="utf-8"), before_registry)
+
     def test_agentteam_cli_stop_marks_latest_run_stopped_and_writes_stop_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

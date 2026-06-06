@@ -35,6 +35,23 @@ def build_run_liveness_summary(run_dir, profile=None):
     }
 
 
+def read_event_records_since(events_path, cursor=0, max_records=None):
+    events_path = Path(events_path)
+    if not events_path.exists():
+        return cursor, []
+    records = []
+    with events_path.open(encoding="utf-8") as stream:
+        stream.seek(cursor)
+        for line in stream:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            records.append(json.loads(stripped))
+            if max_records is not None and len(records) >= max_records:
+                break
+        return stream.tell(), records
+
+
 def stop_run(run_dir, grace_seconds=5, force=False, stale_only=False, operator="operator"):
     run_dir = Path(run_dir).resolve()
     now = _utc_now()
