@@ -1072,6 +1072,32 @@ class TaskpackTests(unittest.TestCase):
             )
             self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
 
+    def test_codex_taskpack_author_normalizes_system_python_verification_without_project_venv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Normalize system Python verification.",
+                draft_root=drafts,
+                taskpack_id="system-python-command",
+                read_scope=["README.md"],
+                write_scope=["README.md"],
+                verification_command=["/usr/bin/python3.12", "-m", "unittest", "discover"],
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+
+            _canonicalize_codex_taskpack_files(taskpack_dir)
+
+            verification = json.loads((taskpack_dir / "verification.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                verification["command"],
+                ["python3", "-m", "unittest", "discover"],
+            )
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
+
     def test_codex_taskpack_author_rejects_dirty_repo_before_running_codex(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

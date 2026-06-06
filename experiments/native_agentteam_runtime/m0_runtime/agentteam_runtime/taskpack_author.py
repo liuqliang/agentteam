@@ -293,14 +293,23 @@ def _canonical_verification_command(command, project_root):
     if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
         return command
     project_python = _project_python(project_root)
-    if project_python is None:
-        return command
     python_index = _python_command_index(command)
     if python_index is None:
         return command
+    python_executable = str(project_python) if project_python is not None else "python3"
+    if _is_env_python_wrapper(command, python_index):
+        return [python_executable, *command[python_index + 1 :]]
     canonical = list(command)
-    canonical[python_index] = str(project_python)
+    if python_index == 0 or project_python is not None:
+        canonical[python_index] = python_executable
     return canonical
+
+
+def _is_env_python_wrapper(command, python_index):
+    if python_index != 1:
+        return False
+    executable = Path(command[0]).name
+    return executable == "env"
 
 
 def _project_python(project_root):
