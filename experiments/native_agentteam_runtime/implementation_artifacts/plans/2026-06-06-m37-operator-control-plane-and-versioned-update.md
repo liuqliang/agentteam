@@ -134,12 +134,12 @@
 - Modify: `experiments/native_agentteam_runtime/README.md`
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py`
 
-- [ ] Write a failing test for `agentteam taskpack delete --project-root <repo> --taskpack <id> --dry-run` that reports draft/frozen/run paths without mutating them.
-- [ ] Write a failing test for deleting a frozen taskpack while its run exists. Assert the command refuses unless `--delete-run --force` is supplied.
-- [ ] Implement deletion scoped to the profile `work_root` only: drafts, frozen taskpacks, and optionally runs. Never delete arbitrary absolute paths supplied by the operator.
-- [ ] Add JSON and human output with deleted path counts and skipped paths.
+- [x] Write a failing test for `agentteam taskpack delete --project-root <repo> --taskpack <id> --dry-run` that reports draft/frozen/run paths without mutating them.
+- [x] Write a failing test for deleting a frozen taskpack while its run exists. Assert the command refuses unless `--delete-run --force` is supplied.
+- [x] Implement deletion scoped to the profile `work_root` only: drafts, frozen taskpacks, and optionally runs. Never delete arbitrary absolute paths supplied by the operator.
+- [x] Add JSON and human output with deleted path counts and skipped paths.
 - [ ] Document the safe cleanup workflow for old frozen taskpacks and runs.
-- [ ] Run focused taskpack delete tests, full runtime tests, and `git diff --check`.
+- [x] Run focused taskpack delete tests, full runtime tests, and `git diff --check`.
 - [ ] Commit with `feat: add taskpack delete`.
 
 ### Verification

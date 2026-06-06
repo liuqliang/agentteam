@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -83,6 +84,7 @@ def _build_parser():
     _add_taskpack_validate_parser(taskpack_subcommands)
     _add_taskpack_freeze_parser(taskpack_subcommands)
     _add_taskpack_list_parser(taskpack_subcommands)
+    _add_taskpack_delete_parser(taskpack_subcommands)
     _add_run_parser(subcommands)
     _add_continue_parser(subcommands)
     _add_answer_parser(subcommands)
@@ -275,6 +277,18 @@ def _add_taskpack_list_parser(subcommands):
     parser.set_defaults(handler=_handle_taskpack_list)
 
 
+def _add_taskpack_delete_parser(subcommands):
+    parser = subcommands.add_parser("delete", help="Delete a draft/frozen taskpack and optionally its run.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--work-root", help="Override the project profile work root.")
+    parser.add_argument("--taskpack", required=True, help="Taskpack id to delete.")
+    parser.add_argument("--delete-run", action="store_true", help="Also delete the run directory.")
+    parser.add_argument("--force", action="store_true", help="Required for non-dry-run deletion.")
+    parser.add_argument("--dry-run", action="store_true", help="Report delete candidates without mutating files.")
+    parser.add_argument("--json", action="store_true", help="Print delete result as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_taskpack_delete)
+
+
 def _add_run_parser(subcommands):
     parser = subcommands.add_parser("run", help="Run a frozen taskpack through agentteam_runtime.cli.")
     parser.add_argument("frozen_taskpack_dir", help="Frozen taskpack directory to run.")
@@ -443,6 +457,101 @@ def _handle_taskpack_list(args):
         return summary
     _write_taskpack_list_text(summary)
     return 0
+
+
+def _handle_taskpack_delete(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    if args.work_root:
+        profile = {**profile, "work_root": str(Path(args.work_root).resolve())}
+    summary = _delete_taskpack_from_profile(
+        profile,
+        args.taskpack,
+        delete_run=args.delete_run,
+        force=args.force,
+        dry_run=args.dry_run,
+    )
+    if args.json:
+        return summary
+    _write_taskpack_delete_text(summary)
+    return 0
+
+
+def _delete_taskpack_from_profile(profile, taskpack_id, delete_run=False, force=False, dry_run=False):
+    work_root = Path(profile["work_root"]).resolve()
+    paths = [
+        ("draft", _scoped_taskpack_path(work_root, "drafts", taskpack_id)),
+        ("frozen", _scoped_taskpack_path(work_root, "frozen", taskpack_id)),
+    ]
+    run_path = _scoped_taskpack_path(work_root, "runs", taskpack_id)
+    skipped_run = None
+    if run_path.exists() and not delete_run:
+        skipped_run = str(run_path)
+        if not dry_run:
+            raise AgentTeamCliError(
+                "run exists for taskpack; pass --delete-run --force to delete it",
+                taskpack_id=taskpack_id,
+                run_dir=str(run_path),
+            )
+    if delete_run:
+        paths.append(("run", run_path))
+    if not dry_run and not force:
+        raise AgentTeamCliError("--force is required for taskpack delete", taskpack_id=taskpack_id)
+
+    candidates = [
+        {"kind": kind, "path": str(path), "exists": path.exists()}
+        for kind, path in paths
+    ]
+    if dry_run:
+        return {
+            "delete_status": "dry_run",
+            "taskpack_id": taskpack_id,
+            "work_root": str(work_root),
+            "candidates": candidates,
+            "deleted": [],
+            "deleted_count": 0,
+            "skipped_run": skipped_run,
+        }
+
+    deleted = []
+    for kind, path in paths:
+        if not path.exists():
+            continue
+        shutil.rmtree(path)
+        deleted.append({"kind": kind, "path": str(path)})
+    return {
+        "delete_status": "deleted",
+        "taskpack_id": taskpack_id,
+        "work_root": str(work_root),
+        "candidates": candidates,
+        "deleted": deleted,
+        "deleted_count": len(deleted),
+        "skipped_run": skipped_run,
+    }
+
+
+def _scoped_taskpack_path(work_root, section, taskpack_id):
+    root = (Path(work_root) / section).resolve()
+    path = (root / taskpack_id).resolve()
+    if not path.is_relative_to(root):
+        raise AgentTeamCliError(
+            "taskpack id escapes work root",
+            taskpack_id=taskpack_id,
+            section=section,
+        )
+    return path
+
+
+def _write_taskpack_delete_text(summary):
+    lines = [
+        f"taskpack: {summary['taskpack_id']}",
+        f"delete_status: {summary['delete_status']}",
+        f"deleted_count: {summary['deleted_count']}",
+    ]
+    if summary.get("skipped_run"):
+        lines.append(f"skipped_run: {summary['skipped_run']}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
 
 
 def _frozen_taskpack_list_summary(profile):

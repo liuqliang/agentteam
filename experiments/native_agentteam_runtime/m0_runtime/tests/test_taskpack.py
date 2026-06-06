@@ -1289,6 +1289,159 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("stale-listed", list_completed.stdout)
             self.assertIn("run_status=running-stale", list_completed.stdout)
 
+    def test_agentteam_cli_taskpack_delete_dry_run_reports_paths_without_mutating(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "delete-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            for base in ["drafts", "frozen", "runs"]:
+                path = work_root / base / "delete-me"
+                path.mkdir(parents=True)
+                (path / "marker.txt").write_text(base, encoding="utf-8")
+
+            delete_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "delete",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "delete-me",
+                    "--dry-run",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(delete_completed.returncode, 0, delete_completed.stderr)
+            summary = json.loads(delete_completed.stdout)
+            self.assertEqual(summary["delete_status"], "dry_run")
+            self.assertEqual(summary["skipped_run"], str((work_root / "runs" / "delete-me").resolve()))
+            self.assertTrue((work_root / "drafts" / "delete-me").exists())
+            self.assertTrue((work_root / "frozen" / "delete-me").exists())
+            self.assertTrue((work_root / "runs" / "delete-me").exists())
+
+    def test_agentteam_cli_taskpack_delete_requires_explicit_run_delete_and_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "delete-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            for base in ["drafts", "frozen", "runs"]:
+                path = work_root / base / "delete-me"
+                path.mkdir(parents=True)
+                (path / "marker.txt").write_text(base, encoding="utf-8")
+
+            refused = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "delete",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "delete-me",
+                    "--force",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("run exists", refused.stderr)
+
+            deleted = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "delete",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "delete-me",
+                    "--delete-run",
+                    "--force",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(deleted.returncode, 0, deleted.stderr)
+            summary = json.loads(deleted.stdout)
+            self.assertEqual(summary["delete_status"], "deleted")
+            self.assertEqual(summary["deleted_count"], 3)
+            self.assertFalse((work_root / "drafts" / "delete-me").exists())
+            self.assertFalse((work_root / "frozen" / "delete-me").exists())
+            self.assertFalse((work_root / "runs" / "delete-me").exists())
+
     def test_agentteam_cli_update_status_reports_releases_and_run_bindings(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
