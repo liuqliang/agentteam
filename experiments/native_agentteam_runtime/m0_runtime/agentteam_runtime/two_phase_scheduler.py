@@ -56,6 +56,7 @@ class TwoPhaseFileScheduler:
         decomposition_context_excerpt_chars=1200,
         decomposition_max_waves=1,
         unavailable_agent_ids=None,
+        notification_sink=None,
     ):
         if max_inflight < 1:
             raise ValueError("max_inflight must be at least 1")
@@ -94,6 +95,7 @@ class TwoPhaseFileScheduler:
         self.decomposition_context_excerpt_chars = decomposition_context_excerpt_chars
         self.decomposition_max_waves = decomposition_max_waves
         self.unavailable_agent_ids = set(unavailable_agent_ids or [])
+        self.notification_sink = notification_sink
         self.state_path = Path(
             state_path or self.output_dir / "state" / "two_phase_scheduler_state.json"
         )
@@ -546,9 +548,7 @@ class TwoPhaseFileScheduler:
             result,
             outcome,
         )
-        self._append_events(
-            inflight["step_id"],
-            [
+        runtime_events = [
                 self._event(
                     "runtime_session_observed",
                     result_actor,
@@ -694,8 +694,9 @@ class TwoPhaseFileScheduler:
                     if retry_allowed
                     else []
                 ),
-            ],
-        )
+            ]
+        canonical_events = self._append_events(inflight["step_id"], runtime_events)
+        self._notify_canonical_events(inflight["step_id"], canonical_events)
         self._update_task_from_outcome(
             inflight["task_id"],
             outcome["validation_status"],
@@ -1159,6 +1160,62 @@ class TwoPhaseFileScheduler:
             )
             sequence += 1
         _append_jsonl(self.events_path, canonical)
+        return canonical
+
+    def _notify_canonical_events(self, step_id, events):
+        if not self.notification_sink:
+            return []
+        telemetry_events = []
+        for event in events:
+            if event.get("event_type") != "manual_gate_required":
+                continue
+            try:
+                result = self.notification_sink.notify(
+                    event,
+                    {"run_dir": str(self.output_dir)},
+                )
+            except Exception as exc:
+                result = [
+                    self._event(
+                        "notification_failed",
+                        "agent-notifier",
+                        None,
+                        f"notification:{event['event_id']}:failed",
+                        event["correlation_id"],
+                        {
+                            "provider": "unknown",
+                            "source_event_type": event.get("event_type"),
+                            "source_event_id": event.get("event_id"),
+                            "source_event_sequence": event.get("sequence"),
+                            "notification_status": "failed",
+                            "error_class": exc.__class__.__name__,
+                            "error_summary": str(exc)[:300],
+                        },
+                    )
+                ]
+            if isinstance(result, dict):
+                telemetry_events.append(self._notification_event_from_spec(result, event))
+            elif isinstance(result, list):
+                telemetry_events.extend(
+                    self._notification_event_from_spec(item, event)
+                    for item in result
+                    if isinstance(item, dict)
+                )
+        if telemetry_events:
+            return self._append_events(step_id, telemetry_events)
+        return []
+
+    def _notification_event_from_spec(self, spec, source_event):
+        if "time" in spec:
+            return spec
+        return self._event(
+            spec["event_type"],
+            spec.get("actor", "agent-notifier"),
+            spec.get("target_agent_id"),
+            spec.get("idempotency_key", f"notification:{source_event['event_id']}"),
+            spec.get("correlation_id", source_event["correlation_id"]),
+            spec.get("payload", {}),
+        )
 
     def _event(self, event_type, actor, target_agent_id, idempotency_key, correlation_id, payload):
         return _event(

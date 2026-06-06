@@ -56,6 +56,243 @@ class FixedClock:
 
 
 class M0RuntimeTests(unittest.TestCase):
+    def test_feishu_custom_bot_notifier_signs_and_formats_manual_gate_message(self):
+        from agentteam_runtime.notifications import (
+            FeishuWebhookNotifier,
+            feishu_custom_bot_sign,
+        )
+
+        calls = []
+
+        def fake_post(url, payload, timeout_seconds):
+            calls.append(
+                {
+                    "url": url,
+                    "payload": payload,
+                    "timeout_seconds": timeout_seconds,
+                }
+            )
+            return {"status_code": 200, "body": {"code": 0, "msg": "success"}}
+
+        notifier = FeishuWebhookNotifier(
+            webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/secret-token",
+            signing_secret="demo",
+            project="agentteam",
+            http_post=fake_post,
+            clock=lambda: 1599360473,
+        )
+        result = notifier.notify_manual_gate(
+            {
+                "event_id": "EVT-12",
+                "sequence": 12,
+                "event_type": "manual_gate_required",
+                "correlation_id": "TASK-001:TASK-001-ATTEMPT-001",
+                "payload": {
+                    "task_id": "TASK-001",
+                    "attempt_id": "TASK-001-ATTEMPT-001",
+                    "question_id": "Q-TASK-001-ATTEMPT-001",
+                    "question": "Should runtime notify Feishu?",
+                    "reason": "Worker needs operator guidance.",
+                },
+            },
+            run_dir="/tmp/agentteam-run",
+        )
+
+        self.assertEqual(
+            feishu_custom_bot_sign(1599360473, "demo"),
+            "l1N0gAcBjdwBvGm1xMjOF0XSyaLRpR7tuO5dHfhAYc8=",
+        )
+        self.assertEqual(result["event_type"], "notification_sent")
+        self.assertEqual(result["payload"]["provider"], "feishu")
+        self.assertEqual(result["payload"]["project"], "agentteam")
+        self.assertEqual(result["payload"]["source_event_id"], "EVT-12")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            calls[0]["url"],
+            "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token",
+        )
+        payload = calls[0]["payload"]
+        self.assertEqual(payload["timestamp"], "1599360473")
+        self.assertEqual(payload["sign"], "l1N0gAcBjdwBvGm1xMjOF0XSyaLRpR7tuO5dHfhAYc8=")
+        self.assertEqual(payload["msg_type"], "text")
+        self.assertIn("Q-TASK-001-ATTEMPT-001", payload["content"]["text"])
+        self.assertIn("resume --run-dir /tmp/agentteam-run", payload["content"]["text"])
+        event_payload = json.dumps(result["payload"], sort_keys=True)
+        self.assertNotIn("secret-token", event_payload)
+        self.assertNotIn("demo", event_payload)
+
+    def test_feishu_custom_bot_notifier_records_failure_without_secret_leak(self):
+        from agentteam_runtime.notifications import FeishuWebhookNotifier
+
+        def failing_post(_url, _payload, _timeout_seconds):
+            raise TimeoutError("network timed out near webhook secret-token")
+
+        notifier = FeishuWebhookNotifier(
+            webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/secret-token",
+            signing_secret="demo",
+            project="agentteam",
+            http_post=failing_post,
+            clock=lambda: 1599360473,
+        )
+        result = notifier.notify_manual_gate(
+            {
+                "event_id": "EVT-12",
+                "sequence": 12,
+                "event_type": "manual_gate_required",
+                "correlation_id": "TASK-001:TASK-001-ATTEMPT-001",
+                "payload": {
+                    "task_id": "TASK-001",
+                    "question_id": "Q-TASK-001-ATTEMPT-001",
+                    "question": "Should runtime notify Feishu?",
+                },
+            },
+            run_dir="/tmp/agentteam-run",
+        )
+
+        self.assertEqual(result["event_type"], "notification_failed")
+        payload = json.dumps(result["payload"], sort_keys=True)
+        self.assertIn("TimeoutError", payload)
+        self.assertNotIn("secret-token", payload)
+        self.assertNotIn("demo", payload)
+
+    def test_feishu_notification_sink_from_env_skips_missing_webhook(self):
+        from agentteam_runtime.notifications import build_feishu_notification_sink_from_env
+
+        sink = build_feishu_notification_sink_from_env(
+            webhook_env="AGENTTEAM_FEISHU_MISSING_WEBHOOK",
+            signing_secret_env="AGENTTEAM_FEISHU_MISSING_SECRET",
+            project="agentteam",
+            env={},
+        )
+
+        self.assertIsNone(sink)
+
+    def test_feishu_notification_sink_from_env_sends_manual_gate(self):
+        from agentteam_runtime.notifications import build_feishu_notification_sink_from_env
+
+        calls = []
+
+        def fake_post(url, payload, timeout_seconds):
+            calls.append({"url": url, "payload": payload, "timeout_seconds": timeout_seconds})
+            return {"status_code": 200, "body": {"code": 0, "msg": "success"}}
+
+        sink = build_feishu_notification_sink_from_env(
+            webhook_env="AGENTTEAM_FEISHU_TEST_WEBHOOK",
+            signing_secret_env="AGENTTEAM_FEISHU_TEST_SECRET",
+            project="agentteam",
+            env={
+                "AGENTTEAM_FEISHU_TEST_WEBHOOK": (
+                    "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token"
+                ),
+                "AGENTTEAM_FEISHU_TEST_SECRET": "demo",
+            },
+            http_post=fake_post,
+            clock=lambda: 1599360473,
+        )
+        result = sink.notify(
+            {
+                "event_id": "EVT-12",
+                "sequence": 12,
+                "event_type": "manual_gate_required",
+                "correlation_id": "TASK-001:TASK-001-ATTEMPT-001",
+                "payload": {
+                    "task_id": "TASK-001",
+                    "question_id": "Q-TASK-001-ATTEMPT-001",
+                    "question": "Should runtime notify Feishu?",
+                },
+            },
+            {"run_dir": "/tmp/agentteam-run"},
+        )
+
+        self.assertEqual(result["event_type"], "notification_sent")
+        self.assertEqual(calls[0]["payload"]["sign"], "l1N0gAcBjdwBvGm1xMjOF0XSyaLRpR7tuO5dHfhAYc8=")
+        self.assertNotIn("secret-token", json.dumps(result["payload"], sort_keys=True))
+        self.assertNotIn("demo", json.dumps(result["payload"], sort_keys=True))
+
+    def test_two_phase_scheduler_notifies_manual_gate_after_canonical_event(self):
+        class RecordingNotificationSink:
+            def __init__(self):
+                self.calls = []
+
+            def notify(self, event, context):
+                self.calls.append({"event": event, "context": context})
+                return [
+                    {
+                        "event_type": "notification_sent",
+                        "actor": "agent-notifier",
+                        "target_agent_id": None,
+                        "idempotency_key": f"notification:{event['event_id']}",
+                        "correlation_id": event["correlation_id"],
+                        "payload": {
+                            "provider": "feishu",
+                            "project": "agentteam",
+                            "source_event_type": event["event_type"],
+                            "source_event_id": event["event_id"],
+                            "source_event_sequence": event["sequence"],
+                            "notification_status": "sent",
+                            "message_summary": (
+                                "manual gate "
+                                + event["payload"]["question_id"]
+                                + " for "
+                                + event["payload"]["task_id"]
+                            ),
+                        },
+                    }
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            sink = RecordingNotificationSink()
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+                notification_sink=sink,
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "blocked",
+                [],
+                {
+                    "manual_gate": {
+                        "question": "Should runtime implement Feishu notification first?",
+                        "reason": "Worker needs operator direction.",
+                    }
+                },
+            )
+
+            scheduler.collect_ready_results()
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            manual_gate = [
+                event for event in events if event["event_type"] == "manual_gate_required"
+            ][0]
+            notification = [
+                event for event in events if event["event_type"] == "notification_sent"
+            ][0]
+
+            self.assertEqual(len(sink.calls), 1)
+            self.assertEqual(sink.calls[0]["event"]["event_id"], manual_gate["event_id"])
+            self.assertEqual(sink.calls[0]["event"]["sequence"], manual_gate["sequence"])
+            self.assertEqual(sink.calls[0]["context"]["run_dir"], str(output_dir))
+            self.assertGreater(notification["sequence"], manual_gate["sequence"])
+            self.assertEqual(
+                notification["payload"]["source_event_id"],
+                manual_gate["event_id"],
+            )
+
     def test_build_planner_context_summarizes_state_roles_and_scopes(self):
         agent_pool = {
             "agents": [

@@ -103,6 +103,7 @@ def _add_submit_parser(subcommands):
         action="store_true",
         help="Commit integration worktree changes after verification passes.",
     )
+    _add_notification_args(parser)
     parser.add_argument(
         "--codex-command",
         nargs=argparse.REMAINDER,
@@ -166,7 +167,24 @@ def _add_run_parser(subcommands):
         action="store_true",
         help="Commit integration worktree changes after verification passes.",
     )
+    _add_notification_args(parser)
     parser.set_defaults(handler=_handle_run)
+
+
+def _add_notification_args(parser):
+    parser.add_argument(
+        "--notification-project",
+        default="agentteam",
+        help="Project key recorded in outbound notification telemetry.",
+    )
+    parser.add_argument(
+        "--feishu-webhook-env",
+        help="Environment variable containing the Feishu custom bot webhook URL.",
+    )
+    parser.add_argument(
+        "--feishu-signing-secret-env",
+        help="Optional environment variable containing the Feishu custom bot signing secret.",
+    )
 
 
 def _add_answer_parser(subcommands):
@@ -247,6 +265,9 @@ def _handle_submit(args):
         max_inflight=args.max_inflight,
         max_attempts=args.max_attempts,
         commit_verified_integration=args.commit_verified_integration,
+        notification_project=args.notification_project,
+        feishu_webhook_env=args.feishu_webhook_env,
+        feishu_signing_secret_env=args.feishu_signing_secret_env,
     )
     if completed.returncode != 0:
         raise AgentTeamCliError(
@@ -283,6 +304,9 @@ def _handle_run(args):
         max_inflight=args.max_inflight,
         max_attempts=args.max_attempts,
         commit_verified_integration=args.commit_verified_integration,
+        notification_project=args.notification_project,
+        feishu_webhook_env=args.feishu_webhook_env,
+        feishu_signing_secret_env=args.feishu_signing_secret_env,
     )
     if completed.stdout:
         sys.stdout.write(completed.stdout)
@@ -741,6 +765,9 @@ def _run_frozen_taskpack(
     max_inflight=2,
     max_attempts=1,
     commit_verified_integration=False,
+    notification_project="agentteam",
+    feishu_webhook_env=None,
+    feishu_signing_secret_env=None,
 ):
     runtime_args = build_taskpack_runtime_args(
         frozen_taskpack_dir,
@@ -750,6 +777,12 @@ def _run_frozen_taskpack(
         max_attempts=max_attempts,
         commit_verified_integration=commit_verified_integration,
     )
+    if notification_project:
+        runtime_args.extend(["--notification-project", notification_project])
+    if feishu_webhook_env:
+        runtime_args.extend(["--feishu-webhook-env", feishu_webhook_env])
+    if feishu_signing_secret_env:
+        runtime_args.extend(["--feishu-signing-secret-env", feishu_signing_secret_env])
     command = [sys.executable, "-m", "agentteam_runtime.cli", *runtime_args]
     return subprocess.run(
         command,

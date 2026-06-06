@@ -17,6 +17,7 @@ from .m0_runtime import (
     run_scheduler_loop,
     run_simulation,
 )
+from .notifications import build_feishu_notification_sink_from_env
 from .observability import build_runtime_observability
 from .two_phase_scheduler import TwoPhaseFileScheduler
 
@@ -134,6 +135,19 @@ def main(argv=None):
         "--commit-verified-integration",
         action="store_true",
         help="Commit the integration worktree only after the verification command passes.",
+    )
+    parser.add_argument(
+        "--notification-project",
+        default="agentteam",
+        help="Project key recorded in outbound notification telemetry.",
+    )
+    parser.add_argument(
+        "--feishu-webhook-env",
+        help="Environment variable containing the Feishu custom bot webhook URL.",
+    )
+    parser.add_argument(
+        "--feishu-signing-secret-env",
+        help="Optional environment variable containing the Feishu custom bot signing secret.",
     )
     parser.add_argument(
         "--auto-decompose-backlog",
@@ -267,6 +281,7 @@ def main(argv=None):
         parser,
         args.integration_verification_command_json,
     )
+    notification_sink = _build_notification_sink(args)
 
     if args.run_until_idle:
         result = run_scheduler_loop(
@@ -298,6 +313,7 @@ def main(argv=None):
                     args,
                     integration_verification_command,
                     worker_pool,
+                    notification_sink,
                 )
             finally:
                 worker_pool_stop = worker_pool.stop()
@@ -416,7 +432,12 @@ def main(argv=None):
     print(json.dumps({**result, "snapshot": snapshot}, sort_keys=True))
 
 
-def _run_supervised_two_phase_scheduler(args, integration_verification_command, worker_pool):
+def _run_supervised_two_phase_scheduler(
+    args,
+    integration_verification_command,
+    worker_pool,
+    notification_sink,
+):
     if args.max_steps < 1:
         raise ValueError("max_ticks must be at least 1")
     scheduler = TwoPhaseFileScheduler(
@@ -436,6 +457,7 @@ def _run_supervised_two_phase_scheduler(args, integration_verification_command, 
         decomposition_default_worker_role=args.decomposition_default_worker_role,
         decomposition_context_artifact_paths=args.planner_context_artifact,
         decomposition_context_excerpt_chars=args.planner_context_excerpt_chars,
+        notification_sink=notification_sink,
     )
     supervision = []
     tick_count = 0
@@ -481,6 +503,16 @@ def _quarantined_agent_ids(pool_health):
         for worker in pool_health.get("workers", [])
         if worker.get("worker_status") == "quarantined"
     ]
+
+
+def _build_notification_sink(args):
+    if not args.feishu_webhook_env:
+        return None
+    return build_feishu_notification_sink_from_env(
+        webhook_env=args.feishu_webhook_env,
+        signing_secret_env=args.feishu_signing_secret_env,
+        project=args.notification_project,
+    )
 
 
 def _require_execution_arg(parser, value, flag):

@@ -22,6 +22,7 @@ _EXPORTS = {
         ".worker_pool",
         "FileMailboxWorkerPoolSupervisor",
     ),
+    "FeishuWebhookNotifier": (".notifications", "FeishuWebhookNotifier"),
     "FileScheduler": (".m0_runtime", "FileScheduler"),
     "FileSchedulerDaemon": (".daemon", "FileSchedulerDaemon"),
     "merge_verified_integration_batch": (
@@ -38,10 +39,15 @@ _EXPORTS = {
     "build_repository_map": (".repo_map", "build_repository_map"),
     "build_runtime_observability": (".observability", "build_runtime_observability"),
     "build_taskpack_runtime_args": (".taskpack", "build_taskpack_runtime_args"),
+    "build_feishu_notification_sink_from_env": (
+        ".notifications",
+        "build_feishu_notification_sink_from_env",
+    ),
     "classify_attempt_outcome": (".m0_runtime", "classify_attempt_outcome"),
     "draft_taskpack_files": (".taskpack", "draft_taskpack_files"),
     "draft_taskpack_from_goal": (".taskpack_author", "draft_taskpack_from_goal"),
     "freeze_taskpack": (".taskpack", "freeze_taskpack"),
+    "feishu_custom_bot_sign": (".notifications", "feishu_custom_bot_sign"),
     "load_taskpack": (".taskpack", "load_taskpack"),
     "normalize_task_proposal": (".task_proposal", "normalize_task_proposal"),
     "read_integration_batches": (".integration_batch", "read_integration_batches"),

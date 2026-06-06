@@ -70,6 +70,8 @@
         "artifact_update_integrated",
         "manual_gate_required",
         "operator_answer_received",
+        "notification_sent",
+        "notification_failed",
         "attempt_timed_out",
         "attempt_cancelled",
         "recovery_routed"

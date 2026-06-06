@@ -201,6 +201,28 @@ clears the task blocker in the two-phase scheduler state, and appends a
 includes `operator_guidance` with the recorded question id, answer, and
 operator.
 
+To send a Feishu custom-bot notification when a manual gate is recorded, keep
+the webhook and optional signing secret in environment variables and pass the
+environment variable names into the run:
+
+```bash
+export AGENTTEAM_FEISHU_AGENTTEAM_WEBHOOK="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+export AGENTTEAM_FEISHU_AGENTTEAM_SECRET="..."
+
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.agentteam run \
+  /tmp/agentteam-taskpacks/frozen/example-taskpack \
+  --run-root /tmp/agentteam-runs \
+  --notification-project agentteam \
+  --feishu-webhook-env AGENTTEAM_FEISHU_AGENTTEAM_WEBHOOK \
+  --feishu-signing-secret-env AGENTTEAM_FEISHU_AGENTTEAM_SECRET
+```
+
+The runtime records `notification_sent` or `notification_failed` telemetry
+after the durable `manual_gate_required` event. Missing Feishu environment
+variables disable notification sending without failing the run. Event payloads
+never include the webhook URL or signing secret.
+
 For scripts, answer a known question id directly:
 
 ```bash
