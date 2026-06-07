@@ -9,6 +9,9 @@ target="${bin_dir}/agentteam"
 
 mkdir -p "${bin_dir}"
 mkdir -p "${state_dir}"
+if [[ -L "${target}" ]]; then
+  rm -f "${target}"
+fi
 cp "${launcher}" "${target}"
 chmod +x "${target}"
 printf '{"development_repo_root": "%s"}\n' "${repo_root}" > "${state_dir}/launcher.json"

@@ -45,7 +45,37 @@ def _arg_value(args, flag):
     return args[index + 1]
 
 
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
 class TaskpackTests(unittest.TestCase):
+    def test_install_local_replaces_existing_launcher_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            bin_dir = home / ".local" / "bin"
+            bin_dir.mkdir(parents=True)
+            target = bin_dir / "agentteam"
+            target.symlink_to(REPO_ROOT / "agentteam")
+            env = {**os.environ, "HOME": str(home)}
+
+            completed = subprocess.run(
+                ["bash", str(REPO_ROOT / "scripts" / "install-local.sh")],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(target.is_symlink())
+            config = json.loads(
+                (home / ".local" / "share" / "agentteam" / "launcher.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(config["development_repo_root"], str(REPO_ROOT))
+
     def test_agentteam_cli_submit_fake_one_shot_runs_full_flow(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
