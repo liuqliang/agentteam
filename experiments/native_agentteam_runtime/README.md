@@ -244,6 +244,10 @@ agentteam update --project-root /path/to/repo --from /path/to/agentteam/checkout
 agentteam update --project-root /path/to/repo --rollback previous-release-id
 ```
 
+Plain `update --status` output is intentionally concise: it lists the active
+release id and the known release ids. Use `--json` when you need release roots,
+run bindings, unmanaged runs, or source metadata.
+
 `update --from` requires a clean source checkout, copies the launcher and runtime
 package into `<work_root>/releases/<release-id>`, and switches `active.json` for
 future commands. Existing run state is not rewritten. New runs record

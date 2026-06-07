@@ -1315,13 +1315,16 @@ def _write_update_text(summary):
         lines.insert(0, f"project: {summary['project']}")
     active = summary.get("active_release") or {}
     lines.append(f"active_release: {active.get('release_id') or 'none'}")
-    if active.get("release_root"):
-        lines.append(f"active_release_root: {active['release_root']}")
     known = summary.get("known_releases") or []
-    lines.append(f"known_releases: {len(known)}")
-    unmanaged = summary.get("unmanaged_runs")
-    if unmanaged is not None:
-        lines.append(f"unmanaged_runs: {len(unmanaged)}")
+    lines.append("known_releases:")
+    if known:
+        lines.extend(
+            f"  - {release.get('release_id') or 'unknown'}"
+            for release in known
+            if isinstance(release, dict)
+        )
+    else:
+        lines.append("  none")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 

@@ -2592,7 +2592,9 @@ The local launcher now supports a project-scoped operator control plane:
   produce run-level notification telemetry.
 - `agentteam update` installs immutable releases under
   `<work_root>/releases/<release-id>` and changes only the active release
-  pointer for future commands. Existing run bindings are preserved.
+  pointer for future commands. Existing run bindings are preserved. Text status
+  output lists only the active release id and known release ids; JSON status
+  keeps full release roots, run bindings, and unmanaged run details.
 - The repository launcher checks the target project profile and active release
   pointer before falling back to the development checkout.
 - `agentteam taskpack delete` is scoped to `drafts/<id>`, `frozen/<id>`, and,

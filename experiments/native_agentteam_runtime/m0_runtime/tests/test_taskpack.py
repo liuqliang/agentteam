@@ -1528,6 +1528,93 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["runs_by_release"]["release-a"], ["managed-run"])
             self.assertEqual(summary["unmanaged_runs"], ["unmanaged-run"])
 
+    def test_agentteam_cli_update_status_text_lists_release_ids_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "update-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            for release_id in ["release-a", "release-b"]:
+                release_root = work_root / "releases" / release_id
+                release_root.mkdir(parents=True)
+                (release_root / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "release_id": release_id,
+                            "release_root": str(release_root),
+                            "source_root": str(tmp_path / "checkout" / release_id),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            (work_root / "releases" / "active.json").write_text(
+                json.dumps(
+                    {
+                        "release_id": "release-b",
+                        "release_root": str(work_root / "releases" / "release-b"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            unmanaged_run = work_root / "runs" / "unmanaged-run"
+            (unmanaged_run / "state").mkdir(parents=True)
+            (unmanaged_run / "state" / "two_phase_scheduler_state.json").write_text(
+                json.dumps({"scheduler_status": "running", "inflight_attempts": []}),
+                encoding="utf-8",
+            )
+
+            status_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--status",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(status_completed.returncode, 0, status_completed.stderr)
+            self.assertIn("active_release: release-b\n", status_completed.stdout)
+            self.assertIn(
+                "known_releases:\n  - release-a\n  - release-b\n",
+                status_completed.stdout,
+            )
+            self.assertNotIn("active_release_root", status_completed.stdout)
+            self.assertNotIn("unmanaged_runs", status_completed.stdout)
+            self.assertNotIn(str(work_root), status_completed.stdout)
+
     def test_agentteam_cli_update_from_installs_and_activates_release(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
