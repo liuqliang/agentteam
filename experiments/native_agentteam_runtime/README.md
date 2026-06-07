@@ -284,6 +284,36 @@ clears the task blocker in the two-phase scheduler state, and appends a
 includes `operator_guidance` with the recorded question id, answer, and
 operator.
 
+If a Codex worker fails because it needs an operator-approved runtime
+capability, for example a sandbox escalation, the adapter normalizes the failure
+to `result_status: "blocked"` with `output.permission_request`. The scheduler
+records `permission_request_required`, blocks the task with a generated
+`PERM-...` request id, and notifications use the same Feishu path as manual
+gates.
+
+Inspect and resolve permission requests from another terminal:
+
+```bash
+agentteam permissions list \
+  --run-dir /tmp/agentteam-taskpacks/runs/example-taskpack
+
+agentteam permissions approve \
+  --run-dir /tmp/agentteam-taskpacks/runs/example-taskpack \
+  --request-id PERM-TASK-001-ATTEMPT-001 \
+  --operator liuql \
+  --reason "Allow one bounded retry."
+
+agentteam permissions deny \
+  --run-dir /tmp/agentteam-taskpacks/runs/example-taskpack \
+  --request-id PERM-TASK-001-ATTEMPT-001 \
+  --operator liuql \
+  --reason "Keep the task blocked until the plan changes."
+```
+
+Approval clears the blocker and stores `permission_grants` on the task. The
+next dispatch includes those grants in the mailbox payload. Denial keeps the
+task blocked and records the decision without retrying.
+
 To send a Feishu custom-bot notification when a manual gate is recorded, keep
 the webhook and optional signing secret in environment variables and pass the
 environment variable names into the run:
@@ -302,9 +332,10 @@ python3 -m agentteam_runtime.agentteam run \
 ```
 
 The runtime records `notification_sent` or `notification_failed` telemetry
-after the durable `manual_gate_required` event. Missing Feishu environment
-variables disable notification sending without failing the run. Event payloads
-never include the webhook URL or signing secret.
+after durable operator events such as `manual_gate_required` and
+`permission_request_required`. Missing Feishu environment variables disable
+notification sending without failing the run. Event payloads never include the
+webhook URL or signing secret.
 
 For scripts, answer a known question id directly:
 

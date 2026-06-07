@@ -241,6 +241,26 @@ class CodexRuntimeAdapter:
                 return fallback_modification
 
             if completed.returncode != 0:
+                permission_request = _codex_permission_request_from_failure(
+                    command,
+                    completed.returncode,
+                    completed.stdout,
+                    completed.stderr,
+                    self.sandbox,
+                )
+                if permission_request:
+                    return {
+                        "result_status": "blocked",
+                        "changed_files": [],
+                        "output": {
+                            "adapter": "codex",
+                            "error": "permission_required",
+                            "permission_request": permission_request,
+                            "exit_code": completed.returncode,
+                            "stdout": completed.stdout,
+                            "stderr": completed.stderr,
+                        },
+                    }
                 return {
                     "result_status": "failed",
                     "changed_files": [],
@@ -347,6 +367,7 @@ class CodexRuntimeAdapter:
                 "All changed_files entries must be relative paths inside the declared write_scope.",
                 "Use result_status blocked only when operator guidance is required before continuing.",
                 "For blocked results, include output.manual_gate with question, optional options, and optional reason.",
+                "If execution needs a sandbox or capability approval, use result_status blocked with output.permission_request.",
                 "Mailbox message:",
                 json.dumps(message, sort_keys=True),
             ]
@@ -423,6 +444,39 @@ class CodexRuntimeAdapter:
             str(repo_context_path),
             "Read repo_context_path before selecting implementation files.",
         ]
+
+
+def _codex_permission_request_from_failure(command, exit_code, stdout, stderr, sandbox):
+    combined = f"{stdout or ''}\n{stderr or ''}".strip()
+    lowered = combined.lower()
+    indicators = [
+        "operation not permitted",
+        "permission denied",
+        "requires approval",
+        "network is restricted",
+        "sandbox",
+    ]
+    if not any(indicator in lowered for indicator in indicators):
+        return None
+    if "permission" not in lowered and "sandbox" not in lowered and "approval" not in lowered:
+        return None
+    reason = _bounded_runtime_text(combined or f"codex exited with {exit_code}", 500)
+    return {
+        "request_type": "sandbox_permission",
+        "requested_capability": "sandbox_escalation",
+        "reason": reason,
+        "command": list(command),
+        "sandbox": sandbox,
+        "scope": "next_attempt",
+        "exit_code": exit_code,
+    }
+
+
+def _bounded_runtime_text(value, limit):
+    value = str(value)
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 15)] + "...[truncated]"
 
 
 def run_simulation(
@@ -1355,6 +1409,161 @@ def answer_manual_gate(output_dir, question_id, answer, operator="operator", clo
     }
 
 
+def list_permission_requests(output_dir):
+    output_dir = Path(output_dir)
+    events_path = output_dir / "events.jsonl"
+    if not events_path.exists():
+        raise FileNotFoundError(f"missing runtime events: {events_path}")
+    snapshot = replay_events(events_path)
+    requests = snapshot.get("permission_requests", {})
+    waiting = [
+        request
+        for _request_id, request in sorted(requests.items())
+        if isinstance(request, dict) and request.get("request_status") == "waiting"
+    ]
+    return {
+        "permission_status": "waiting_permission_requests"
+        if waiting
+        else "no_waiting_permission_requests",
+        "waiting_count": len(waiting),
+        "waiting": waiting,
+        "run_dir": str(output_dir.resolve()),
+    }
+
+
+def resolve_permission_request(
+    output_dir,
+    request_id,
+    decision,
+    operator="operator",
+    reason=None,
+    clock=None,
+):
+    if not request_id:
+        raise ValueError("request_id must be a non-empty string")
+    if decision not in {"approved", "denied"}:
+        raise ValueError("decision must be approved or denied")
+    if not operator:
+        raise ValueError("operator must be a non-empty string")
+
+    clock = clock or SystemClock()
+    output_dir = Path(output_dir)
+    events_path = output_dir / "events.jsonl"
+    state_path = output_dir / "state" / "two_phase_scheduler_state.json"
+    if not events_path.exists():
+        raise FileNotFoundError(f"missing runtime events: {events_path}")
+    if not state_path.exists():
+        raise FileNotFoundError(f"missing two-phase scheduler state: {state_path}")
+
+    events = list(_read_jsonl(events_path))
+    request_event = _find_permission_request_event(events, request_id)
+    if request_event is None:
+        raise ValueError(f"permission request not found: {request_id}")
+    task_id = request_event["payload"]["task_id"]
+    if _permission_request_has_resolution(events, request_id):
+        return {
+            "permission_status": "already_resolved",
+            "request_id": request_id,
+            "task_id": task_id,
+            "events_path": str(events_path),
+            "state_path": str(state_path),
+        }
+
+    state = _read_json(state_path)
+    task = _state_task_by_id(state, task_id)
+    requested_capability = request_event["payload"].get("requested_capability")
+    if decision == "approved":
+        task["backlog_status"] = "ready"
+        task["blockers"] = []
+        grants = task.setdefault("permission_grants", [])
+        grants.append(
+            {
+                "request_id": request_id,
+                "requested_capability": requested_capability,
+                "operator": operator,
+                "reason": reason,
+            }
+        )
+        update_type = "permission_request_approved"
+        task_status = "ready"
+        blockers = []
+    else:
+        task["backlog_status"] = "blocked"
+        task["blockers"] = [request_id]
+        decisions = task.setdefault("permission_decisions", [])
+        decisions.append(
+            {
+                "request_id": request_id,
+                "requested_capability": requested_capability,
+                "operator": operator,
+                "decision": "denied",
+                "reason": reason,
+            }
+        )
+        update_type = "permission_request_denied"
+        task_status = "blocked"
+        blockers = [request_id]
+    state["scheduler_status"] = "running" if decision == "approved" else "blocked"
+    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+    sequence = _next_event_sequence(events)
+    now = clock.now()
+    run_id = request_event.get("run_id")
+    step_id = f"OPERATOR-PERMISSION-{request_id}"
+    resolved_event = {
+        **_event(
+            sequence,
+            now,
+            "permission_request_resolved",
+            operator,
+            "agent-scheduler",
+            f"permission-request-resolved:{request_id}",
+            f"operator:{request_id}",
+            {
+                "request_id": request_id,
+                "task_id": task_id,
+                "attempt_id": request_event["payload"].get("attempt_id"),
+                "lease_id": request_event["payload"].get("lease_id"),
+                "requested_capability": requested_capability,
+                "permission_status": decision,
+                "operator": operator,
+                "reason": reason,
+            },
+        ),
+        "run_id": run_id,
+        "step_id": step_id,
+    }
+    backlog_event = {
+        **_event(
+            sequence + 1,
+            now,
+            "backlog_updated",
+            "agent-scheduler",
+            None,
+            f"backlog-permission:{task_id}:{request_id}:{decision}",
+            f"operator:{request_id}",
+            {
+                "task_id": task_id,
+                "task_status": task_status,
+                "update_type": update_type,
+                "request_id": request_id,
+                "blockers": blockers,
+            },
+        ),
+        "run_id": run_id,
+        "step_id": step_id,
+    }
+    _append_jsonl(events_path, [resolved_event, backlog_event])
+    rebuild_sqlite_state_index(output_dir / "state" / "scheduler_state.sqlite", events_path)
+    return {
+        "permission_status": decision,
+        "request_id": request_id,
+        "task_id": task_id,
+        "events_path": str(events_path),
+        "state_path": str(state_path),
+    }
+
+
 def _find_manual_gate_event(events, question_id):
     for event in reversed(events):
         if event.get("event_type") != "manual_gate_required":
@@ -1368,6 +1577,23 @@ def _manual_gate_has_answer(events, question_id):
     return any(
         event.get("event_type") == "operator_answer_received"
         and event.get("payload", {}).get("question_id") == question_id
+        for event in events
+    )
+
+
+def _find_permission_request_event(events, request_id):
+    for event in reversed(events):
+        if event.get("event_type") != "permission_request_required":
+            continue
+        if event.get("payload", {}).get("request_id") == request_id:
+            return event
+    return None
+
+
+def _permission_request_has_resolution(events, request_id):
+    return any(
+        event.get("event_type") == "permission_request_resolved"
+        and event.get("payload", {}).get("request_id") == request_id
         for event in events
     )
 
@@ -1605,6 +1831,7 @@ def replay_events(events_path):
         "runtime_sessions": {},
         "integration_queue": {},
         "manual_gates": {},
+        "permission_requests": {},
     }
     for event in _read_jsonl(events_path):
         payload = event["payload"]
@@ -1738,6 +1965,37 @@ def replay_events(events_path):
                     "answer": payload["answer"],
                     "operator": payload.get("operator"),
                     "answer_status": payload.get("answer_status"),
+                }
+            )
+        elif event["event_type"] == "permission_request_required":
+            request_id = payload["request_id"]
+            snapshot["permission_requests"][request_id] = {
+                "request_id": request_id,
+                "request_status": "waiting",
+                "task_id": task_id,
+                "attempt_id": attempt_id,
+                "lease_id": lease_id,
+                "request_type": payload.get("request_type"),
+                "requested_capability": payload.get("requested_capability"),
+                "reason": payload.get("reason"),
+                "scope": payload.get("scope"),
+                "sandbox": payload.get("sandbox"),
+                "command": payload.get("command"),
+            }
+            snapshot["tasks"].setdefault(task_id, {})["task_status"] = "blocked"
+            snapshot["tasks"].setdefault(task_id, {})["blockers"] = [request_id]
+        elif event["event_type"] == "permission_request_resolved":
+            request_id = payload["request_id"]
+            request = snapshot["permission_requests"].setdefault(
+                request_id,
+                {"request_id": request_id},
+            )
+            request.update(
+                {
+                    "request_status": payload.get("permission_status"),
+                    "operator": payload.get("operator"),
+                    "reason": payload.get("reason"),
+                    "requested_capability": payload.get("requested_capability"),
                 }
             )
         elif event["event_type"] == "integration_queued":

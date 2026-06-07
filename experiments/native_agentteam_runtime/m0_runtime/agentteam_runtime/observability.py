@@ -96,6 +96,10 @@ def build_runtime_observability(output_dir, view="summary"):
             snapshot.get("manual_gates", {}).values(),
             "gate_status",
         ),
+        "permission_request_counts": _count_values(
+            snapshot.get("permission_requests", {}).values(),
+            "request_status",
+        ),
         "worker_counts": _count_values(
             worker_registry.get("workers", []),
             "worker_status",

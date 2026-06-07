@@ -8,7 +8,12 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from .m0_runtime import answer_manual_gate, replay_events
+from .m0_runtime import (
+    answer_manual_gate,
+    list_permission_requests,
+    replay_events,
+    resolve_permission_request,
+)
 from .operator_control import (
     build_run_liveness_summary,
     cleanup_stale_runs,
@@ -92,6 +97,20 @@ _HELP_COMMANDS = [
         "name": "answer",
         "summary": "Answer one manual gate directly by question id.",
         "examples": ["agentteam answer --run-dir <run> --question-id <id> --answer <text>"],
+    },
+    {
+        "name": "permissions",
+        "summary": "List, approve, or deny runtime permission requests.",
+        "examples": [
+            "agentteam permissions list --run-dir <run>",
+            "agentteam permissions approve --run-dir <run> --request-id <id>",
+            "agentteam permissions deny --run-dir <run> --request-id <id>",
+        ],
+        "subcommands": [
+            "list: show waiting permission requests",
+            "approve: clear the blocker and allow a bounded retry",
+            "deny: keep the task blocked and record the decision",
+        ],
     },
     {
         "name": "taskpack",
@@ -178,6 +197,7 @@ def _build_parser():
     _add_run_parser(subcommands)
     _add_continue_parser(subcommands)
     _add_answer_parser(subcommands)
+    _add_permissions_parser(subcommands)
     _add_resume_parser(subcommands)
     _add_watch_parser(subcommands)
     _add_stop_parser(subcommands)
@@ -451,6 +471,45 @@ def _add_answer_parser(subcommands):
     parser.add_argument("--answer", required=True, help="Operator answer text.")
     parser.add_argument("--operator", default="operator", help="Operator identity recorded in the event log.")
     parser.set_defaults(handler=_handle_answer)
+
+
+def _add_permissions_parser(subcommands):
+    parser = subcommands.add_parser(
+        "permissions",
+        help="List or resolve runtime permission requests.",
+    )
+    permission_subcommands = parser.add_subparsers(
+        dest="permission_command",
+        required=True,
+        parser_class=JsonArgumentParser,
+    )
+    list_parser = permission_subcommands.add_parser(
+        "list",
+        help="List waiting runtime permission requests.",
+    )
+    list_parser.add_argument("--run-dir", required=True, help="Runtime output directory containing events.jsonl.")
+    list_parser.add_argument("--json", action="store_true", help="Print list result as JSON.")
+    list_parser.set_defaults(handler=_handle_permissions)
+
+    approve_parser = permission_subcommands.add_parser(
+        "approve",
+        help="Approve a waiting runtime permission request.",
+    )
+    approve_parser.add_argument("--run-dir", required=True, help="Runtime output directory containing events.jsonl.")
+    approve_parser.add_argument("--request-id", required=True, help="Permission request id to approve.")
+    approve_parser.add_argument("--operator", default="operator", help="Operator identity recorded in the event log.")
+    approve_parser.add_argument("--reason", help="Reason recorded with the approval.")
+    approve_parser.set_defaults(handler=_handle_permissions)
+
+    deny_parser = permission_subcommands.add_parser(
+        "deny",
+        help="Deny a waiting runtime permission request.",
+    )
+    deny_parser.add_argument("--run-dir", required=True, help="Runtime output directory containing events.jsonl.")
+    deny_parser.add_argument("--request-id", required=True, help="Permission request id to deny.")
+    deny_parser.add_argument("--operator", default="operator", help="Operator identity recorded in the event log.")
+    deny_parser.add_argument("--reason", help="Reason recorded with the denial.")
+    deny_parser.set_defaults(handler=_handle_permissions)
 
 
 def _add_resume_parser(subcommands):
@@ -1081,6 +1140,28 @@ def _handle_answer(args):
     )
 
 
+def _handle_permissions(args):
+    if args.permission_command == "list":
+        return list_permission_requests(args.run_dir)
+    if args.permission_command == "approve":
+        return resolve_permission_request(
+            args.run_dir,
+            args.request_id,
+            "approved",
+            operator=args.operator,
+            reason=args.reason,
+        )
+    if args.permission_command == "deny":
+        return resolve_permission_request(
+            args.run_dir,
+            args.request_id,
+            "denied",
+            operator=args.operator,
+            reason=args.reason,
+        )
+    raise AgentTeamCliError("unknown permissions command", command=args.permission_command)
+
+
 def _handle_resume(args):
     resume_context = _load_resume_context(args.run_dir)
     all_waiting_gates = _waiting_manual_gates_from_snapshot(resume_context["snapshot"])
@@ -1325,6 +1406,7 @@ def _build_run_status_summary(profile, run_dir):
     task_counts = _status_task_counts(snapshot, state)
     integration_counts = _status_integration_counts(snapshot)
     manual_gate_count = _waiting_manual_gate_count(snapshot)
+    permission_request_count = _waiting_permission_request_count(snapshot)
     summary = {
         "project": profile.get("project_key") or "unknown",
         "latest_run": run_dir.name,
@@ -1338,6 +1420,7 @@ def _build_run_status_summary(profile, run_dir):
         "workers": _status_worker_counts(worker_registry),
         "last_worker": _status_last_worker(worker_registry),
         "manual_gates": manual_gate_count,
+        "permission_requests": permission_request_count,
         "last_failure": _status_last_failure(snapshot, state),
         "run_dir": str(run_dir),
     }
@@ -1358,6 +1441,7 @@ def _write_status_text(summary):
         f"integration: {summary['integration']['blocked']} blocked",
         f"inflight: {summary['inflight']['total']}",
         f"manual_gates: {summary['manual_gates']}",
+        f"permission_requests: {summary['permission_requests']}",
     ]
     if summary["workers"]["total"]:
         lines.append(
@@ -1445,6 +1529,17 @@ def _waiting_manual_gate_count(snapshot):
         1
         for gate in gates.values()
         if isinstance(gate, dict) and gate.get("gate_status") == "waiting"
+    )
+
+
+def _waiting_permission_request_count(snapshot):
+    requests = snapshot.get("permission_requests") if isinstance(snapshot, dict) else None
+    if not isinstance(requests, dict):
+        return 0
+    return sum(
+        1
+        for request in requests.values()
+        if isinstance(request, dict) and request.get("request_status") == "waiting"
     )
 
 
@@ -1579,6 +1674,13 @@ def _submit_status_from_run(run):
         if isinstance(gate, dict)
     ):
         return "manual_gate_required"
+    permission_requests = snapshot.get("permission_requests", {})
+    if isinstance(permission_requests, dict) and any(
+        request.get("request_status") == "waiting"
+        for request in permission_requests.values()
+        if isinstance(request, dict)
+    ):
+        return "permission_request_required"
     tasks = snapshot.get("tasks", {})
     if isinstance(tasks, dict) and any(
         task.get("task_status") == "blocked"

@@ -5918,6 +5918,68 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(state_task["blockers"], ["Q-TASK-001-ATTEMPT-001"])
             self.assertEqual(snapshot["manual_gates"]["Q-TASK-001-ATTEMPT-001"]["gate_status"], "waiting")
 
+    def test_two_phase_scheduler_records_permission_request_for_blocked_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+
+            dispatch = scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "blocked",
+                [],
+                {
+                    "permission_request": {
+                        "requested_capability": "sandbox_escalation",
+                        "reason": "Codex hit an operation-not-permitted sandbox failure.",
+                        "command": ["codex", "exec", "-s", "workspace-write"],
+                        "sandbox": "workspace-write",
+                        "scope": "next_attempt",
+                    }
+                },
+            )
+
+            collect = scheduler.collect_ready_results()
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            permission_request = [
+                event for event in events if event["event_type"] == "permission_request_required"
+            ][0]
+            state_task = scheduler.state["backlog"]["items"][0]
+            snapshot = replay_events(output_dir / "events.jsonl")
+
+            self.assertEqual(dispatch["dispatched_task_ids"], ["TASK-001"])
+            self.assertEqual(collect["results"][0]["validation_status"], "rejected")
+            self.assertEqual(
+                permission_request["payload"]["request_id"],
+                "PERM-TASK-001-ATTEMPT-001",
+            )
+            self.assertEqual(
+                permission_request["payload"]["requested_capability"],
+                "sandbox_escalation",
+            )
+            self.assertEqual(state_task["backlog_status"], "blocked")
+            self.assertEqual(state_task["blockers"], ["PERM-TASK-001-ATTEMPT-001"])
+            self.assertEqual(
+                snapshot["permission_requests"]["PERM-TASK-001-ATTEMPT-001"]["request_status"],
+                "waiting",
+            )
+
     def test_operator_answer_resumes_manual_gate_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -6052,6 +6114,151 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["question_id"], "Q-TASK-001-ATTEMPT-001")
             self.assertEqual(resumed.state["backlog"]["items"][0]["backlog_status"], "ready")
             self.assertEqual(resumed.state["backlog"]["items"][0]["blockers"], [])
+
+    def test_agentteam_permissions_cli_lists_and_approves_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "blocked",
+                [],
+                {
+                    "permission_request": {
+                        "requested_capability": "sandbox_escalation",
+                        "reason": "Need one escalated retry.",
+                        "sandbox": "workspace-write",
+                    }
+                },
+            )
+            scheduler.collect_ready_results()
+
+            listed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "permissions",
+                    "list",
+                    "--run-dir",
+                    str(output_dir),
+                    "--json",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            list_summary = json.loads(listed.stdout)
+            self.assertEqual(list_summary["permission_status"], "waiting_permission_requests")
+            self.assertEqual(list_summary["waiting_count"], 1)
+            self.assertEqual(
+                list_summary["waiting"][0]["request_id"],
+                "PERM-TASK-001-ATTEMPT-001",
+            )
+
+            approved = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "permissions",
+                    "approve",
+                    "--run-dir",
+                    str(output_dir),
+                    "--request-id",
+                    "PERM-TASK-001-ATTEMPT-001",
+                    "--operator",
+                    "liuql",
+                    "--reason",
+                    "Allow exactly one bounded retry.",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(approved.returncode, 0, approved.stderr)
+            approve_summary = json.loads(approved.stdout)
+            resumed = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+
+            self.assertEqual(approve_summary["permission_status"], "approved")
+            self.assertEqual(
+                approve_summary["request_id"],
+                "PERM-TASK-001-ATTEMPT-001",
+            )
+            self.assertEqual(resumed.state["backlog"]["items"][0]["backlog_status"], "ready")
+            self.assertEqual(resumed.state["backlog"]["items"][0]["blockers"], [])
+            self.assertEqual(
+                resumed.state["backlog"]["items"][0]["permission_grants"],
+                [
+                    {
+                        "request_id": "PERM-TASK-001-ATTEMPT-001",
+                        "requested_capability": "sandbox_escalation",
+                        "operator": "liuql",
+                        "reason": "Allow exactly one bounded retry.",
+                    }
+                ],
+            )
+            dispatch = resumed.dispatch_ready()
+            resumed_inflight = resumed.state["inflight_attempts"][0]
+            resumed_message = json.loads(
+                Path(resumed_inflight["step_dir"])
+                .joinpath("mailboxes/agent-repo-map/inbox.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[0]
+            )
+            self.assertEqual(dispatch["dispatched_task_ids"], ["TASK-001"])
+            self.assertEqual(
+                resumed_message["payload"]["permission_grants"],
+                [
+                    {
+                        "request_id": "PERM-TASK-001-ATTEMPT-001",
+                        "requested_capability": "sandbox_escalation",
+                        "operator": "liuql",
+                        "reason": "Allow exactly one bounded retry.",
+                    }
+                ],
+            )
+
+    def test_agentteam_help_lists_permissions_command(self):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agentteam_runtime.agentteam",
+                "help",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("permissions", completed.stdout)
+        self.assertIn("List, approve, or deny runtime permission requests.", completed.stdout)
 
     def test_agentteam_resume_interactive_answers_waiting_manual_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6964,6 +7171,51 @@ class M0RuntimeTests(unittest.TestCase):
             worktree_path = Path(result["worktree_path"])
             self.assertEqual(result["validation_status"], "accepted")
             self.assertTrue((worktree_path / "generated" / "codex_result.json").exists())
+
+    def test_codex_runtime_adapter_converts_sandbox_failure_to_permission_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            fake_codex = tmp_path / "fake_codex_denied.py"
+            _init_git_repo(repo)
+            fake_codex.write_text(
+                "import sys\n"
+                "sys.stdin.read()\n"
+                "sys.stderr.write('Operation not permitted by sandbox\\n')\n"
+                "raise SystemExit(1)\n",
+                encoding="utf-8",
+            )
+            message = {
+                "message_id": "MSG-0001",
+                "from_agent": "agent-scheduler",
+                "to_agent": "agent-repo-map",
+                "message_type": "dispatch_task",
+                "correlation_id": "TASK-001:TASK-001-ATTEMPT-001",
+                "created_at": "2026-06-03T00:00:00Z",
+                "lease_expires_at": "2026-06-03T00:15:00Z",
+                "payload": {
+                    "task_id": "TASK-001",
+                    "attempt_id": "TASK-001-ATTEMPT-001",
+                    "lease_id": "TASK-001-LEASE-001",
+                    "objective": "Need a sandbox permission.",
+                    "read_scope": ["."],
+                    "write_scope": ["generated/"],
+                },
+            }
+
+            result = CodexRuntimeAdapter(
+                command=[sys.executable, str(fake_codex)],
+                sandbox="workspace-write",
+            ).run(message, worktree_path=repo)
+
+            self.assertEqual(result["result_status"], "blocked")
+            self.assertEqual(result["output"]["error"], "permission_required")
+            self.assertEqual(
+                result["output"]["permission_request"]["requested_capability"],
+                "sandbox_escalation",
+            )
+            self.assertEqual(result["output"]["permission_request"]["sandbox"], "workspace-write")
+            self.assertIn("Operation not permitted", result["output"]["permission_request"]["reason"])
 
     def test_codex_runtime_adapter_builds_planner_prompt_contract(self):
         message = {

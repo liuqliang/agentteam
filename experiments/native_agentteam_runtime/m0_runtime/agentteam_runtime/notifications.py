@@ -14,6 +14,7 @@ DEFAULT_NOTIFICATION_EVENT_TYPES = {
     "run_timed_out",
     "run_stopped",
     "manual_gate_required",
+    "permission_request_required",
     "integration_blocked",
     "run_stale_detected",
     "update_activated",
@@ -211,9 +212,39 @@ def _manual_gate_text(event, run_dir, project):
     return "\n".join(lines)
 
 
+def _permission_request_text(event, run_dir, project):
+    payload = event.get("payload", {})
+    request_id = payload.get("request_id", "unknown")
+    task_id = payload.get("task_id", "unknown")
+    capability = payload.get("requested_capability") or "runtime_permission"
+    reason = payload.get("reason")
+    command = (
+        "python3 -m agentteam_runtime.agentteam permissions approve "
+        f"--run-dir {run_dir} --request-id {request_id}"
+    )
+    lines = [
+        "[AgentTeam] permission request required",
+        f"Project: {project}",
+        f"Task: {task_id}",
+        f"Request id: {request_id}",
+        f"Capability: {capability}",
+    ]
+    if reason:
+        lines.append(f"Reason: {reason}")
+    lines.extend(
+        [
+            f"Run dir: {run_dir}",
+            f"Approve: {command}",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _event_text(event, run_dir, project):
     if event.get("event_type") == "manual_gate_required":
         return _manual_gate_text(event, run_dir, project)
+    if event.get("event_type") == "permission_request_required":
+        return _permission_request_text(event, run_dir, project)
     payload = event.get("payload", {})
     lines = [
         f"[AgentTeam] {event.get('event_type', 'event')}",
@@ -244,6 +275,10 @@ def _event_message_summary(event):
         question_id = payload.get("question_id")
         task_id = payload.get("task_id")
         return f"manual gate {question_id} for {task_id}"
+    if event_type == "permission_request_required":
+        request_id = payload.get("request_id")
+        task_id = payload.get("task_id")
+        return f"permission request {request_id} for {task_id}"
     status = payload.get("run_status") or payload.get("scheduler_status") or payload.get("status")
     if status:
         return f"{event_type} {status}"

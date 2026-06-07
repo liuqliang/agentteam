@@ -326,6 +326,7 @@ class TwoPhaseFileScheduler:
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
                 **_operator_guidance_fields(task),
+                **_permission_grant_fields(task),
                 **_role_prompt_fields(agent_pool, agent, task),
                 **_role_context_fields(
                     agent_pool,
@@ -500,9 +501,15 @@ class TwoPhaseFileScheduler:
             else None
         )
         outcome = classify_attempt_outcome(runtime_result, task, diff_audit=diff_audit)
+        permission_request = (
+            _permission_request_payload(inflight, runtime_result)
+            if runtime_result["result_status"] == "blocked"
+            and not _runtime_result_has_manual_gate(runtime_result)
+            else None
+        )
         manual_gate = (
             _manual_gate_payload(inflight, runtime_result)
-            if runtime_result["result_status"] == "blocked"
+            if runtime_result["result_status"] == "blocked" and not permission_request
             else None
         )
         retry_allowed = (
@@ -644,6 +651,20 @@ class TwoPhaseFileScheduler:
                     if manual_gate
                     else []
                 ),
+                *(
+                    [
+                        self._event(
+                            "permission_request_required",
+                            "agent-scheduler",
+                            inflight["agent_id"],
+                            f"permission-request:{permission_request['request_id']}",
+                            inflight["correlation_id"],
+                            permission_request,
+                        )
+                    ]
+                    if permission_request
+                    else []
+                ),
                 *integration_events,
                 *decomposition_events,
                 *(
@@ -690,6 +711,28 @@ class TwoPhaseFileScheduler:
                 *(
                     [
                         self._event(
+                            "backlog_updated",
+                            "agent-scheduler",
+                            None,
+                            f"backlog-blocked:{inflight['task_id']}:{permission_request['request_id']}",
+                            inflight["correlation_id"],
+                            {
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "task_status": "blocked",
+                                "lease_id": inflight["lease_id"],
+                                "update_type": "permission_request_required",
+                                "request_id": permission_request["request_id"],
+                                "blockers": [permission_request["request_id"]],
+                            },
+                        )
+                    ]
+                    if permission_request
+                    else []
+                ),
+                *(
+                    [
+                        self._event(
                             "recovery_routed",
                             "agent-scheduler",
                             inflight["agent_id"],
@@ -717,6 +760,9 @@ class TwoPhaseFileScheduler:
             outcome["failure_category"],
             retry_allowed,
             manual_gate_question_id=manual_gate["question_id"] if manual_gate else None,
+            permission_request_id=permission_request["request_id"]
+            if permission_request
+            else None,
         )
         self.state["steps"].append(
             {
@@ -1130,6 +1176,7 @@ class TwoPhaseFileScheduler:
         failure_category,
         retry_allowed,
         manual_gate_question_id=None,
+        permission_request_id=None,
     ):
         task = self._task_by_id(task_id)
         if validation_status == "accepted":
@@ -1141,7 +1188,10 @@ class TwoPhaseFileScheduler:
         else:
             task["backlog_status"] = "blocked"
             task["blockers"] = [
-                manual_gate_question_id or failure_category or "validation_rejected"
+                manual_gate_question_id
+                or permission_request_id
+                or failure_category
+                or "validation_rejected"
             ]
 
     def _next_attempt_number(self, task_id):
@@ -1376,6 +1426,48 @@ def _manual_gate_payload(inflight, runtime_result):
     }
 
 
+def _runtime_result_has_manual_gate(runtime_result):
+    output = runtime_result.get("output") if isinstance(runtime_result, dict) else {}
+    return isinstance(output, dict) and isinstance(output.get("manual_gate"), dict)
+
+
+def _permission_request_payload(inflight, runtime_result):
+    output = runtime_result.get("output") if isinstance(runtime_result, dict) else {}
+    if not isinstance(output, dict):
+        return None
+    request = output.get("permission_request")
+    if not isinstance(request, dict):
+        return None
+    requested_capability = _first_non_empty_string(
+        request.get("requested_capability"),
+        request.get("capability"),
+        "runtime_permission",
+    )
+    reason = _first_non_empty_string(
+        request.get("reason"),
+        output.get("reason"),
+        "Worker requested an operator-approved runtime capability before continuing.",
+    )
+    payload = {
+        "task_id": inflight["task_id"],
+        "attempt_id": inflight["attempt_id"],
+        "lease_id": inflight["lease_id"],
+        "request_id": f"PERM-{inflight['attempt_id']}",
+        "request_status": "waiting",
+        "request_type": _first_non_empty_string(
+            request.get("request_type"),
+            "runtime_permission",
+        ),
+        "requested_capability": requested_capability,
+        "reason": reason,
+        "scope": _first_non_empty_string(request.get("scope"), "next_attempt"),
+    }
+    for key in ["command", "sandbox", "exit_code"]:
+        if key in request:
+            payload[key] = request[key]
+    return payload
+
+
 def _operator_guidance_fields(task):
     guidance = task.get("operator_guidance")
     if not guidance:
@@ -1392,6 +1484,25 @@ def _operator_guidance_fields(task):
         if isinstance(item, dict)
     ]
     return {"operator_guidance": safe_guidance} if safe_guidance else {}
+
+
+def _permission_grant_fields(task):
+    grants = task.get("permission_grants")
+    if not grants:
+        return {}
+    if not isinstance(grants, list):
+        return {}
+    safe_grants = [
+        {
+            "request_id": item.get("request_id"),
+            "requested_capability": item.get("requested_capability"),
+            "operator": item.get("operator"),
+            "reason": item.get("reason"),
+        }
+        for item in grants
+        if isinstance(item, dict)
+    ]
+    return {"permission_grants": safe_grants} if safe_grants else {}
 
 
 def _first_non_empty_string(*values):

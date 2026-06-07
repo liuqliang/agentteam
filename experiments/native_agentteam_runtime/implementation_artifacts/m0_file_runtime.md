@@ -74,7 +74,9 @@ from agentteam_runtime import (
     ShellRuntimeAdapter,
     TwoPhaseFileScheduler,
     classify_attempt_outcome,
+    list_permission_requests,
     read_scheduler_state_index,
+    resolve_permission_request,
     replay_events,
     run_file_daemon,
     run_scheduler_loop,
@@ -88,6 +90,7 @@ snapshot = replay_events(result["events_path"])
 loop_summary = run_scheduler_loop(agent_pool_path, backlog_path, output_dir)
 daemon_summary = run_file_daemon(agent_pool_path, backlog_path, output_dir)
 state_index = read_scheduler_state_index(output_dir)
+permission_summary = list_permission_requests(output_dir)
 
 daemon = FileSchedulerDaemon(agent_pool_path, backlog_path, output_dir)
 tick_summary = daemon.tick()
@@ -149,6 +152,13 @@ result_with_codex = run_simulation(
 outcome = classify_attempt_outcome(
     {"result_status": "timed_out", "changed_files": [], "output": {}},
     {"write_scope": ["generated/"]},
+)
+permission_resolution = resolve_permission_request(
+    output_dir,
+    "PERM-TASK-001-ATTEMPT-001",
+    "approved",
+    operator="operator",
+    reason="Allow one bounded retry.",
 )
 ```
 
@@ -551,6 +561,13 @@ answer to the `--output-last-message` file as one JSON object:
   "output": {"adapter": "codex"}
 }
 ```
+
+If the Codex process exits non-zero with a clear sandbox or permission failure,
+the adapter returns `result_status: "blocked"` with
+`output.permission_request`. The two-phase scheduler turns that into a durable
+`permission_request_required` event, blocks the task with a `PERM-...` request
+id, and resumes only after `resolve_permission_request(..., "approved")` or the
+CLI equivalent records an approval.
 
 The unit tests use a fake Codex command that implements this CLI contract. They
 do not perform a live model invocation.
