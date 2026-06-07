@@ -39,6 +39,7 @@ from agentteam_runtime import (
     verify_integration_batch,
 )
 from agentteam_runtime.cli import _run_supervised_two_phase_scheduler
+from agentteam_runtime.m0_runtime import apply_patch_to_integration_worktree
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -6808,6 +6809,52 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 snapshot["attempts"]["ATTEMPT-001"]["integration_status"],
                 "applied",
+            )
+
+    def test_integration_worktree_apply_is_idempotent_after_interrupted_continue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            patch_path = tmp_path / "worktree.patch"
+            _init_git_repo(repo)
+            patch_path.write_text(
+                "\n".join(
+                    [
+                        "diff --git a/generated/recovered.json b/generated/recovered.json",
+                        "new file mode 100644",
+                        "index 0000000..6132295",
+                        "--- /dev/null",
+                        "+++ b/generated/recovered.json",
+                        "@@ -0,0 +1 @@",
+                        '+{"status":"recovered"}',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            first = apply_patch_to_integration_worktree(
+                repo,
+                output_dir,
+                "TASK-001",
+                patch_path,
+            )
+            second = apply_patch_to_integration_worktree(
+                repo,
+                output_dir,
+                "TASK-001",
+                patch_path,
+            )
+
+            integration_worktree = Path(second["integration_worktree_path"])
+            self.assertEqual(first["integration_status"], "applied")
+            self.assertEqual(second["integration_status"], "applied")
+            self.assertEqual(second["integration_recovery_status"], "reused_existing")
+            self.assertTrue((integration_worktree / "generated" / "recovered.json").exists())
+            self.assertEqual(
+                _git_status_short(integration_worktree),
+                "?? generated/",
             )
 
     def test_integration_verification_command_passes_in_integration_worktree(self):

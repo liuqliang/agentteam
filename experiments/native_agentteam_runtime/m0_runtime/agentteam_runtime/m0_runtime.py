@@ -2618,35 +2618,77 @@ def apply_patch_to_integration_worktree(project_root, output_dir, task_id, patch
     integration_branch = f"agentteam/integration/{task_id}"
     integration_worktree = Path(output_dir) / "integration" / task_id
     integration_worktree.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(project_root),
-            "worktree",
-            "add",
-            "-b",
-            integration_branch,
-            str(integration_worktree),
-            "HEAD",
-        ],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(integration_worktree), "apply", str(patch_path)],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    recovery_status = "created"
+    if integration_worktree.exists():
+        recovery_status = "reused_existing"
+    else:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(project_root),
+                "worktree",
+                "add",
+                "-b",
+                integration_branch,
+                str(integration_worktree),
+                "HEAD",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    if _git_apply_check(integration_worktree, patch_path):
+        subprocess.run(
+            ["git", "-C", str(integration_worktree), "apply", str(patch_path)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    elif _git_apply_reverse_check(integration_worktree, patch_path):
+        recovery_status = (
+            "already_applied"
+            if recovery_status == "created"
+            else "reused_existing"
+        )
+    else:
+        subprocess.run(
+            ["git", "-C", str(integration_worktree), "apply", str(patch_path)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
     return {
         "integration_status": "applied",
         "integration_branch": integration_branch,
         "integration_worktree_path": str(integration_worktree),
+        "integration_recovery_status": recovery_status,
     }
+
+
+def _git_apply_check(worktree, patch_path):
+    completed = subprocess.run(
+        ["git", "-C", str(worktree), "apply", "--check", str(patch_path)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return completed.returncode == 0
+
+
+def _git_apply_reverse_check(worktree, patch_path):
+    completed = subprocess.run(
+        ["git", "-C", str(worktree), "apply", "--reverse", "--check", str(patch_path)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return completed.returncode == 0
 
 
 def run_integration_verification(command, integration_worktree_path):
