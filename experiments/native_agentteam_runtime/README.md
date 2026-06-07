@@ -102,8 +102,13 @@ run creates a project-local `.agentteam/profile.json`; later runs reuse it:
 ```bash
 cd /path/to/repo
 agentteam init --interactive
+agentteam update --from /home/liuql/projects/agentteam/.worktrees/native-runtime-m0 --release-id <release-id>
+agentteam update --status
 agentteam start
 ```
+
+`init` and `update` default to concise human-readable text. Pass `--json` only
+when another tool needs the full structured payload.
 
 The profile belongs to the target project, not this AgentTeam framework
 repository. It stores non-secret defaults such as `work_root`,

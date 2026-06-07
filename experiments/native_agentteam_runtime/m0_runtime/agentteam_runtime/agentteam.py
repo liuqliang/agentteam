@@ -299,6 +299,7 @@ def _add_init_parser(subcommands):
         action="store_true",
         help="Overwrite an existing .agentteam/profile.json.",
     )
+    parser.add_argument("--json", action="store_true", help="Print full profile details as JSON.")
     parser.set_defaults(handler=_handle_init)
 
 
@@ -831,11 +832,26 @@ def _handle_init(args):
     else:
         profile = _profile_from_args(args, project_root)
     profile_path = write_project_profile(project_root, profile, force=args.force)
-    return {
+    summary = {
         "status": "initialized",
         "profile_path": str(profile_path),
         "profile": profile,
     }
+    if args.json:
+        return summary
+    _write_init_text(summary)
+    return 0
+
+
+def _write_init_text(summary):
+    profile = summary.get("profile") or {}
+    lines = [
+        f"project: {profile.get('project_key') or 'unknown'}",
+        f"init_status: {summary.get('status') or 'unknown'}",
+        f"profile_path: {summary.get('profile_path') or 'unknown'}",
+    ]
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
 
 
 def _handle_start(args):

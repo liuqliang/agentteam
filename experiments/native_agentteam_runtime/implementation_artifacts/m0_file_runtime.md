@@ -2595,6 +2595,8 @@ The local launcher now supports a project-scoped operator control plane:
   pointer for future commands. Existing run bindings are preserved. Text status
   output lists only the active release id and known release ids; JSON status
   keeps full release roots, run bindings, and unmanaged run details.
+- `agentteam init` defaults to concise text for operators; `--json` preserves
+  the full profile payload for tools.
 - The repository launcher checks the target project profile and active release
   pointer before falling back to the development checkout.
 - `agentteam taskpack delete` is scoped to `drafts/<id>`, `frozen/<id>`, and,

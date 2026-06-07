@@ -169,6 +169,7 @@ class TaskpackTests(unittest.TestCase):
                     "AGENTTEAM_FEISHU_FIXTURE_WEBHOOK",
                     "--feishu-signing-secret-env",
                     "AGENTTEAM_FEISHU_FIXTURE_SECRET",
+                    "--json",
                 ],
                 env=_test_env(),
                 stdout=subprocess.PIPE,
@@ -194,6 +195,44 @@ class TaskpackTests(unittest.TestCase):
             serialized = json.dumps(profile, sort_keys=True)
             self.assertNotIn("https://open.feishu.cn", serialized)
             self.assertNotIn("secret-token", serialized)
+
+    def test_agentteam_cli_init_text_is_concise_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "fixture-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "codex",
+                    "--runtime",
+                    "auto",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("init_status: initialized\n", completed.stdout)
+            self.assertIn("project: fixture-project\n", completed.stdout)
+            self.assertIn("profile_path:", completed.stdout)
+            self.assertNotIn("{", completed.stdout)
+            self.assertNotIn("profile_schema_version", completed.stdout)
 
     def test_agentteam_cli_init_keeps_project_git_status_clean(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1708,6 +1747,33 @@ class TaskpackTests(unittest.TestCase):
                 (existing_run / "state" / "two_phase_scheduler_state.json").read_text(encoding="utf-8")
             )
             self.assertEqual(existing_state["runtime_release_id"], "old-release")
+
+            text_update_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--from",
+                    str(checkout),
+                    "--release-id",
+                    "fixture-release-text",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(text_update_completed.returncode, 0, text_update_completed.stderr)
+            self.assertIn("update_status: installed\n", text_update_completed.stdout)
+            self.assertIn("active_release: fixture-release-text\n", text_update_completed.stdout)
+            self.assertIn("  - fixture-release-text\n", text_update_completed.stdout)
+            self.assertNotIn("release_root", text_update_completed.stdout)
+            self.assertNotIn(str(work_root), text_update_completed.stdout)
 
     def test_agentteam_cli_start_records_active_runtime_release(self):
         with tempfile.TemporaryDirectory() as tmp:
