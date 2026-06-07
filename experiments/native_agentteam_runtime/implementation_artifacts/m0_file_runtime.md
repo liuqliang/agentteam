@@ -2579,9 +2579,9 @@ The local launcher now supports a project-scoped operator control plane:
   registered worker PIDs are alive; stale `running` state is reported as
   `running-stale`.
 - `agentteam taskpack list` uses the same liveness-aware run status.
-- `agentteam start` and `agentteam continue` stream compact runtime progress to
-  stderr while the delegated runtime process runs. Stdout remains reserved for
-  the final JSON result.
+- `agentteam start` and `agentteam continue` print compact runtime progress to
+  stderr only when the run summary changes or new run events appear. Stdout
+  remains reserved for the final JSON result.
 - `agentteam watch` is read-only. It prints compact progress lines from the run
   state and event log and can stop after `--max-lines`.
 - `agentteam stop` writes registered stop files and signals only registered

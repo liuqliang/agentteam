@@ -217,12 +217,13 @@ agentteam continue --project-root /path/to/repo --taskpack example-taskpack
 `running` is reported as `running-alive` only when a registered worker PID is
 still alive; otherwise it is `running-stale`. `start` and `continue` keep stdout
 reserved for the final JSON result and print compact runtime progress to stderr
-while they wait, including task counts, inflight count, manual gates, permission
-requests, worker counts, and the latest event type. `watch` is still useful from
-a second terminal because it is read-only and can follow an already running
-taskpack. `stop` is scoped to the selected run: it writes registered stop files
-and signals only registered worker PIDs and owned descendants. It never searches
-for process names such as `codex`.
+only when the run summary changes or new run events appear. The line includes
+task counts, inflight count, manual gates, permission requests, worker counts,
+and the latest event type. `watch` is still useful from a second terminal
+because it is read-only and can follow an already running taskpack. `stop` is
+scoped to the selected run: it writes registered stop files and signals only
+registered worker PIDs and owned descendants. It never searches for process
+names such as `codex`.
 
 To clean old taskpacks, start with a dry run:
 

@@ -2221,7 +2221,7 @@ def _run_runtime_command_with_progress(
                 stderr=stderr_file,
                 text=True,
             )
-            cursor = 0
+            cursor = _runtime_progress_cursor()
             next_emit_at = 0.0
             while True:
                 returncode = process.poll()
@@ -2246,9 +2246,15 @@ def _run_runtime_command_with_progress(
 def _emit_runtime_progress(run_dir, cursor, progress_stream):
     run_dir = Path(run_dir)
     events_path = run_dir / "events.jsonl"
+    cursor = _runtime_progress_cursor(cursor)
     try:
-        cursor, events = read_event_records_since(events_path, cursor, max_records=50)
+        event_cursor, events = read_event_records_since(
+            events_path,
+            cursor["event_cursor"],
+            max_records=50,
+        )
     except (OSError, json.JSONDecodeError):
+        event_cursor = cursor["event_cursor"]
         events = []
     try:
         snapshot = replay_events(events_path) if events_path.exists() else {}
@@ -2262,7 +2268,7 @@ def _emit_runtime_progress(run_dir, cursor, progress_stream):
     inflight = _status_inflight_attempts(state)
     workers = _status_worker_counts(worker_registry)
     event_type = events[-1].get("event_type") if events else None
-    pieces = [
+    summary_pieces = [
         f"status={_status_run_state(snapshot, state)}",
         f"tasks={task_counts['done']}/{task_counts['total']}",
         f"blocked={task_counts['blocked']}",
@@ -2271,11 +2277,29 @@ def _emit_runtime_progress(run_dir, cursor, progress_stream):
         f"permission_requests={_waiting_permission_request_count(snapshot)}",
     ]
     if workers["total"]:
-        pieces.append(f"workers={workers['running']} running/{workers['stopped']} stopped")
+        summary_pieces.append(
+            f"workers={workers['running']} running/{workers['stopped']} stopped"
+        )
+    summary_key = tuple(summary_pieces)
+    cursor["event_cursor"] = event_cursor
+    should_emit = bool(events) or summary_key != cursor["last_summary_key"]
+    if not should_emit:
+        return cursor
+    pieces = list(summary_pieces)
     if event_type:
         pieces.append(f"event={event_type}")
     _write_progress_to_stream(f"runtime {' '.join(pieces)}", progress_stream)
+    cursor["last_summary_key"] = summary_key
     return cursor
+
+
+def _runtime_progress_cursor(cursor=None):
+    if isinstance(cursor, dict):
+        return {
+            "event_cursor": cursor.get("event_cursor", 0),
+            "last_summary_key": cursor.get("last_summary_key"),
+        }
+    return {"event_cursor": cursor or 0, "last_summary_key": None}
 
 
 def _write_progress_to_stream(message, stream):
