@@ -532,6 +532,8 @@ class TwoPhaseFileScheduler:
             "message_id": inflight["message_id"],
             "runtime_session_id": inflight["runtime_session_id"],
             "runtime_session_status": "stopped",
+            "changed_files": list(runtime_result["changed_files"]),
+            "runtime_output": runtime_result.get("output", {}),
             "worktree_id": inflight["worktree_id"],
             "worktree_path": inflight["worktree_path"],
             "branch": inflight["branch"],
@@ -1304,6 +1306,10 @@ class TwoPhaseFileScheduler:
             "inflight_count": len(self.state["inflight_attempts"]),
             "step_count": len(self.state["steps"]),
         }
+        if run_status != "running":
+            operator_report = _operator_report_from_state(self.state)
+            if operator_report["task_reports"]:
+                payload["operator_report"] = operator_report
         if extra:
             payload.update(extra)
         return payload
@@ -1389,6 +1395,157 @@ def _decomposition_wave_from_task_id(task_id):
 
 def _is_terminal_backlog_status(task):
     return task.get("backlog_status") in {"done", "blocked"}
+
+
+def _operator_report_from_state(state):
+    task_reports = []
+    for step in state.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        result = step.get("result")
+        if not isinstance(result, dict):
+            continue
+        task_reports.append(_operator_task_report(step, result))
+    return {
+        "report_schema_version": "operator_run_report.v1",
+        "task_count": len(task_reports),
+        "blocked_count": sum(
+            1 for report in task_reports if "blocked" in report.get("status", "")
+        ),
+        "task_reports": task_reports,
+    }
+
+
+def _operator_task_report(step, result):
+    output = result.get("runtime_output") if isinstance(result.get("runtime_output"), dict) else {}
+    operator_summary = (
+        output.get("operator_summary")
+        if isinstance(output.get("operator_summary"), dict)
+        else {}
+    )
+    return {
+        "task_id": result.get("task_id") or step.get("task_id") or "unknown",
+        "attempt_id": result.get("attempt_id"),
+        "status": _operator_task_status(result),
+        "what_changed": _operator_what_changed(output, operator_summary),
+        "changed_files": _operator_changed_files(result),
+        "verification": _operator_verification(output, operator_summary),
+        "integration": _operator_integration_summary(result),
+        "merge_recommendation": _operator_merge_recommendation(result, operator_summary),
+        "next_steps": _operator_next_steps(result, operator_summary),
+    }
+
+
+def _operator_task_status(result):
+    validation = result.get("validation_status")
+    integration = result.get("integration_verification_status")
+    if integration == "failed":
+        return "implementation completed, integration blocked"
+    if validation == "accepted":
+        return "implementation completed"
+    if validation == "rejected":
+        return "implementation rejected"
+    return result.get("failure_category") or validation or "unknown"
+
+
+def _operator_what_changed(output, operator_summary):
+    for key in ["what_changed", "summary"]:
+        values = _coerce_text_list(operator_summary.get(key))
+        if values:
+            return values
+    values = _coerce_text_list(output.get("summary"))
+    if values:
+        return values
+    behavior_change = operator_summary.get("behavior_change")
+    if behavior_change:
+        return [str(behavior_change)]
+    return ["Worker did not provide a natural-language change summary."]
+
+
+def _operator_changed_files(result):
+    changed_files = _coerce_text_list(result.get("changed_files"))
+    if changed_files:
+        return changed_files
+    diff_audit = result.get("diff_audit") if isinstance(result.get("diff_audit"), dict) else {}
+    return _coerce_text_list(
+        diff_audit.get("actual_changed_files") or diff_audit.get("declared_changed_files")
+    )
+
+
+def _operator_verification(output, operator_summary):
+    explicit = _coerce_text_list(operator_summary.get("verification_summary"))
+    if explicit:
+        return explicit
+    verification = output.get("verification")
+    if not isinstance(verification, dict):
+        return []
+    lines = []
+    for name, item in verification.items():
+        if isinstance(item, dict):
+            status = item.get("status") or item.get("result") or "unknown"
+        else:
+            status = str(item)
+        lines.append(f"{name}: {status}")
+    return lines
+
+
+def _operator_integration_summary(result):
+    status = result.get("integration_verification_status")
+    if status == "failed":
+        failure = _first_failure_line(result.get("integration_verification_stderr", ""))
+        return f"failed: {failure}" if failure else "failed"
+    if status in {None, "not_requested"}:
+        return "not requested"
+    if status == "passed":
+        return "passed"
+    return str(status)
+
+
+def _operator_merge_recommendation(result, operator_summary):
+    explicit = operator_summary.get("merge_recommendation")
+    if explicit:
+        return str(explicit)
+    if result.get("integration_verification_status") == "failed":
+        return "Do not merge until integration passes."
+    if result.get("validation_status") == "accepted":
+        return "Review accepted patch before merging."
+    return "Do not merge until the task is accepted."
+
+
+def _operator_next_steps(result, operator_summary):
+    explicit = _coerce_text_list(operator_summary.get("next_steps"))
+    if explicit:
+        return explicit
+    if result.get("integration_verification_status") == "failed":
+        return ["Review the failing integration test and update the patch or generated artifacts."]
+    return []
+
+
+def _first_failure_line(text):
+    for line in reversed(str(text or "").splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if (
+            stripped.startswith("FAILED")
+            or stripped.startswith("FAIL:")
+            or stripped.startswith("ERROR:")
+            or "ModuleNotFoundError" in stripped
+        ):
+            return stripped
+    return None
+
+
+def _coerce_text_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None and str(item)]
+    if isinstance(value, tuple):
+        return [str(item) for item in value if item is not None and str(item)]
+    if isinstance(value, str):
+        return [value] if value else []
+    return [str(value)]
 
 
 def _manual_gate_payload(inflight, runtime_result):

@@ -256,6 +256,74 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("[AgentTeam] run_completed", calls[0]["payload"]["content"]["text"])
         self.assertIn("Run dir: /tmp/agentteam-run", calls[0]["payload"]["content"]["text"])
 
+    def test_feishu_run_completed_includes_operator_report(self):
+        from agentteam_runtime.notifications import build_feishu_notification_sink_from_env
+
+        calls = []
+
+        def fake_post(url, payload, timeout_seconds):
+            calls.append({"url": url, "payload": payload, "timeout_seconds": timeout_seconds})
+            return {"status_code": 200, "body": {"code": 0, "msg": "success"}}
+
+        sink = build_feishu_notification_sink_from_env(
+            webhook_env="AGENTTEAM_FEISHU_TEST_WEBHOOK",
+            project="verisilicon",
+            env={
+                "AGENTTEAM_FEISHU_TEST_WEBHOOK": (
+                    "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token"
+                ),
+            },
+            http_post=fake_post,
+            clock=lambda: 1599360473,
+        )
+        result = sink.notify(
+            {
+                "event_id": "EVT-99",
+                "sequence": 99,
+                "event_type": "run_completed",
+                "correlation_id": "run:completed",
+                "payload": {
+                    "run_status": "completed",
+                    "operator_report": {
+                        "report_schema_version": "operator_run_report.v1",
+                        "task_reports": [
+                            {
+                                "task_id": "optimize-gesture-evaluation-pipeline",
+                                "status": "implementation completed, integration blocked",
+                                "what_changed": [
+                                    "优化了 IMU 解析和特征提取流程。",
+                                    "延后 negative window 特征提取以减少计算量。",
+                                ],
+                                "changed_files": [
+                                    "gesture_recognition/sim_eval.py",
+                                    "gesture_recognition/tests/test_sim_eval.py",
+                                ],
+                                "verification": [
+                                    "compileall: passed",
+                                    "sim_eval_tests: passed",
+                                ],
+                                "integration": "failed: FAILED (failures=1)",
+                                "merge_recommendation": "Do not merge until integration passes.",
+                                "next_steps": ["恢复不改变采样语义的优化，或重新导出 C 模型。"],
+                            }
+                        ],
+                    },
+                },
+            },
+            {"run_dir": "/tmp/agentteam-run"},
+        )
+
+        self.assertEqual(result["event_type"], "notification_sent")
+        text = calls[0]["payload"]["content"]["text"]
+        self.assertIn("What changed:", text)
+        self.assertIn("优化了 IMU 解析和特征提取流程。", text)
+        self.assertIn("Changed files:", text)
+        self.assertIn("gesture_recognition/sim_eval.py", text)
+        self.assertIn("Verification:", text)
+        self.assertIn("compileall: passed", text)
+        self.assertIn("Integration: failed: FAILED (failures=1)", text)
+        self.assertIn("Merge: Do not merge until integration passes.", text)
+
     def test_two_phase_scheduler_notifies_manual_gate_after_canonical_event(self):
         class RecordingNotificationSink:
             def __init__(self):
@@ -466,6 +534,67 @@ class M0RuntimeTests(unittest.TestCase):
                 ],
                 ["run_started", "run_completed"],
             )
+
+    def test_run_completed_event_contains_operator_report_from_runtime_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+            scheduler.tick()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                ["generated/result.json"],
+                {
+                    "summary": [
+                        "用自然语言汇总 worker 完成的实现内容。",
+                        "保留机器可读 changed_files 作为辅助定位。",
+                    ],
+                    "verification": {
+                        "unit_tests": {
+                            "command": "python3 -m unittest",
+                            "status": "passed",
+                        }
+                    },
+                },
+            )
+
+            scheduler.run_until_idle(max_ticks=5, poll_interval_seconds=0)
+
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            run_completed = [
+                event for event in events if event["event_type"] == "run_completed"
+            ][0]
+            report = run_completed["payload"]["operator_report"]
+            task_report = report["task_reports"][0]
+
+            self.assertEqual(report["report_schema_version"], "operator_run_report.v1")
+            self.assertEqual(task_report["task_id"], "TASK-001")
+            self.assertEqual(
+                task_report["what_changed"],
+                [
+                    "用自然语言汇总 worker 完成的实现内容。",
+                    "保留机器可读 changed_files 作为辅助定位。",
+                ],
+            )
+            self.assertEqual(task_report["changed_files"], ["generated/result.json"])
+            self.assertEqual(task_report["verification"], ["unit_tests: passed"])
+            self.assertEqual(task_report["integration"], "not requested")
 
     def test_build_planner_context_summarizes_state_roles_and_scopes(self):
         agent_pool = {
@@ -7457,6 +7586,8 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("Implement bounded repository edits.", prompt)
         self.assertIn("Inspect read_scope before writing.", prompt)
         self.assertIn("required_output_keys", prompt)
+        self.assertIn("operator_summary", prompt)
+        self.assertIn("what_changed", prompt)
 
     def test_codex_runtime_adapter_includes_role_context_path(self):
         message = {

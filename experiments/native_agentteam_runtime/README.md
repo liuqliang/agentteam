@@ -351,6 +351,13 @@ after durable operator events such as `manual_gate_required` and
 notification sending without failing the run. Event payloads never include the
 webhook URL or signing secret.
 
+When a run reaches `run_completed`, the scheduler attaches an operator report
+derived from worker output, changed files, verification, and integration state.
+Feishu renders this as natural language: what changed, what was verified,
+whether integration passed or blocked, and the recommended next step. Workers
+should return `output.operator_summary` for the clearest report; older
+`output.summary` entries are still summarized.
+
 For scripts, answer a known question id directly:
 
 ```bash

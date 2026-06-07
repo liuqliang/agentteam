@@ -364,6 +364,8 @@ class CodexRuntimeAdapter:
                 "Return exactly one JSON object as the final response.",
                 "The JSON object must have this shape:",
                 '{"result_status":"completed|blocked|failed|cancelled","changed_files":["path"],"output":{}}',
+                "For completed or failed work, output must include operator_summary for the human operator.",
+                "operator_summary must be natural language, not a patch dump: include what_changed, measured_result, verification_summary, merge_recommendation, and next_steps.",
                 "All changed_files entries must be relative paths inside the declared write_scope.",
                 "Use result_status blocked only when operator guidance is required before continuing.",
                 "For blocked results, include output.manual_gate with question, optional options, and optional reason.",

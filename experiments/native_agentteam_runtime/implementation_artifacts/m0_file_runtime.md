@@ -2589,7 +2589,9 @@ The local launcher now supports a project-scoped operator control plane:
   does not terminate live processes.
 - Feishu notifications use a sparse allowlist. Manual gates remain supported,
   and two-phase `run_started`, `run_completed`, and `run_timed_out` events can
-  produce run-level notification telemetry.
+  produce run-level notification telemetry. `run_completed` carries an
+  operator report that Feishu renders as natural language: changes, verification,
+  integration status, merge recommendation, and next steps.
 - `agentteam update` installs immutable releases under
   `<work_root>/releases/<release-id>` and changes only the active release
   pointer for future commands. Existing run bindings are preserved. Text status

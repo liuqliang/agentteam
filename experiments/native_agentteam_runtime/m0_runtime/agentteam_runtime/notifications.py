@@ -259,6 +259,9 @@ def _event_text(event, run_dir, project):
     failure = payload.get("failure_category") or payload.get("error_summary")
     if failure:
         lines.append(f"Failure: {failure}")
+    operator_report = payload.get("operator_report")
+    if isinstance(operator_report, dict):
+        lines.extend(_operator_report_text(operator_report))
     lines.extend(
         [
             f"Run dir: {run_dir}",
@@ -266,6 +269,46 @@ def _event_text(event, run_dir, project):
         ]
     )
     return "\n".join(lines)
+
+
+def _operator_report_text(report):
+    lines = ["Operator report:"]
+    for task in report.get("task_reports", []):
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("task_id") or "unknown"
+        status = task.get("status") or "unknown"
+        lines.append(f"Task: {task_id}")
+        lines.append(f"Status: {status}")
+        _extend_section(lines, "What changed:", task.get("what_changed"))
+        _extend_section(lines, "Changed files:", task.get("changed_files"))
+        _extend_section(lines, "Verification:", task.get("verification"))
+        integration = task.get("integration")
+        if integration:
+            lines.append(f"Integration: {integration}")
+        merge = task.get("merge_recommendation")
+        if merge:
+            lines.append(f"Merge: {merge}")
+        _extend_section(lines, "Next steps:", task.get("next_steps"))
+    return lines
+
+
+def _extend_section(lines, heading, values):
+    items = _text_items(values)
+    if not items:
+        return
+    lines.append(heading)
+    lines.extend(f"- {item}" for item in items)
+
+
+def _text_items(values):
+    if values is None:
+        return []
+    if isinstance(values, list):
+        return [str(item) for item in values if item is not None and str(item)]
+    if isinstance(values, tuple):
+        return [str(item) for item in values if item is not None and str(item)]
+    return [str(values)] if str(values) else []
 
 
 def _event_message_summary(event):
