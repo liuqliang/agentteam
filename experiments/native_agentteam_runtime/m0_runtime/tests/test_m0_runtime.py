@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import sqlite3
@@ -38,6 +39,7 @@ from agentteam_runtime import (
     run_simulation,
     verify_integration_batch,
 )
+from agentteam_runtime.agentteam import _run_runtime_command_with_progress
 from agentteam_runtime.cli import _run_supervised_two_phase_scheduler
 from agentteam_runtime.m0_runtime import apply_patch_to_integration_worktree
 
@@ -5629,6 +5631,67 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue(
                 (integration_worktree / "generated" / "cli_integration_result.json").exists()
             )
+
+    def test_runtime_command_progress_streams_run_events_while_waiting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            run_dir = tmp_path / "run"
+            script = tmp_path / "slow_runtime.py"
+            script.write_text(
+                "\n".join(
+                    [
+                        "import json, pathlib, sys, time",
+                        "run_dir = pathlib.Path(sys.argv[1])",
+                        "(run_dir / 'state').mkdir(parents=True, exist_ok=True)",
+                        "events_path = run_dir / 'events.jsonl'",
+                        "state_path = run_dir / 'state' / 'two_phase_scheduler_state.json'",
+                        "state_path.write_text(json.dumps({",
+                        "  'scheduler_status': 'running',",
+                        "  'backlog': {'items': [{'task_id': 'TASK-001', 'backlog_status': 'ready'}]},",
+                        "  'inflight_attempts': [{'task_id': 'TASK-001'}]",
+                        "}, sort_keys=True), encoding='utf-8')",
+                        "events_path.write_text(json.dumps({",
+                        "  'event_type': 'runtime_session_started',",
+                        "  'payload': {",
+                        "    'task_id': 'TASK-001',",
+                        "    'attempt_id': 'ATTEMPT-001',",
+                        "    'lease_id': 'LEASE-001',",
+                        "    'runtime_session_id': 'SESSION-001',",
+                        "    'runtime_adapter': 'fake'",
+                        "  }",
+                        "}, sort_keys=True) + '\\n', encoding='utf-8')",
+                        "time.sleep(0.25)",
+                        "with events_path.open('a', encoding='utf-8') as stream:",
+                        "    stream.write(json.dumps({",
+                        "      'event_type': 'runtime_output_received',",
+                        "      'payload': {",
+                        "        'task_id': 'TASK-001',",
+                        "        'attempt_id': 'ATTEMPT-001',",
+                        "        'result_status': 'completed'",
+                        "      }",
+                        "    }, sort_keys=True) + '\\n')",
+                        "print(json.dumps({'status': 'ok'}, sort_keys=True))",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            progress_stream = io.StringIO()
+
+            completed = _run_runtime_command_with_progress(
+                [sys.executable, str(script), str(run_dir)],
+                env=os.environ.copy(),
+                run_dir=run_dir,
+                progress=True,
+                progress_interval_seconds=0.05,
+                progress_stream=progress_stream,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(json.loads(completed.stdout), {"status": "ok"})
+            progress = progress_stream.getvalue()
+            self.assertIn("[agentteam] runtime", progress)
+            self.assertIn("event=runtime_session_started", progress)
+            self.assertIn("inflight=1", progress)
 
     def test_cli_can_commit_verified_integration_patch(self):
         with tempfile.TemporaryDirectory() as tmp:

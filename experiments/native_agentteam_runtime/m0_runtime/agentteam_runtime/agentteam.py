@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -897,6 +898,7 @@ def _handle_submit(args):
         notification_project=args.notification_project,
         feishu_webhook_env=args.feishu_webhook_env,
         feishu_signing_secret_env=args.feishu_signing_secret_env,
+        progress=progress,
     )
     if completed.returncode != 0:
         raise AgentTeamCliError(
@@ -981,6 +983,7 @@ def _handle_continue(args):
         or "agentteam",
         feishu_webhook_env=_profile_feishu_value(args, profile, "webhook_env"),
         feishu_signing_secret_env=_profile_feishu_value(args, profile, "signing_secret_env"),
+        progress=True,
     )
     if completed.returncode != 0:
         raise AgentTeamCliError(
@@ -2159,6 +2162,8 @@ def _run_frozen_taskpack(
     notification_project="agentteam",
     feishu_webhook_env=None,
     feishu_signing_secret_env=None,
+    progress=False,
+    progress_interval_seconds=2.0,
 ):
     runtime_args = build_taskpack_runtime_args(
         frozen_taskpack_dir,
@@ -2176,14 +2181,113 @@ def _run_frozen_taskpack(
         runtime_args.extend(["--feishu-signing-secret-env", feishu_signing_secret_env])
     command = [sys.executable, "-m", "agentteam_runtime.cli", *runtime_args]
     env = _runtime_subprocess_env()
-    return subprocess.run(
+    run_dir = Path(run_root).resolve() / Path(frozen_taskpack_dir).resolve().name
+    return _run_runtime_command_with_progress(
         command,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
+        run_dir=run_dir,
+        progress=progress,
+        progress_interval_seconds=progress_interval_seconds,
+        progress_stream=sys.stderr,
     )
+
+
+def _run_runtime_command_with_progress(
+    command,
+    env,
+    run_dir,
+    progress=False,
+    progress_interval_seconds=2.0,
+    progress_stream=None,
+):
+    if not progress:
+        return subprocess.run(
+            command,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    progress_stream = progress_stream or sys.stderr
+    run_dir = Path(run_dir)
+    interval = max(float(progress_interval_seconds or 0), 0.05)
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file:
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
+            process = subprocess.Popen(
+                command,
+                env=env,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                text=True,
+            )
+            cursor = 0
+            next_emit_at = 0.0
+            while True:
+                returncode = process.poll()
+                now = time.monotonic()
+                if now >= next_emit_at:
+                    cursor = _emit_runtime_progress(run_dir, cursor, progress_stream)
+                    next_emit_at = now + interval
+                if returncode is not None:
+                    break
+                time.sleep(min(interval, 0.2))
+            _emit_runtime_progress(run_dir, cursor, progress_stream)
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            return subprocess.CompletedProcess(
+                command,
+                process.returncode,
+                stdout_file.read(),
+                stderr_file.read(),
+            )
+
+
+def _emit_runtime_progress(run_dir, cursor, progress_stream):
+    run_dir = Path(run_dir)
+    events_path = run_dir / "events.jsonl"
+    try:
+        cursor, events = read_event_records_since(events_path, cursor, max_records=50)
+    except (OSError, json.JSONDecodeError):
+        events = []
+    try:
+        snapshot = replay_events(events_path) if events_path.exists() else {}
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        snapshot = {}
+    state = _read_json_progress_safe(run_dir / "state" / "two_phase_scheduler_state.json")
+    worker_registry = _read_json_progress_safe(run_dir / "state" / "worker_process_registry.json")
+    if not worker_registry:
+        worker_registry = _read_json_progress_safe(run_dir / "state" / "worker_registry.json")
+    task_counts = _status_task_counts(snapshot, state)
+    inflight = _status_inflight_attempts(state)
+    workers = _status_worker_counts(worker_registry)
+    event_type = events[-1].get("event_type") if events else None
+    pieces = [
+        f"status={_status_run_state(snapshot, state)}",
+        f"tasks={task_counts['done']}/{task_counts['total']}",
+        f"blocked={task_counts['blocked']}",
+        f"inflight={inflight['total']}",
+        f"manual_gates={_waiting_manual_gate_count(snapshot)}",
+        f"permission_requests={_waiting_permission_request_count(snapshot)}",
+    ]
+    if workers["total"]:
+        pieces.append(f"workers={workers['running']} running/{workers['stopped']} stopped")
+    if event_type:
+        pieces.append(f"event={event_type}")
+    _write_progress_to_stream(f"runtime {' '.join(pieces)}", progress_stream)
+    return cursor
+
+
+def _write_progress_to_stream(message, stream):
+    stream.write(f"[agentteam] {message}\n")
+    stream.flush()
+
+
+def _read_json_progress_safe(path):
+    try:
+        return _read_json_if_exists(path)
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 def _runtime_subprocess_env():
