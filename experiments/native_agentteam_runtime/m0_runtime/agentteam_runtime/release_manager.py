@@ -17,12 +17,19 @@ class AgentTeamReleaseError(RuntimeError):
 
 def update_status(profile):
     work_root = Path(profile["work_root"]).resolve()
+    releases = known_releases(work_root)
+    active = read_active_release(work_root)
+    latest = latest_installed_release(releases)
+    active_release_id = active.get("release_id")
+    latest_release_id = latest.get("release_id") if isinstance(latest, dict) else None
     return {
         "update_status": "status",
         "project": profile.get("project_key") or "unknown",
         "work_root": str(work_root),
-        "active_release": read_active_release(work_root),
-        "known_releases": known_releases(work_root),
+        "active_release": active,
+        "latest_installed_release": latest,
+        "active_is_latest": bool(active_release_id and active_release_id == latest_release_id),
+        "known_releases": releases,
         **run_release_bindings(work_root),
     }
 
@@ -109,6 +116,21 @@ def known_releases(work_root):
         if manifest:
             releases.append(manifest)
     return releases
+
+
+def latest_installed_release(releases):
+    releases = [release for release in releases if isinstance(release, dict) and release.get("release_id")]
+    if not releases:
+        return {"release_id": None, "reason": "no_installed_releases"}
+    with_installed_at = [release for release in releases if release.get("installed_at")]
+    if with_installed_at:
+        return max(
+            enumerate(with_installed_at),
+            key=lambda item: (item[1].get("installed_at") or "", item[0]),
+        )[1]
+    if len(releases) == 1:
+        return releases[0]
+    return {"release_id": None, "reason": "missing_installed_at"}
 
 
 def run_release_bindings(work_root):

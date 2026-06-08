@@ -1898,6 +1898,7 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["update_status"], "status")
             self.assertEqual(summary["active_release"]["release_id"], "release-a")
             self.assertEqual(summary["known_releases"][0]["release_id"], "release-a")
+            self.assertEqual(summary["latest_installed_release"]["release_id"], "release-a")
             self.assertEqual(summary["runs_by_release"]["release-a"], ["managed-run"])
             self.assertEqual(summary["unmanaged_runs"], ["unmanaged-run"])
 
@@ -1941,6 +1942,11 @@ class TaskpackTests(unittest.TestCase):
                             "release_id": release_id,
                             "release_root": str(release_root),
                             "source_root": str(tmp_path / "checkout" / release_id),
+                            "installed_at": (
+                                "2026-06-08T09:00:00Z"
+                                if release_id == "release-a"
+                                else "2026-06-08T10:00:00Z"
+                            ),
                         }
                     ),
                     encoding="utf-8",
@@ -1980,6 +1986,8 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(status_completed.returncode, 0, status_completed.stderr)
             self.assertIn("active_release: release-b\n", status_completed.stdout)
+            self.assertIn("latest_installed_release: release-b\n", status_completed.stdout)
+            self.assertIn("active_is_latest: true\n", status_completed.stdout)
             self.assertIn(
                 "known_releases:\n  - release-a\n  - release-b\n",
                 status_completed.stdout,
@@ -2083,6 +2091,8 @@ class TaskpackTests(unittest.TestCase):
             summary = json.loads(update_completed.stdout)
             self.assertEqual(summary["update_status"], "installed")
             self.assertEqual(summary["active_release"]["release_id"], "fixture-release")
+            self.assertEqual(summary["latest_installed_release"]["release_id"], "fixture-release")
+            self.assertTrue(summary["active_is_latest"])
             self.assertEqual(summary["release_prune"]["deleted_release_ids"], ["stale-release"])
             release_root = Path(summary["active_release"]["release_root"])
             self.assertTrue((release_root / "manifest.json").exists())
@@ -2119,6 +2129,8 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(text_update_completed.returncode, 0, text_update_completed.stderr)
             self.assertIn("update_status: installed\n", text_update_completed.stdout)
             self.assertIn("active_release: fixture-release-text\n", text_update_completed.stdout)
+            self.assertIn("latest_installed_release: fixture-release-text\n", text_update_completed.stdout)
+            self.assertIn("active_is_latest: true\n", text_update_completed.stdout)
             self.assertIn("  - fixture-release-text\n", text_update_completed.stdout)
             self.assertIn("pruned_releases:\n  - fixture-release\n", text_update_completed.stdout)
             self.assertNotIn("release_root", text_update_completed.stdout)

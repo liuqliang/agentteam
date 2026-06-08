@@ -1255,6 +1255,7 @@ def _handle_update(args):
         summary["known_releases"] = update_status(profile)["known_releases"]
     else:
         raise AgentTeamCliError("update action is required")
+    summary = _attach_release_status_fields(summary, profile)
     if args.json:
         return summary
     _write_update_text(summary)
@@ -1486,6 +1487,10 @@ def _write_update_text(summary):
         lines.insert(0, f"project: {summary['project']}")
     active = summary.get("active_release") or {}
     lines.append(f"active_release: {active.get('release_id') or 'none'}")
+    latest = summary.get("latest_installed_release") or {}
+    lines.append(f"latest_installed_release: {latest.get('release_id') or 'unknown'}")
+    if summary.get("active_is_latest") is not None:
+        lines.append(f"active_is_latest: {str(bool(summary.get('active_is_latest'))).lower()}")
     known = summary.get("known_releases") or []
     lines.append("known_releases:")
     if known:
@@ -1503,6 +1508,15 @@ def _write_update_text(summary):
         lines.extend(f"  - {release_id}" for release_id in deleted_release_ids)
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
+
+
+def _attach_release_status_fields(summary, profile):
+    status = update_status(profile)
+    enriched = dict(summary)
+    for key in ("active_release", "latest_installed_release", "active_is_latest", "known_releases"):
+        if key not in enriched or enriched[key] is None:
+            enriched[key] = status.get(key)
+    return enriched
 
 
 def _record_run_release(run_dir, profile):
