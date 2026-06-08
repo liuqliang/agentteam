@@ -223,6 +223,51 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["agent_role"], "runtime_diagnostic_agent")
             self.assertEqual(summary["latest_failure"]["failed_test"], "test_host_c_model_matches_exported_python_reference_exactly")
 
+    def test_agentteam_cli_chat_interactive_launches_codex_tui_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            run_dir = _write_failed_integration_run(tmp_path / "runs" / "taskpack-5")
+            capture_path = tmp_path / "codex-argv.json"
+            fake_codex = tmp_path / "fake_codex.py"
+            fake_codex.write_text(
+                "import json\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                f"Path({str(capture_path)!r}).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "chat",
+                    "--run-dir",
+                    str(run_dir),
+                    "--topic",
+                    "integration-failure",
+                    "--interactive",
+                    "--codex-command",
+                    "python3",
+                    str(fake_codex),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            argv = json.loads(capture_path.read_text(encoding="utf-8"))
+            self.assertNotIn("exec", argv)
+            self.assertEqual(_arg_value(argv, "-C"), str(run_dir.resolve()))
+            self.assertEqual(_arg_value(argv, "-s"), "read-only")
+            self.assertIn("--no-alt-screen", argv)
+            self.assertIn("runtime_diagnostic_agent", argv[-1])
+            self.assertIn("test_host_c_model_matches_exported_python_reference_exactly", argv[-1])
+
     def test_install_local_replaces_existing_launcher_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"

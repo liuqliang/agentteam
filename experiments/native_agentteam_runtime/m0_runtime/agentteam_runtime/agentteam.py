@@ -1328,12 +1328,6 @@ def _handle_chat(args):
             model=args.codex_model,
             timeout_seconds=args.codex_timeout_seconds,
         )
-        if result["stdout"]:
-            sys.stdout.write(result["stdout"])
-            sys.stdout.flush()
-        if result["stderr"]:
-            sys.stderr.write(result["stderr"])
-            sys.stderr.flush()
         return result["exit_code"]
     if args.json:
         return context

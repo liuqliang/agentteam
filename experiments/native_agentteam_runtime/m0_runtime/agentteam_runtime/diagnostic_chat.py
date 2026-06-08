@@ -129,28 +129,44 @@ def run_runtime_diagnostic_chat(
     model=None,
     timeout_seconds=DEFAULT_CODEX_TIMEOUT_SECONDS,
 ):
-    command = _codex_command(codex_command)
-    if model:
-        command.extend(["-m", model])
-    command.extend(["-"])
-    completed = subprocess.run(
-        command,
-        cwd=context["run_dir"],
-        input=context.get("prompt") or render_runtime_diagnostic_context(context),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=timeout_seconds,
-        check=False,
+    command = _interactive_codex_command(
+        context,
+        codex_command=codex_command,
+        model=model,
     )
+    try:
+        exit_code = subprocess.call(command, cwd=context["run_dir"], timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return {
+            "chat_status": "timed_out",
+            "agent_role": "runtime_diagnostic_agent",
+            "exit_code": None,
+            "run_dir": context["run_dir"],
+            "timeout_seconds": timeout_seconds,
+        }
     return {
-        "chat_status": "completed" if completed.returncode == 0 else "failed",
+        "chat_status": "completed" if exit_code == 0 else "failed",
         "agent_role": "runtime_diagnostic_agent",
-        "exit_code": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
+        "exit_code": exit_code,
         "run_dir": context["run_dir"],
     }
+
+
+def _interactive_codex_command(context, codex_command=None, model=None):
+    command = _codex_command(codex_command)
+    command.extend(
+        [
+            "-C",
+            context["run_dir"],
+            "-s",
+            "read-only",
+            "--no-alt-screen",
+        ]
+    )
+    if model:
+        command.extend(["-m", model])
+    command.append(context.get("prompt") or render_runtime_diagnostic_context(context))
+    return command
 
 
 def _latest_failure(events, integration_items, text_limit):
@@ -317,7 +333,7 @@ def _compact_json(value, limit):
 
 def _codex_command(codex_command):
     if codex_command is None:
-        return ["codex", "exec", "--skip-git-repo-check"]
+        return ["codex"]
     if isinstance(codex_command, str):
         raise ValueError("codex_command must be a string array, not a bare string")
     command = list(codex_command)
