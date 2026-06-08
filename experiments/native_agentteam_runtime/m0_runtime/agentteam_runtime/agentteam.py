@@ -73,7 +73,11 @@ _HELP_COMMANDS = [
     {
         "name": "start",
         "summary": "Author a taskpack from a goal, freeze it, and run it.",
-        "examples": ["agentteam start", "agentteam start --goal \"optimize this repo\""],
+        "examples": [
+            "agentteam start",
+            "agentteam start --goal \"optimize this repo\"",
+            "agentteam start --goal \"optimize this repo\" --json",
+        ],
     },
     {
         "name": "status",
@@ -121,7 +125,10 @@ _HELP_COMMANDS = [
     {
         "name": "continue",
         "summary": "Resume an existing frozen taskpack run.",
-        "examples": ["agentteam continue --project-root <repo> --taskpack <id>"],
+        "examples": [
+            "agentteam continue --project-root <repo> --taskpack <id>",
+            "agentteam continue --project-root <repo> --taskpack <id> --json",
+        ],
     },
     {
         "name": "resume",
@@ -382,6 +389,7 @@ def _add_start_parser(subcommands):
         nargs=argparse.REMAINDER,
         help="Optional Codex command prefix. Must appear last.",
     )
+    parser.add_argument("--json", action="store_true", help="Print the full execution result as JSON.")
     parser.set_defaults(handler=_handle_start)
 
 
@@ -484,6 +492,7 @@ def _add_continue_parser(subcommands):
         help="Commit integration worktree changes after verification passes.",
     )
     _add_notification_args(parser, notification_project_default=None)
+    parser.add_argument("--json", action="store_true", help="Print the full continue result as JSON.")
     parser.set_defaults(handler=_handle_continue)
 
 
@@ -953,7 +962,10 @@ def _handle_start(args):
         "profile_path": str(profile_path.resolve()),
         "project_key": profile.get("project_key"),
     }
-    return result
+    if args.json:
+        return result
+    _write_execution_result_text(result)
+    return 0
 
 
 def _handle_submit(args):
@@ -1110,7 +1122,7 @@ def _handle_continue(args):
     )
     _progress_completion_report(True, report)
     _write_progress(f"run {_run_progress_status(run)}")
-    return {
+    result = {
         "continue_status": "continued",
         "status": _submit_status_from_run(run),
         "taskpack_id": taskpack_id,
@@ -1131,6 +1143,10 @@ def _handle_continue(args):
             "run_dir": str(run_dir),
         },
     }
+    if args.json:
+        return result
+    _write_execution_result_text(result)
+    return 0
 
 
 def _continue_taskpack_id(args, profile):
@@ -1656,6 +1672,33 @@ def _write_status_text(summary):
     if summary.get("last_failure"):
         lines.append(f"last_failure: {summary['last_failure']}")
     lines.append(f"run_dir: {summary['run_dir']}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _write_execution_result_text(result):
+    report = result.get("report") if isinstance(result.get("report"), dict) else {}
+    paths = result.get("paths") if isinstance(result.get("paths"), dict) else {}
+    lines = [
+        f"status: {result.get('status') or result.get('continue_status') or 'unknown'}",
+        f"taskpack_id: {result.get('taskpack_id') or 'unknown'}",
+    ]
+    if result.get("runtime"):
+        lines.append(f"runtime: {result['runtime']}")
+    if report:
+        lines.append(
+            "summary: "
+            f"run_status={report.get('run_status') or 'unknown'} "
+            f"tasks={report.get('task_count', 0)} "
+            f"blocked={report.get('blocked_count', 0)}"
+        )
+        if isinstance(report.get("token_usage"), dict):
+            lines.append(format_token_usage(report.get("token_usage"), label="tokens"))
+        if report.get("report_path"):
+            lines.append(f"report: {report['report_path']}")
+    run_dir = paths.get("run_dir")
+    if run_dir:
+        lines.append(f"run_dir: {run_dir}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 
@@ -2480,7 +2523,7 @@ def _emit_runtime_progress(run_dir, cursor, progress_stream):
         )
     summary_key = tuple(summary_pieces)
     cursor["event_cursor"] = event_cursor
-    should_emit = bool(events) or summary_key != cursor["last_summary_key"]
+    should_emit = summary_key != cursor["last_summary_key"]
     if not should_emit:
         return cursor
     pieces = list(summary_pieces)

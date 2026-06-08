@@ -674,6 +674,7 @@ class TaskpackTests(unittest.TestCase):
                     "Start from project profile.",
                     "--taskpack-id",
                     "cli-start-profile",
+                    "--json",
                 ],
                 env=_test_env(),
                 stdout=subprocess.PIPE,
@@ -745,7 +746,11 @@ class TaskpackTests(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            json.loads(completed.stdout)
+            self.assertIn("status: completed\n", completed.stdout)
+            self.assertIn("taskpack_id: cli-start-progress\n", completed.stdout)
+            self.assertIn("report:", completed.stdout)
+            self.assertNotIn('"draft"', completed.stdout)
+            self.assertLessEqual(len([line for line in completed.stdout.splitlines() if line.strip()]), 7)
             self.assertIn("[agentteam] profile loaded: progress-project", completed.stderr)
             self.assertIn("[agentteam] authoring taskpack with fake", completed.stderr)
             self.assertIn("[agentteam] draft accepted: cli-start-progress", completed.stderr)
@@ -2490,6 +2495,7 @@ class TaskpackTests(unittest.TestCase):
                     str(repo),
                     "--taskpack",
                     "cli-continue",
+                    "--json",
                 ],
                 env=_test_env(),
                 stdout=subprocess.PIPE,
@@ -2617,6 +2623,7 @@ class TaskpackTests(unittest.TestCase):
                     "Run launcher start without PYTHONPATH.",
                     "--taskpack-id",
                     "launcher-start-fake",
+                    "--json",
                 ],
                 env=env,
                 stdout=subprocess.PIPE,
