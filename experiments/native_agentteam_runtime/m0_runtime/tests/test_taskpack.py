@@ -166,6 +166,61 @@ def _write_failed_integration_run(run_dir):
     return run_dir
 
 
+def _write_completed_operator_run(run_dir):
+    run_dir = Path(run_dir)
+    operator_report = {
+        "report_schema_version": "operator_run_report.v1",
+        "task_count": 1,
+        "blocked_count": 0,
+        "task_reports": [
+            {
+                "task_id": "optimize-pipeline",
+                "attempt_id": "optimize-pipeline-ATTEMPT-001",
+                "status": "implementation completed",
+                "what_changed": [
+                    "Scanned the repository and implemented one evidence-backed optimization."
+                ],
+                "changed_files": ["gesture_recognition/sim_eval.py"],
+                "verification": ["unit_tests: passed"],
+                "integration": "passed",
+                "merge_recommendation": "Review accepted patch before merging.",
+                "next_steps": ["Run the full competition validation package."],
+            }
+        ],
+    }
+    _write_json(
+        run_dir / "state" / "two_phase_scheduler_state.json",
+        {
+            "scheduler_status": "idle",
+            "backlog": {
+                "items": [
+                    {
+                        "task_id": "optimize-pipeline",
+                        "backlog_status": "done",
+                    }
+                ]
+            },
+            "steps": [],
+        },
+    )
+    _write_jsonl(
+        run_dir / "events.jsonl",
+        [
+            {
+                "event_id": "EVT-0001",
+                "event_type": "run_completed",
+                "sequence": 1,
+                "payload": {
+                    "run_status": "completed",
+                    "scheduler_status": "idle",
+                    "operator_report": operator_report,
+                },
+            }
+        ],
+    )
+    return run_dir
+
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
@@ -267,6 +322,36 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("--no-alt-screen", argv)
             self.assertIn("runtime_diagnostic_agent", argv[-1])
             self.assertIn("test_host_c_model_matches_exported_python_reference_exactly", argv[-1])
+
+    def test_agentteam_cli_report_renders_operator_summary_and_writes_report_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = _write_completed_operator_run(Path(tmp) / "runs" / "taskpack-7")
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "report",
+                    "--run-dir",
+                    str(run_dir),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("AgentTeam Run Report", completed.stdout)
+            self.assertIn("Run: taskpack-7", completed.stdout)
+            self.assertIn("Status: completed", completed.stdout)
+            self.assertIn("Scanned the repository", completed.stdout)
+            self.assertIn("gesture_recognition/sim_eval.py", completed.stdout)
+            report_path = run_dir / "reports" / "final_report.md"
+            self.assertTrue(report_path.exists())
+            self.assertIn("Run: taskpack-7", report_path.read_text(encoding="utf-8"))
 
     def test_install_local_replaces_existing_launcher_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3230,9 +3315,90 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(loaded["taskpack"]["taskpack_schema_version"], "taskpack.v1")
             self.assertEqual(loaded["taskpack"]["taskpack_id"], "fixture-taskpack")
             self.assertEqual(loaded["taskpack"]["status"], "draft")
+            self.assertEqual(loaded["taskpack"]["semantic_contract_version"], "task_semantics.v1")
             self.assertEqual(loaded["taskpack"]["project_root"], str(repo.resolve()))
+            self.assertEqual(loaded["taskpack"]["original_goal"], "Improve fixture behavior without broad writes.")
+            self.assertIn("goal_alignment", loaded["backlog"]["items"][0])
+            self.assertIn("required_deliverables", loaded["backlog"]["items"][0])
+            self.assertIn("verification_summary", loaded["backlog"]["items"][0]["required_deliverables"])
             self.assertEqual(loaded["verification"]["command"], ["python3", "-m", "unittest", "discover"])
             self.assertEqual(loaded["backlog"]["items"][0]["write_scope"], ["src/"])
+
+    def test_validate_taskpack_rejects_missing_goal_alignment_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Optimize existing competition repository.",
+                draft_root=drafts,
+                taskpack_id="missing-goal-alignment",
+                write_scope=["src/"],
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+            backlog_path = taskpack_dir / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            del backlog["items"][0]["goal_alignment"]
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(taskpack_dir)
+
+            self.assertIn("goal_alignment", str(raised.exception))
+
+    def test_validate_taskpack_rejects_missing_required_deliverables_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Optimize existing competition repository.",
+                draft_root=drafts,
+                taskpack_id="missing-required-deliverables",
+                write_scope=["src/"],
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+            backlog_path = taskpack_dir / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["required_deliverables"] = []
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(taskpack_dir)
+
+            self.assertIn("required_deliverables", str(raised.exception))
+
+    def test_validate_taskpack_accepts_legacy_frozen_without_semantic_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Run legacy frozen taskpack.",
+                draft_root=drafts,
+                taskpack_id="legacy-frozen",
+                write_scope=["src/"],
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+            taskpack_path = taskpack_dir / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["status"] = "frozen"
+            del taskpack["semantic_contract_version"]
+            del taskpack["original_goal"]
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+            backlog_path = taskpack_dir / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            del backlog["items"][0]["goal_alignment"]
+            del backlog["items"][0]["required_deliverables"]
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
 
     def test_draft_taskpack_files_rejects_unsafe_taskpack_ids(self):
         with tempfile.TemporaryDirectory() as tmp:

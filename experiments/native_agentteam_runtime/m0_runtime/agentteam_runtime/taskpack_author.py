@@ -5,7 +5,10 @@ from pathlib import Path
 
 from .repo_map import build_repository_map
 from .taskpack import (
+    TASKPACK_SEMANTIC_CONTRACT_VERSION,
     TaskpackValidationError,
+    _default_goal_alignment,
+    _default_required_deliverables,
     _require_contained_path,
     _resolve_draft_taskpack_id,
     draft_taskpack_files,
@@ -193,11 +196,17 @@ def _author_prompt(
             f"- taskpack.taskpack_schema_version: taskpack.v1",
             f"- taskpack.taskpack_id: {taskpack_id}",
             "- taskpack.status: draft",
+            f"- taskpack.semantic_contract_version: {TASKPACK_SEMANTIC_CONTRACT_VERSION}",
             f"- taskpack.project_root: {project_root}",
+            f"- taskpack.goal: {goal}",
+            f"- taskpack.original_goal: {goal}",
             "- taskpack.runtime.default_backend: codex",
             "- taskpack.files maps agent_pool, backlog, and verification to the JSON filenames above",
             "- agent_pool contains at least one idle agent with role implementation_worker",
             "- backlog.items contains at least one ready item with required_role implementation_worker",
+            "- each backlog item must include goal_alignment explaining how it advances taskpack.original_goal",
+            "- each backlog item must include required_deliverables as a non-empty string array",
+            "- broad optimization/audit goals must require an optimization_candidate_matrix and evidence_paths",
             "- backlog item read_scope is a non-empty string array",
             "- backlog item write_scope is a narrow repository-relative string array; never use repository root",
             "- verification.command is a non-empty string array using an allowed executable such as python3",
@@ -243,6 +252,12 @@ def _verify_required_taskpack_files(taskpack_dir):
 def _canonicalize_codex_taskpack_files(taskpack_dir):
     taskpack_dir = Path(taskpack_dir)
     taskpack = _read_json(taskpack_dir / "taskpack.yaml")
+    if isinstance(taskpack, dict):
+        if not taskpack.get("semantic_contract_version"):
+            taskpack["semantic_contract_version"] = TASKPACK_SEMANTIC_CONTRACT_VERSION
+        if not taskpack.get("original_goal") and taskpack.get("goal"):
+            taskpack["original_goal"] = taskpack["goal"]
+        _write_json(taskpack_dir / "taskpack.yaml", taskpack)
     files = taskpack.get("files") if isinstance(taskpack.get("files"), dict) else {}
 
     agent_pool_path = taskpack_dir / files.get("agent_pool", "agent_pool.json")
@@ -272,6 +287,14 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
                 item["task_id"] = item["item_id"]
             if not item.get("objective") and item.get("title"):
                 item["objective"] = item["title"]
+            if not item.get("goal_alignment"):
+                item["goal_alignment"] = _default_goal_alignment(
+                    taskpack.get("original_goal") or taskpack.get("goal") or item.get("objective")
+                )
+            if not item.get("required_deliverables"):
+                item["required_deliverables"] = _default_required_deliverables(
+                    taskpack.get("original_goal") or taskpack.get("goal") or item.get("objective")
+                )
             if not item.get("backlog_status") and item.get("status"):
                 item["backlog_status"] = item["status"]
             if "blockers" not in item:

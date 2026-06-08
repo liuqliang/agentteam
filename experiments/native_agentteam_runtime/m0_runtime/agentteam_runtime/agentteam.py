@@ -27,6 +27,11 @@ from .operator_control import (
     read_event_records_since,
     stop_run,
 )
+from .operator_report import (
+    build_run_completion_report,
+    concise_report_lines,
+    render_run_completion_report,
+)
 from .profile import (
     AgentTeamProfileError,
     build_project_profile,
@@ -72,6 +77,14 @@ _HELP_COMMANDS = [
         "name": "status",
         "summary": "Show the latest run state, including liveness and workers.",
         "examples": ["agentteam status --project-root <repo>"],
+    },
+    {
+        "name": "report",
+        "summary": "Render the latest run as a human-readable completion report.",
+        "examples": [
+            "agentteam report --project-root <repo>",
+            "agentteam report --run-dir <run>",
+        ],
     },
     {
         "name": "watch",
@@ -220,6 +233,7 @@ def _build_parser():
     _add_permissions_parser(subcommands)
     _add_resume_parser(subcommands)
     _add_watch_parser(subcommands)
+    _add_report_parser(subcommands)
     _add_chat_parser(subcommands)
     _add_stop_parser(subcommands)
     _add_update_parser(subcommands)
@@ -581,6 +595,15 @@ def _add_watch_parser(subcommands):
     parser.add_argument("--max-lines", type=int, help="Maximum lines to print before exiting.")
     parser.add_argument("--json-lines", action="store_true", help="Print progress as JSON lines.")
     parser.set_defaults(handler=_handle_watch)
+
+
+def _add_report_parser(subcommands):
+    parser = subcommands.add_parser("report", help="Show a human-readable AgentTeam run report.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--taskpack", help="Run/taskpack id to report. Defaults to latest run id.")
+    parser.add_argument("--run-dir", help="Existing run directory to report. Overrides --project-root selection.")
+    parser.add_argument("--json", action="store_true", help="Print report metadata as JSON instead of markdown.")
+    parser.set_defaults(handler=_handle_report)
 
 
 def _add_chat_parser(subcommands):
@@ -977,10 +1000,16 @@ def _handle_submit(args):
         )
 
     run = _json_or_output(completed.stdout)
+    run_dir = run_root / frozen["manifest"]["taskpack_id"]
     release_record = _record_run_release(
-        run_root / frozen["manifest"]["taskpack_id"],
+        run_dir,
         {"work_root": str(work_root)},
     )
+    report = build_run_completion_report(
+        run_dir,
+        project=args.notification_project or "agentteam",
+    )
+    _progress_completion_report(progress, report)
     _progress(progress, f"run {_run_progress_status(run)}")
     return {
         "status": _submit_status_from_run(run),
@@ -991,6 +1020,13 @@ def _handle_submit(args):
         "validation": validation,
         "freeze": frozen,
         "run": run,
+        "report": {
+            "report_path": report["report_path"],
+            "report_json_path": report["report_json_path"],
+            "run_status": report["run_status"],
+            "task_count": report["task_count"],
+            "blocked_count": report["blocked_count"],
+        },
         "paths": {
             "work_root": str(work_root),
             "draft_root": str(draft_root),
@@ -1063,6 +1099,11 @@ def _handle_continue(args):
         )
     run = _json_or_output(completed.stdout)
     release_record = _record_run_release(run_dir, profile)
+    report = build_run_completion_report(
+        run_dir,
+        project=profile.get("project_key") or "agentteam",
+    )
+    _progress_completion_report(True, report)
     _write_progress(f"run {_run_progress_status(run)}")
     return {
         "continue_status": "continued",
@@ -1071,6 +1112,13 @@ def _handle_continue(args):
         "lease_refresh": lease_refresh,
         "runtime_release": release_record,
         "run": run,
+        "report": {
+            "report_path": report["report_path"],
+            "report_json_path": report["report_json_path"],
+            "run_status": report["run_status"],
+            "task_count": report["task_count"],
+            "blocked_count": report["blocked_count"],
+        },
         "paths": {
             "work_root": str(work_root),
             "frozen_taskpack_dir": str(frozen_dir),
@@ -1315,6 +1363,22 @@ def _handle_watch(args):
     return 0
 
 
+def _handle_report(args):
+    profile = _watch_profile(args)
+    run_dir = _watch_run_dir(args, profile)
+    if not run_dir.exists():
+        raise AgentTeamCliError("run not found", run_dir=str(run_dir))
+    report = build_run_completion_report(
+        run_dir,
+        project=profile.get("project_key") or "unknown",
+    )
+    if args.json:
+        return report
+    sys.stdout.write(render_run_completion_report(report))
+    sys.stdout.flush()
+    return 0
+
+
 def _handle_chat(args):
     profile = _watch_profile(args)
     run_dir = _watch_run_dir(args, profile)
@@ -1385,6 +1449,13 @@ def _write_watch_line(summary, events, json_lines=False):
         pieces.append(f"event={event_type}")
     sys.stdout.write(" ".join(pieces) + "\n")
     sys.stdout.flush()
+
+
+def _progress_completion_report(enabled, report):
+    if not enabled:
+        return
+    for line in concise_report_lines(report):
+        _write_progress(line)
 
 
 def _watch_should_stop(summary):

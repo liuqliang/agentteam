@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 TASKPACK_SCHEMA_VERSION = "taskpack.v1"
+TASKPACK_SEMANTIC_CONTRACT_VERSION = "task_semantics.v1"
 DEFAULT_WORKER_ROLE = "implementation_worker"
 DEFAULT_DAEMON_MAX_STEPS = 45000
 DEFAULT_CODEX_RUNTIME_TIMEOUT_SECONDS = 3600
@@ -52,8 +53,10 @@ def draft_taskpack_files(
         "taskpack_schema_version": TASKPACK_SCHEMA_VERSION,
         "taskpack_id": taskpack_id,
         "status": "draft",
+        "semantic_contract_version": TASKPACK_SEMANTIC_CONTRACT_VERSION,
         "project_root": str(project_root),
         "goal": goal,
+        "original_goal": goal,
         "runtime": {
             "default_backend": "codex",
             "codex": {
@@ -97,6 +100,8 @@ def draft_taskpack_files(
                 "task_id": task_id,
                 "milestone_id": "TASKPACK-M0",
                 "objective": goal,
+                "goal_alignment": _default_goal_alignment(goal),
+                "required_deliverables": _default_required_deliverables(goal),
                 "backlog_status": "ready",
                 "risk_target": "L1",
                 "depends_on": [],
@@ -186,6 +191,12 @@ def validate_taskpack(taskpack_dir):
         errors.append("status must be draft or frozen")
     if not _is_non_empty_string(taskpack.get("goal")):
         errors.append("goal must be a non-empty string")
+    semantic_contract = taskpack.get("semantic_contract_version")
+    if semantic_contract is not None and semantic_contract != TASKPACK_SEMANTIC_CONTRACT_VERSION:
+        errors.append("semantic_contract_version must be task_semantics.v1")
+    semantic_contract_enabled = semantic_contract == TASKPACK_SEMANTIC_CONTRACT_VERSION
+    if semantic_contract_enabled and not _is_non_empty_string(taskpack.get("original_goal")):
+        errors.append("original_goal must be a non-empty string")
     try:
         _validate_taskpack_runtime_backend(taskpack.get("runtime"))
     except TaskpackValidationError as exc:
@@ -222,6 +233,13 @@ def validate_taskpack(taskpack_dir):
         required_role = item.get("required_role")
         if not _is_non_empty_string(item.get("objective")):
             errors.append(f"{task_id_label} objective must be a non-empty string")
+        if semantic_contract_enabled and not _is_non_empty_string(item.get("goal_alignment")):
+            errors.append(f"{task_id_label} goal_alignment must be a non-empty string")
+        deliverables = item.get("required_deliverables")
+        if semantic_contract_enabled and (not isinstance(deliverables, list) or not deliverables):
+            errors.append(f"{task_id_label} required_deliverables must be a non-empty list")
+        elif semantic_contract_enabled and not all(_is_non_empty_string(deliverable) for deliverable in deliverables):
+            errors.append(f"{task_id_label} required_deliverables entries must be non-empty strings")
         if not _is_non_empty_string(required_role):
             errors.append(f"{task_id_label} required_role must be a non-empty string")
         elif required_role not in idle_agent_roles:
@@ -304,6 +322,44 @@ def _verification_command_allowed(executable, project_root):
     except ValueError:
         return False
     return relative.as_posix() in {".venv/bin/python", "venv/bin/python"} and executable_path.is_file()
+
+
+def _default_goal_alignment(goal):
+    return (
+        "This task must preserve the original goal and either implement an "
+        "evidence-backed repository change or explain why no safe in-repo "
+        f"change is justified for: {goal}"
+    )
+
+
+def _default_required_deliverables(goal):
+    normalized = str(goal or "").lower()
+    optimization_markers = [
+        "optimize",
+        "optimization",
+        "improve",
+        "audit",
+        "性能",
+        "优化",
+        "改进",
+        "提升",
+        "检查",
+    ]
+    if any(marker in normalized for marker in optimization_markers):
+        return [
+            "repository_understanding_summary",
+            "optimization_candidate_matrix",
+            "evidence_paths",
+            "implemented_changes_or_no_safe_change_rationale",
+            "verification_summary",
+            "recommended_next_implementation_tasks",
+        ]
+    return [
+        "goal_alignment_summary",
+        "implemented_changes_or_no_safe_change_rationale",
+        "verification_summary",
+        "next_steps",
+    ]
 
 
 def freeze_taskpack(taskpack_dir, frozen_root):
@@ -811,9 +867,15 @@ def _render_readme(taskpack, backlog, verification):
             "",
             f"Goal: {taskpack['goal']}",
             "",
+            f"Original goal: {taskpack.get('original_goal') or taskpack['goal']}",
+            "",
             f"Project root: `{taskpack['project_root']}`",
             "",
             f"Task: `{task['task_id']}`",
+            "",
+            f"Goal alignment: {task.get('goal_alignment') or 'not specified'}",
+            "",
+            f"Required deliverables: `{json.dumps(task.get('required_deliverables', []), sort_keys=True)}`",
             "",
             f"Read scope: `{json.dumps(task['read_scope'], sort_keys=True)}`",
             "",

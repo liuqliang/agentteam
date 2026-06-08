@@ -98,6 +98,21 @@ def _normalize_task(
         "task_id": task_id,
         "milestone_id": milestone_id,
         "objective": objective,
+        "goal_alignment": _optional_string(
+            raw_task,
+            "goal_alignment",
+            f"This generated task advances the current milestone objective: {objective}",
+        ),
+        "required_deliverables": _non_empty_string_list(
+            raw_task,
+            "required_deliverables",
+            [
+                "goal_alignment_summary",
+                "implemented_changes_or_no_safe_change_rationale",
+                "verification_summary",
+                "next_steps",
+            ],
+        ),
         "backlog_status": backlog_status,
         "risk_target": risk_target,
         "depends_on": depends_on,
@@ -128,6 +143,13 @@ def _string_list(source, key):
     value = source.get(key, [])
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{key} must be a list of strings")
+    return list(value)
+
+
+def _non_empty_string_list(source, key, default):
+    value = source.get(key, default)
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+        raise ValueError(f"{key} must be a non-empty list of strings")
     return list(value)
 
 

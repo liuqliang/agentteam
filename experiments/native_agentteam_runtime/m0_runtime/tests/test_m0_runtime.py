@@ -6036,6 +6036,70 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIsNone(outcome["failure_category"])
         self.assertFalse(outcome["retryable"])
 
+    def test_attempt_outcome_rejects_completed_result_missing_required_deliverables(self):
+        task = {
+            "task_id": "TASK-001",
+            "write_scope": ["generated/"],
+            "required_deliverables": [
+                "optimization_candidate_matrix",
+                "evidence_paths",
+            ],
+        }
+        result = {
+            "result_status": "completed",
+            "changed_files": ["generated/result.json"],
+            "output": {
+                "operator_summary": {
+                    "what_changed": ["Changed one generated file."],
+                }
+            },
+        }
+
+        outcome = classify_attempt_outcome(result, task)
+
+        self.assertEqual(outcome["validation_status"], "rejected")
+        self.assertEqual(outcome["failure_category"], "missing_required_deliverables")
+        self.assertFalse(outcome["retryable"])
+        self.assertEqual(
+            outcome["semantic_validation"]["missing_required_deliverables"],
+            ["optimization_candidate_matrix", "evidence_paths"],
+        )
+
+    def test_attempt_outcome_accepts_completed_result_with_required_deliverables(self):
+        task = {
+            "task_id": "TASK-001",
+            "write_scope": ["generated/"],
+            "required_deliverables": [
+                "optimization_candidate_matrix",
+                "evidence_paths",
+            ],
+        }
+        result = {
+            "result_status": "completed",
+            "changed_files": ["generated/result.json"],
+            "output": {
+                "operator_summary": {
+                    "deliverables": [
+                        {
+                            "deliverable": "optimization_candidate_matrix",
+                            "summary": "Compared parser and feature extraction candidates.",
+                            "evidence": ["src/pipeline.py"],
+                        },
+                        {
+                            "deliverable": "evidence_paths",
+                            "summary": "Listed concrete source and test files.",
+                            "evidence": ["tests/test_pipeline.py"],
+                        },
+                    ]
+                }
+            },
+        }
+
+        outcome = classify_attempt_outcome(result, task)
+
+        self.assertEqual(outcome["validation_status"], "accepted")
+        self.assertIsNone(outcome["failure_category"])
+
     def test_attempt_outcome_classifies_timeout_as_retryable(self):
         task = {"write_scope": ["generated/"]}
         result = {"result_status": "timed_out", "changed_files": [], "output": {}}
@@ -8329,7 +8393,35 @@ def _append_runtime_result(
             "lease_id": lease_id,
             "result_status": result_status,
             "changed_files": changed_files,
-            "output": {"test": "m18"},
+            "output": {
+                "test": "m18",
+                "operator_summary": {
+                    "what_changed": ["Simulated worker completed the task."],
+                    "verification_summary": ["simulated_worker: passed"],
+                    "deliverables": [
+                        {
+                            "deliverable": "goal_alignment_summary",
+                            "summary": "Simulated worker preserved task alignment.",
+                            "evidence": ["test helper"],
+                        },
+                        {
+                            "deliverable": "implemented_changes_or_no_safe_change_rationale",
+                            "summary": "Simulated worker produced the declared changed files.",
+                            "evidence": changed_files or ["no changed files"],
+                        },
+                        {
+                            "deliverable": "verification_summary",
+                            "summary": "Simulated verification passed.",
+                            "evidence": ["test helper"],
+                        },
+                        {
+                            "deliverable": "next_steps",
+                            "summary": "No additional simulated next step.",
+                            "evidence": ["test helper"],
+                        },
+                    ],
+                },
+            },
         },
     }
     outbox_path = Path(outbox_path)
@@ -8440,6 +8532,12 @@ def _write_fake_codex(path, changed_file):
                 "import sys",
                 "args = sys.argv[1:]",
                 "prompt = sys.stdin.read()",
+                "message = json.loads(prompt.rsplit('Mailbox message:', 1)[1].strip())",
+                "required = message['payload'].get('required_deliverables', [])",
+                "deliverables = [",
+                "    {'deliverable': item, 'summary': f'satisfied {item}', 'evidence': ['fake codex']}",
+                "    for item in required",
+                "]",
                 "output_path = pathlib.Path(args[args.index('--output-last-message') + 1])",
                 "worktree = pathlib.Path(args[args.index('-C') + 1])",
                 f"target = worktree / {changed_file!r}",
@@ -8449,7 +8547,15 @@ def _write_fake_codex(path, changed_file):
                 "output_path.write_text(json.dumps({",
                 "    'result_status': 'completed',",
                 f"    'changed_files': [{changed_file!r}],",
-                "    'output': {'adapter': 'codex', 'prompt_contains_contract': 'changed_files' in prompt}",
+                "    'output': {",
+                "        'adapter': 'codex',",
+                "        'prompt_contains_contract': 'changed_files' in prompt,",
+                "        'operator_summary': {",
+                "            'what_changed': ['Fake Codex wrote the requested file.'],",
+                "            'verification_summary': ['fake_codex: passed'],",
+                "            'deliverables': deliverables,",
+                "        },",
+                "    },",
                 "}), encoding='utf-8')",
                 "print(json.dumps({'event': 'fake_codex_done'}))",
             ]
@@ -8543,13 +8649,26 @@ def _write_fake_codex_planner_and_worker(path):
                 "        },",
                 "    }), encoding='utf-8')",
                 "else:",
+                "    message = json.loads(prompt.rsplit('Mailbox message:', 1)[1].strip())",
+                "    required = message['payload'].get('required_deliverables', [])",
+                "    deliverables = [",
+                "        {'deliverable': item, 'summary': f'satisfied {item}', 'evidence': ['fake codex']}",
+                "        for item in required",
+                "    ]",
                 "    target = worktree / 'generated' / 'codex_generated_worker.json'",
                 "    target.parent.mkdir(parents=True, exist_ok=True)",
                 "    target.write_text(json.dumps({'generated_by': 'fake_codex_worker'}), encoding='utf-8')",
                 "    output_path.write_text(json.dumps({",
                 "        'result_status': 'completed',",
                 "        'changed_files': ['generated/codex_generated_worker.json'],",
-                "        'output': {'adapter': 'codex'},",
+                "        'output': {",
+                "            'adapter': 'codex',",
+                "            'operator_summary': {",
+                "                'what_changed': ['Fake Codex worker wrote a generated result.'],",
+                "                'verification_summary': ['fake_codex_worker: passed'],",
+                "                'deliverables': deliverables,",
+                "            },",
+                "        },",
                 "    }), encoding='utf-8')",
                 "print(json.dumps({'event': 'fake_codex_planner_and_worker_done'}))",
             ]

@@ -44,6 +44,13 @@ class FakeRuntimeAdapter:
                             {
                                 "task_id": f"TASK-{milestone_id}-GENERATED-001",
                                 "objective": f"Run generated worker task for {milestone_id}.",
+                                "goal_alignment": f"Advance milestone {milestone_id} with a bounded generated task.",
+                                "required_deliverables": [
+                                    "goal_alignment_summary",
+                                    "implemented_changes_or_no_safe_change_rationale",
+                                    "verification_summary",
+                                    "next_steps",
+                                ],
                                 "read_scope": ["."],
                                 "write_scope": [allowed_write_scopes[0]],
                                 "required_role": default_worker_role,
@@ -73,7 +80,10 @@ class FakeRuntimeAdapter:
         return {
             "result_status": "completed",
             "changed_files": changed_files,
-            "output": {"adapter": "fake"},
+            "output": {
+                "adapter": "fake",
+                "operator_summary": _fake_operator_summary(message["payload"], changed_files),
+            },
         }
 
 
@@ -366,6 +376,8 @@ class CodexRuntimeAdapter:
                 '{"result_status":"completed|blocked|failed|cancelled","changed_files":["path"],"output":{}}',
                 "For completed or failed work, output must include operator_summary for the human operator.",
                 "operator_summary must be natural language, not a patch dump: include what_changed, measured_result, verification_summary, merge_recommendation, and next_steps.",
+                "If mailbox payload has required_deliverables, operator_summary.deliverables must be a list of objects.",
+                "Each deliverables item must use the exact required deliverable string in its deliverable field and include summary plus evidence.",
                 "All changed_files entries must be relative paths inside the declared write_scope.",
                 "Use result_status blocked only when operator guidance is required before continuing.",
                 "For blocked results, include output.manual_gate with question, optional options, and optional reason.",
@@ -387,6 +399,13 @@ class CodexRuntimeAdapter:
                         {
                             "task_id": "TASK-<MILESTONE>-001",
                             "objective": "One bounded executable task.",
+                            "goal_alignment": "How this task advances the current milestone and original goal.",
+                            "required_deliverables": [
+                                "goal_alignment_summary",
+                                "implemented_changes_or_no_safe_change_rationale",
+                                "verification_summary",
+                                "next_steps",
+                            ],
                             "read_scope": ["."],
                             "write_scope": ["generated/"],
                             "required_role": payload.get("default_worker_role"),
@@ -577,6 +596,8 @@ def run_simulation(
                 "worktree_path": str(worktree_path) if worktree_path else None,
                 "branch": branch,
                 "objective": task["objective"],
+                "goal_alignment": task.get("goal_alignment"),
+                "required_deliverables": task.get("required_deliverables", []),
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
                 **_role_prompt_fields(agent_pool, agent, task),
@@ -745,6 +766,7 @@ def run_simulation(
                 "lease_id": lease_id,
                 "diff_audit": diff_audit,
                 "patch_path": str(patch_path) if patch_path else None,
+                "semantic_validation": outcome.get("semantic_validation"),
             },
         )
 
@@ -761,6 +783,7 @@ def run_simulation(
             "validation_status": outcome["validation_status"],
             "failure_category": outcome["failure_category"],
             "retryable": outcome["retryable"],
+            "semantic_validation": outcome.get("semantic_validation"),
             "diff_audit": diff_audit,
             "patch_path": str(patch_path) if patch_path else None,
             "integration_status": "not_requested",
@@ -2465,6 +2488,26 @@ def _fake_changed_files(write_scope):
     return [f"{write_scope[0].rstrip('/')}/m0_generated_repo_index.json"]
 
 
+def _fake_operator_summary(payload, changed_files):
+    deliverables = [
+        {
+            "deliverable": deliverable,
+            "summary": f"Fake runtime satisfied {deliverable}.",
+            "evidence": changed_files or ["no changed files"],
+        }
+        for deliverable in _coerce_text_list(payload.get("required_deliverables"))
+    ]
+    return {
+        "what_changed": [
+            "Fake runtime produced a deterministic bounded result for the task."
+        ],
+        "verification_summary": ["fake_runtime: passed"],
+        "deliverables": deliverables,
+        "merge_recommendation": "Review accepted patch before merging.",
+        "next_steps": [],
+    }
+
+
 def _scoped_attempt_id(attempt_number, attempt_id_prefix=None):
     return _scoped_id("ATTEMPT", attempt_number, attempt_id_prefix)
 
@@ -2506,10 +2549,19 @@ def classify_attempt_outcome(runtime_result, task, diff_audit=None):
             "retryable": False,
         }
     if validation_status == "accepted":
+        semantic_validation = _semantic_deliverable_validation(runtime_result, task)
+        if semantic_validation["missing_required_deliverables"]:
+            return {
+                "validation_status": "rejected",
+                "failure_category": "missing_required_deliverables",
+                "retryable": False,
+                "semantic_validation": semantic_validation,
+            }
         return {
             "validation_status": "accepted",
             "failure_category": None,
             "retryable": False,
+            "semantic_validation": semantic_validation,
         }
     if runtime_result["result_status"] == "timed_out":
         return {
@@ -2534,6 +2586,53 @@ def classify_attempt_outcome(runtime_result, task, diff_audit=None):
         "failure_category": "runtime_error",
         "retryable": True,
     }
+
+
+def _semantic_deliverable_validation(runtime_result, task):
+    required = _coerce_text_list(task.get("required_deliverables"))
+    delivered = _delivered_deliverable_names(runtime_result)
+    return {
+        "required_deliverables": required,
+        "delivered_deliverables": sorted(delivered),
+        "missing_required_deliverables": [
+            deliverable for deliverable in required if deliverable not in delivered
+        ],
+    }
+
+
+def _delivered_deliverable_names(runtime_result):
+    output = runtime_result.get("output") if isinstance(runtime_result, dict) else {}
+    if not isinstance(output, dict):
+        return set()
+    operator_summary = output.get("operator_summary")
+    if not isinstance(operator_summary, dict):
+        operator_summary = {}
+    deliverables = operator_summary.get("deliverables") or output.get("deliverables")
+    if isinstance(deliverables, dict):
+        return {str(key) for key, value in deliverables.items() if value}
+    if isinstance(deliverables, list):
+        names = set()
+        for item in deliverables:
+            if isinstance(item, dict):
+                name = item.get("deliverable") or item.get("name") or item.get("id")
+                if name and (item.get("summary") or item.get("evidence") or item.get("status")):
+                    names.add(str(name))
+            elif item:
+                names.add(str(item))
+        return names
+    return set()
+
+
+def _coerce_text_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None and str(item)]
+    if isinstance(value, tuple):
+        return [str(item) for item in value if item is not None and str(item)]
+    if isinstance(value, str):
+        return [value] if value else []
+    return [str(value)]
 
 
 def audit_worktree_diff(worktree_path, declared_changed_files):
