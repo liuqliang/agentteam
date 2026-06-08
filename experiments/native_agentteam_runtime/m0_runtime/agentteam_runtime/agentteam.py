@@ -9,6 +9,12 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from .diagnostic_chat import (
+    DEFAULT_CODEX_TIMEOUT_SECONDS,
+    build_runtime_diagnostic_context,
+    render_runtime_diagnostic_context,
+    run_runtime_diagnostic_chat,
+)
 from .m0_runtime import (
     answer_manual_gate,
     list_permission_requests,
@@ -71,6 +77,19 @@ _HELP_COMMANDS = [
         "name": "watch",
         "summary": "Print compact read-only progress lines for a run.",
         "examples": ["agentteam watch --project-root <repo> --max-lines 20"],
+    },
+    {
+        "name": "chat",
+        "summary": "Open a read-only diagnostic context for discussing a run.",
+        "examples": [
+            "agentteam chat --taskpack <id>",
+            "agentteam chat --run-dir <run> --topic integration-failure",
+            "agentteam chat --run-dir <run> --interactive",
+        ],
+        "notes": [
+            "Defaults to printing the diagnostic context without launching a model.",
+            "--interactive starts a Codex diagnostic session with the same read-only context.",
+        ],
     },
     {
         "name": "stop",
@@ -201,6 +220,7 @@ def _build_parser():
     _add_permissions_parser(subcommands)
     _add_resume_parser(subcommands)
     _add_watch_parser(subcommands)
+    _add_chat_parser(subcommands)
     _add_stop_parser(subcommands)
     _add_update_parser(subcommands)
     _add_status_parser(subcommands)
@@ -561,6 +581,37 @@ def _add_watch_parser(subcommands):
     parser.add_argument("--max-lines", type=int, help="Maximum lines to print before exiting.")
     parser.add_argument("--json-lines", action="store_true", help="Print progress as JSON lines.")
     parser.set_defaults(handler=_handle_watch)
+
+
+def _add_chat_parser(subcommands):
+    parser = subcommands.add_parser("chat", help="Discuss a run with a read-only diagnostic agent context.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--taskpack", help="Run/taskpack id to inspect. Defaults to latest run id.")
+    parser.add_argument("--run-dir", help="Existing run directory to inspect. Overrides --project-root selection.")
+    parser.add_argument(
+        "--topic",
+        default="runtime-diagnostic",
+        help="Diagnostic topic label, for example integration-failure or patch-review.",
+    )
+    parser.add_argument("--json", action="store_true", help="Print the diagnostic context as JSON.")
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Launch Codex with the diagnostic context instead of only printing it.",
+    )
+    parser.add_argument("--codex-model", help="Optional model passed to Codex for interactive diagnostics.")
+    parser.add_argument(
+        "--codex-timeout-seconds",
+        type=int,
+        default=DEFAULT_CODEX_TIMEOUT_SECONDS,
+        help="Timeout for the Codex diagnostic subprocess.",
+    )
+    parser.add_argument(
+        "--codex-command",
+        nargs=argparse.REMAINDER,
+        help="Optional Codex command prefix. Must appear last.",
+    )
+    parser.set_defaults(handler=_handle_chat)
 
 
 def _add_status_parser(subcommands):
@@ -1261,6 +1312,33 @@ def _handle_watch(args):
         if max_lines is not None and printed >= max_lines:
             break
         time.sleep(max(args.interval, 0))
+    return 0
+
+
+def _handle_chat(args):
+    profile = _watch_profile(args)
+    run_dir = _watch_run_dir(args, profile)
+    if not run_dir.exists():
+        raise AgentTeamCliError("run not found", run_dir=str(run_dir))
+    context = build_runtime_diagnostic_context(run_dir, topic=args.topic)
+    if args.interactive:
+        result = run_runtime_diagnostic_chat(
+            context,
+            codex_command=args.codex_command,
+            model=args.codex_model,
+            timeout_seconds=args.codex_timeout_seconds,
+        )
+        if result["stdout"]:
+            sys.stdout.write(result["stdout"])
+            sys.stdout.flush()
+        if result["stderr"]:
+            sys.stderr.write(result["stderr"])
+            sys.stderr.flush()
+        return result["exit_code"]
+    if args.json:
+        return context
+    sys.stdout.write(render_runtime_diagnostic_context(context))
+    sys.stdout.flush()
     return 0
 
 

@@ -16,6 +16,10 @@ from agentteam_runtime import (
     load_taskpack,
     validate_taskpack,
 )
+from agentteam_runtime.diagnostic_chat import (
+    build_runtime_diagnostic_context,
+    render_runtime_diagnostic_context,
+)
 from agentteam_runtime.taskpack_author import _command_list
 from agentteam_runtime.taskpack_author import _canonicalize_codex_taskpack_files
 
@@ -45,10 +49,180 @@ def _arg_value(args, flag):
     return args[index + 1]
 
 
+def _write_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+
+def _write_jsonl(path, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+
+def _write_failed_integration_run(run_dir):
+    run_dir = Path(run_dir)
+    integration_worktree = run_dir / "integration" / "optimize-pipeline"
+    integration_worktree.mkdir(parents=True)
+    (integration_worktree / "gesture_recognition").mkdir()
+    (integration_worktree / "gesture_recognition" / "sim_eval.py").write_text(
+        "# changed\n",
+        encoding="utf-8",
+    )
+    failure_stderr = "\n".join(
+        [
+            "test_fast_path (test_sim_eval.SimEvalTest.test_fast_path) ... ok",
+            "test_host_c_model_matches_exported_python_reference_exactly "
+            "(test_c_algo.CAlgoTest.test_host_c_model_matches_exported_python_reference_exactly) ... FAIL",
+            "",
+            "======================================================================",
+            "FAIL: test_host_c_model_matches_exported_python_reference_exactly "
+            "(test_c_algo.CAlgoTest.test_host_c_model_matches_exported_python_reference_exactly)",
+            "----------------------------------------------------------------------",
+            "AssertionError: First differing element 346: 'pinch' != 'others'",
+            "",
+            "FAILED (failures=1)",
+        ]
+    )
+    _write_json(
+        run_dir / "state" / "integration_queue.json",
+        {
+            "queue_schema_version": "integration_queue.v1",
+            "items": [
+                {
+                    "task_id": "optimize-pipeline",
+                    "attempt_id": "optimize-pipeline-ATTEMPT-001",
+                    "queue_status": "blocked",
+                    "integration_status": "applied",
+                    "integration_verification_status": "failed",
+                    "integration_verification_exit_code": 1,
+                    "integration_worktree_path": str(integration_worktree),
+                }
+            ],
+        },
+    )
+    _write_json(
+        run_dir / "codex_results" / "codex_result_optimize-pipeline-ATTEMPT-001.json",
+        {
+            "result_status": "completed",
+            "changed_files": [
+                "gesture_recognition/sim_eval.py",
+                "gesture_recognition/tests/test_sim_eval.py",
+            ],
+            "output": {
+                "operator_summary": {
+                    "what_changed": "Optimized feature extraction and negative window selection.",
+                    "verification_summary": "Local sim_eval tests passed.",
+                }
+            },
+        },
+    )
+    _write_json(
+        run_dir / "steps" / "STEP-0001-optimize-pipeline" / "backlog.json",
+        {
+            "items": [
+                {
+                    "task_id": "optimize-pipeline",
+                    "title": "Optimize gesture evaluation pipeline",
+                    "objective": "Improve Python evaluation speed without changing generated outputs.",
+                    "write_scope": [
+                        "gesture_recognition/sim_eval.py",
+                        "gesture_recognition/tests/test_sim_eval.py",
+                    ],
+                }
+            ]
+        },
+    )
+    _write_jsonl(
+        run_dir / "events.jsonl",
+        [
+            {
+                "event_id": "EVT-0001",
+                "event_type": "worker_result_recorded",
+                "sequence": 1,
+                "payload": {
+                    "task_id": "optimize-pipeline",
+                    "attempt_id": "optimize-pipeline-ATTEMPT-001",
+                    "result_status": "completed",
+                },
+            },
+            {
+                "event_id": "EVT-0002",
+                "event_type": "integration_verified",
+                "sequence": 2,
+                "payload": {
+                    "task_id": "optimize-pipeline",
+                    "attempt_id": "optimize-pipeline-ATTEMPT-001",
+                    "integration_verification_status": "failed",
+                    "integration_verification_exit_code": 1,
+                    "integration_verification_stderr": failure_stderr,
+                    "integration_verification_stdout": "",
+                },
+            },
+        ],
+    )
+    return run_dir
+
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 class TaskpackTests(unittest.TestCase):
+    def test_runtime_diagnostic_context_summarizes_failed_integration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = _write_failed_integration_run(Path(tmp) / "runs" / "taskpack-5")
+
+            context = build_runtime_diagnostic_context(run_dir, topic="integration-failure")
+            rendered = render_runtime_diagnostic_context(context)
+
+            self.assertEqual(context["agent_role"], "runtime_diagnostic_agent")
+            self.assertEqual(context["chat_status"], "context_ready")
+            self.assertEqual(context["topic"], "integration-failure")
+            self.assertEqual(context["latest_failure"]["task_id"], "optimize-pipeline")
+            self.assertEqual(context["latest_failure"]["failed_test"], "test_host_c_model_matches_exported_python_reference_exactly")
+            self.assertIn("First differing element 346", context["latest_failure"]["stderr_excerpt"])
+            self.assertEqual(
+                context["worker_results"][0]["changed_files"],
+                [
+                    "gesture_recognition/sim_eval.py",
+                    "gesture_recognition/tests/test_sim_eval.py",
+                ],
+            )
+            self.assertIn("runtime_diagnostic_agent", rendered)
+            self.assertIn("test_host_c_model_matches_exported_python_reference_exactly", rendered)
+            self.assertIn("Read-only role", rendered)
+
+    def test_agentteam_cli_chat_prints_diagnostic_context_as_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = _write_failed_integration_run(Path(tmp) / "runs" / "taskpack-5")
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "chat",
+                    "--run-dir",
+                    str(run_dir),
+                    "--topic",
+                    "integration-failure",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["chat_status"], "context_ready")
+            self.assertEqual(summary["agent_role"], "runtime_diagnostic_agent")
+            self.assertEqual(summary["latest_failure"]["failed_test"], "test_host_c_model_matches_exported_python_reference_exactly")
+
     def test_install_local_replaces_existing_launcher_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
