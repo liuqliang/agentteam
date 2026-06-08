@@ -80,6 +80,14 @@ _HELP_COMMANDS = [
         ],
     },
     {
+        "name": "next",
+        "summary": "Create a follow-up taskpack from a previous run report.",
+        "examples": [
+            "agentteam next --from-taskpack <id> --goal \"continue optimizing\"",
+            "agentteam next --goal \"continue from the latest run\" --json",
+        ],
+    },
+    {
         "name": "status",
         "summary": "Show the latest run state, including liveness and workers.",
         "examples": ["agentteam status --project-root <repo>"],
@@ -232,6 +240,7 @@ def _build_parser():
     _add_help_parser(subcommands)
     _add_init_parser(subcommands)
     _add_start_parser(subcommands)
+    _add_next_parser(subcommands)
     _add_taskpack_draft_parser(taskpack_subcommands)
     _add_taskpack_validate_parser(taskpack_subcommands)
     _add_taskpack_freeze_parser(taskpack_subcommands)
@@ -391,6 +400,54 @@ def _add_start_parser(subcommands):
     )
     parser.add_argument("--json", action="store_true", help="Print the full execution result as JSON.")
     parser.set_defaults(handler=_handle_start)
+
+
+def _add_next_parser(subcommands):
+    parser = subcommands.add_parser("next", help="Create and run a follow-up taskpack from a previous run.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--from-taskpack", help="Source taskpack/run id. Defaults to the latest run.")
+    parser.add_argument("--from-run-dir", help="Source run directory. Overrides --from-taskpack.")
+    parser.add_argument("--goal", help="Follow-up goal. Prompted when omitted.")
+    parser.add_argument("--taskpack-id", help="Optional safe id for the new follow-up taskpack.")
+    parser.add_argument("--work-root", help="Override the profile work root for this run.")
+    parser.add_argument(
+        "--author-runtime",
+        choices=["fake", "codex"],
+        help="Override the profile taskpack author runtime.",
+    )
+    parser.add_argument(
+        "--runtime",
+        choices=["auto", "fake", "codex"],
+        help="Override the profile execution runtime.",
+    )
+    parser.add_argument(
+        "--codex-timeout-seconds",
+        type=int,
+        default=600,
+        help="Timeout for Codex taskpack authoring.",
+    )
+    parser.add_argument(
+        "--one-shot",
+        action="store_true",
+        default=None,
+        help="Use the one-shot scheduler path for this run.",
+    )
+    parser.add_argument("--max-inflight", type=int, help="Override maximum daemon inflight attempts.")
+    parser.add_argument("--max-attempts", type=int, help="Override maximum attempts per task.")
+    parser.add_argument(
+        "--commit-verified-integration",
+        action="store_true",
+        default=None,
+        help="Commit integration worktree changes after verification passes for this run.",
+    )
+    _add_notification_args(parser, notification_project_default=None)
+    parser.add_argument(
+        "--codex-command",
+        nargs=argparse.REMAINDER,
+        help="Optional Codex command prefix. Must appear last.",
+    )
+    parser.add_argument("--json", action="store_true", help="Print the full execution result as JSON.")
+    parser.set_defaults(handler=_handle_next)
 
 
 def _add_taskpack_draft_parser(subcommands):
@@ -966,6 +1023,114 @@ def _handle_start(args):
         return result
     _write_execution_result_text(result)
     return 0
+
+
+def _handle_next(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    work_root = Path(args.work_root or profile["work_root"]).resolve()
+    source_run_dir = _followup_source_run_dir(args, profile, work_root)
+    if not source_run_dir.exists():
+        raise AgentTeamCliError("source run not found", run_dir=str(source_run_dir))
+    source_report = build_run_completion_report(
+        source_run_dir,
+        project=profile.get("project_key") or "agentteam",
+    )
+    requested_goal = args.goal or _prompt_text("Follow-up goal", required=True)
+    followup_goal = _build_followup_goal(requested_goal, source_report)
+
+    _write_progress(f"profile loaded: {profile.get('project_key') or project_root.name}")
+    _write_progress(f"follow-up source: {source_run_dir.name}")
+    submit_args = _submit_args_from_profile(args, project_root, profile)
+    submit_args.goal = followup_goal
+    submit_args.progress = True
+    result = _handle_submit(submit_args)
+    result["follow_up"] = {
+        "source_taskpack_id": source_run_dir.name,
+        "source_run_dir": str(source_run_dir),
+        "source_report_path": source_report["report_path"],
+        "requested_goal": requested_goal,
+    }
+    if args.json:
+        return result
+    _write_execution_result_text(result)
+    return 0
+
+
+def _followup_source_run_dir(args, profile, work_root):
+    if args.from_run_dir:
+        return Path(args.from_run_dir).resolve()
+    if args.from_taskpack:
+        return (work_root / "runs" / args.from_taskpack).resolve()
+    return _latest_run_dir(profile)
+
+
+def _build_followup_goal(requested_goal, source_report):
+    source_taskpack_id = source_report.get("run_id") or "unknown"
+    report_path = source_report.get("report_path") or "unknown"
+    run_dir = source_report.get("run_dir") or "unknown"
+    lines = [
+        "Follow-up goal:",
+        str(requested_goal),
+        "",
+        "Previous taskpack context:",
+        f"- source_taskpack_id: {source_taskpack_id}",
+        f"- source_run_dir: {run_dir}",
+        f"- source_report_path: {report_path}",
+        f"- source_run_status: {source_report.get('run_status') or 'unknown'}",
+        f"- source_scheduler_status: {source_report.get('scheduler_status') or 'unknown'}",
+        (
+            "- source_summary: "
+            f"tasks={source_report.get('task_count', 0)} "
+            f"blocked={source_report.get('blocked_count', 0)}"
+        ),
+        "",
+        "Instructions for the new taskpack:",
+        "- Treat the previous taskpack as immutable history; do not rewrite its run artifacts.",
+        "- Read the source report before drafting or executing the follow-up work.",
+        "- Use the previous findings, verification results, blockers, and next steps as context.",
+    ]
+    task_lines = _followup_task_summary_lines(source_report)
+    if task_lines:
+        lines.extend(["", "Previous task summaries:", *task_lines])
+    return "\n".join(lines)
+
+
+def _followup_task_summary_lines(source_report, limit=3):
+    operator_report = source_report.get("operator_report")
+    if not isinstance(operator_report, dict):
+        return []
+    task_reports = operator_report.get("task_reports")
+    if not isinstance(task_reports, list):
+        return []
+    lines = []
+    for task in task_reports[:limit]:
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("task_id") or "unknown"
+        status = task.get("status") or "unknown"
+        changed = _first_non_empty_text(task.get("what_changed"))
+        next_step = _first_non_empty_text(task.get("next_steps"))
+        line = f"- {task_id}: status={status}"
+        if changed:
+            line += f"; changed={changed}"
+        if next_step:
+            line += f"; next={next_step}"
+        lines.append(line)
+    return lines
+
+
+def _first_non_empty_text(value):
+    if isinstance(value, list):
+        for item in value:
+            text = str(item).strip()
+            if text:
+                return text
+        return None
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _handle_submit(args):
@@ -1679,12 +1844,15 @@ def _write_status_text(summary):
 def _write_execution_result_text(result):
     report = result.get("report") if isinstance(result.get("report"), dict) else {}
     paths = result.get("paths") if isinstance(result.get("paths"), dict) else {}
+    follow_up = result.get("follow_up") if isinstance(result.get("follow_up"), dict) else {}
     lines = [
         f"status: {result.get('status') or result.get('continue_status') or 'unknown'}",
         f"taskpack_id: {result.get('taskpack_id') or 'unknown'}",
     ]
     if result.get("runtime"):
         lines.append(f"runtime: {result['runtime']}")
+    if follow_up:
+        lines.append(f"source_taskpack_id: {follow_up.get('source_taskpack_id') or 'unknown'}")
     if report:
         lines.append(
             "summary: "
@@ -1696,6 +1864,8 @@ def _write_execution_result_text(result):
             lines.append(format_token_usage(report.get("token_usage"), label="tokens"))
         if report.get("report_path"):
             lines.append(f"report: {report['report_path']}")
+    if follow_up.get("source_report_path"):
+        lines.append(f"source_report: {follow_up['source_report_path']}")
     run_dir = paths.get("run_dir")
     if run_dir:
         lines.append(f"run_dir: {run_dir}")

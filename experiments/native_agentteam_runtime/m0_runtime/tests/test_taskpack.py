@@ -2420,6 +2420,7 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("AgentTeam commands", help_completed.stdout)
         self.assertIn("init", help_completed.stdout)
         self.assertIn("start", help_completed.stdout)
+        self.assertIn("next", help_completed.stdout)
         self.assertIn("status", help_completed.stdout)
         self.assertIn("watch", help_completed.stdout)
         self.assertIn("stop", help_completed.stdout)
@@ -2510,6 +2511,178 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["taskpack_id"], "cli-continue")
             self.assertEqual(summary["status"], "completed")
             self.assertEqual(summary["run"]["scheduler_status"], "idle")
+
+    def test_agentteam_cli_next_creates_followup_taskpack_from_completed_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "next-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            first_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Initial optimization pass.",
+                    "--taskpack-id",
+                    "first-pass",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(first_completed.returncode, 0, first_completed.stderr)
+
+            next_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "next",
+                    "--project-root",
+                    str(repo),
+                    "--from-taskpack",
+                    "first-pass",
+                    "--goal",
+                    "Plan and implement the next optimization step.",
+                    "--taskpack-id",
+                    "second-pass",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(next_completed.returncode, 0, next_completed.stderr)
+            summary = json.loads(next_completed.stdout)
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["taskpack_id"], "second-pass")
+            self.assertEqual(summary["follow_up"]["source_taskpack_id"], "first-pass")
+            self.assertTrue(Path(summary["follow_up"]["source_report_path"]).exists())
+            drafted = json.loads((work_root / "drafts" / "second-pass" / "taskpack.yaml").read_text(encoding="utf-8"))
+            self.assertIn("Follow-up goal:", drafted["goal"])
+            self.assertIn("Plan and implement the next optimization step.", drafted["goal"])
+            self.assertIn("Previous taskpack context:", drafted["goal"])
+            self.assertIn("source_taskpack_id: first-pass", drafted["goal"])
+            self.assertIn("final_report.md", drafted["goal"])
+
+    def test_agentteam_cli_next_default_output_is_concise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "next-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            first_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Initial optimization pass.",
+                    "--taskpack-id",
+                    "first-pass",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(first_completed.returncode, 0, first_completed.stderr)
+
+            next_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "next",
+                    "--project-root",
+                    str(repo),
+                    "--from-taskpack",
+                    "first-pass",
+                    "--goal",
+                    "Plan and implement the next optimization step.",
+                    "--taskpack-id",
+                    "second-pass",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(next_completed.returncode, 0, next_completed.stderr)
+            self.assertIn("status: completed\n", next_completed.stdout)
+            self.assertIn("taskpack_id: second-pass\n", next_completed.stdout)
+            self.assertIn("source_taskpack_id: first-pass\n", next_completed.stdout)
+            self.assertIn("report:", next_completed.stdout)
+            self.assertNotIn('"draft"', next_completed.stdout)
+            self.assertLessEqual(len([line for line in next_completed.stdout.splitlines() if line.strip()]), 9)
 
     def test_repo_root_agentteam_launcher_invokes_cli_help(self):
         launcher = Path(__file__).resolve().parents[4] / "agentteam"
