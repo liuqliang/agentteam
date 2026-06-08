@@ -15,6 +15,7 @@ from .diagnostic_chat import (
     render_runtime_diagnostic_context,
     run_runtime_diagnostic_chat,
 )
+from .artifact_repo import snapshot_run_artifacts_safe
 from .m0_runtime import (
     answer_manual_gate,
     list_permission_requests,
@@ -1190,6 +1191,13 @@ def _handle_submit(args):
         run_dir,
         project=args.notification_project or "agentteam",
     )
+    artifact_snapshot = snapshot_run_artifacts_safe(
+        work_root,
+        run_dir,
+        taskpack_id=frozen["manifest"]["taskpack_id"],
+        project=args.notification_project or "agentteam",
+    )
+    _progress(progress, _artifact_snapshot_progress(artifact_snapshot))
     _progress_completion_report(progress, report)
     _progress(progress, f"run {_run_progress_status(run)}")
     return {
@@ -1209,6 +1217,7 @@ def _handle_submit(args):
             "blocked_count": report["blocked_count"],
             "token_usage": report["token_usage"],
         },
+        "artifact_snapshot": artifact_snapshot,
         "paths": {
             "work_root": str(work_root),
             "draft_root": str(draft_root),
@@ -1285,6 +1294,13 @@ def _handle_continue(args):
         run_dir,
         project=profile.get("project_key") or "agentteam",
     )
+    artifact_snapshot = snapshot_run_artifacts_safe(
+        work_root,
+        run_dir,
+        taskpack_id=taskpack_id,
+        project=profile.get("project_key") or "agentteam",
+    )
+    _write_progress(_artifact_snapshot_progress(artifact_snapshot))
     _progress_completion_report(True, report)
     _write_progress(f"run {_run_progress_status(run)}")
     result = {
@@ -1302,6 +1318,7 @@ def _handle_continue(args):
             "blocked_count": report["blocked_count"],
             "token_usage": report["token_usage"],
         },
+        "artifact_snapshot": artifact_snapshot,
         "paths": {
             "work_root": str(work_root),
             "frozen_taskpack_dir": str(frozen_dir),
@@ -1569,7 +1586,14 @@ def _handle_report(args):
         run_dir,
         project=profile.get("project_key") or "unknown",
     )
+    artifact_snapshot = snapshot_run_artifacts_safe(
+        profile.get("work_root") or run_dir.parent,
+        run_dir,
+        taskpack_id=run_dir.name,
+        project=profile.get("project_key") or "unknown",
+    )
     if args.json:
+        report = {**report, "artifact_snapshot": artifact_snapshot}
         return report
     sys.stdout.write(render_run_completion_report(report))
     sys.stdout.flush()
@@ -1845,6 +1869,11 @@ def _write_execution_result_text(result):
     report = result.get("report") if isinstance(result.get("report"), dict) else {}
     paths = result.get("paths") if isinstance(result.get("paths"), dict) else {}
     follow_up = result.get("follow_up") if isinstance(result.get("follow_up"), dict) else {}
+    artifact_snapshot = (
+        result.get("artifact_snapshot")
+        if isinstance(result.get("artifact_snapshot"), dict)
+        else {}
+    )
     lines = [
         f"status: {result.get('status') or result.get('continue_status') or 'unknown'}",
         f"taskpack_id: {result.get('taskpack_id') or 'unknown'}",
@@ -1866,11 +1895,26 @@ def _write_execution_result_text(result):
             lines.append(f"report: {report['report_path']}")
     if follow_up.get("source_report_path"):
         lines.append(f"source_report: {follow_up['source_report_path']}")
+    if artifact_snapshot:
+        lines.append(f"artifact_trace: {_artifact_snapshot_text(artifact_snapshot)}")
     run_dir = paths.get("run_dir")
     if run_dir:
         lines.append(f"run_dir: {run_dir}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
+
+
+def _artifact_snapshot_progress(snapshot):
+    return f"artifact_trace: {_artifact_snapshot_text(snapshot)}"
+
+
+def _artifact_snapshot_text(snapshot):
+    status = snapshot.get("snapshot_status") or "unknown"
+    root = snapshot.get("artifacts_root") or "unknown"
+    commit = snapshot.get("commit_sha")
+    if commit:
+        return f"{status} commit={str(commit)[:12]} root={root}"
+    return f"{status} root={root}"
 
 
 def _status_run_state(snapshot, state):

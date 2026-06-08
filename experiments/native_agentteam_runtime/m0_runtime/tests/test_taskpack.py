@@ -374,6 +374,21 @@ class TaskpackTests(unittest.TestCase):
             self.assertTrue(report_path.exists())
             self.assertIn("Run: taskpack-7", report_path.read_text(encoding="utf-8"))
             self.assertIn("Tokens: total=1500 input=1200 output=300", report_path.read_text(encoding="utf-8"))
+            artifacts_root = Path(tmp) / "artifacts"
+            self.assertTrue((artifacts_root / ".git").exists())
+            self.assertTrue((artifacts_root / "runs" / "taskpack-7" / "reports" / "final_report.md").exists())
+            tracked_completed = subprocess.run(
+                ["git", "-C", str(artifacts_root), "ls-files"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(tracked_completed.returncode, 0, tracked_completed.stderr)
+            self.assertIn(
+                "runs/taskpack-7/reports/final_report.md",
+                tracked_completed.stdout.splitlines(),
+            )
 
     def test_install_local_replaces_existing_launcher_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -757,6 +772,91 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("[agentteam] frozen taskpack created: cli-start-progress", completed.stderr)
             self.assertIn("[agentteam] runtime started:", completed.stderr)
             self.assertIn("[agentteam] run idle", completed.stderr)
+
+    def test_agentteam_cli_start_versions_trace_artifacts_without_worktrees(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "artifact-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Create a versioned trace snapshot.",
+                    "--taskpack-id",
+                    "trace-artifacts",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            snapshot = summary["artifact_snapshot"]
+            artifacts_root = work_root / "artifacts"
+            self.assertEqual(snapshot["snapshot_status"], "committed")
+            self.assertEqual(snapshot["artifacts_root"], str(artifacts_root.resolve()))
+            self.assertTrue((artifacts_root / ".git").exists())
+            self.assertTrue((artifacts_root / "runs" / "trace-artifacts" / "reports" / "final_report.md").exists())
+            self.assertTrue((artifacts_root / "runs" / "trace-artifacts" / "reports" / "final_report.json").exists())
+            self.assertTrue((artifacts_root / "runs" / "trace-artifacts" / "events.jsonl").exists())
+            state_snapshot = artifacts_root / "runs" / "trace-artifacts" / "state"
+            self.assertTrue(
+                (state_snapshot / "two_phase_scheduler_state.json").exists()
+                or (state_snapshot / "scheduler_state.json").exists()
+            )
+            self.assertTrue((artifacts_root / "runs" / "trace-artifacts" / "taskpack" / "taskpack.yaml").exists())
+            tracked_completed = subprocess.run(
+                ["git", "-C", str(artifacts_root), "ls-files"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(tracked_completed.returncode, 0, tracked_completed.stderr)
+            tracked_files = tracked_completed.stdout.splitlines()
+            self.assertIn("runs/trace-artifacts/reports/final_report.md", tracked_files)
+            self.assertIn("runs/trace-artifacts/taskpack/taskpack.yaml", tracked_files)
+            self.assertFalse(any(path.startswith("runs/trace-artifacts/worktrees/") for path in tracked_files))
+            self.assertFalse(any(path.startswith("runs/trace-artifacts/integration/") for path in tracked_files))
+            self.assertTrue(snapshot["commit_sha"])
+            self.assertIn("artifact_trace:", completed.stderr)
 
     def test_agentteam_cli_status_summarizes_latest_run(self):
         with tempfile.TemporaryDirectory() as tmp:
