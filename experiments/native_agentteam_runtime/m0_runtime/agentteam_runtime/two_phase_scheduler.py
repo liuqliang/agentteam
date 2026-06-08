@@ -29,6 +29,7 @@ from .integration_queue import integration_queue_path, upsert_integration_queue_
 from .notifications import DEFAULT_NOTIFICATION_EVENT_TYPES
 from .planner_context import build_planner_context
 from .task_proposal import normalize_task_proposal
+from .token_usage import aggregate_token_usage, token_usage_from_result
 
 
 class TwoPhaseFileScheduler:
@@ -536,6 +537,7 @@ class TwoPhaseFileScheduler:
             "runtime_session_status": "stopped",
             "changed_files": list(runtime_result["changed_files"]),
             "runtime_output": runtime_result.get("output", {}),
+            "token_usage": token_usage_from_result(runtime_result),
             "worktree_id": inflight["worktree_id"],
             "worktree_path": inflight["worktree_path"],
             "branch": inflight["branch"],
@@ -1410,12 +1412,14 @@ def _operator_report_from_state(state):
         if not isinstance(result, dict):
             continue
         task_reports.append(_operator_task_report(step, result))
+    token_usages = [report.get("token_usage") for report in task_reports]
     return {
         "report_schema_version": "operator_run_report.v1",
         "task_count": len(task_reports),
         "blocked_count": sum(
             1 for report in task_reports if "blocked" in report.get("status", "")
         ),
+        "token_usage": aggregate_token_usage(token_usages, expected_count=len(task_reports)),
         "task_reports": task_reports,
     }
 
@@ -1437,6 +1441,7 @@ def _operator_task_report(step, result):
         "integration": _operator_integration_summary(result),
         "merge_recommendation": _operator_merge_recommendation(result, operator_summary),
         "next_steps": _operator_next_steps(result, operator_summary),
+        "token_usage": token_usage_from_result(result),
     }
 
 
@@ -1684,6 +1689,8 @@ def _runtime_result_from_outbox(outbox_path, source_message_id):
             "result_status": payload.get("result_status", "failed"),
             "changed_files": payload.get("changed_files", []),
             "output": payload.get("output", {}),
+            "usage": payload.get("usage"),
+            "token_usage": payload.get("token_usage"),
         }
     return None
 

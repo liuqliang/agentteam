@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from .two_phase_scheduler import _operator_report_from_state
+from .token_usage import aggregate_token_usage, format_token_usage
 
 
 TERMINAL_EVENT_TYPES = {
@@ -26,6 +27,15 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         operator_report = _operator_report_from_state(state) if isinstance(state, dict) else {}
     if not isinstance(operator_report, dict):
         operator_report = {}
+    token_usage = operator_report.get("token_usage")
+    if not isinstance(token_usage, dict):
+        task_reports = operator_report.get("task_reports", [])
+        if not isinstance(task_reports, list):
+            task_reports = []
+        token_usage = aggregate_token_usage(
+            [task.get("token_usage") for task in task_reports if isinstance(task, dict)],
+            expected_count=len(task_reports),
+        )
 
     report = {
         "report_status": "ready",
@@ -37,6 +47,7 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         "scheduler_status": _scheduler_status(payload, state),
         "task_count": operator_report.get("task_count", 0),
         "blocked_count": operator_report.get("blocked_count", 0),
+        "token_usage": token_usage,
         "operator_report": operator_report,
         "report_path": str(run_dir / "reports" / "final_report.md"),
         "report_json_path": str(run_dir / "reports" / "final_report.json"),
@@ -65,6 +76,7 @@ def render_run_completion_report(report):
             "## Summary",
             f"- Tasks reported: {report.get('task_count', 0)}",
             f"- Blocked tasks: {report.get('blocked_count', 0)}",
+            f"- {format_token_usage(report.get('token_usage'))}",
         ]
     )
 
@@ -101,6 +113,8 @@ def render_run_completion_report(report):
             lines.append(f"- Integration: {task['integration']}")
         if task.get("merge_recommendation"):
             lines.append(f"- Merge: {task['merge_recommendation']}")
+        if isinstance(task.get("token_usage"), dict):
+            lines.append(f"- {format_token_usage(task.get('token_usage'), label='Tokens')}")
         _extend_bullets(lines, "Next steps", task.get("next_steps"))
     return "\n".join(lines) + "\n"
 
@@ -115,6 +129,9 @@ def concise_report_lines(report, max_tasks=3):
             f"blocked={report.get('blocked_count', 0)}"
         ),
     ]
+    token_usage = report.get("token_usage")
+    if isinstance(token_usage, dict):
+        lines.append(format_token_usage(token_usage, label="tokens"))
     task_reports = (
         report.get("operator_report", {}).get("task_reports", [])
         if isinstance(report.get("operator_report"), dict)

@@ -562,6 +562,11 @@ class M0RuntimeTests(unittest.TestCase):
                         "用自然语言汇总 worker 完成的实现内容。",
                         "保留机器可读 changed_files 作为辅助定位。",
                     ],
+                    "usage": {
+                        "input_tokens": 1200,
+                        "output_tokens": 300,
+                        "total_tokens": 1500,
+                    },
                     "verification": {
                         "unit_tests": {
                             "command": "python3 -m unittest",
@@ -584,7 +589,21 @@ class M0RuntimeTests(unittest.TestCase):
             task_report = report["task_reports"][0]
 
             self.assertEqual(report["report_schema_version"], "operator_run_report.v1")
+            self.assertEqual(
+                report["token_usage"],
+                {
+                    "usage_status": "reported",
+                    "reported_attempt_count": 1,
+                    "unreported_attempt_count": 0,
+                    "input_tokens": 1200,
+                    "output_tokens": 300,
+                    "total_tokens": 1500,
+                    "cached_input_tokens": None,
+                    "reasoning_tokens": None,
+                },
+            )
             self.assertEqual(task_report["task_id"], "TASK-001")
+            self.assertEqual(task_report["token_usage"]["total_tokens"], 1500)
             self.assertEqual(
                 task_report["what_changed"],
                 [

@@ -2933,11 +2933,16 @@ def _normalize_runtime_result(result, adapter, stderr=""):
                 "stderr": stderr,
             },
         }
-    return {
+    normalized = {
         "result_status": result.get("result_status", "failed"),
         "changed_files": changed_files,
         "output": result.get("output", {}),
     }
+    if isinstance(result.get("token_usage"), dict):
+        normalized["token_usage"] = result["token_usage"]
+    elif isinstance(result.get("usage"), dict):
+        normalized["usage"] = result["usage"]
+    return normalized
 
 
 def _event(

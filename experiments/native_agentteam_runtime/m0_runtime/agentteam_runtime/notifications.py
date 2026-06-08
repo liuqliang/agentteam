@@ -6,6 +6,8 @@ import os
 import time
 import urllib.request
 
+from .token_usage import format_token_usage
+
 
 DEFAULT_NOTIFICATION_EVENT_TYPES = {
     "run_started",
@@ -273,6 +275,8 @@ def _event_text(event, run_dir, project):
 
 def _operator_report_text(report):
     lines = ["Operator report:"]
+    if isinstance(report.get("token_usage"), dict):
+        lines.append(format_token_usage(report.get("token_usage")))
     for task in report.get("task_reports", []):
         if not isinstance(task, dict):
             continue
@@ -289,6 +293,8 @@ def _operator_report_text(report):
         merge = task.get("merge_recommendation")
         if merge:
             lines.append(f"Merge: {merge}")
+        if isinstance(task.get("token_usage"), dict):
+            lines.append(format_token_usage(task.get("token_usage"), label="Tokens"))
         _extend_section(lines, "Next steps:", task.get("next_steps"))
     return lines
 

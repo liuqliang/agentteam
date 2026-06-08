@@ -185,8 +185,28 @@ def _write_completed_operator_run(run_dir):
                 "integration": "passed",
                 "merge_recommendation": "Review accepted patch before merging.",
                 "next_steps": ["Run the full competition validation package."],
+                "token_usage": {
+                    "usage_status": "reported",
+                    "reported_attempt_count": 1,
+                    "unreported_attempt_count": 0,
+                    "input_tokens": 1200,
+                    "output_tokens": 300,
+                    "total_tokens": 1500,
+                    "cached_input_tokens": None,
+                    "reasoning_tokens": None,
+                },
             }
         ],
+        "token_usage": {
+            "usage_status": "reported",
+            "reported_attempt_count": 1,
+            "unreported_attempt_count": 0,
+            "input_tokens": 1200,
+            "output_tokens": 300,
+            "total_tokens": 1500,
+            "cached_input_tokens": None,
+            "reasoning_tokens": None,
+        },
     }
     _write_json(
         run_dir / "state" / "two_phase_scheduler_state.json",
@@ -347,11 +367,13 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("AgentTeam Run Report", completed.stdout)
             self.assertIn("Run: taskpack-7", completed.stdout)
             self.assertIn("Status: completed", completed.stdout)
+            self.assertIn("Token usage: total=1500 input=1200 output=300 reported=1/1", completed.stdout)
             self.assertIn("Scanned the repository", completed.stdout)
             self.assertIn("gesture_recognition/sim_eval.py", completed.stdout)
             report_path = run_dir / "reports" / "final_report.md"
             self.assertTrue(report_path.exists())
             self.assertIn("Run: taskpack-7", report_path.read_text(encoding="utf-8"))
+            self.assertIn("Tokens: total=1500 input=1200 output=300", report_path.read_text(encoding="utf-8"))
 
     def test_install_local_replaces_existing_launcher_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -860,6 +882,22 @@ class TaskpackTests(unittest.TestCase):
                                 "agent_id": "implementation-worker-1",
                             }
                         ],
+                        "steps": [
+                            {
+                                "task_id": "completed-task",
+                                "result": {
+                                    "task_id": "completed-task",
+                                    "attempt_id": "ATTEMPT-000",
+                                    "runtime_output": {
+                                        "usage": {
+                                            "input_tokens": 700,
+                                            "output_tokens": 200,
+                                            "total_tokens": 900,
+                                        }
+                                    },
+                                },
+                            }
+                        ],
                     }
                 ),
                 encoding="utf-8",
@@ -900,6 +938,7 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(status_completed.returncode, 0, status_completed.stderr)
             self.assertIn("latest_run: inflight-run", status_completed.stdout)
             self.assertIn("status: max_ticks_reached", status_completed.stdout)
+            self.assertIn("tokens: total=900 input=700 output=200 reported=1/1", status_completed.stdout)
             self.assertIn("inflight: 1", status_completed.stdout)
             self.assertIn("workers: 1 stopped, 0 running, 0 quarantined", status_completed.stdout)
             self.assertIn(

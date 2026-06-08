@@ -50,6 +50,7 @@ from .release_manager import (
 )
 from .taskpack import build_taskpack_runtime_args, freeze_taskpack, validate_taskpack
 from .taskpack_author import draft_taskpack_from_goal
+from .token_usage import format_token_usage, token_usage_from_state
 
 
 class AgentTeamCliError(RuntimeError):
@@ -1029,6 +1030,7 @@ def _handle_submit(args):
             "run_status": report["run_status"],
             "task_count": report["task_count"],
             "blocked_count": report["blocked_count"],
+            "token_usage": report["token_usage"],
         },
         "paths": {
             "work_root": str(work_root),
@@ -1121,6 +1123,7 @@ def _handle_continue(args):
             "run_status": report["run_status"],
             "task_count": report["task_count"],
             "blocked_count": report["blocked_count"],
+            "token_usage": report["token_usage"],
         },
         "paths": {
             "work_root": str(work_root),
@@ -1615,6 +1618,7 @@ def _build_run_status_summary(profile, run_dir):
         "inflight": _status_inflight_attempts(state),
         "workers": _status_worker_counts(worker_registry),
         "last_worker": _status_last_worker(worker_registry),
+        "token_usage": token_usage_from_state(state),
         "manual_gates": manual_gate_count,
         "permission_requests": permission_request_count,
         "last_failure": _status_last_failure(snapshot, state),
@@ -1635,6 +1639,7 @@ def _write_status_text(summary):
             f"{summary['tasks']['blocked']} blocked"
         ),
         f"integration: {summary['integration']['blocked']} blocked",
+        format_token_usage(summary.get("token_usage"), label="tokens"),
         f"inflight: {summary['inflight']['total']}",
         f"manual_gates: {summary['manual_gates']}",
         f"permission_requests: {summary['permission_requests']}",
