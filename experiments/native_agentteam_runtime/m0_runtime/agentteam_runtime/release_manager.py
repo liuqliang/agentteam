@@ -8,6 +8,7 @@ from pathlib import Path
 
 RELEASE_POINTER_SCHEMA_VERSION = "agentteam_active_release.v1"
 RELEASE_MANIFEST_SCHEMA_VERSION = "agentteam_release_manifest.v1"
+TERMINAL_RUN_STATUSES = {"idle", "completed", "failed", "cancelled", "canceled"}
 
 
 class AgentTeamReleaseError(RuntimeError):
@@ -26,7 +27,7 @@ def update_status(profile):
     }
 
 
-def install_release_from_checkout(checkout_root, work_root, release_id=None, activate=True):
+def install_release_from_checkout(checkout_root, work_root, release_id=None, activate=True, prune_keep_latest=1):
     checkout_root = Path(checkout_root).resolve()
     work_root = Path(work_root).resolve()
     if not checkout_root.exists():
@@ -52,11 +53,15 @@ def install_release_from_checkout(checkout_root, work_root, release_id=None, act
     active_release = None
     if activate:
         active_release = activate_release(work_root, release_id)
+    release_prune = None
+    if activate and prune_keep_latest is not None:
+        release_prune = prune_releases(work_root, keep_latest=prune_keep_latest)
     return {
         "update_status": "installed",
         "release": manifest,
         "active_release": active_release,
         "known_releases": known_releases(work_root),
+        "release_prune": release_prune,
     }
 
 
@@ -122,6 +127,46 @@ def run_release_bindings(work_root):
     return {
         "runs_by_release": runs_by_release,
         "unmanaged_runs": unmanaged_runs,
+    }
+
+
+def prune_releases(work_root, keep_latest=1):
+    work_root = Path(work_root).resolve()
+    keep_latest = max(0, int(keep_latest))
+    releases = known_releases(work_root)
+    latest_release_ids = set(_latest_release_ids(releases, keep_latest))
+    active_release_id = read_active_release(work_root).get("release_id")
+    protected_release_ids = {
+        release_id
+        for release_id in [active_release_id, *latest_release_ids, *_nonterminal_run_release_ids(work_root)]
+        if release_id
+    }
+    deleted_releases = []
+    for release in releases:
+        raw_release_id = release.get("release_id")
+        try:
+            release_id = _safe_release_id(raw_release_id)
+        except AgentTeamReleaseError:
+            continue
+        if not release_id or release_id in protected_release_ids:
+            continue
+        release_root = releases_root(work_root) / release_id
+        if release_root.exists():
+            shutil.rmtree(release_root)
+            deleted_releases.append(
+                {
+                    "release_id": release_id,
+                    "release_root": str(release_root),
+                }
+            )
+    retained_release_ids = [release["release_id"] for release in known_releases(work_root) if release.get("release_id")]
+    return {
+        "prune_status": "pruned",
+        "keep_latest": keep_latest,
+        "deleted_release_ids": [release["release_id"] for release in deleted_releases],
+        "deleted_releases": deleted_releases,
+        "protected_release_ids": sorted(protected_release_ids),
+        "retained_release_ids": retained_release_ids,
     }
 
 
@@ -210,6 +255,39 @@ def _git_commit(checkout_root):
     if completed.returncode != 0:
         return None
     return completed.stdout.strip()
+
+
+def _latest_release_ids(releases, count):
+    if count <= 0:
+        return []
+    indexed = [(release, index) for index, release in enumerate(releases) if release.get("installed_at")]
+    indexed.sort(key=lambda item: (_release_sort_value(item[0]), item[1]), reverse=True)
+    return [release["release_id"] for release, _index in indexed[:count] if release.get("release_id")]
+
+
+def _release_sort_value(release):
+    installed_at = release.get("installed_at")
+    if installed_at:
+        return (1, installed_at)
+    return (0, release.get("release_id") or "")
+
+
+def _nonterminal_run_release_ids(work_root):
+    run_root = Path(work_root).resolve() / "runs"
+    if not run_root.exists():
+        return []
+    release_ids = []
+    for run_dir in sorted(path for path in run_root.iterdir() if path.is_dir()):
+        state = _run_state(run_dir)
+        if not isinstance(state, dict):
+            continue
+        release_id = state.get("runtime_release_id")
+        if not release_id:
+            continue
+        scheduler_status = state.get("scheduler_status")
+        if not scheduler_status or scheduler_status not in TERMINAL_RUN_STATUSES:
+            release_ids.append(release_id)
+    return release_ids
 
 
 def _safe_release_id(value):

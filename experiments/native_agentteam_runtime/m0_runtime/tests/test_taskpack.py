@@ -1995,6 +1995,7 @@ class TaskpackTests(unittest.TestCase):
             checkout = tmp_path / "checkout"
             work_root = tmp_path / "agentteam-work"
             existing_run = work_root / "runs" / "existing-run"
+            stale_release = work_root / "releases" / "stale-release"
             _init_repo(repo)
             _init_repo(checkout)
             runtime_pkg = checkout / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
@@ -2034,11 +2035,22 @@ class TaskpackTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            stale_release.mkdir(parents=True)
+            (stale_release / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "release_id": "stale-release",
+                        "release_root": str(stale_release),
+                        "source_root": str(tmp_path / "old-checkout"),
+                    }
+                ),
+                encoding="utf-8",
+            )
             (existing_run / "state").mkdir(parents=True)
             (existing_run / "state" / "two_phase_scheduler_state.json").write_text(
                 json.dumps(
                     {
-                        "scheduler_status": "running",
+                        "scheduler_status": "idle",
                         "runtime_release_id": "old-release",
                         "runtime_release_root": str(work_root / "releases" / "old-release"),
                     }
@@ -2071,10 +2083,12 @@ class TaskpackTests(unittest.TestCase):
             summary = json.loads(update_completed.stdout)
             self.assertEqual(summary["update_status"], "installed")
             self.assertEqual(summary["active_release"]["release_id"], "fixture-release")
+            self.assertEqual(summary["release_prune"]["deleted_release_ids"], ["stale-release"])
             release_root = Path(summary["active_release"]["release_root"])
             self.assertTrue((release_root / "manifest.json").exists())
             self.assertTrue((release_root / "agentteam").exists())
             self.assertTrue((release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime" / "__init__.py").exists())
+            self.assertFalse(stale_release.exists())
             active = json.loads((work_root / "releases" / "active.json").read_text(encoding="utf-8"))
             self.assertEqual(active["release_id"], "fixture-release")
             existing_state = json.loads(
@@ -2106,8 +2120,154 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("update_status: installed\n", text_update_completed.stdout)
             self.assertIn("active_release: fixture-release-text\n", text_update_completed.stdout)
             self.assertIn("  - fixture-release-text\n", text_update_completed.stdout)
+            self.assertIn("pruned_releases:\n  - fixture-release\n", text_update_completed.stdout)
             self.assertNotIn("release_root", text_update_completed.stdout)
             self.assertNotIn(str(work_root), text_update_completed.stdout)
+
+    def test_release_prune_keeps_active_and_running_run_release(self):
+        from agentteam_runtime.release_manager import prune_releases
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "agentteam-work"
+            releases = work_root / "releases"
+            for release_id in ["active-release", "running-release", "idle-release"]:
+                release_root = releases / release_id
+                release_root.mkdir(parents=True)
+                (release_root / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "release_id": release_id,
+                            "release_root": str(release_root),
+                            "source_root": str(tmp_path / "checkout" / release_id),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            (releases / "active.json").write_text(
+                json.dumps(
+                    {
+                        "release_id": "active-release",
+                        "release_root": str(releases / "active-release"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            for run_id, scheduler_status, release_id in [
+                ("running-run", "running", "running-release"),
+                ("idle-run", "idle", "idle-release"),
+            ]:
+                state_dir = work_root / "runs" / run_id / "state"
+                state_dir.mkdir(parents=True)
+                (state_dir / "two_phase_scheduler_state.json").write_text(
+                    json.dumps(
+                        {
+                            "scheduler_status": scheduler_status,
+                            "runtime_release_id": release_id,
+                            "runtime_release_root": str(releases / release_id),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            result = prune_releases(work_root, keep_latest=1)
+
+            self.assertEqual(result["deleted_release_ids"], ["idle-release"])
+            self.assertEqual(result["protected_release_ids"], ["active-release", "running-release"])
+            self.assertTrue((releases / "active-release").exists())
+            self.assertTrue((releases / "running-release").exists())
+            self.assertFalse((releases / "idle-release").exists())
+
+    def test_agentteam_cli_update_prune_deletes_old_terminal_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "update-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            for release_id in ["active-release", "old-release"]:
+                release_root = work_root / "releases" / release_id
+                release_root.mkdir(parents=True)
+                (release_root / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "release_id": release_id,
+                            "release_root": str(release_root),
+                            "source_root": str(tmp_path / "checkout" / release_id),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            (work_root / "releases" / "active.json").write_text(
+                json.dumps(
+                    {
+                        "release_id": "active-release",
+                        "release_root": str(work_root / "releases" / "active-release"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            idle_run_state = work_root / "runs" / "idle-run" / "state"
+            idle_run_state.mkdir(parents=True)
+            (idle_run_state / "two_phase_scheduler_state.json").write_text(
+                json.dumps(
+                    {
+                        "scheduler_status": "idle",
+                        "runtime_release_id": "old-release",
+                        "runtime_release_root": str(work_root / "releases" / "old-release"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            prune_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--prune",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(prune_completed.returncode, 0, prune_completed.stderr)
+            summary = json.loads(prune_completed.stdout)
+            self.assertEqual(summary["update_status"], "pruned")
+            self.assertEqual(summary["release_prune"]["deleted_release_ids"], ["old-release"])
+            self.assertTrue((work_root / "releases" / "active-release").exists())
+            self.assertFalse((work_root / "releases" / "old-release").exists())
 
     def test_agentteam_cli_start_records_active_runtime_release(self):
         with tempfile.TemporaryDirectory() as tmp:

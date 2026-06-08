@@ -45,6 +45,7 @@ from .release_manager import (
     activate_release,
     install_release_from_checkout,
     record_active_release_for_run,
+    prune_releases,
     update_status,
 )
 from .taskpack import build_taskpack_runtime_args, freeze_taskpack, validate_taskpack
@@ -163,10 +164,11 @@ _HELP_COMMANDS = [
     },
     {
         "name": "update",
-        "summary": "Manage side-by-side AgentTeam runtime releases.",
+        "summary": "Manage AgentTeam runtime releases. New installs prune old completed-run releases by default.",
         "examples": [
             "agentteam update --project-root <repo> --status",
             "agentteam update --project-root <repo> --from <checkout> --release-id <id>",
+            "agentteam update --project-root <repo> --prune",
             "agentteam update --project-root <repo> --rollback <release-id>",
         ],
     },
@@ -653,6 +655,7 @@ def _add_update_parser(subcommands):
     action.add_argument("--from", dest="source_checkout", help="Install and activate a release from a clean checkout.")
     action.add_argument("--activate", help="Activate an already installed release id.")
     action.add_argument("--rollback", help="Activate an older release id.")
+    action.add_argument("--prune", action="store_true", help="Prune old installed releases, keeping the active/latest release.")
     parser.add_argument("--release-id", help="Release id to use with --from. Defaults to git commit.")
     parser.add_argument("--json", action="store_true", help="Print update result as JSON instead of human text.")
     parser.set_defaults(handler=_handle_update)
@@ -1241,6 +1244,15 @@ def _handle_update(args):
             "active_release": activate_release(work_root, args.rollback, update_status="rollback_activated"),
             "known_releases": update_status(profile)["known_releases"],
         }
+    elif args.prune:
+        summary = {
+            "update_status": "pruned",
+            "project": profile.get("project_key") or "unknown",
+            "active_release": update_status(profile)["active_release"],
+            "known_releases": update_status(profile)["known_releases"],
+            "release_prune": prune_releases(work_root, keep_latest=1),
+        }
+        summary["known_releases"] = update_status(profile)["known_releases"]
     else:
         raise AgentTeamCliError("update action is required")
     if args.json:
@@ -1484,6 +1496,11 @@ def _write_update_text(summary):
         )
     else:
         lines.append("  none")
+    prune = summary.get("release_prune") or {}
+    deleted_release_ids = prune.get("deleted_release_ids") or []
+    if deleted_release_ids:
+        lines.append("pruned_releases:")
+        lines.extend(f"  - {release_id}" for release_id in deleted_release_ids)
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 
