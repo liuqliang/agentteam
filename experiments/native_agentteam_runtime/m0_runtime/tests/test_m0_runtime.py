@@ -4567,6 +4567,139 @@ class M0RuntimeTests(unittest.TestCase):
                 "committed",
             )
 
+    def test_two_phase_worker_attempts_start_from_updated_integration_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            source_head = _git_rev_parse(repo, "HEAD")
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/"]),
+                    _backlog_task("TASK-002", write_scope=["generated/"]),
+                ],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                max_inflight=1,
+                integrate_accepted_patch=True,
+                integration_verification_command=[
+                    sys.executable,
+                    "-c",
+                    "import pathlib; assert any(pathlib.Path('generated').glob('*.json'))",
+                ],
+            )
+
+            scheduler.dispatch_ready()
+            first = scheduler.state["inflight_attempts"][0]
+            first_worktree = Path(first["worktree_path"])
+            first_target = first_worktree / "generated" / "baseline_one.json"
+            first_target.parent.mkdir(parents=True, exist_ok=True)
+            first_target.write_text(json.dumps({"task": "one"}), encoding="utf-8")
+            _append_runtime_result(
+                first["outbox_path"],
+                first["message_id"],
+                first["task_id"],
+                first["attempt_id"],
+                first["lease_id"],
+                "completed",
+                ["generated/baseline_one.json"],
+            )
+
+            collected = scheduler.collect_ready_results()
+            first_result = collected["results"][0]
+            baseline_branch = "agentteam/run/run/integration"
+            baseline_worktree = output_dir / "integration-baseline"
+            baseline_commit = first_result["integration_baseline_commit_sha"]
+
+            self.assertEqual(first["integration_base_sha"], source_head)
+            self.assertEqual(first_result["integration_baseline_commit_status"], "committed")
+            self.assertNotEqual(baseline_commit, source_head)
+            self.assertEqual(first_result["integration_baseline_branch"], baseline_branch)
+            self.assertEqual(
+                first_result["integration_baseline_worktree_path"],
+                str(baseline_worktree),
+            )
+            self.assertEqual(_git_rev_parse(repo, baseline_branch), baseline_commit)
+            self.assertEqual(_git_rev_parse(baseline_worktree, "HEAD"), baseline_commit)
+            self.assertEqual(_git_rev_parse(repo, "HEAD"), source_head)
+            self.assertEqual(_git_status_short(repo), "")
+
+            scheduler.dispatch_ready()
+            second = scheduler.state["inflight_attempts"][0]
+            second_worktree = Path(second["worktree_path"])
+
+            self.assertEqual(second["integration_base_sha"], baseline_commit)
+            self.assertEqual(_git_rev_parse(second_worktree, "HEAD"), baseline_commit)
+            self.assertTrue((second_worktree / "generated" / "baseline_one.json").exists())
+
+    def test_two_phase_failed_integration_verification_does_not_advance_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            source_head = _git_rev_parse(repo, "HEAD")
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-001", write_scope=["generated/"])],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                max_inflight=1,
+                integrate_accepted_patch=True,
+                integration_verification_command=[
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.exit(7)",
+                ],
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            worktree = Path(inflight["worktree_path"])
+            target = worktree / "generated" / "failing.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"status": "will-fail"}), encoding="utf-8")
+            _append_runtime_result(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                ["generated/failing.json"],
+            )
+
+            collected = scheduler.collect_ready_results()
+            result = collected["results"][0]
+            baseline_worktree = Path(result["integration_baseline_worktree_path"])
+
+            self.assertEqual(result["integration_verification_status"], "failed")
+            self.assertEqual(result["integration_baseline_commit_status"], "skipped")
+            self.assertEqual(result["integration_baseline_commit_reason"], "verification_failed")
+            self.assertEqual(_git_rev_parse(repo, "agentteam/run/run/integration"), source_head)
+            self.assertEqual(_git_rev_parse(baseline_worktree, "HEAD"), source_head)
+            self.assertFalse((baseline_worktree / "generated" / "failing.json").exists())
+            self.assertEqual(_git_status_short(baseline_worktree), "")
+            self.assertEqual(_git_rev_parse(repo, "HEAD"), source_head)
+
     def test_two_phase_scheduler_dispatches_multiple_tasks_before_collecting(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

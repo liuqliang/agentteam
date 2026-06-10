@@ -17,12 +17,16 @@ from .m0_runtime import (
     _role_prompt_fields,
     _runtime_adapter_metadata,
     _scoped_id,
-    apply_patch_to_integration_worktree,
+    apply_patch_to_integration_baseline_worktree,
     audit_worktree_diff,
     classify_attempt_outcome,
+    commit_integration_baseline_worktree,
     evaluate_integration_commit,
+    ensure_integration_baseline_worktree,
     rebuild_sqlite_state_index,
+    reset_integration_baseline_worktree,
     run_integration_verification,
+    skip_integration_baseline_commit,
     write_patch_artifact,
 )
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
@@ -283,6 +287,7 @@ class TwoPhaseFileScheduler:
         runtime_session_id = f"SESSION-{attempt_id}"
         worktree_path = None
         branch = None
+        integration_baseline = None
         correlation_id = f"{task['task_id']}:{attempt_id}"
         created_at = self.clock.now()
         lease_expires_at = _timestamp_after(
@@ -297,11 +302,17 @@ class TwoPhaseFileScheduler:
         }
 
         if self.project_root and worktree_id:
+            integration_baseline = self._ensure_integration_baseline() if self.integrate_accepted_patch else None
             worktree_path, branch = _create_git_worktree(
                 self.project_root,
                 step_dir,
                 attempt_id,
                 worktree_id,
+                base_ref=(
+                    integration_baseline["integration_baseline_branch"]
+                    if integration_baseline
+                    else None
+                ),
             )
 
         message = {
@@ -424,6 +435,7 @@ class TwoPhaseFileScheduler:
                                 "worktree_id": worktree_id,
                                 "worktree_path": str(worktree_path),
                                 "branch": branch,
+                                **_integration_baseline_event_fields(integration_baseline),
                                 "write_scope": task["write_scope"],
                             },
                         )
@@ -459,6 +471,7 @@ class TwoPhaseFileScheduler:
                         **metadata,
                         "worktree_id": worktree_id,
                         "worktree_path": str(worktree_path) if worktree_path else None,
+                        **_integration_baseline_event_fields(integration_baseline),
                         "session_status": "started",
                     },
                 ),
@@ -480,6 +493,7 @@ class TwoPhaseFileScheduler:
             "worktree_id": worktree_id,
             "worktree_path": str(worktree_path) if worktree_path else None,
             "branch": branch,
+            **_integration_baseline_inflight_fields(integration_baseline),
             "correlation_id": correlation_id,
         }
         self.state["inflight_attempts"].append(inflight)
@@ -541,6 +555,12 @@ class TwoPhaseFileScheduler:
             "worktree_id": inflight["worktree_id"],
             "worktree_path": inflight["worktree_path"],
             "branch": inflight["branch"],
+            "integration_base_ref": inflight.get("integration_base_ref"),
+            "integration_base_sha": inflight.get("integration_base_sha"),
+            "integration_baseline_branch": inflight.get("integration_baseline_branch"),
+            "integration_baseline_worktree_path": inflight.get(
+                "integration_baseline_worktree_path"
+            ),
             "validation_status": outcome["validation_status"],
             "failure_category": outcome["failure_category"],
             "retryable": outcome["retryable"],
@@ -560,6 +580,15 @@ class TwoPhaseFileScheduler:
             "integration_commit_reason": None,
             "integration_commit_stdout": "",
             "integration_commit_stderr": "",
+            "integration_baseline_commit_status": "not_requested",
+            "integration_baseline_commit_sha": None,
+            "integration_baseline_commit_message": None,
+            "integration_baseline_commit_reason": None,
+            "integration_baseline_commit_stdout": "",
+            "integration_baseline_commit_stderr": "",
+            "integration_baseline_rollback_status": "not_requested",
+            "integration_baseline_rollback_stdout": "",
+            "integration_baseline_rollback_stderr": "",
             "integration_queue_status": "not_queued",
             "integration_queue_item_id": None,
             "integration_queue_path": str(integration_queue_path(self.output_dir)),
@@ -891,6 +920,26 @@ class TwoPhaseFileScheduler:
             }
         )
 
+    def _ensure_integration_baseline(self):
+        baseline = ensure_integration_baseline_worktree(
+            self.project_root,
+            self.output_dir,
+        )
+        self.state["integration_baseline"] = baseline
+        return baseline
+
+    def _record_integration_baseline_result(self, integration, head_sha):
+        self.state["integration_baseline"] = {
+            "integration_baseline_status": "ready",
+            "integration_baseline_branch": integration.get(
+                "integration_baseline_branch"
+            ),
+            "integration_baseline_worktree_path": integration.get(
+                "integration_baseline_worktree_path"
+            ),
+            "integration_baseline_head_sha": head_sha,
+        }
+
     def _integrate_accepted_result(self, inflight, result, patch_path, outcome):
         if outcome["validation_status"] != "accepted":
             return []
@@ -915,10 +964,9 @@ class TwoPhaseFileScheduler:
                 )
             )
         if self.integrate_accepted_patch and self.project_root and patch_path:
-            integration = apply_patch_to_integration_worktree(
+            integration = apply_patch_to_integration_baseline_worktree(
                 self.project_root,
                 self.output_dir,
-                inflight["task_id"],
                 patch_path,
             )
             result.update(integration)
@@ -959,12 +1007,99 @@ class TwoPhaseFileScheduler:
                         },
                     )
                 )
+                if verification["integration_verification_status"] == "passed":
+                    baseline_commit = commit_integration_baseline_worktree(
+                        integration["integration_baseline_worktree_path"],
+                        inflight["task_id"],
+                        inflight["attempt_id"],
+                    )
+                    result.update(baseline_commit)
+                    self._record_integration_baseline_result(
+                        integration,
+                        baseline_commit["integration_baseline_commit_sha"],
+                    )
+                    events.append(
+                        self._event(
+                            "integration_baseline_commit_evaluated",
+                            "agent-scheduler",
+                            inflight["agent_id"],
+                            f"integration-baseline-commit:{inflight['attempt_id']}",
+                            inflight["correlation_id"],
+                            {
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "lease_id": inflight["lease_id"],
+                                **baseline_commit,
+                            },
+                        )
+                    )
+                else:
+                    baseline_commit = skip_integration_baseline_commit(
+                        "verification_failed"
+                    )
+                    rollback = reset_integration_baseline_worktree(
+                        integration["integration_baseline_worktree_path"]
+                    )
+                    result.update(baseline_commit)
+                    result.update(rollback)
+                    self._record_integration_baseline_result(
+                        integration,
+                        integration["integration_base_sha"],
+                    )
+                    events.append(
+                        self._event(
+                            "integration_baseline_commit_evaluated",
+                            "agent-scheduler",
+                            inflight["agent_id"],
+                            f"integration-baseline-commit:{inflight['attempt_id']}",
+                            inflight["correlation_id"],
+                            {
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "lease_id": inflight["lease_id"],
+                                **baseline_commit,
+                                **rollback,
+                            },
+                        )
+                    )
+            else:
+                baseline_commit = skip_integration_baseline_commit(
+                    "verification_not_requested"
+                )
+                rollback = reset_integration_baseline_worktree(
+                    integration["integration_baseline_worktree_path"]
+                )
+                result.update(baseline_commit)
+                result.update(rollback)
+                self._record_integration_baseline_result(
+                    integration,
+                    integration["integration_base_sha"],
+                )
+                events.append(
+                    self._event(
+                        "integration_baseline_commit_evaluated",
+                        "agent-scheduler",
+                        inflight["agent_id"],
+                        f"integration-baseline-commit:{inflight['attempt_id']}",
+                        inflight["correlation_id"],
+                        {
+                            "task_id": inflight["task_id"],
+                            "attempt_id": inflight["attempt_id"],
+                            "lease_id": inflight["lease_id"],
+                            **baseline_commit,
+                            **rollback,
+                        },
+                    )
+                )
         if self.commit_verified_integration:
-            integration_commit = evaluate_integration_commit(
-                result,
-                inflight["task_id"],
-                inflight["attempt_id"],
-            )
+            if result.get("integration_baseline_commit_status") != "not_requested":
+                integration_commit = _integration_commit_from_baseline_result(result)
+            else:
+                integration_commit = evaluate_integration_commit(
+                    result,
+                    inflight["task_id"],
+                    inflight["attempt_id"],
+                )
             result.update(integration_commit)
             events.append(
                 self._event(
@@ -1359,6 +1494,7 @@ class TwoPhaseFileScheduler:
             state.setdefault("max_attempts", self.max_attempts)
             state.setdefault("lease_timeout_seconds", self.lease_timeout_seconds)
             state.setdefault("milestones", {})
+            state.setdefault("integration_baseline", {})
             return state
         return {
             "scheduler_status": "initialized",
@@ -1368,6 +1504,7 @@ class TwoPhaseFileScheduler:
             "steps": [],
             "inflight_attempts": [],
             "milestones": {},
+            "integration_baseline": {},
         }
 
     def _write_state(self):
@@ -1421,6 +1558,56 @@ def _operator_report_from_state(state):
         ),
         "token_usage": aggregate_token_usage(token_usages, expected_count=len(task_reports)),
         "task_reports": task_reports,
+    }
+
+
+def _integration_baseline_event_fields(baseline):
+    if not isinstance(baseline, dict):
+        return {}
+    return {
+        "integration_base_ref": baseline.get("integration_baseline_branch"),
+        "integration_base_sha": baseline.get("integration_baseline_head_sha"),
+        "integration_baseline_branch": baseline.get("integration_baseline_branch"),
+        "integration_baseline_worktree_path": baseline.get(
+            "integration_baseline_worktree_path"
+        ),
+    }
+
+
+def _integration_baseline_inflight_fields(baseline):
+    if not isinstance(baseline, dict):
+        return {
+            "integration_base_ref": None,
+            "integration_base_sha": None,
+            "integration_baseline_branch": None,
+            "integration_baseline_worktree_path": None,
+        }
+    return {
+        "integration_base_ref": baseline.get("integration_baseline_branch"),
+        "integration_base_sha": baseline.get("integration_baseline_head_sha"),
+        "integration_baseline_branch": baseline.get("integration_baseline_branch"),
+        "integration_baseline_worktree_path": baseline.get(
+            "integration_baseline_worktree_path"
+        ),
+    }
+
+
+def _integration_commit_from_baseline_result(result):
+    return {
+        "integration_commit_status": result.get("integration_baseline_commit_status"),
+        "integration_commit_sha": result.get("integration_baseline_commit_sha"),
+        "integration_commit_message": result.get(
+            "integration_baseline_commit_message"
+        ),
+        "integration_commit_reason": result.get("integration_baseline_commit_reason"),
+        "integration_commit_stdout": result.get(
+            "integration_baseline_commit_stdout",
+            "",
+        ),
+        "integration_commit_stderr": result.get(
+            "integration_baseline_commit_stderr",
+            "",
+        ),
     }
 
 

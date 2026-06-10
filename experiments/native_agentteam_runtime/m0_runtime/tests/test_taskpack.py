@@ -667,7 +667,6 @@ class TaskpackTests(unittest.TestCase):
                     "fake",
                     "--runtime",
                     "auto",
-                    "--one-shot",
                 ],
                 env=_test_env(),
                 stdout=subprocess.PIPE,
@@ -707,6 +706,31 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["paths"]["work_root"], str(work_root.resolve()))
             self.assertTrue((work_root / "drafts" / "cli-start-profile").exists())
             self.assertEqual(summary["run"]["scheduler_status"], "idle")
+            baseline_worktree = work_root / "runs" / "cli-start-profile" / "integration-baseline"
+            self.assertTrue(baseline_worktree.exists())
+            baseline_ref = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "rev-parse",
+                    "agentteam/run/cli-start-profile/integration",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(baseline_ref.returncode, 0, baseline_ref.stderr)
+            repo_status = subprocess.run(
+                ["git", "-C", str(repo), "status", "--porcelain=v1", "--untracked-files=all"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(repo_status.returncode, 0, repo_status.stderr)
+            self.assertEqual(repo_status.stdout, "")
 
     def test_agentteam_cli_start_prints_progress_to_stderr(self):
         with tempfile.TemporaryDirectory() as tmp:

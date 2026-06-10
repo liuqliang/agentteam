@@ -73,6 +73,22 @@ def build_integration_queue_item(attempt):
         ),
         "integration_commit_sha": attempt.get("integration_commit_sha"),
         "integration_commit_reason": attempt.get("integration_commit_reason"),
+        "integration_base_ref": attempt.get("integration_base_ref"),
+        "integration_base_sha": attempt.get("integration_base_sha"),
+        "integration_baseline_branch": attempt.get("integration_baseline_branch"),
+        "integration_baseline_worktree_path": attempt.get(
+            "integration_baseline_worktree_path"
+        ),
+        "integration_baseline_commit_status": attempt.get(
+            "integration_baseline_commit_status",
+            "not_requested",
+        ),
+        "integration_baseline_commit_sha": attempt.get(
+            "integration_baseline_commit_sha"
+        ),
+        "integration_baseline_commit_reason": attempt.get(
+            "integration_baseline_commit_reason"
+        ),
     }
 
 

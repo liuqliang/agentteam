@@ -1903,6 +1903,16 @@ def replay_events(events_path):
                 "worktree_path"
             ]
             snapshot["attempts"].setdefault(attempt_id, {})["branch"] = payload["branch"]
+            _copy_optional_payload_fields(
+                snapshot["attempts"].setdefault(attempt_id, {}),
+                payload,
+                [
+                    "integration_base_ref",
+                    "integration_base_sha",
+                    "integration_baseline_branch",
+                    "integration_baseline_worktree_path",
+                ],
+            )
             snapshot["attempts"].setdefault(attempt_id, {})["worktree_status"] = "created"
         elif event["event_type"] == "worktree_removed":
             snapshot["attempts"].setdefault(attempt_id, {})["worktree_id"] = payload["worktree_id"]
@@ -1925,6 +1935,16 @@ def replay_events(events_path):
                 "worktree_id": payload.get("worktree_id"),
                 "worktree_path": payload.get("worktree_path"),
             }
+            _copy_optional_payload_fields(
+                snapshot["runtime_sessions"][runtime_session_id],
+                payload,
+                [
+                    "integration_base_ref",
+                    "integration_base_sha",
+                    "integration_baseline_branch",
+                    "integration_baseline_worktree_path",
+                ],
+            )
             snapshot["attempts"].setdefault(attempt_id, {})[
                 "runtime_session_id"
             ] = runtime_session_id
@@ -2052,6 +2072,16 @@ def replay_events(events_path):
             snapshot["attempts"].setdefault(attempt_id, {})["integration_worktree_path"] = payload[
                 "integration_worktree_path"
             ]
+            _copy_optional_payload_fields(
+                snapshot["attempts"].setdefault(attempt_id, {}),
+                payload,
+                [
+                    "integration_base_sha",
+                    "integration_baseline_branch",
+                    "integration_baseline_worktree_path",
+                    "integration_baseline_head_sha",
+                ],
+            )
             queue_item = _integration_queue_snapshot_item(snapshot, task_id, attempt_id)
             queue_item.update(
                 {
@@ -2061,6 +2091,16 @@ def replay_events(events_path):
                     "integration_branch": payload["integration_branch"],
                     "integration_worktree_path": payload["integration_worktree_path"],
                 }
+            )
+            _copy_optional_payload_fields(
+                queue_item,
+                payload,
+                [
+                    "integration_base_sha",
+                    "integration_baseline_branch",
+                    "integration_baseline_worktree_path",
+                    "integration_baseline_head_sha",
+                ],
             )
             snapshot["attempts"].setdefault(attempt_id, {})[
                 "integration_queue_status"
@@ -2098,6 +2138,36 @@ def replay_events(events_path):
             snapshot["attempts"].setdefault(attempt_id, {})[
                 "integration_queue_status"
             ] = queue_status
+        elif event["event_type"] == "integration_baseline_commit_evaluated":
+            attempt_state = snapshot["attempts"].setdefault(attempt_id, {})
+            _copy_optional_payload_fields(
+                attempt_state,
+                payload,
+                [
+                    "integration_baseline_commit_status",
+                    "integration_baseline_commit_sha",
+                    "integration_baseline_commit_message",
+                    "integration_baseline_commit_reason",
+                    "integration_baseline_rollback_status",
+                ],
+            )
+            queue_item = _existing_integration_queue_snapshot_item(
+                snapshot,
+                task_id,
+                attempt_id,
+            )
+            if queue_item:
+                _copy_optional_payload_fields(
+                    queue_item,
+                    payload,
+                    [
+                        "integration_baseline_commit_status",
+                        "integration_baseline_commit_sha",
+                        "integration_baseline_commit_message",
+                        "integration_baseline_commit_reason",
+                        "integration_baseline_rollback_status",
+                    ],
+                )
         elif event["event_type"] == "integration_commit_evaluated":
             snapshot["attempts"].setdefault(attempt_id, {})[
                 "integration_commit_status"
@@ -2154,6 +2224,13 @@ def _integration_queue_snapshot_item(snapshot, task_id, attempt_id):
 
 def _existing_integration_queue_snapshot_item(snapshot, task_id, attempt_id):
     return snapshot["integration_queue"].get(f"{task_id}:{attempt_id}")
+
+
+def _copy_optional_payload_fields(target, payload, field_names):
+    for field_name in field_names:
+        value = payload.get(field_name)
+        if value is not None:
+            target[field_name] = value
 
 
 def _queue_status_from_commit_event(payload):
@@ -2715,6 +2792,144 @@ def write_patch_artifact(worktree_path, artifact_dir, actual_changed_files):
     return patch_path
 
 
+def ensure_integration_baseline_worktree(project_root, output_dir):
+    integration_branch = _integration_baseline_branch_name(output_dir)
+    integration_worktree = Path(output_dir) / "integration-baseline"
+    integration_worktree.parent.mkdir(parents=True, exist_ok=True)
+    recovery_status = "created"
+    if integration_worktree.exists():
+        recovery_status = "reused_existing"
+    elif _git_ref_exists(project_root, integration_branch):
+        recovery_status = "reused_branch"
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(project_root),
+                "worktree",
+                "add",
+                str(integration_worktree),
+                integration_branch,
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    else:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(project_root),
+                "worktree",
+                "add",
+                "-b",
+                integration_branch,
+                str(integration_worktree),
+                "HEAD",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    return {
+        "integration_baseline_status": "ready",
+        "integration_baseline_branch": integration_branch,
+        "integration_baseline_worktree_path": str(integration_worktree),
+        "integration_baseline_recovery_status": recovery_status,
+        "integration_baseline_head_sha": _git_rev_parse(integration_worktree, "HEAD"),
+    }
+
+
+def apply_patch_to_integration_baseline_worktree(project_root, output_dir, patch_path):
+    baseline = ensure_integration_baseline_worktree(project_root, output_dir)
+    integration_worktree = Path(baseline["integration_baseline_worktree_path"])
+    recovery_status = baseline["integration_baseline_recovery_status"]
+    if _git_apply_check(integration_worktree, patch_path):
+        subprocess.run(
+            ["git", "-C", str(integration_worktree), "apply", str(patch_path)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    elif _git_apply_reverse_check(integration_worktree, patch_path):
+        recovery_status = (
+            "already_applied"
+            if recovery_status == "created"
+            else "reused_existing"
+        )
+    else:
+        subprocess.run(
+            ["git", "-C", str(integration_worktree), "apply", str(patch_path)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    return {
+        **baseline,
+        "integration_status": "applied",
+        "integration_branch": baseline["integration_baseline_branch"],
+        "integration_worktree_path": str(integration_worktree),
+        "integration_recovery_status": recovery_status,
+        "integration_base_sha": baseline["integration_baseline_head_sha"],
+    }
+
+
+def commit_integration_baseline_worktree(integration_worktree_path, task_id, attempt_id):
+    commit = commit_integration_worktree(integration_worktree_path, task_id, attempt_id)
+    sha = commit["integration_commit_sha"] or _git_rev_parse(
+        integration_worktree_path,
+        "HEAD",
+    )
+    return {
+        "integration_baseline_commit_status": commit["integration_commit_status"],
+        "integration_baseline_commit_sha": sha,
+        "integration_baseline_commit_message": commit["integration_commit_message"],
+        "integration_baseline_commit_reason": commit["integration_commit_reason"],
+        "integration_baseline_commit_stdout": commit["integration_commit_stdout"],
+        "integration_baseline_commit_stderr": commit["integration_commit_stderr"],
+    }
+
+
+def skip_integration_baseline_commit(reason):
+    return {
+        "integration_baseline_commit_status": "skipped",
+        "integration_baseline_commit_sha": None,
+        "integration_baseline_commit_message": None,
+        "integration_baseline_commit_reason": reason,
+        "integration_baseline_commit_stdout": "",
+        "integration_baseline_commit_stderr": "",
+    }
+
+
+def reset_integration_baseline_worktree(integration_worktree_path):
+    integration_worktree_path = Path(integration_worktree_path)
+    reset = subprocess.run(
+        ["git", "-C", str(integration_worktree_path), "reset", "--hard", "HEAD"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    clean = subprocess.run(
+        ["git", "-C", str(integration_worktree_path), "clean", "-fd"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    status = "reset" if reset.returncode == 0 and clean.returncode == 0 else "failed"
+    return {
+        "integration_baseline_rollback_status": status,
+        "integration_baseline_rollback_stdout": reset.stdout + clean.stdout,
+        "integration_baseline_rollback_stderr": reset.stderr + clean.stderr,
+    }
+
+
 def apply_patch_to_integration_worktree(project_root, output_dir, task_id, patch_path):
     integration_branch = f"agentteam/integration/{task_id}"
     integration_worktree = Path(output_dir) / "integration" / task_id
@@ -2968,13 +3183,23 @@ def _event(
     }
 
 
-def _create_git_worktree(project_root, output_dir, attempt_id, worktree_id):
+def _create_git_worktree(project_root, output_dir, attempt_id, worktree_id, base_ref=None):
     project_root = Path(project_root)
     worktree_path = Path(output_dir) / "worktrees" / worktree_id
     branch = _worktree_branch_name(output_dir, attempt_id)
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["git", "-C", str(project_root), "worktree", "add", "-b", branch, str(worktree_path), "HEAD"],
+        [
+            "git",
+            "-C",
+            str(project_root),
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            str(worktree_path),
+            base_ref or "HEAD",
+        ],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -2995,6 +3220,13 @@ def _worktree_branch_name(output_dir, attempt_id):
     )
 
 
+def _integration_baseline_branch_name(output_dir):
+    output_dir = Path(output_dir)
+    return "agentteam/run/{run}/integration".format(
+        run=_safe_git_ref_component(output_dir.name),
+    )
+
+
 def _safe_git_ref_component(value):
     component = "".join(
         char if char.isalnum() or char in {".", "_", "-"} else "-"
@@ -3002,6 +3234,28 @@ def _safe_git_ref_component(value):
     )
     component = component.strip(".-")
     return component or "run"
+
+
+def _git_ref_exists(repo, ref):
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return completed.returncode == 0
+
+
+def _git_rev_parse(repo, ref):
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", ref],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return completed.stdout.strip()
 
 
 def _remove_git_worktree(project_root, worktree_path):
