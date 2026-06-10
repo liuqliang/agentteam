@@ -49,6 +49,7 @@ from .release_manager import (
     prune_releases,
     update_status,
 )
+from .notifications import FeishuWebhookNotifier
 from .taskpack import build_taskpack_runtime_args, freeze_taskpack, validate_taskpack
 from .taskpack_author import draft_taskpack_from_goal
 from .token_usage import format_token_usage, token_usage_from_state
@@ -111,6 +112,17 @@ _HELP_COMMANDS = [
         "notes": [
             "Requires a clean target repository.",
             "Only fast-forward merges are performed in this release.",
+        ],
+    },
+    {
+        "name": "notify",
+        "summary": "Test project notification configuration without running a task.",
+        "examples": [
+            "agentteam notify test --project-root <repo>",
+            "agentteam notify test --dry-run --json",
+        ],
+        "subcommands": [
+            "test: send a diagnostic Feishu notification from the current project profile",
         ],
     },
     {
@@ -279,6 +291,7 @@ def _build_parser():
     _add_update_parser(subcommands)
     _add_paths_parser(subcommands)
     _add_integrate_parser(subcommands)
+    _add_notify_parser(subcommands)
     _add_status_parser(subcommands)
     return parser
 
@@ -748,6 +761,30 @@ def _add_integrate_parser(subcommands):
     parser.add_argument("--run-dir", help="Existing run directory to integrate. Overrides --taskpack.")
     parser.add_argument("--json", action="store_true", help="Print integration result as JSON instead of human text.")
     parser.set_defaults(handler=_handle_integrate)
+
+
+def _add_notify_parser(subcommands):
+    parser = subcommands.add_parser(
+        "notify",
+        help="Test or inspect project notification configuration.",
+    )
+    notify_subcommands = parser.add_subparsers(
+        dest="notify_command",
+        required=True,
+        parser_class=JsonArgumentParser,
+    )
+    test_parser = notify_subcommands.add_parser(
+        "test",
+        help="Send a diagnostic Feishu notification using the current project profile.",
+    )
+    test_parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    test_parser.add_argument("--notification-project", help="Project label used in the notification.")
+    test_parser.add_argument("--feishu-webhook-env", help="Override the profile Feishu webhook env var name.")
+    test_parser.add_argument("--feishu-signing-secret-env", help="Override the profile Feishu signing secret env var name.")
+    test_parser.add_argument("--message", help="Optional diagnostic message body.")
+    test_parser.add_argument("--dry-run", action="store_true", help="Validate configuration without sending.")
+    test_parser.add_argument("--json", action="store_true", help="Print notification test result as JSON.")
+    test_parser.set_defaults(handler=_handle_notify)
 
 
 def _add_status_parser(subcommands):
@@ -1483,6 +1520,116 @@ def _handle_integrate(args):
     return 0
 
 
+def _handle_notify(args):
+    if args.notify_command == "test":
+        summary = _notify_test(args)
+        if args.json:
+            return summary
+        _write_notify_text(summary)
+        return 0
+    raise AgentTeamCliError("unknown notify command", command=args.notify_command)
+
+
+def _notify_test(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    project = (
+        args.notification_project
+        or profile.get("notification_project")
+        or profile.get("project_key")
+        or project_root.name
+    )
+    webhook_env = _profile_feishu_value(args, profile, "webhook_env")
+    signing_secret_env = _profile_feishu_value(args, profile, "signing_secret_env")
+    if not webhook_env:
+        raise AgentTeamCliError(
+            "Feishu webhook env is not configured",
+            project=str(project_root),
+        )
+    webhook_url = os.environ.get(webhook_env)
+    if not webhook_url:
+        raise AgentTeamCliError(
+            "Feishu webhook env value is not set",
+            webhook_env=webhook_env,
+            project=str(project_root),
+        )
+    signing_secret = os.environ.get(signing_secret_env) if signing_secret_env else None
+    event = _notify_test_event(project, message=args.message)
+    summary = {
+        "notify_status": "dry_run" if args.dry_run else "pending",
+        "provider": "feishu",
+        "project": project,
+        "project_root": str(project_root),
+        "webhook_env": webhook_env,
+        "webhook_env_set": True,
+        "signing_secret_env": signing_secret_env,
+        "signing_enabled": bool(signing_secret),
+        "event_type": event["event_type"],
+        "run_dir": str(project_root),
+    }
+    if args.dry_run:
+        return summary
+
+    notifier = FeishuWebhookNotifier(
+        webhook_url=webhook_url,
+        signing_secret=signing_secret,
+        project=project,
+    )
+    result = notifier.notify_event(event, run_dir=str(project_root))
+    payload = result.get("payload") if isinstance(result, dict) else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    summary.update(
+        {
+            "notify_status": payload.get("notification_status") or "unknown",
+            "source_event_type": payload.get("source_event_type"),
+            "message_summary": payload.get("message_summary"),
+        }
+    )
+    if payload.get("error_class"):
+        summary["error_class"] = payload["error_class"]
+    if payload.get("error_summary"):
+        summary["error_summary"] = payload["error_summary"]
+    if summary["notify_status"] != "sent":
+        raise AgentTeamCliError("Feishu notification test failed", **summary)
+    return summary
+
+
+def _notify_test_event(project, message=None):
+    task_message = message or f"AgentTeam notification test for {project}."
+    return {
+        "event_id": "notify-test",
+        "sequence": 0,
+        "event_type": "run_completed",
+        "actor": "agentteam-cli",
+        "target_agent_id": None,
+        "idempotency_key": "notify:test",
+        "correlation_id": "notify:test",
+        "payload": {
+            "run_status": "diagnostic",
+            "operator_report": {
+                "report_schema_version": "operator_run_report.v1",
+                "task_count": 1,
+                "blocked_count": 0,
+                "task_reports": [
+                    {
+                        "task_id": "notify-test",
+                        "status": "implementation completed",
+                        "what_changed": [task_message],
+                        "changed_files": [],
+                        "verification": ["Feishu webhook delivery test was triggered."],
+                        "integration": "not requested",
+                        "merge_recommendation": "No merge action; notification test only.",
+                        "next_steps": [
+                            "If you receive this message, Feishu notification delivery works."
+                        ],
+                    }
+                ],
+            },
+        },
+    }
+
+
 def _handle_update(args):
     project_root = Path(args.project_root or ".").resolve()
     profile = load_project_profile(project_root)
@@ -2049,6 +2196,24 @@ def _write_integrate_text(summary):
         f"after_head: {summary.get('after_head') or 'unknown'}",
         f"run_dir: {summary['run_dir']}",
     ]
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _write_notify_text(summary):
+    lines = [
+        f"notify_status: {summary['notify_status']}",
+        f"provider: {summary['provider']}",
+        f"project: {summary['project']}",
+        f"webhook_env: {summary['webhook_env']}",
+        f"signing_enabled: {str(bool(summary.get('signing_enabled'))).lower()}",
+    ]
+    if summary.get("message_summary"):
+        lines.append(f"message_summary: {summary['message_summary']}")
+    if summary.get("error_class"):
+        lines.append(f"error_class: {summary['error_class']}")
+    if summary.get("error_summary"):
+        lines.append(f"error_summary: {summary['error_summary']}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 

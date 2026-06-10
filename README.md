@@ -42,6 +42,7 @@ cd /path/to/target-repo
 agentteam init --interactive
 agentteam update --from /home/liuql/projects/agentteam/.worktrees/native-runtime-m0 --release-id <release-id>
 agentteam update --status
+agentteam notify test
 agentteam start
 agentteam status
 agentteam report
@@ -55,6 +56,8 @@ completion summary with what changed, verification status, integration status,
 merge guidance, and next steps when worker reports provide those fields.
 Feishu run-completion notifications use the same summary before any task-level
 detail, so milestone results are readable from the chat message itself.
+Use `agentteam notify test` after configuring Feishu in `agentteam init` to send
+one diagnostic message through the same project webhook.
 
 When a run has verified integration-baseline changes, merge them back into the
 current target repository branch explicitly:

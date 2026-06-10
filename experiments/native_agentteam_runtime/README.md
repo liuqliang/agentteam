@@ -104,6 +104,7 @@ cd /path/to/repo
 agentteam init --interactive
 agentteam update --from /home/liuql/projects/agentteam/.worktrees/native-runtime-m0 --release-id <release-id>
 agentteam update --status
+agentteam notify test
 agentteam start
 ```
 
@@ -115,6 +116,10 @@ repository. It stores non-secret defaults such as `work_root`,
 `author_runtime`, `default_runtime`, and Feishu environment variable names.
 Runtime artifacts are written under the configured `work_root`, typically
 `~/.local/share/agentteam/<project-key>/`.
+If Feishu is configured, `agentteam notify test` sends one diagnostic
+`run_completed` message through the same project webhook. Use
+`agentteam notify test --dry-run --json` to validate the selected environment
+variable names without sending.
 
 For a scripted local smoke run without installing the command, use the launcher
 directly:
@@ -350,6 +355,9 @@ after durable operator events such as `manual_gate_required` and
 `permission_request_required`. Missing Feishu environment variables disable
 notification sending without failing the run. Event payloads never include the
 webhook URL or signing secret.
+For project profiles created with `agentteam init`, run
+`agentteam notify test --project-root /path/to/repo` to verify the webhook
+outside a full scheduler run.
 
 When a run reaches `run_completed`, the scheduler attaches an operator report
 derived from worker output, changed files, verification, and integration state.

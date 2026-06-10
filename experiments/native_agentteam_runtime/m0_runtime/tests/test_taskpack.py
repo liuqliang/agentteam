@@ -4,7 +4,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from agentteam_runtime import (
@@ -60,6 +62,33 @@ def _write_jsonl(path, records):
         "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
         encoding="utf-8",
     )
+
+
+class _WebhookCaptureHandler(BaseHTTPRequestHandler):
+    payloads = None
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        self.payloads.append(json.loads(body))
+        response = json.dumps({"code": 0, "msg": "success"}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+
+    def log_message(self, _format, *_args):
+        return
+
+
+def _start_webhook_capture_server():
+    payloads = []
+    handler = type("WebhookCaptureHandler", (_WebhookCaptureHandler,), {"payloads": payloads})
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, payloads
 
 
 def _write_failed_integration_run(run_dir):
@@ -624,6 +653,132 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("profile_path:", completed.stdout)
             self.assertNotIn("{", completed.stdout)
             self.assertNotIn("profile_schema_version", completed.stdout)
+
+    def test_agentteam_cli_notify_test_sends_feishu_message_from_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            server, payloads = _start_webhook_capture_server()
+            try:
+                env = _test_env()
+                env["AGENTTEAM_FEISHU_TEST_WEBHOOK"] = (
+                    f"http://127.0.0.1:{server.server_port}/hook"
+                )
+                init_completed = subprocess.run(
+                    [
+                        "python3",
+                        "-m",
+                        "agentteam_runtime.agentteam",
+                        "init",
+                        "--project-root",
+                        str(repo),
+                        "--project-key",
+                        "notify-project",
+                        "--work-root",
+                        str(work_root),
+                        "--author-runtime",
+                        "fake",
+                        "--runtime",
+                        "fake",
+                        "--notification-project",
+                        "notify-project",
+                        "--feishu-webhook-env",
+                        "AGENTTEAM_FEISHU_TEST_WEBHOOK",
+                    ],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+
+                completed = subprocess.run(
+                    [
+                        "python3",
+                        "-m",
+                        "agentteam_runtime.agentteam",
+                        "notify",
+                        "test",
+                        "--project-root",
+                        str(repo),
+                        "--json",
+                    ],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["notify_status"], "sent")
+            self.assertEqual(summary["provider"], "feishu")
+            self.assertEqual(summary["project"], "notify-project")
+            self.assertEqual(summary["webhook_env"], "AGENTTEAM_FEISHU_TEST_WEBHOOK")
+            self.assertFalse(summary["signing_enabled"])
+            self.assertEqual(len(payloads), 1)
+            message = payloads[0]["content"]["text"]
+            self.assertIn("[AgentTeam] run_completed", message)
+            self.assertIn("Completion summary:", message)
+            self.assertIn("AgentTeam notification test for notify-project.", message)
+            self.assertIn("If you receive this message, Feishu notification delivery works.", message)
+
+    def test_agentteam_cli_notify_test_requires_configured_feishu_webhook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "missing-notify-project",
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "notify",
+                    "test",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 1)
+            error = json.loads(completed.stderr)
+            self.assertEqual(error["error"], "Feishu webhook env is not configured")
 
     def test_agentteam_cli_init_keeps_project_git_status_clean(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3038,6 +3193,7 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("status", help_completed.stdout)
         self.assertIn("paths", help_completed.stdout)
         self.assertIn("integrate", help_completed.stdout)
+        self.assertIn("notify", help_completed.stdout)
         self.assertIn("watch", help_completed.stdout)
         self.assertIn("stop", help_completed.stdout)
         self.assertIn("taskpack", help_completed.stdout)
