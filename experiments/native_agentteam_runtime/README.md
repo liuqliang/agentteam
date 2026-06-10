@@ -121,6 +121,20 @@ If Feishu is configured, `agentteam notify test` sends one diagnostic
 `agentteam notify test --dry-run --json` to validate the selected environment
 variable names without sending.
 
+If the operator already knows the task shape and scopes, use `taskpack new` to
+create a taskpack without invoking Codex authoring:
+
+```bash
+agentteam taskpack new \
+  --goal "profile algorithm latency by module" \
+  --write-scope output/current/ \
+  --verification-command-json '["python3", "-m", "unittest", "discover"]' \
+  --freeze
+```
+
+This command uses the current project profile, writes under `work_root/drafts`,
+validates the taskpack, and optionally freezes it under `work_root/frozen`.
+
 Taskpack authoring classifies broad goals before execution. Optimization goals
 such as "optimize this repository" or "优化比赛代码" become
 `goal_kind: optimization` taskpacks and must include at least one code-facing
@@ -215,11 +229,16 @@ python3 -m agentteam_runtime.agentteam run \
   --one-shot
 ```
 
-Successful `submit` and `taskpack` commands print JSON to stdout. Draft,
-validation, freeze, and pre-launch failures print JSON to stderr and exit `1`.
-After pre-launch translation succeeds, `run` delegates to `agentteam_runtime.cli`
-and forwards that child process's stdout, stderr, and exit code. `submit`
-captures the delegated run output and includes it in its JSON summary.
+`--run-root` may point either to the shared runs directory or to a concrete run
+directory named after the taskpack. In both cases the final run directory is
+`<runs-root>/<taskpack-id>`; the wrapper no longer creates nested
+`<taskpack-id>/<taskpack-id>` paths.
+
+Successful `submit`, `start`, `continue`, and low-level `run` default to concise
+human-readable stdout. Pass `--json` when another tool needs the full structured
+payload. Draft, validation, freeze, and pre-launch failures print JSON to stderr
+and exit `1`. Runtime child argument errors still forward the child process
+stdout, stderr, and exit code so the failing flag is visible.
 
 ## Operator Control
 
@@ -229,6 +248,7 @@ Use these commands from the target project or pass `--project-root` explicitly:
 agentteam status --project-root /path/to/repo
 agentteam watch --project-root /path/to/repo --max-lines 20
 agentteam stop --project-root /path/to/repo
+agentteam stop --project-root /path/to/repo --authoring
 agentteam stop --project-root /path/to/repo --stale
 agentteam continue --project-root /path/to/repo --taskpack example-taskpack
 ```
@@ -239,11 +259,15 @@ still alive; otherwise it is `running-stale`. `start` and `continue` keep stdout
 reserved for the final JSON result and print compact runtime progress to stderr
 only when the run summary changes or new run events appear. The line includes
 task counts, inflight count, manual gates, permission requests, worker counts,
-and the latest event type. `watch` is still useful from a second terminal
-because it is read-only and can follow an already running taskpack. `stop` is
-scoped to the selected run: it writes registered stop files and signals only
-registered worker PIDs and owned descendants. It never searches for process
-names such as `codex`.
+and the latest event type. During Codex taskpack authoring, the author writes
+`author_state.json` under `work_root/drafts/.<taskpack-id>-author/`; `status`
+reports this state even before a run directory exists. `watch` is still useful
+from a second terminal because it is read-only and can follow an already running
+taskpack. `stop` is scoped to the selected run: it writes registered stop files
+and signals only registered worker PIDs and owned descendants. `stop --authoring`
+is the separate path for a stalled taskpack author and signals only the PID
+recorded in that author state file. It never searches for process names such as
+`codex`.
 
 To clean old taskpacks, start with a dry run:
 
@@ -390,8 +414,10 @@ python3 -m agentteam_runtime.agentteam answer \
 `--author-runtime fake` creates deterministic fixture taskpacks for tests and
 smoke runs. `--author-runtime codex` asks the Codex CLI to author the draft. The
 Codex author path requires a clean target Git repository, writes scratch context
-outside the taskpack directory, and fails validation if the author edits the
-target repository or leaves unexpected files in the taskpack.
+and `author_state.json` outside the taskpack directory, and fails validation if
+the author edits the target repository or leaves unexpected files in the
+taskpack. The state file records PID, elapsed time, prompt path, result path,
+and final author status.
 
 Frozen taskpacks are immutable launch inputs. The freezer rejects extra draft
 files and symlinks before copying artifacts and writing `manifest.json`.

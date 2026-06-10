@@ -1,6 +1,9 @@
 import json
 import re
 import subprocess
+import tempfile
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .repo_map import build_repository_map
@@ -35,6 +38,8 @@ def draft_taskpack_from_goal(
     taskpack_id=None,
     codex_command=None,
     codex_timeout_seconds=600,
+    progress_callback=None,
+    progress_interval_seconds=30.0,
 ):
     if author_runtime == "fake":
         return draft_taskpack_files(
@@ -55,6 +60,8 @@ def draft_taskpack_from_goal(
             taskpack_id=taskpack_id,
             codex_command=codex_command,
             codex_timeout_seconds=codex_timeout_seconds,
+            progress_callback=progress_callback,
+            progress_interval_seconds=progress_interval_seconds,
         )
     raise TaskpackValidationError(f"unsupported taskpack author runtime: {author_runtime}")
 
@@ -66,6 +73,8 @@ def _draft_with_codex(
     taskpack_id=None,
     codex_command=None,
     codex_timeout_seconds=600,
+    progress_callback=None,
+    progress_interval_seconds=30.0,
 ):
     project_root = Path(project_root).resolve()
     draft_root = Path(draft_root).resolve()
@@ -107,41 +116,35 @@ def _draft_with_codex(
 
     command = _command_list(codex_command)
     result_path = author_context_dir / "author_result.json"
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=draft_root,
-            input=prompt,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=codex_timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
+    state_path = author_context_dir / "author_state.json"
+    completed = _run_codex_author_command(
+        command,
+        draft_root=draft_root,
+        prompt=prompt,
+        timeout_seconds=codex_timeout_seconds,
+        state_path=state_path,
+        result_path=result_path,
+        taskpack_id=taskpack_id,
+        taskpack_dir=taskpack_dir,
+        author_context_dir=author_context_dir,
+        prompt_path=prompt_path,
+        progress_callback=progress_callback,
+        progress_interval_seconds=progress_interval_seconds,
+    )
+    if completed.returncode != -9:
         _write_json(
             result_path,
             {
-                "status": "timed_out",
-                "timeout_seconds": codex_timeout_seconds,
-                "stdout": exc.stdout or "",
-                "stderr": exc.stderr or "",
+                "status": "completed" if completed.returncode == 0 else "failed",
+                "exit_code": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
             },
         )
-        _raise_if_target_repo_modified(project_root, repo_status_before)
-        raise TaskpackValidationError("codex taskpack author timed out") from exc
-
-    _write_json(
-        result_path,
-        {
-            "status": "completed" if completed.returncode == 0 else "failed",
-            "exit_code": completed.returncode,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
-        },
-    )
 
     _raise_if_target_repo_modified(project_root, repo_status_before)
+    if completed.returncode == -9:
+        raise TaskpackValidationError("codex taskpack author timed out")
     if completed.returncode != 0:
         raise TaskpackValidationError(f"codex taskpack author failed with exit code {completed.returncode}")
 
@@ -154,6 +157,116 @@ def _draft_with_codex(
         "author_context_path": str(author_context_dir),
         "author_result_path": str(result_path),
     }
+
+
+def _run_codex_author_command(
+    command,
+    draft_root,
+    prompt,
+    timeout_seconds,
+    state_path,
+    result_path,
+    taskpack_id,
+    taskpack_dir,
+    author_context_dir,
+    prompt_path,
+    progress_callback=None,
+    progress_interval_seconds=30.0,
+):
+    started_at = _utc_now()
+    started_monotonic = time.monotonic()
+    interval = max(float(progress_interval_seconds or 0), 0.5)
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file:
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
+            with subprocess.Popen(
+                command,
+                cwd=draft_root,
+                stdin=subprocess.PIPE,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                text=True,
+            ) as process:
+                base_state = {
+                    "author_status": "running",
+                    "taskpack_id": taskpack_id,
+                    "pid": process.pid,
+                    "command": command,
+                    "started_at": started_at,
+                    "taskpack_dir": str(taskpack_dir),
+                    "author_context_dir": str(author_context_dir),
+                    "prompt_path": str(prompt_path),
+                    "result_path": str(result_path),
+                    "timeout_seconds": timeout_seconds,
+                }
+                _write_author_state(state_path, base_state, started_monotonic, progress_callback)
+                if process.stdin:
+                    try:
+                        process.stdin.write(prompt)
+                        process.stdin.close()
+                    except (BrokenPipeError, OSError):
+                        pass
+                next_progress_at = time.monotonic() + interval
+                timed_out = False
+                while process.poll() is None:
+                    now = time.monotonic()
+                    elapsed = now - started_monotonic
+                    if timeout_seconds is not None and elapsed >= timeout_seconds:
+                        timed_out = True
+                        process.terminate()
+                        try:
+                            process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=2)
+                        break
+                    if now >= next_progress_at:
+                        _write_author_state(state_path, base_state, started_monotonic, progress_callback)
+                        next_progress_at = now + interval
+                    time.sleep(min(interval, 0.2))
+                stdout_file.seek(0)
+                stderr_file.seek(0)
+                stdout = stdout_file.read()
+                stderr = stderr_file.read()
+                returncode = -9 if timed_out else process.returncode
+                status = "timed_out" if timed_out else ("completed" if returncode == 0 else "failed")
+                completed = subprocess.CompletedProcess(command, returncode, stdout, stderr)
+                _write_json(
+                    result_path,
+                    {
+                        "status": status,
+                        "exit_code": returncode,
+                        "timeout_seconds": timeout_seconds,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                    },
+                )
+                final_state = {
+                    **base_state,
+                    "author_status": status,
+                    "exit_code": returncode,
+                    "stdout_bytes": len(stdout.encode("utf-8")),
+                    "stderr_bytes": len(stderr.encode("utf-8")),
+                    "finished_at": _utc_now(),
+                }
+                _write_author_state(state_path, final_state, started_monotonic, progress_callback)
+                return completed
+
+
+def _write_author_state(state_path, state, started_monotonic, progress_callback=None):
+    state_path = Path(state_path)
+    state = {
+        **state,
+        "state_path": str(state_path),
+        "elapsed_seconds": round(max(time.monotonic() - started_monotonic, 0.0), 3),
+        "updated_at": _utc_now(),
+    }
+    _write_json(state_path, state)
+    if progress_callback:
+        progress_callback(dict(state))
+
+
+def _utc_now():
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _author_prompt(

@@ -59,6 +59,23 @@ detail, so milestone results are readable from the chat message itself.
 Use `agentteam notify test` after configuring Feishu in `agentteam init` to send
 one diagnostic message through the same project webhook.
 
+When the task is already clear, bypass Codex taskpack authoring and create an
+explicit operator taskpack from the project profile:
+
+```bash
+agentteam taskpack new \
+  --goal "profile algorithm latency by module" \
+  --write-scope output/current/ \
+  --verification-command-json '["python3", "-m", "unittest", "discover"]' \
+  --freeze
+```
+
+`agentteam status` also reports active Codex taskpack authoring before a run
+exists. If authoring stalls, use `agentteam stop --authoring`; it only signals
+the PID recorded in `work_root/drafts/.<taskpack-id>-author/author_state.json`.
+Low-level `agentteam run` now prints a concise completion summary by default and
+uses `--json` for the full runtime payload.
+
 Taskpack authoring classifies broad goals before execution. Optimization goals
 such as "optimize this repository" or "优化比赛代码" are marked
 `goal_kind: optimization` and must include at least one code-facing backlog item

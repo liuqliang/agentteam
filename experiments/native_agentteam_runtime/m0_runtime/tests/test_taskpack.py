@@ -6,8 +6,11 @@ import sys
 import tempfile
 import threading
 import unittest
+import io
+from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 from agentteam_runtime import (
     TaskpackValidationError,
@@ -18,10 +21,20 @@ from agentteam_runtime import (
     load_taskpack,
     validate_taskpack,
 )
+from agentteam_runtime.agentteam import (
+    _build_project_authoring_summary,
+    _canonical_run_dir,
+    _handle_taskpack_new,
+    _handle_run,
+    _run_paths_for_frozen_taskpack,
+    _set_taskpack_runtime_backend,
+    _stop_authoring,
+)
 from agentteam_runtime.diagnostic_chat import (
     build_runtime_diagnostic_context,
     render_runtime_diagnostic_context,
 )
+from agentteam_runtime.profile import build_project_profile, write_project_profile
 from agentteam_runtime.taskpack_author import _command_list
 from agentteam_runtime.taskpack_author import _canonicalize_codex_taskpack_files
 
@@ -3732,6 +3745,7 @@ class TaskpackTests(unittest.TestCase):
                     "--run-root",
                     str(run_root),
                     "--one-shot",
+                    "--json",
                 ],
                 env=_test_env(),
                 stdout=subprocess.PIPE,
@@ -3741,9 +3755,9 @@ class TaskpackTests(unittest.TestCase):
             )
             self.assertEqual(run_completed.returncode, 0, run_completed.stderr)
             run_summary = json.loads(run_completed.stdout)
-            self.assertEqual(run_summary["scheduler_status"], "idle")
+            self.assertEqual(run_summary["run"]["scheduler_status"], "idle")
             self.assertEqual(
-                run_summary["snapshot"]["tasks"]["TASK-CLI_RUN_FAKE-001"]["task_status"],
+                run_summary["run"]["snapshot"]["tasks"]["TASK-CLI_RUN_FAKE-001"]["task_status"],
                 "done",
             )
 
@@ -4570,6 +4584,227 @@ class TaskpackTests(unittest.TestCase):
                 )
 
             self.assertIn("modified the target repository", str(raised.exception))
+
+    def test_codex_taskpack_author_records_timeout_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            fake_codex = tmp_path / "fake_timeout_author.py"
+            _init_repo(repo)
+            fake_codex.write_text(
+                "\n".join(
+                    [
+                        "import time",
+                        "time.sleep(10)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(TaskpackValidationError):
+                draft_taskpack_from_goal(
+                    project_root=repo,
+                    goal="Improve fixture behavior.",
+                    draft_root=drafts,
+                    author_runtime="codex",
+                    taskpack_id="author-state-timeout",
+                    codex_command=["python3", str(fake_codex)],
+                    codex_timeout_seconds=1,
+                )
+
+            state_path = drafts / ".author-state-timeout-author" / "author_state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["author_status"], "timed_out")
+            self.assertEqual(state["taskpack_id"], "author-state-timeout")
+            self.assertEqual(state["timeout_seconds"], 1)
+            self.assertTrue(state["pid"])
+            self.assertTrue(Path(state["prompt_path"]).exists())
+            self.assertTrue(Path(state["result_path"]).exists())
+
+    def test_project_authoring_summary_reports_running_author(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            author_dir = work_root / "drafts" / ".running-author"
+            author_dir.mkdir(parents=True)
+            _write_json(
+                author_dir / "author_state.json",
+                {
+                    "author_status": "running",
+                    "taskpack_id": "running",
+                    "pid": os.getpid(),
+                    "started_at": "2026-06-10T00:00:00Z",
+                    "updated_at": "2026-06-10T00:00:01Z",
+                    "elapsed_seconds": 1.0,
+                },
+            )
+            profile = {"project_key": "fixture", "work_root": str(work_root)}
+
+            summary = _build_project_authoring_summary(profile)
+
+            self.assertEqual(summary["active_count"], 1)
+            self.assertEqual(summary["latest"]["taskpack_id"], "running")
+            self.assertEqual(summary["latest"]["liveness_status"], "running-alive")
+
+    def test_stop_authoring_terminates_recorded_author_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            author_dir = work_root / "drafts" / ".sleep-author"
+            author_dir.mkdir(parents=True)
+            process = subprocess.Popen(
+                ["python3", "-c", "import time; time.sleep(30)"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                _write_json(
+                    author_dir / "author_state.json",
+                    {
+                        "author_status": "running",
+                        "taskpack_id": "sleep",
+                        "pid": process.pid,
+                        "started_at": "2026-06-10T00:00:00Z",
+                        "updated_at": "2026-06-10T00:00:01Z",
+                    },
+                )
+                profile = {"project_key": "fixture", "work_root": str(work_root)}
+
+                summary = _stop_authoring(profile, grace_seconds=1, force=True, operator="tester")
+
+                process.wait(timeout=5)
+                state = json.loads((author_dir / "author_state.json").read_text(encoding="utf-8"))
+                self.assertEqual(summary["stop_status"], "stopped_authoring")
+                self.assertEqual(summary["taskpack_id"], "sleep")
+                self.assertEqual(state["author_status"], "stopped")
+                self.assertEqual(state["stopped_by"], "tester")
+                self.assertIn(state["stop_signal"], {"SIGTERM", "SIGKILL"})
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+
+    def test_run_paths_for_frozen_taskpack_accepts_concrete_run_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            runs_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Build runtime args.",
+                draft_root=drafts,
+                taskpack_id="runtime-paths",
+                write_scope=["src/"],
+            )
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+
+            paths = _run_paths_for_frozen_taskpack(
+                frozen["frozen_taskpack_dir"],
+                runs_root / "runtime-paths",
+            )
+
+            self.assertEqual(paths["taskpack_id"], "runtime-paths")
+            self.assertEqual(paths["run_root"], runs_root.resolve())
+            self.assertEqual(paths["run_dir"], (runs_root / "runtime-paths").resolve())
+            self.assertTrue(paths["normalized_from_concrete_run_dir"])
+
+    def test_canonical_run_dir_resolves_nested_low_level_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            outer = tmp_path / "runs" / "taskpack-5"
+            nested = outer / "taskpack-5"
+            nested.mkdir(parents=True)
+            (nested / "events.jsonl").write_text("", encoding="utf-8")
+
+            self.assertEqual(_canonical_run_dir(outer), nested.resolve())
+
+    def test_handle_run_prints_compact_summary_and_normalizes_run_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            runs_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement fixture output.",
+                draft_root=drafts,
+                taskpack_id="compact-run",
+                write_scope=["generated/"],
+                verification_command=["python3", "-c", "pass"],
+            )
+            _set_taskpack_runtime_backend(Path(result["taskpack_dir"]), "fake")
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                code = _handle_run(
+                    SimpleNamespace(
+                        frozen_taskpack_dir=frozen["frozen_taskpack_dir"],
+                        run_root=str(runs_root / "compact-run"),
+                        one_shot=False,
+                        max_inflight=1,
+                        max_attempts=1,
+                        commit_verified_integration=False,
+                        notification_project="fixture",
+                        feishu_webhook_env=None,
+                        feishu_signing_secret_env=None,
+                        json=False,
+                    )
+                )
+
+            output = stdout.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("status: completed", output)
+            self.assertIn("taskpack_id: compact-run", output)
+            self.assertIn("report:", output)
+            self.assertIn(f"run_dir: {runs_root / 'compact-run'}", output)
+            self.assertNotIn('"snapshot"', output)
+            self.assertTrue((runs_root / "compact-run" / "events.jsonl").exists())
+            self.assertFalse((runs_root / "compact-run" / "compact-run").exists())
+
+    def test_taskpack_new_uses_profile_and_can_freeze(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "work"
+            _init_repo(repo)
+            profile = build_project_profile(
+                repo,
+                project_key="fixture",
+                work_root=work_root,
+                author_runtime="codex",
+                default_runtime="auto",
+            )
+            write_project_profile(repo, profile, force=True)
+
+            result = _handle_taskpack_new(
+                SimpleNamespace(
+                    project_root=str(repo),
+                    work_root=None,
+                    goal="Optimize fixture code.",
+                    taskpack_id="quick-optimization",
+                    read_scope=["."],
+                    write_scope=["src/"],
+                    verification_command_json=json.dumps(["python3", "-c", "print('ok')"]),
+                    allow_merge=False,
+                    codex_timeout_seconds=123,
+                    freeze=True,
+                    json=True,
+                )
+            )
+
+            self.assertEqual(result["new_status"], "frozen")
+            self.assertEqual(result["taskpack_id"], "quick-optimization")
+            frozen_dir = Path(result["frozen"]["frozen_taskpack_dir"])
+            self.assertTrue((frozen_dir / "taskpack.yaml").exists())
+            validation = validate_taskpack(frozen_dir)
+            self.assertEqual(validation["status"], "accepted")
 
     def test_draft_taskpack_files_writes_expected_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:

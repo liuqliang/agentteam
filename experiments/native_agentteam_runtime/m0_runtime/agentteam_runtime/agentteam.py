@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -50,7 +51,13 @@ from .release_manager import (
     update_status,
 )
 from .notifications import FeishuWebhookNotifier
-from .taskpack import build_taskpack_runtime_args, freeze_taskpack, validate_taskpack
+from .taskpack import (
+    build_taskpack_runtime_args,
+    draft_taskpack_files,
+    freeze_taskpack,
+    load_taskpack,
+    validate_taskpack,
+)
 from .taskpack_author import draft_taskpack_from_goal
 from .token_usage import format_token_usage, token_usage_from_state
 
@@ -156,10 +163,12 @@ _HELP_COMMANDS = [
         "summary": "Stop or clean up an existing run safely.",
         "examples": [
             "agentteam stop --project-root <repo>",
+            "agentteam stop --project-root <repo> --authoring",
             "agentteam stop --project-root <repo> --stale",
         ],
         "notes": [
             "Signals only registered worker PIDs and owned descendants.",
+            "--authoring stops a running Codex taskpack author recorded under work_root/drafts.",
             "--stale cleans stale state without terminating live processes.",
         ],
     },
@@ -199,11 +208,14 @@ _HELP_COMMANDS = [
         "name": "taskpack",
         "summary": "Draft, validate, freeze, list, and delete taskpacks.",
         "examples": [
+            "agentteam taskpack new --goal \"profile algorithm latency\" --write-scope output/current/",
+            "agentteam taskpack new --goal \"profile algorithm latency\" --write-scope output/current/ --freeze",
             "agentteam taskpack list --project-root <repo>",
             "agentteam taskpack delete --project-root <repo> --taskpack <id> --dry-run",
             "agentteam taskpack delete --project-root <repo> --taskpack <id> --delete-run --force",
         ],
         "subcommands": [
+            "new: create an explicit operator-authored taskpack from project profile defaults",
             "draft: create a taskpack from a goal without running it",
             "validate: validate a draft or frozen taskpack",
             "freeze: freeze an accepted draft for execution",
@@ -229,7 +241,10 @@ _HELP_COMMANDS = [
     {
         "name": "run",
         "summary": "Lower-level command that runs an already frozen taskpack directory.",
-        "examples": ["agentteam run <frozen-taskpack-dir> --run-root <runs-dir>"],
+        "examples": [
+            "agentteam run <frozen-taskpack-dir> --run-root <runs-dir>",
+            "agentteam run <frozen-taskpack-dir> --run-root <runs-dir> --json",
+        ],
     },
 ]
 
@@ -274,6 +289,7 @@ def _build_parser():
     _add_init_parser(subcommands)
     _add_start_parser(subcommands)
     _add_next_parser(subcommands)
+    _add_taskpack_new_parser(taskpack_subcommands)
     _add_taskpack_draft_parser(taskpack_subcommands)
     _add_taskpack_validate_parser(taskpack_subcommands)
     _add_taskpack_freeze_parser(taskpack_subcommands)
@@ -486,6 +502,41 @@ def _add_next_parser(subcommands):
     parser.set_defaults(handler=_handle_next)
 
 
+def _add_taskpack_new_parser(subcommands):
+    parser = subcommands.add_parser(
+        "new",
+        help="Create an explicit operator-authored taskpack from project profile defaults.",
+    )
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--work-root", help="Override the project profile work root.")
+    parser.add_argument("--goal", help="Human-readable taskpack goal. Prompted when omitted.")
+    parser.add_argument("--taskpack-id", help="Optional safe taskpack id slug.")
+    parser.add_argument(
+        "--read-scope",
+        action="append",
+        help="Repository-relative read scope. Repeat for multiple scopes. Defaults to '.'.",
+    )
+    parser.add_argument(
+        "--write-scope",
+        action="append",
+        help="Repository-relative write scope. Repeat for multiple scopes.",
+    )
+    parser.add_argument(
+        "--verification-command-json",
+        help="Verification command as a JSON string array. Defaults to python3 unittest discovery.",
+    )
+    parser.add_argument("--allow-merge", action="store_true", help="Set taskpack policy.allow_merge.")
+    parser.add_argument(
+        "--codex-timeout-seconds",
+        type=int,
+        default=1800,
+        help="Worker Codex timeout recorded in the taskpack runtime profile.",
+    )
+    parser.add_argument("--freeze", action="store_true", help="Freeze the draft immediately after validation.")
+    parser.add_argument("--json", action="store_true", help="Print result as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_taskpack_new)
+
+
 def _add_taskpack_draft_parser(subcommands):
     parser = subcommands.add_parser("draft", help="Draft a taskpack from a human goal.")
     parser.add_argument("--project-root", required=True, help="Git repository root for the target project.")
@@ -562,6 +613,7 @@ def _add_run_parser(subcommands):
         help="Commit integration worktree changes after verification passes.",
     )
     _add_notification_args(parser)
+    parser.add_argument("--json", action="store_true", help="Print the full run result as JSON.")
     parser.set_defaults(handler=_handle_run)
 
 
@@ -683,6 +735,11 @@ def _add_stop_parser(subcommands):
         "--stale",
         action="store_true",
         help="Only repair stale running state whose registered PIDs are no longer alive.",
+    )
+    parser.add_argument(
+        "--authoring",
+        action="store_true",
+        help="Stop the latest live Codex taskpack author instead of a runtime run.",
     )
     parser.add_argument("--grace-seconds", type=int, default=5, help="Seconds to wait after SIGTERM.")
     parser.add_argument("--force", action="store_true", help="Send SIGKILL if registered PIDs do not exit.")
@@ -889,6 +946,86 @@ def _write_help_detail(details):
 
 def _handle_taskpack_validate(args):
     return validate_taskpack(args.taskpack_dir)
+
+
+def _handle_taskpack_new(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    if args.work_root:
+        profile = {**profile, "work_root": str(Path(args.work_root).resolve())}
+    work_root = Path(profile["work_root"]).resolve()
+    draft_root = work_root / "drafts"
+    frozen_root = work_root / "frozen"
+    goal = args.goal or _prompt_text("Goal", required=True)
+    write_scope = args.write_scope
+    if not write_scope:
+        write_scope_text = _prompt_text("Write scope", required=True)
+        write_scope = [write_scope_text]
+    verification_command = _parse_verification_command_arg(
+        args.verification_command_json,
+        default=["python3", "-m", "unittest", "discover"],
+    )
+    draft = draft_taskpack_files(
+        project_root=project_root,
+        goal=goal,
+        draft_root=draft_root,
+        taskpack_id=args.taskpack_id,
+        read_scope=args.read_scope or ["."],
+        write_scope=write_scope,
+        verification_command=verification_command,
+        allow_merge=args.allow_merge,
+        codex_timeout_seconds=args.codex_timeout_seconds,
+    )
+    validation = validate_taskpack(draft["taskpack_dir"])
+    frozen = None
+    if args.freeze:
+        frozen = freeze_taskpack(draft["taskpack_dir"], frozen_root)
+    summary = {
+        "new_status": "frozen" if frozen else "draft",
+        "taskpack_id": draft["taskpack_id"],
+        "project": profile.get("project_key") or project_root.name,
+        "draft": draft,
+        "validation": validation,
+        "frozen": frozen,
+        "paths": {
+            "work_root": str(work_root),
+            "draft_root": str(draft_root),
+            "frozen_root": str(frozen_root),
+        },
+    }
+    if args.json:
+        return summary
+    _write_taskpack_new_text(summary)
+    return 0
+
+
+def _parse_verification_command_arg(raw_command, default):
+    if not raw_command:
+        return list(default)
+    try:
+        command = json.loads(raw_command)
+    except json.JSONDecodeError as exc:
+        raise AgentTeamCliError(
+            "--verification-command-json must be valid JSON",
+            error=str(exc),
+        ) from exc
+    if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+        raise AgentTeamCliError("--verification-command-json must be a non-empty string array")
+    return command
+
+
+def _write_taskpack_new_text(summary):
+    lines = [
+        f"taskpack_id: {summary['taskpack_id']}",
+        f"new_status: {summary['new_status']}",
+        f"draft_dir: {summary['draft']['taskpack_dir']}",
+    ]
+    frozen = summary.get("frozen")
+    if isinstance(frozen, dict):
+        lines.append(f"frozen_dir: {frozen['frozen_taskpack_dir']}")
+    lines.append(f"validation: {summary['validation']['status']}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
 
 
 def _handle_taskpack_freeze(args):
@@ -1232,6 +1369,7 @@ def _handle_submit(args):
         taskpack_id=args.taskpack_id,
         codex_command=args.codex_command,
         codex_timeout_seconds=args.codex_timeout_seconds,
+        progress_callback=_author_progress_callback(progress),
     )
     _progress(progress, f"draft accepted: {draft['taskpack_id']}")
     taskpack_dir = Path(draft["taskpack_dir"])
@@ -1309,6 +1447,7 @@ def _handle_submit(args):
 
 
 def _handle_run(args):
+    run_paths = _run_paths_for_frozen_taskpack(args.frozen_taskpack_dir, args.run_root)
     completed = _run_frozen_taskpack(
         args.frozen_taskpack_dir,
         run_root=args.run_root,
@@ -1320,13 +1459,62 @@ def _handle_run(args):
         feishu_webhook_env=args.feishu_webhook_env,
         feishu_signing_secret_env=args.feishu_signing_secret_env,
     )
-    if completed.stdout:
-        sys.stdout.write(completed.stdout)
-        sys.stdout.flush()
     if completed.stderr:
         sys.stderr.write(completed.stderr)
         sys.stderr.flush()
-    return completed.returncode
+    if completed.returncode != 0:
+        if completed.stdout:
+            sys.stdout.write(completed.stdout)
+            sys.stdout.flush()
+        return completed.returncode
+    run = _json_or_output(completed.stdout)
+    run_dir = run_paths["run_dir"]
+    work_root = _infer_work_root_for_run(run_paths["run_root"], args.frozen_taskpack_dir)
+    report = build_run_completion_report(
+        run_dir,
+        project=args.notification_project or "agentteam",
+    )
+    artifact_snapshot = snapshot_run_artifacts_safe(
+        work_root,
+        run_dir,
+        taskpack_id=run_paths["taskpack_id"],
+        project=args.notification_project or "agentteam",
+    )
+    result = {
+        "status": _submit_status_from_run(run),
+        "taskpack_id": run_paths["taskpack_id"],
+        "run": run,
+        "report": {
+            "report_path": report["report_path"],
+            "report_json_path": report["report_json_path"],
+            "run_status": report["run_status"],
+            "task_count": report["task_count"],
+            "blocked_count": report["blocked_count"],
+            "token_usage": report["token_usage"],
+            "completion_summary": report["completion_summary"],
+        },
+        "artifact_snapshot": artifact_snapshot,
+        "paths": {
+            "work_root": str(work_root),
+            "run_root": str(run_paths["run_root"]),
+            "run_dir": str(run_dir),
+            "frozen_taskpack_dir": str(Path(args.frozen_taskpack_dir).resolve()),
+        },
+    }
+    if args.json:
+        return result
+    _write_execution_result_text(result)
+    return 0
+
+
+def _infer_work_root_for_run(run_root, frozen_taskpack_dir):
+    run_root = Path(run_root).resolve()
+    frozen_taskpack_dir = Path(frozen_taskpack_dir).resolve()
+    if run_root.name == "runs":
+        return run_root.parent.resolve()
+    if frozen_taskpack_dir.parent.name == "frozen":
+        return frozen_taskpack_dir.parent.parent.resolve()
+    return run_root.parent.resolve()
 
 
 def _handle_continue(args):
@@ -1491,11 +1679,21 @@ def _format_utc_timestamp(timestamp):
 def _handle_status(args):
     project_root = Path(args.project_root or ".").resolve()
     profile = load_project_profile(project_root)
-    run_dir = Path(args.run_dir).resolve() if args.run_dir else _latest_run_dir(profile)
-    summary = _build_run_status_summary(profile, run_dir)
+    try:
+        run_dir = _canonical_run_dir(Path(args.run_dir).resolve()) if args.run_dir else _latest_run_dir(profile)
+        summary = _build_run_status_summary(profile, run_dir)
+    except AgentTeamCliError as exc:
+        authoring = _build_project_authoring_summary(profile)
+        if not args.run_dir and authoring["active_count"]:
+            summary = _build_project_status_summary(profile, authoring)
+        else:
+            raise exc
     if args.json:
         return summary
-    _write_status_text(summary)
+    if summary.get("status_scope") == "project":
+        _write_project_status_text(summary)
+    else:
+        _write_status_text(summary)
     return 0
 
 
@@ -1746,7 +1944,10 @@ def _handle_resume(args):
 def _handle_stop(args):
     project_root = Path(args.project_root or ".").resolve()
     profile = load_project_profile(project_root)
-    if args.stale and not args.taskpack and not args.run_dir:
+    if args.authoring:
+        summary = _stop_authoring(profile, grace_seconds=args.grace_seconds, force=args.force, operator=args.operator)
+        summary["project"] = profile.get("project_key") or "unknown"
+    elif args.stale and not args.taskpack and not args.run_dir:
         summary = cleanup_stale_runs(profile, operator=args.operator)
         summary["project"] = profile.get("project_key") or "unknown"
     else:
@@ -1849,7 +2050,7 @@ def _watch_profile(args):
 
 def _watch_run_dir(args, profile):
     if args.run_dir:
-        return Path(args.run_dir).resolve()
+        return _canonical_run_dir(Path(args.run_dir).resolve())
     return _selected_run_dir(args, profile, command_name="watch")
 
 
@@ -1970,7 +2171,8 @@ def _selected_run_dir(args, profile, command_name):
             taskpack_id=taskpack_id,
             run_dir=str(Path(args.run_dir).resolve()),
         )
-    return Path(args.run_dir).resolve() if args.run_dir else (work_root / "runs" / taskpack_id).resolve()
+    selected = Path(args.run_dir).resolve() if args.run_dir else (work_root / "runs" / taskpack_id).resolve()
+    return _canonical_run_dir(selected)
 
 
 def _write_stop_text(summary):
@@ -1988,6 +2190,12 @@ def _write_stop_text(summary):
             f"{workers.get('stop_requested', 0)} stop_requested, "
             f"{workers.get('running', 0)} running"
         )
+    if summary.get("taskpack_id"):
+        lines.append(f"taskpack_id: {summary['taskpack_id']}")
+    if summary.get("pid"):
+        lines.append(f"pid: {summary['pid']}")
+    if summary.get("state_path"):
+        lines.append(f"author_state: {summary['state_path']}")
     if summary.get("run_dir"):
         lines.append(f"run_dir: {summary['run_dir']}")
     if summary.get("cleaned_count") is not None:
@@ -2006,7 +2214,175 @@ def _latest_run_dir(profile):
     run_dirs = [path for path in run_root.iterdir() if path.is_dir()]
     if not run_dirs:
         raise AgentTeamCliError("no AgentTeam runs found", run_root=str(run_root))
-    return max(run_dirs, key=lambda path: path.stat().st_mtime)
+    return _canonical_run_dir(max(run_dirs, key=lambda path: path.stat().st_mtime))
+
+
+def _build_project_status_summary(profile, authoring):
+    return {
+        "status_scope": "project",
+        "project": profile.get("project_key") or "unknown",
+        "status": "authoring",
+        "authoring": authoring,
+        "work_root": profile.get("work_root"),
+    }
+
+
+def _build_project_authoring_summary(profile):
+    records = _authoring_state_records(profile)
+    active = [
+        record
+        for record in records
+        if record.get("liveness_status") == "running-alive"
+    ]
+    latest = records[-1] if records else None
+    return {
+        "total_count": len(records),
+        "active_count": len(active),
+        "latest": latest,
+        "active": active,
+    }
+
+
+def _authoring_state_records(profile):
+    work_root = profile.get("work_root")
+    if not work_root:
+        return []
+    drafts_root = Path(work_root).resolve() / "drafts"
+    if not drafts_root.exists():
+        return []
+    records = []
+    for state_path in sorted(drafts_root.glob(".*-author/author_state.json")):
+        state = _read_json_if_exists(state_path)
+        if not isinstance(state, dict) or not state:
+            continue
+        record = {
+            **state,
+            "state_path": str(state_path.resolve()),
+            "author_context_dir": str(state_path.parent.resolve()),
+            "liveness_status": _author_liveness_status(state),
+        }
+        records.append(record)
+    return sorted(records, key=lambda item: item.get("updated_at") or item.get("started_at") or "")
+
+
+def _author_liveness_status(state):
+    if not isinstance(state, dict):
+        return "unknown"
+    status = state.get("author_status")
+    pid = state.get("pid")
+    if status == "running":
+        return "running-alive" if _pid_is_running(pid) else "running-stale"
+    if status in {"completed", "failed", "timed_out", "stopped"}:
+        return "not-running"
+    return "unknown"
+
+
+def _stop_authoring(profile, grace_seconds=5, force=False, operator="operator"):
+    summary = _build_project_authoring_summary(profile)
+    active = summary.get("active") or []
+    if not active:
+        latest = summary.get("latest") or {}
+        return {
+            "stop_status": "no_running_authoring",
+            "authoring": summary,
+            "latest_authoring": latest.get("taskpack_id"),
+        }
+    target = active[-1]
+    pid = target.get("pid")
+    state_path = Path(target["state_path"])
+    stopped = False
+    stop_error = None
+    stop_signal = "SIGTERM"
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+        deadline = time.monotonic() + max(float(grace_seconds or 0), 0.0)
+        while time.monotonic() < deadline:
+            if not _pid_is_running(pid):
+                stopped = True
+                break
+            time.sleep(0.1)
+        if not stopped and force:
+            stop_signal = "SIGKILL"
+            os.kill(int(pid), signal.SIGKILL)
+            stopped = not _pid_is_running(pid)
+    except (OSError, ProcessLookupError, PermissionError, TypeError, ValueError) as exc:
+        stop_error = str(exc)
+        stopped = not _pid_is_running(pid)
+    final_state = {
+        **target,
+        "author_status": "stopped" if stopped else "stop_requested",
+        "stopped_by": operator,
+        "stopped_at": _format_utc_timestamp(datetime.now(UTC)),
+        "stop_signal": stop_signal,
+    }
+    if stop_error:
+        final_state["stop_error"] = stop_error
+    _write_json(state_path, final_state)
+    return {
+        "stop_status": "stopped_authoring" if stopped else "stop_requested",
+        "taskpack_id": target.get("taskpack_id"),
+        "pid": pid,
+        "state_path": str(state_path),
+        "authoring": _build_project_authoring_summary(profile),
+    }
+
+
+def _pid_is_running(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.exists():
+        try:
+            parts = proc_stat.read_text(encoding="utf-8").split()
+            if len(parts) > 2 and parts[2] == "Z":
+                return False
+        except OSError:
+            pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _canonical_run_dir(run_dir):
+    run_dir = Path(run_dir).resolve()
+    nested = (run_dir / run_dir.name).resolve()
+    if not _run_dir_has_runtime_artifacts(run_dir) and _run_dir_has_runtime_artifacts(nested):
+        return nested
+    return run_dir
+
+
+def _run_dir_has_runtime_artifacts(run_dir):
+    run_dir = Path(run_dir)
+    return (
+        (run_dir / "events.jsonl").exists()
+        or (run_dir / "state" / "two_phase_scheduler_state.json").exists()
+        or (run_dir / "state" / "scheduler_state.json").exists()
+    )
+
+
+def _run_paths_for_frozen_taskpack(frozen_taskpack_dir, run_root):
+    frozen_taskpack_dir = Path(frozen_taskpack_dir).resolve()
+    loaded = load_taskpack(frozen_taskpack_dir)
+    taskpack_id = loaded["taskpack"].get("taskpack_id") or frozen_taskpack_dir.name
+    supplied_run_root = Path(run_root).resolve()
+    normalized = supplied_run_root.name == taskpack_id
+    actual_run_root = supplied_run_root.parent.resolve() if normalized else supplied_run_root
+    run_dir = (actual_run_root / taskpack_id).resolve()
+    return {
+        "taskpack_id": taskpack_id,
+        "supplied_run_root": supplied_run_root,
+        "run_root": actual_run_root,
+        "run_dir": run_dir,
+        "normalized_from_concrete_run_dir": normalized,
+    }
 
 
 def _build_run_status_summary(profile, run_dir):
@@ -2041,6 +2417,7 @@ def _build_run_status_summary(profile, run_dir):
         "manual_gates": manual_gate_count,
         "permission_requests": permission_request_count,
         "last_failure": _status_last_failure(snapshot, state),
+        "authoring": _build_project_authoring_summary(profile),
         "run_dir": str(run_dir),
     }
     return summary
@@ -2272,7 +2649,39 @@ def _write_status_text(summary):
         lines.append(f"last_worker: {summary['last_worker']}")
     if summary.get("last_failure"):
         lines.append(f"last_failure: {summary['last_failure']}")
+    authoring = summary.get("authoring") if isinstance(summary.get("authoring"), dict) else {}
+    if authoring.get("active_count"):
+        latest = authoring.get("latest") or {}
+        lines.append(
+            "authoring: "
+            f"{authoring['active_count']} active "
+            f"latest={latest.get('taskpack_id') or 'unknown'} "
+            f"liveness={latest.get('liveness_status') or 'unknown'}"
+        )
     lines.append(f"run_dir: {summary['run_dir']}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _write_project_status_text(summary):
+    authoring = summary.get("authoring") if isinstance(summary.get("authoring"), dict) else {}
+    latest = authoring.get("latest") or {}
+    lines = [
+        f"project: {summary['project']}",
+        f"status: {summary['status']}",
+        f"authoring: {authoring.get('active_count', 0)} active, {authoring.get('total_count', 0)} recorded",
+    ]
+    if latest:
+        lines.extend(
+            [
+                f"latest_authoring: {latest.get('taskpack_id') or 'unknown'}",
+                f"liveness: {latest.get('liveness_status') or 'unknown'}",
+                f"pid: {latest.get('pid') or 'unknown'}",
+                f"elapsed_seconds: {latest.get('elapsed_seconds') or 0}",
+                f"author_state: {latest.get('state_path') or 'unknown'}",
+            ]
+        )
+    lines.append(f"work_root: {summary.get('work_root') or 'unknown'}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 
@@ -2530,6 +2939,24 @@ def _manual_gate_summary_item(gate, resume_context):
 def _progress(enabled, message):
     if enabled:
         _write_progress(message)
+
+
+def _author_progress_callback(enabled):
+    if not enabled:
+        return None
+
+    def emit(state):
+        status = state.get("author_status") or "unknown"
+        taskpack_id = state.get("taskpack_id") or "unknown"
+        elapsed = int(float(state.get("elapsed_seconds") or 0))
+        pid = state.get("pid") or "unknown"
+        state_path = state.get("state_path")
+        message = f"authoring status={status} taskpack={taskpack_id} elapsed={elapsed}s pid={pid}"
+        if state_path:
+            message += f" state={state_path}"
+        _write_progress(message)
+
+    return emit
 
 
 def _write_progress(message):
@@ -3048,9 +3475,10 @@ def _run_frozen_taskpack(
     progress=False,
     progress_interval_seconds=2.0,
 ):
+    run_paths = _run_paths_for_frozen_taskpack(frozen_taskpack_dir, run_root)
     runtime_args = build_taskpack_runtime_args(
         frozen_taskpack_dir,
-        run_root=run_root,
+        run_root=run_paths["run_root"],
         daemon=not one_shot,
         max_inflight=max_inflight,
         max_attempts=max_attempts,
@@ -3064,11 +3492,10 @@ def _run_frozen_taskpack(
         runtime_args.extend(["--feishu-signing-secret-env", feishu_signing_secret_env])
     command = [sys.executable, "-m", "agentteam_runtime.cli", *runtime_args]
     env = _runtime_subprocess_env()
-    run_dir = Path(run_root).resolve() / Path(frozen_taskpack_dir).resolve().name
     return _run_runtime_command_with_progress(
         command,
         env=env,
-        run_dir=run_dir,
+        run_dir=run_paths["run_dir"],
         progress=progress,
         progress_interval_seconds=progress_interval_seconds,
         progress_stream=sys.stderr,
