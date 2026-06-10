@@ -59,6 +59,15 @@ detail, so milestone results are readable from the chat message itself.
 Use `agentteam notify test` after configuring Feishu in `agentteam init` to send
 one diagnostic message through the same project webhook.
 
+Taskpack authoring classifies broad goals before execution. Optimization goals
+such as "optimize this repository" or "优化比赛代码" are marked
+`goal_kind: optimization` and must include at least one code-facing backlog item
+with baseline/current-behavior evidence, an optimization candidate matrix,
+evidence paths, implementation-or-no-safe-change rationale, metric delta or
+no-safe-change evidence, verification, and next-step deliverables. A
+documentation-only audit is rejected unless the original goal is explicitly an
+audit.
+
 When a run has verified integration-baseline changes, merge them back into the
 current target repository branch explicitly:
 

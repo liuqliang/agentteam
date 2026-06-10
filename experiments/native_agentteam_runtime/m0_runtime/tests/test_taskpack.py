@@ -3884,6 +3884,30 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(loaded["backlog"]["items"][0]["required_role"], "implementation_worker")
             self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
 
+    def test_fake_taskpack_author_marks_optimization_goals_code_facing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+
+            result = draft_taskpack_from_goal(
+                project_root=repo,
+                goal="阅读这个比赛代码仓库并检查能否优化现有工作。",
+                draft_root=drafts,
+                author_runtime="fake",
+                taskpack_id="optimize-competition",
+            )
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            task = loaded["backlog"]["items"][0]
+            self.assertEqual(loaded["taskpack"]["goal_kind"], "optimization")
+            self.assertEqual(task["work_type"], "code_implementation")
+            self.assertIn("baseline_or_current_behavior", task["required_deliverables"])
+            self.assertIn("optimization_candidate_matrix", task["required_deliverables"])
+            self.assertIn("metric_delta_or_no_safe_change_evidence", task["required_deliverables"])
+            self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
+
     def test_fake_taskpack_author_draft_can_be_frozen(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -3904,6 +3928,31 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(frozen["manifest"]["taskpack_id"], "fake-freezable")
             self.assertTrue((Path(frozen["frozen_taskpack_dir"]) / "manifest.json").exists())
+
+    def test_validate_taskpack_rejects_optimization_taskpack_without_code_facing_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Optimize existing competition repository.",
+                draft_root=drafts,
+                taskpack_id="doc-only-optimization",
+                write_scope=["README.md"],
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+            backlog_path = taskpack_dir / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["work_type"] = "audit"
+            backlog["items"][0]["write_scope"] = ["README.md"]
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(taskpack_dir)
+
+            self.assertIn("optimization taskpack requires", str(raised.exception))
 
     def test_taskpack_author_uses_unique_implicit_id_when_default_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4054,6 +4103,78 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(backlog["items"][0]["objective"], "Audit and optimize runtime path")
             self.assertEqual(backlog["items"][0]["backlog_status"], "ready")
             self.assertEqual(backlog["items"][0]["blockers"], [])
+
+    def test_codex_taskpack_author_canonicalizes_optimization_contract_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "codex-optimization-contract"
+            _init_repo(repo)
+            taskpack_dir.mkdir(parents=True)
+            (taskpack_dir / "taskpack.yaml").write_text(
+                json.dumps(
+                    {
+                        "taskpack_schema_version": "taskpack.v1",
+                        "taskpack_id": "codex-optimization-contract",
+                        "status": "draft",
+                        "project_root": str(repo),
+                        "goal": "优化现有比赛代码，寻找可以验证的代码改进。",
+                        "runtime": {"default_backend": "codex"},
+                        "files": {
+                            "agent_pool": "agent_pool.json",
+                            "backlog": "backlog.json",
+                            "verification": "verification.json",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "agent_pool.json").write_text(
+                json.dumps(
+                    {
+                        "agents": [
+                            {
+                                "agent_id": "implementation-worker-1",
+                                "role": "implementation_worker",
+                                "status": "idle",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "backlog.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "optimize-code-001",
+                                "title": "Find and implement one safe optimization",
+                                "status": "ready",
+                                "required_role": "implementation_worker",
+                                "read_scope": ["."],
+                                "write_scope": ["src/"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "verification.json").write_text(
+                json.dumps({"command": ["python3", "-m", "unittest", "discover"]}),
+                encoding="utf-8",
+            )
+
+            _canonicalize_codex_taskpack_files(taskpack_dir)
+
+            taskpack = json.loads((taskpack_dir / "taskpack.yaml").read_text(encoding="utf-8"))
+            backlog = json.loads((taskpack_dir / "backlog.json").read_text(encoding="utf-8"))
+            task = backlog["items"][0]
+            self.assertEqual(taskpack["goal_kind"], "optimization")
+            self.assertEqual(task["work_type"], "code_implementation")
+            self.assertIn("baseline_or_current_behavior", task["required_deliverables"])
+            self.assertIn("metric_delta_or_no_safe_change_evidence", task["required_deliverables"])
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
 
     def test_codex_taskpack_author_uses_project_venv_for_python_verification(self):
         with tempfile.TemporaryDirectory() as tmp:

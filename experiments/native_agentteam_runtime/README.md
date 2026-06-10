@@ -121,6 +121,16 @@ If Feishu is configured, `agentteam notify test` sends one diagnostic
 `agentteam notify test --dry-run --json` to validate the selected environment
 variable names without sending.
 
+Taskpack authoring classifies broad goals before execution. Optimization goals
+such as "optimize this repository" or "优化比赛代码" become
+`goal_kind: optimization` taskpacks and must include at least one code-facing
+`code_implementation` or `code_investigation` backlog item. The required
+deliverables force a baseline/current-behavior note, candidate matrix, evidence
+paths, implementation-or-no-safe-change rationale, metric delta or
+no-safe-change evidence, verification summary, and recommended next
+implementation tasks. A docs-only taskpack is rejected unless the original goal
+is explicitly an audit.
+
 For a scripted local smoke run without installing the command, use the launcher
 directly:
 

@@ -15,6 +15,8 @@ DEFAULT_CODEX_RUNTIME_TIMEOUT_SECONDS = 3600
 DEFAULT_LEASE_TIMEOUT_GRACE_SECONDS = 60
 TASKPACK_TRANSLATABLE_RUNTIME_BACKENDS = {"fake", "codex"}
 TASKPACK_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
+TASKPACK_GOAL_KINDS = {"implementation", "optimization", "audit"}
+OPTIMIZATION_CODE_WORK_TYPES = {"code_implementation", "code_investigation"}
 
 
 class TaskpackValidationError(ValueError):
@@ -45,6 +47,7 @@ def draft_taskpack_files(
         ["python3", "-m", "unittest", "discover"],
         "verification_command",
     )
+    goal_kind = classify_goal_kind(goal)
 
     taskpack_dir.mkdir(parents=True, exist_ok=False)
 
@@ -57,6 +60,7 @@ def draft_taskpack_files(
         "project_root": str(project_root),
         "goal": goal,
         "original_goal": goal,
+        "goal_kind": goal_kind,
         "runtime": {
             "default_backend": "codex",
             "codex": {
@@ -100,6 +104,7 @@ def draft_taskpack_files(
                 "task_id": task_id,
                 "milestone_id": "TASKPACK-M0",
                 "objective": goal,
+                "work_type": _default_work_type(goal_kind),
                 "goal_alignment": _default_goal_alignment(goal),
                 "required_deliverables": _default_required_deliverables(goal),
                 "backlog_status": "ready",
@@ -197,6 +202,16 @@ def validate_taskpack(taskpack_dir):
     semantic_contract_enabled = semantic_contract == TASKPACK_SEMANTIC_CONTRACT_VERSION
     if semantic_contract_enabled and not _is_non_empty_string(taskpack.get("original_goal")):
         errors.append("original_goal must be a non-empty string")
+    effective_goal = taskpack.get("original_goal") or taskpack.get("goal") or ""
+    goal_kind = taskpack.get("goal_kind")
+    if semantic_contract_enabled:
+        if goal_kind is None:
+            goal_kind = classify_goal_kind(effective_goal)
+        elif not _is_non_empty_string(goal_kind):
+            errors.append("goal_kind must be a non-empty string")
+            goal_kind = classify_goal_kind(effective_goal)
+        elif goal_kind not in TASKPACK_GOAL_KINDS:
+            errors.append(f"goal_kind must be one of: {', '.join(sorted(TASKPACK_GOAL_KINDS))}")
     try:
         _validate_taskpack_runtime_backend(taskpack.get("runtime"))
     except TaskpackValidationError as exc:
@@ -216,6 +231,7 @@ def validate_taskpack(taskpack_dir):
             errors.append("backlog must contain at least one task")
     seen_task_ids = set()
     dependency_graph = {}
+    has_optimization_code_item = False
     for item in items:
         if not isinstance(item, dict):
             errors.append("backlog.items entries must be objects")
@@ -233,6 +249,9 @@ def validate_taskpack(taskpack_dir):
         required_role = item.get("required_role")
         if not _is_non_empty_string(item.get("objective")):
             errors.append(f"{task_id_label} objective must be a non-empty string")
+        work_type = item.get("work_type")
+        if semantic_contract_enabled and work_type is not None and not _is_non_empty_string(work_type):
+            errors.append(f"{task_id_label} work_type must be a non-empty string")
         if semantic_contract_enabled and not _is_non_empty_string(item.get("goal_alignment")):
             errors.append(f"{task_id_label} goal_alignment must be a non-empty string")
         deliverables = item.get("required_deliverables")
@@ -240,6 +259,13 @@ def validate_taskpack(taskpack_dir):
             errors.append(f"{task_id_label} required_deliverables must be a non-empty list")
         elif semantic_contract_enabled and not all(_is_non_empty_string(deliverable) for deliverable in deliverables):
             errors.append(f"{task_id_label} required_deliverables entries must be non-empty strings")
+        elif semantic_contract_enabled and goal_kind == "optimization" and _is_optimization_code_item(item):
+            has_optimization_code_item = True
+            missing = _missing_optimization_deliverables(deliverables)
+            if missing:
+                errors.append(
+                    f"{task_id_label} optimization required_deliverables missing: {', '.join(missing)}"
+                )
         if not _is_non_empty_string(required_role):
             errors.append(f"{task_id_label} required_role must be a non-empty string")
         elif required_role not in idle_agent_roles:
@@ -292,6 +318,11 @@ def validate_taskpack(taskpack_dir):
                     dependency_graph[task_id].append(dependency)
 
     _validate_dependency_graph(dependency_graph, seen_task_ids, errors)
+    if semantic_contract_enabled and goal_kind == "optimization" and not has_optimization_code_item:
+        errors.append(
+            "optimization taskpack requires at least one ready code-facing backlog item "
+            "with work_type code_implementation or code_investigation and non-document write_scope"
+        )
 
     if not isinstance(verification, dict):
         errors.append("verification must be an object")
@@ -332,24 +363,67 @@ def _default_goal_alignment(goal):
     )
 
 
-def _default_required_deliverables(goal):
+def classify_goal_kind(goal):
     normalized = str(goal or "").lower()
     optimization_markers = [
         "optimize",
         "optimization",
         "improve",
-        "audit",
-        "性能",
+        "performance",
+        "accuracy",
+        "latency",
+        "throughput",
+        "benchmark",
+        "metric",
         "优化",
         "改进",
         "提升",
+        "性能",
+        "准确率",
+        "精度",
+        "加速",
+        "比赛",
+    ]
+    audit_markers = [
+        "audit",
+        "review",
+        "inspect",
+        "check",
         "检查",
+        "审计",
+        "评估",
     ]
     if any(marker in normalized for marker in optimization_markers):
+        return "optimization"
+    if any(marker in normalized for marker in audit_markers):
+        return "audit"
+    return "implementation"
+
+
+def _default_work_type(goal_kind):
+    if goal_kind == "audit":
+        return "audit"
+    return "code_implementation"
+
+
+def _default_required_deliverables(goal):
+    goal_kind = classify_goal_kind(goal)
+    if goal_kind == "optimization":
         return [
             "repository_understanding_summary",
+            "baseline_or_current_behavior",
             "optimization_candidate_matrix",
             "evidence_paths",
+            "implemented_changes_or_no_safe_change_rationale",
+            "metric_delta_or_no_safe_change_evidence",
+            "verification_summary",
+            "recommended_next_implementation_tasks",
+        ]
+    if goal_kind == "audit":
+        return [
+            "repository_understanding_summary",
+            "evidence_paths",
+            "audit_findings",
             "implemented_changes_or_no_safe_change_rationale",
             "verification_summary",
             "recommended_next_implementation_tasks",
@@ -360,6 +434,49 @@ def _default_required_deliverables(goal):
         "verification_summary",
         "next_steps",
     ]
+
+
+def _is_optimization_code_item(item):
+    if item.get("backlog_status") not in {None, "ready", "in_progress"}:
+        return False
+    if item.get("work_type") not in OPTIMIZATION_CODE_WORK_TYPES:
+        return False
+    write_scope = item.get("write_scope")
+    if not isinstance(write_scope, list) or not write_scope:
+        return False
+    return not _write_scope_is_document_only(write_scope)
+
+
+def _missing_optimization_deliverables(deliverables):
+    if not isinstance(deliverables, list):
+        return _default_required_deliverables("optimization")
+    present = set(deliverables)
+    return [
+        deliverable
+        for deliverable in _default_required_deliverables("optimization")
+        if deliverable not in present
+    ]
+
+
+def _write_scope_is_document_only(write_scope):
+    document_scopes = [
+        _write_scope_is_document_path(scope)
+        for scope in write_scope
+        if isinstance(scope, str)
+    ]
+    return bool(document_scopes) and all(document_scopes)
+
+
+def _write_scope_is_document_path(scope):
+    normalized = scope.strip().lstrip("./")
+    if not normalized:
+        return False
+    lowered = normalized.lower()
+    if lowered in {"readme", "readme.md", "readme.rst"}:
+        return True
+    if lowered.startswith(("docs/", "doc/", "documentation/")):
+        return True
+    return Path(lowered).suffix in {".md", ".rst", ".txt", ".adoc"}
 
 
 def freeze_taskpack(taskpack_dir, frozen_root):
@@ -869,9 +986,13 @@ def _render_readme(taskpack, backlog, verification):
             "",
             f"Original goal: {taskpack.get('original_goal') or taskpack['goal']}",
             "",
+            f"Goal kind: `{taskpack.get('goal_kind') or classify_goal_kind(taskpack.get('original_goal') or taskpack['goal'])}`",
+            "",
             f"Project root: `{taskpack['project_root']}`",
             "",
             f"Task: `{task['task_id']}`",
+            "",
+            f"Work type: `{task.get('work_type') or 'not specified'}`",
             "",
             f"Goal alignment: {task.get('goal_alignment') or 'not specified'}",
             "",
