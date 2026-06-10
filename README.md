@@ -43,10 +43,23 @@ agentteam init --interactive
 agentteam update --from /home/liuql/projects/agentteam/.worktrees/native-runtime-m0 --release-id <release-id>
 agentteam update --status
 agentteam start
+agentteam status
+agentteam report
+agentteam paths
 ```
 
 The target project owns `.agentteam/profile.json`; AgentTeam runtime data should
 live under that profile's `work_root`, not inside the target repository.
+
+When a run has verified integration-baseline changes, merge them back into the
+current target repository branch explicitly:
+
+```bash
+agentteam integrate --taskpack <taskpack-id>
+```
+
+`agentteam integrate` requires a clean target repository and only performs a
+fast-forward merge from `agentteam/run/<taskpack-id>/integration`.
 
 ## Design Documents
 

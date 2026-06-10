@@ -36,13 +36,31 @@ runtime path used by normal multi-agent runs:
 6. If patch application or verification fails, the baseline is not committed and
    the failed result remains visible in run state and trace artifacts.
 
+7. Operators can inspect run paths and baseline locations with:
+
+   ```text
+   agentteam paths --project-root <repo> --taskpack <taskpack-id>
+   ```
+
+8. Operators can explicitly fast-forward a completed run's baseline into the
+   target repository with:
+
+   ```text
+   agentteam integrate --project-root <repo> --taskpack <taskpack-id>
+   ```
+
+   This requires a clean target repository and refuses non-fast-forward merges.
+
+9. `agentteam status` and `agentteam report` include the integration baseline
+   branch, worktree, and head summary when available.
+
 ## Out Of Scope
 
 The M1 task does not implement:
 
 - legacy one-shot runtime baseline handling
-- final merge into the user's current project branch
-- a user-facing `agentteam integrate` or `agentteam merge` command
+- automatic final merge into the user's current project branch
+- non-fast-forward merge or conflict resolution for `agentteam integrate`
 - a full wave planner
 - multi-patch batch merge as the default path
 - Feishu reverse-control for integration decisions
@@ -59,6 +77,11 @@ The M1 task does not implement:
   commit.
 - Failed integration verification does not advance the baseline commit.
 - The target repository's current checkout is not modified by this flow.
+- `agentteam paths` reports run, artifact, and baseline locations.
+- `agentteam integrate` fast-forwards the current project branch only when the
+  repository is clean and the baseline is a descendant of `HEAD`.
+- `agentteam status` and `agentteam report` expose baseline identity and head
+  information.
 - Trace artifacts include the baseline state through existing event and state
   snapshots.
 
@@ -70,3 +93,5 @@ The M1 task does not implement:
   evaluation instead of expanding CLI code.
 - Preserve current default behavior for final merge: no automatic merge into the
   user's current project branch.
+- Keep final merge explicit through `agentteam integrate` until the runtime has
+  stronger operator gates and conflict handling.

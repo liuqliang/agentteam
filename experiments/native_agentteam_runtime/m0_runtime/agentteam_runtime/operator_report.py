@@ -48,6 +48,7 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         "task_count": operator_report.get("task_count", 0),
         "blocked_count": operator_report.get("blocked_count", 0),
         "token_usage": token_usage,
+        "integration_baseline": _integration_baseline_summary(run_dir, state),
         "operator_report": operator_report,
         "report_path": str(run_dir / "reports" / "final_report.md"),
         "report_json_path": str(run_dir / "reports" / "final_report.json"),
@@ -67,6 +68,12 @@ def render_run_completion_report(report):
         f"Scheduler: {report.get('scheduler_status') or 'unknown'}",
         f"Run dir: {report.get('run_dir') or 'unknown'}",
     ]
+    baseline = report.get("integration_baseline") if isinstance(report.get("integration_baseline"), dict) else {}
+    if baseline.get("branch"):
+        lines.append(f"Integration baseline: {baseline['branch']}")
+        lines.append(f"Baseline head: {baseline.get('head_sha') or 'unknown'}")
+        if baseline.get("worktree_path"):
+            lines.append(f"Baseline worktree: {baseline['worktree_path']}")
     terminal_event_type = report.get("terminal_event_type")
     if terminal_event_type:
         lines.append(f"Terminal event: {terminal_event_type}")
@@ -182,6 +189,25 @@ def _scheduler_status(payload, state):
     if isinstance(state, dict) and state.get("scheduler_status"):
         return state["scheduler_status"]
     return "unknown"
+
+
+def _integration_baseline_summary(run_dir, state):
+    baseline = state.get("integration_baseline") if isinstance(state, dict) else {}
+    if not isinstance(baseline, dict):
+        baseline = {}
+    worktree_path = baseline.get("integration_baseline_worktree_path")
+    fallback_worktree = (run_dir / "integration-baseline").resolve()
+    if not worktree_path and fallback_worktree.exists():
+        worktree_path = str(fallback_worktree)
+    branch = baseline.get("integration_baseline_branch")
+    if not branch and worktree_path:
+        branch = f"agentteam/run/{run_dir.name}/integration"
+    return {
+        "branch": branch,
+        "worktree_path": worktree_path,
+        "worktree_exists": Path(worktree_path).exists() if worktree_path else False,
+        "head_sha": baseline.get("integration_baseline_head_sha"),
+    }
 
 
 def _extend_bullets(lines, heading, values):

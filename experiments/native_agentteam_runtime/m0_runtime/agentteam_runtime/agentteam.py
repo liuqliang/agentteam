@@ -94,6 +94,26 @@ _HELP_COMMANDS = [
         "examples": ["agentteam status --project-root <repo>"],
     },
     {
+        "name": "paths",
+        "summary": "Show project, run, artifact, and integration baseline paths.",
+        "examples": [
+            "agentteam paths --project-root <repo>",
+            "agentteam paths --taskpack <id> --json",
+        ],
+    },
+    {
+        "name": "integrate",
+        "summary": "Fast-forward a completed run's integration baseline into the target repository.",
+        "examples": [
+            "agentteam integrate --project-root <repo> --taskpack <id>",
+            "agentteam integrate --project-root <repo> --taskpack <id> --json",
+        ],
+        "notes": [
+            "Requires a clean target repository.",
+            "Only fast-forward merges are performed in this release.",
+        ],
+    },
+    {
         "name": "report",
         "summary": "Render the latest run as a human-readable completion report.",
         "examples": [
@@ -257,6 +277,8 @@ def _build_parser():
     _add_chat_parser(subcommands)
     _add_stop_parser(subcommands)
     _add_update_parser(subcommands)
+    _add_paths_parser(subcommands)
+    _add_integrate_parser(subcommands)
     _add_status_parser(subcommands)
     return parser
 
@@ -705,6 +727,27 @@ def _add_chat_parser(subcommands):
         help="Optional Codex command prefix. Must appear last.",
     )
     parser.set_defaults(handler=_handle_chat)
+
+
+def _add_paths_parser(subcommands):
+    parser = subcommands.add_parser("paths", help="Show AgentTeam project and run paths.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--taskpack", help="Run/taskpack id to inspect. Defaults to latest run id.")
+    parser.add_argument("--run-dir", help="Existing run directory to inspect. Overrides --project-root selection.")
+    parser.add_argument("--json", action="store_true", help="Print paths as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_paths)
+
+
+def _add_integrate_parser(subcommands):
+    parser = subcommands.add_parser(
+        "integrate",
+        help="Fast-forward a run integration baseline into the target repository.",
+    )
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--taskpack", help="Run/taskpack id to integrate. Defaults to latest run id.")
+    parser.add_argument("--run-dir", help="Existing run directory to integrate. Overrides --taskpack.")
+    parser.add_argument("--json", action="store_true", help="Print integration result as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_integrate)
 
 
 def _add_status_parser(subcommands):
@@ -1417,6 +1460,27 @@ def _handle_status(args):
     return 0
 
 
+def _handle_paths(args):
+    profile = _watch_profile(args)
+    run_dir = _watch_run_dir(args, profile)
+    summary = _build_paths_summary(args, profile, run_dir)
+    if args.json:
+        return summary
+    _write_paths_text(summary)
+    return 0
+
+
+def _handle_integrate(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    run_dir = _selected_run_dir(args, profile, command_name="integrate")
+    summary = _integrate_run_baseline(project_root, profile, run_dir)
+    if args.json:
+        return summary
+    _write_integrate_text(summary)
+    return 0
+
+
 def _handle_update(args):
     project_root = Path(args.project_root or ".").resolve()
     profile = load_project_profile(project_root)
@@ -1820,6 +1884,7 @@ def _build_run_status_summary(profile, run_dir):
         "processes": liveness["processes"],
         "tasks": task_counts,
         "integration": integration_counts,
+        "integration_baseline": _paths_integration_baseline(run_dir, state),
         "inflight": _status_inflight_attempts(state),
         "workers": _status_worker_counts(worker_registry),
         "last_worker": _status_last_worker(worker_registry),
@@ -1830,6 +1895,184 @@ def _build_run_status_summary(profile, run_dir):
         "run_dir": str(run_dir),
     }
     return summary
+
+
+def _build_paths_summary(args, profile, run_dir):
+    work_root = Path(profile["work_root"]).resolve()
+    run_dir = Path(run_dir).resolve()
+    if getattr(args, "project_root", None):
+        project_root = Path(args.project_root).resolve()
+    elif not getattr(args, "run_dir", None):
+        project_root = Path(".").resolve()
+    else:
+        project_root = None
+    state = _paths_run_state(run_dir)
+    final_report = run_dir / "reports" / "final_report.md"
+    return {
+        "project": profile.get("project_key") or "unknown",
+        "project_root": str(project_root) if project_root else None,
+        "profile_path": str(profile_path_for_project(project_root).resolve()) if project_root else None,
+        "work_root": str(work_root),
+        "draft_root": str((work_root / "drafts").resolve()),
+        "frozen_root": str((work_root / "frozen").resolve()),
+        "run_root": str((work_root / "runs").resolve()),
+        "artifacts_root": str((work_root / "artifacts").resolve()),
+        "releases_root": str((work_root / "releases").resolve()),
+        "latest_run": run_dir.name,
+        "run_dir": str(run_dir),
+        "worker_worktrees_root": str((run_dir / "worktrees").resolve()),
+        "artifact_snapshot_root": str((work_root / "artifacts" / "runs" / run_dir.name).resolve()),
+        "final_report": str(final_report.resolve()),
+        "final_report_exists": final_report.exists(),
+        "integration_baseline": _paths_integration_baseline(run_dir, state),
+    }
+
+
+def _paths_run_state(run_dir):
+    state = _read_json_if_exists(run_dir / "state" / "two_phase_scheduler_state.json")
+    if not state:
+        state = _read_json_if_exists(run_dir / "state" / "scheduler_state.json")
+    return state
+
+
+def _paths_integration_baseline(run_dir, state):
+    baseline = state.get("integration_baseline") if isinstance(state, dict) else {}
+    if not isinstance(baseline, dict):
+        baseline = {}
+    worktree_path = baseline.get("integration_baseline_worktree_path")
+    baseline_worktree = (run_dir / "integration-baseline").resolve()
+    if not worktree_path and baseline_worktree.exists():
+        worktree_path = str(baseline_worktree)
+    branch = baseline.get("integration_baseline_branch")
+    if not branch and worktree_path:
+        branch = f"agentteam/run/{run_dir.name}/integration"
+    return {
+        "branch": branch,
+        "worktree_path": worktree_path,
+        "worktree_exists": Path(worktree_path).exists() if worktree_path else False,
+        "head_sha": baseline.get("integration_baseline_head_sha"),
+    }
+
+
+def _write_paths_text(summary):
+    baseline = summary.get("integration_baseline") or {}
+    lines = [
+        f"project: {summary['project']}",
+        f"project_root: {summary.get('project_root') or 'unknown'}",
+        f"work_root: {summary['work_root']}",
+        f"latest_run: {summary['latest_run']}",
+        f"run_dir: {summary['run_dir']}",
+        f"artifacts_root: {summary['artifacts_root']}",
+        f"final_report: {summary['final_report']}",
+        f"integration_baseline_branch: {baseline.get('branch') or 'none'}",
+        f"integration_baseline_worktree: {baseline.get('worktree_path') or 'none'}",
+        f"integration_baseline_head: {baseline.get('head_sha') or 'unknown'}",
+    ]
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _integrate_run_baseline(project_root, profile, run_dir):
+    run_dir = Path(run_dir).resolve()
+    run_status = _build_run_status_summary(profile, run_dir)
+    if run_status.get("status") not in {"idle", "completed"}:
+        raise AgentTeamCliError(
+            "run is not ready to integrate",
+            run_dir=str(run_dir),
+            run_status=run_status.get("status") or "unknown",
+        )
+    dirty_status = _git_stdout(project_root, ["status", "--porcelain=v1", "--untracked-files=all"])
+    if dirty_status:
+        raise AgentTeamCliError(
+            "target repository must be clean before integrate",
+            project_root=str(project_root),
+            dirty_status=dirty_status,
+        )
+
+    state = _paths_run_state(run_dir)
+    baseline = _paths_integration_baseline(run_dir, state)
+    branch = baseline.get("branch")
+    if not branch:
+        raise AgentTeamCliError("integration baseline branch not found", run_dir=str(run_dir))
+    branch_head = _git_stdout(project_root, ["rev-parse", "--verify", f"{branch}^{{commit}}"])
+    current_head = _git_stdout(project_root, ["rev-parse", "HEAD"])
+    if branch_head == current_head:
+        return {
+            "integrate_status": "up_to_date",
+            "merge_status": "up_to_date",
+            "project": profile.get("project_key") or "unknown",
+            "taskpack_id": run_dir.name,
+            "project_root": str(project_root),
+            "run_dir": str(run_dir),
+            "integration_baseline": {**baseline, "head_sha": branch_head},
+            "before_head": current_head,
+            "after_head": current_head,
+        }
+    ancestor = _git_completed(project_root, ["merge-base", "--is-ancestor", "HEAD", branch], check=False)
+    if ancestor.returncode != 0:
+        raise AgentTeamCliError(
+            "integration baseline is not a fast-forward of target HEAD",
+            project_root=str(project_root),
+            run_dir=str(run_dir),
+            branch=branch,
+            current_head=current_head,
+            integration_baseline_head=branch_head,
+        )
+    merge = _git_completed(project_root, ["merge", "--ff-only", branch])
+    after_head = _git_stdout(project_root, ["rev-parse", "HEAD"])
+    return {
+        "integrate_status": "merged",
+        "merge_status": "fast_forward",
+        "project": profile.get("project_key") or "unknown",
+        "taskpack_id": run_dir.name,
+        "project_root": str(project_root),
+        "run_dir": str(run_dir),
+        "integration_baseline": {**baseline, "head_sha": branch_head},
+        "before_head": current_head,
+        "after_head": after_head,
+        "merge_stdout": merge.stdout,
+        "merge_stderr": merge.stderr,
+    }
+
+
+def _write_integrate_text(summary):
+    baseline = summary.get("integration_baseline") or {}
+    lines = [
+        f"integrate_status: {summary['integrate_status']}",
+        f"merge_status: {summary['merge_status']}",
+        f"project: {summary['project']}",
+        f"taskpack_id: {summary['taskpack_id']}",
+        f"integration_baseline_branch: {baseline.get('branch') or 'none'}",
+        f"before_head: {summary.get('before_head') or 'unknown'}",
+        f"after_head: {summary.get('after_head') or 'unknown'}",
+        f"run_dir: {summary['run_dir']}",
+    ]
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _git_stdout(repo, args):
+    return _git_completed(repo, args).stdout.strip()
+
+
+def _git_completed(repo, args, check=True):
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if check and completed.returncode != 0:
+        raise AgentTeamCliError(
+            "git command failed",
+            project_root=str(repo),
+            git_args=args,
+            exit_code=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+    return completed
 
 
 def _write_status_text(summary):
@@ -1844,6 +2087,8 @@ def _write_status_text(summary):
             f"{summary['tasks']['blocked']} blocked"
         ),
         f"integration: {summary['integration']['blocked']} blocked",
+        f"integration_baseline_branch: {summary['integration_baseline'].get('branch') or 'none'}",
+        f"integration_baseline_head: {summary['integration_baseline'].get('head_sha') or 'unknown'}",
         format_token_usage(summary.get("token_usage"), label="tokens"),
         f"inflight: {summary['inflight']['total']}",
         f"manual_gates: {summary['manual_gates']}",

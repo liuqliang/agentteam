@@ -732,6 +732,470 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(repo_status.returncode, 0, repo_status.stderr)
             self.assertEqual(repo_status.stdout, "")
 
+    def test_agentteam_cli_paths_reports_run_artifact_and_baseline_locations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "paths-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            start_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Create a run for paths.",
+                    "--taskpack-id",
+                    "paths-run",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(start_completed.returncode, 0, start_completed.stderr)
+
+            json_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "paths",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            text_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "paths",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            cwd_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "paths",
+                    "--json",
+                ],
+                cwd=repo,
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(json_completed.returncode, 0, json_completed.stderr)
+            summary = json.loads(json_completed.stdout)
+            run_dir = work_root / "runs" / "paths-run"
+            baseline_worktree = run_dir / "integration-baseline"
+            self.assertEqual(summary["project"], "paths-project")
+            self.assertEqual(summary["project_root"], str(repo.resolve()))
+            self.assertEqual(summary["work_root"], str(work_root.resolve()))
+            self.assertEqual(summary["latest_run"], "paths-run")
+            self.assertEqual(summary["run_dir"], str(run_dir.resolve()))
+            self.assertEqual(summary["artifacts_root"], str((work_root / "artifacts").resolve()))
+            self.assertEqual(summary["final_report"], str((run_dir / "reports" / "final_report.md").resolve()))
+            self.assertEqual(
+                summary["integration_baseline"]["branch"],
+                "agentteam/run/paths-run/integration",
+            )
+            self.assertEqual(
+                summary["integration_baseline"]["worktree_path"],
+                str(baseline_worktree.resolve()),
+            )
+            self.assertTrue(summary["integration_baseline"]["worktree_exists"])
+            self.assertEqual(text_completed.returncode, 0, text_completed.stderr)
+            self.assertIn("project: paths-project\n", text_completed.stdout)
+            self.assertIn("latest_run: paths-run\n", text_completed.stdout)
+            self.assertIn("integration_baseline_branch: agentteam/run/paths-run/integration\n", text_completed.stdout)
+            self.assertIn(str(baseline_worktree.resolve()), text_completed.stdout)
+            self.assertEqual(cwd_completed.returncode, 0, cwd_completed.stderr)
+            cwd_summary = json.loads(cwd_completed.stdout)
+            self.assertEqual(cwd_summary["project_root"], str(repo.resolve()))
+
+    def test_agentteam_cli_integrate_fast_forwards_verified_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "integrate-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Create a run for integration.",
+                    "--taskpack-id",
+                    "integrate-run",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            baseline_worktree = work_root / "runs" / "integrate-run" / "integration-baseline"
+            (baseline_worktree / "README.md").write_text("# fixture\n\nintegrated\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=baseline_worktree, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "agentteam integration fixture"],
+                cwd=baseline_worktree,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            baseline_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=baseline_worktree,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            ).stdout.strip()
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "integrate",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "integrate-run",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["integrate_status"], "merged")
+            self.assertEqual(summary["merge_status"], "fast_forward")
+            self.assertEqual(summary["after_head"], baseline_head)
+            self.assertEqual((repo / "README.md").read_text(encoding="utf-8"), "# fixture\n\nintegrated\n")
+
+    def test_agentteam_cli_integrate_requires_clean_target_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "dirty-integrate-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Create a run for dirty integration.",
+                    "--taskpack-id",
+                    "dirty-integrate-run",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            baseline_worktree = work_root / "runs" / "dirty-integrate-run" / "integration-baseline"
+            (baseline_worktree / "README.md").write_text("# fixture\n\nintegrated\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=baseline_worktree, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "agentteam dirty integration fixture"],
+                cwd=baseline_worktree,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            before_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            (repo / "local.txt").write_text("uncommitted\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "integrate",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "dirty-integrate-run",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 1)
+            error = json.loads(completed.stderr)
+            self.assertEqual(error["error"], "target repository must be clean before integrate")
+            after_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            self.assertEqual(after_head, before_head)
+
+    def test_agentteam_cli_status_and_report_show_integration_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "baseline-visible"
+            baseline_worktree = run_dir / "integration-baseline"
+            _init_repo(repo)
+            baseline_worktree.mkdir(parents=True)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "baseline-visible-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            _write_json(
+                run_dir / "state" / "two_phase_scheduler_state.json",
+                {
+                    "scheduler_status": "idle",
+                    "integration_baseline": {
+                        "integration_baseline_status": "ready",
+                        "integration_baseline_branch": "agentteam/run/baseline-visible/integration",
+                        "integration_baseline_worktree_path": str(baseline_worktree.resolve()),
+                        "integration_baseline_head_sha": "abc123",
+                    },
+                },
+            )
+
+            status_json = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            status_text = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            report_json = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "report",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            report_text = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "report",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(status_json.returncode, 0, status_json.stderr)
+            status_summary = json.loads(status_json.stdout)
+            self.assertEqual(
+                status_summary["integration_baseline"]["branch"],
+                "agentteam/run/baseline-visible/integration",
+            )
+            self.assertEqual(status_summary["integration_baseline"]["head_sha"], "abc123")
+            self.assertEqual(status_text.returncode, 0, status_text.stderr)
+            self.assertIn(
+                "integration_baseline_branch: agentteam/run/baseline-visible/integration\n",
+                status_text.stdout,
+            )
+            self.assertEqual(report_json.returncode, 0, report_json.stderr)
+            report_summary = json.loads(report_json.stdout)
+            self.assertEqual(
+                report_summary["integration_baseline"]["branch"],
+                "agentteam/run/baseline-visible/integration",
+            )
+            self.assertEqual(report_text.returncode, 0, report_text.stderr)
+            self.assertIn("Integration baseline: agentteam/run/baseline-visible/integration", report_text.stdout)
+            self.assertIn("Baseline head: abc123", report_text.stdout)
+
     def test_agentteam_cli_start_prints_progress_to_stderr(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2546,6 +3010,8 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("start", help_completed.stdout)
         self.assertIn("next", help_completed.stdout)
         self.assertIn("status", help_completed.stdout)
+        self.assertIn("paths", help_completed.stdout)
+        self.assertIn("integrate", help_completed.stdout)
         self.assertIn("watch", help_completed.stdout)
         self.assertIn("stop", help_completed.stdout)
         self.assertIn("taskpack", help_completed.stdout)
