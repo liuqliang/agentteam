@@ -212,6 +212,12 @@ def _write_completed_operator_run(run_dir):
         run_dir / "state" / "two_phase_scheduler_state.json",
         {
             "scheduler_status": "idle",
+            "integration_baseline": {
+                "integration_baseline_status": "ready",
+                "integration_baseline_branch": "agentteam/run/taskpack-7/integration",
+                "integration_baseline_worktree_path": str((run_dir / "integration-baseline").resolve()),
+                "integration_baseline_head_sha": "abc123",
+            },
             "backlog": {
                 "items": [
                     {
@@ -368,12 +374,26 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("Run: taskpack-7", completed.stdout)
             self.assertIn("Status: completed", completed.stdout)
             self.assertIn("Token usage: total=1500 input=1200 output=300 reported=1/1", completed.stdout)
+            self.assertIn("## Operator Summary", completed.stdout)
+            self.assertIn("What changed: Scanned the repository", completed.stdout)
+            self.assertIn("Integration: passed", completed.stdout)
+            self.assertIn("Integration recommendation: Review the final report, then run `agentteam integrate --taskpack taskpack-7` from a clean target repository if these changes should land.", completed.stdout)
             self.assertIn("Scanned the repository", completed.stdout)
             self.assertIn("gesture_recognition/sim_eval.py", completed.stdout)
             report_path = run_dir / "reports" / "final_report.md"
             self.assertTrue(report_path.exists())
             self.assertIn("Run: taskpack-7", report_path.read_text(encoding="utf-8"))
             self.assertIn("Tokens: total=1500 input=1200 output=300", report_path.read_text(encoding="utf-8"))
+            report_json = json.loads((run_dir / "reports" / "final_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                report_json["completion_summary"]["what_changed"],
+                ["Scanned the repository and implemented one evidence-backed optimization."],
+            )
+            self.assertEqual(report_json["completion_summary"]["integration"], "passed")
+            self.assertEqual(
+                report_json["completion_summary"]["next_steps"],
+                ["Run the full competition validation package."],
+            )
             artifacts_root = Path(tmp) / "artifacts"
             self.assertTrue((artifacts_root / ".git").exists())
             self.assertTrue((artifacts_root / "runs" / "taskpack-7" / "reports" / "final_report.md").exists())
@@ -1251,9 +1271,15 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("status: completed\n", completed.stdout)
             self.assertIn("taskpack_id: cli-start-progress\n", completed.stdout)
+            self.assertIn("changed: Worker did not provide a natural-language change summary.\n", completed.stdout)
+            self.assertIn("integration: blocked\n", completed.stdout)
+            self.assertIn(
+                "integration_recommendation: Do not integrate until blocked tasks are resolved.\n",
+                completed.stdout,
+            )
             self.assertIn("report:", completed.stdout)
             self.assertNotIn('"draft"', completed.stdout)
-            self.assertLessEqual(len([line for line in completed.stdout.splitlines() if line.strip()]), 7)
+            self.assertLessEqual(len([line for line in completed.stdout.splitlines() if line.strip()]), 12)
             self.assertIn("[agentteam] profile loaded: progress-project", completed.stderr)
             self.assertIn("[agentteam] authoring taskpack with fake", completed.stderr)
             self.assertIn("[agentteam] draft accepted: cli-start-progress", completed.stderr)

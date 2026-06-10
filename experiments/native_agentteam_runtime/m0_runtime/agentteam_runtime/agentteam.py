@@ -1259,6 +1259,7 @@ def _handle_submit(args):
             "task_count": report["task_count"],
             "blocked_count": report["blocked_count"],
             "token_usage": report["token_usage"],
+            "completion_summary": report["completion_summary"],
         },
         "artifact_snapshot": artifact_snapshot,
         "paths": {
@@ -1360,6 +1361,7 @@ def _handle_continue(args):
             "task_count": report["task_count"],
             "blocked_count": report["blocked_count"],
             "token_usage": report["token_usage"],
+            "completion_summary": report["completion_summary"],
         },
         "artifact_snapshot": artifact_snapshot,
         "paths": {
@@ -2136,6 +2138,22 @@ def _write_execution_result_text(result):
         )
         if isinstance(report.get("token_usage"), dict):
             lines.append(format_token_usage(report.get("token_usage"), label="tokens"))
+        if not follow_up:
+            completion_summary = (
+                report.get("completion_summary")
+                if isinstance(report.get("completion_summary"), dict)
+                else {}
+            )
+            changed = _first_non_empty_text(completion_summary.get("what_changed"))
+            if changed:
+                lines.append(f"changed: {changed}")
+            if completion_summary.get("integration"):
+                lines.append(f"integration: {completion_summary['integration']}")
+            if completion_summary.get("integration_recommendation"):
+                lines.append(f"integration_recommendation: {completion_summary['integration_recommendation']}")
+            next_step = _first_non_empty_text(completion_summary.get("next_steps"))
+            if next_step:
+                lines.append(f"next: {next_step}")
         if report.get("report_path"):
             lines.append(f"report: {report['report_path']}")
     if follow_up.get("source_report_path"):

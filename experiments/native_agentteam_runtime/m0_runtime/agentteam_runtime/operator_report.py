@@ -36,6 +36,12 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
             [task.get("token_usage") for task in task_reports if isinstance(task, dict)],
             expected_count=len(task_reports),
         )
+    task_reports = (
+        operator_report.get("task_reports", [])
+        if isinstance(operator_report.get("task_reports"), list)
+        else []
+    )
+    integration_baseline = _integration_baseline_summary(run_dir, state)
 
     report = {
         "report_status": "ready",
@@ -48,7 +54,15 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         "task_count": operator_report.get("task_count", 0),
         "blocked_count": operator_report.get("blocked_count", 0),
         "token_usage": token_usage,
-        "integration_baseline": _integration_baseline_summary(run_dir, state),
+        "completion_summary": _completion_summary(
+            run_id=run_dir.name,
+            run_status=_run_status(payload, state),
+            task_count=operator_report.get("task_count", 0),
+            blocked_count=operator_report.get("blocked_count", 0),
+            task_reports=task_reports,
+            integration_baseline=integration_baseline,
+        ),
+        "integration_baseline": integration_baseline,
         "operator_report": operator_report,
         "report_path": str(run_dir / "reports" / "final_report.md"),
         "report_json_path": str(run_dir / "reports" / "final_report.json"),
@@ -86,6 +100,19 @@ def render_run_completion_report(report):
             f"- {format_token_usage(report.get('token_usage'))}",
         ]
     )
+    summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
+    if summary:
+        lines.extend(["", "## Operator Summary"])
+        if summary.get("status_line"):
+            lines.append(f"- Status: {summary['status_line']}")
+        _extend_summary_item(lines, "What changed", summary.get("what_changed"))
+        _extend_summary_item(lines, "Changed files", summary.get("changed_files"))
+        _extend_summary_item(lines, "Verification", summary.get("verification"))
+        if summary.get("integration"):
+            lines.append(f"- Integration: {summary['integration']}")
+        if summary.get("integration_recommendation"):
+            lines.append(f"- Integration recommendation: {summary['integration_recommendation']}")
+        _extend_summary_item(lines, "Next", summary.get("next_steps"))
 
     task_reports = (
         report.get("operator_report", {}).get("task_reports", [])
@@ -139,6 +166,13 @@ def concise_report_lines(report, max_tasks=3):
     token_usage = report.get("token_usage")
     if isinstance(token_usage, dict):
         lines.append(format_token_usage(token_usage, label="tokens"))
+    summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
+    changed = _first_text(summary.get("what_changed"))
+    if changed:
+        lines.append(f"changed: {changed}")
+    next_step = _first_text(summary.get("next_steps"))
+    if next_step:
+        lines.append(f"next: {next_step}")
     task_reports = (
         report.get("operator_report", {}).get("task_reports", [])
         if isinstance(report.get("operator_report"), dict)
@@ -210,6 +244,102 @@ def _integration_baseline_summary(run_dir, state):
     }
 
 
+def _completion_summary(run_id, run_status, task_count, blocked_count, task_reports, integration_baseline):
+    task_reports = [task for task in task_reports if isinstance(task, dict)]
+    what_changed = _unique_limited(
+        item
+        for task in task_reports
+        for item in _text_items(task.get("what_changed"))
+    )
+    changed_files = _unique_limited(
+        [
+            item
+            for task in task_reports
+            for item in _text_items(task.get("changed_files"))
+        ],
+        limit=12,
+    )
+    verification = _unique_limited(
+        item
+        for task in task_reports
+        for item in _text_items(task.get("verification"))
+    )
+    next_steps = _unique_limited(
+        item
+        for task in task_reports
+        for item in _text_items(task.get("next_steps"))
+    )
+    merge_recommendations = _unique_limited(
+        task.get("merge_recommendation")
+        for task in task_reports
+        if task.get("merge_recommendation")
+    )
+    if not what_changed and not task_reports:
+        what_changed = ["No task-level operator report was found in this run."]
+    return {
+        "status_line": _completion_status_line(run_status, task_count, blocked_count),
+        "what_changed": what_changed,
+        "changed_files": changed_files,
+        "verification": verification,
+        "integration": _completion_integration(task_reports),
+        "integration_recommendation": _integration_recommendation(
+            run_id,
+            blocked_count,
+            integration_baseline,
+            merge_recommendations,
+        ),
+        "next_steps": next_steps,
+        "merge_recommendations": merge_recommendations,
+    }
+
+
+def _completion_status_line(run_status, task_count, blocked_count):
+    task_label = "task" if task_count == 1 else "tasks"
+    blocked_label = "blocked task" if blocked_count == 1 else "blocked tasks"
+    return f"{run_status or 'unknown'}: {task_count} {task_label} reported, {blocked_count} {blocked_label}"
+
+
+def _completion_integration(task_reports):
+    integrations = _unique_limited(
+        task.get("integration")
+        for task in task_reports
+        if task.get("integration")
+    )
+    if not integrations:
+        return "not recorded"
+    if any(str(item).startswith("failed") for item in integrations):
+        return "blocked"
+    if integrations == ["passed"]:
+        return "passed"
+    return "; ".join(integrations)
+
+
+def _integration_recommendation(run_id, blocked_count, integration_baseline, merge_recommendations):
+    if blocked_count:
+        return "Do not integrate until blocked tasks are resolved."
+    branch = integration_baseline.get("branch") if isinstance(integration_baseline, dict) else None
+    if branch:
+        return (
+            "Review the final report, then run "
+            f"`agentteam integrate --taskpack {run_id}` from a clean target repository "
+            "if these changes should land."
+        )
+    if merge_recommendations:
+        return merge_recommendations[0]
+    return "No integration baseline was recorded; inspect the run report before merging manually."
+
+
+def _extend_summary_item(lines, heading, values):
+    items = _text_items(values)
+    if not items:
+        return
+    if len(items) == 1:
+        lines.append(f"- {heading}: {items[0]}")
+        return
+    lines.append(f"- {heading}:")
+    lines.extend(f"  - {item}" for item in items)
+
+
 def _extend_bullets(lines, heading, values):
     items = _text_items(values)
     if not items:
@@ -226,6 +356,25 @@ def _text_items(values):
     if isinstance(values, tuple):
         return [str(item) for item in values if item is not None and str(item)]
     return [str(values)] if str(values) else []
+
+
+def _unique_limited(values, limit=5):
+    seen = set()
+    items = []
+    for value in values:
+        text = str(value).strip() if value is not None else ""
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _first_text(values):
+    items = _text_items(values)
+    return items[0] if items else None
 
 
 def _read_jsonl_if_exists(path):

@@ -50,6 +50,9 @@ agentteam paths
 
 The target project owns `.agentteam/profile.json`; AgentTeam runtime data should
 live under that profile's `work_root`, not inside the target repository.
+`agentteam start`, `agentteam continue`, and `agentteam report` surface a
+completion summary with what changed, verification status, integration status,
+merge guidance, and next steps when worker reports provide those fields.
 
 When a run has verified integration-baseline changes, merge them back into the
 current target repository branch explicitly:
