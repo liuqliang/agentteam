@@ -1274,7 +1274,7 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("changed: Worker did not provide a natural-language change summary.\n", completed.stdout)
             self.assertIn("integration: blocked\n", completed.stdout)
             self.assertIn(
-                "integration_recommendation: Do not integrate until blocked tasks are resolved.\n",
+                "integration_recommendation: Do not merge until integration passes.\n",
                 completed.stdout,
             )
             self.assertIn("report:", completed.stdout)

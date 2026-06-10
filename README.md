@@ -53,6 +53,8 @@ live under that profile's `work_root`, not inside the target repository.
 `agentteam start`, `agentteam continue`, and `agentteam report` surface a
 completion summary with what changed, verification status, integration status,
 merge guidance, and next steps when worker reports provide those fields.
+Feishu run-completion notifications use the same summary before any task-level
+detail, so milestone results are readable from the chat message itself.
 
 When a run has verified integration-baseline changes, merge them back into the
 current target repository branch explicitly:

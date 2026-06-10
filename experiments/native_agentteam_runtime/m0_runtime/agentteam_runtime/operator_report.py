@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from .completion_summary import build_completion_summary
 from .two_phase_scheduler import _operator_report_from_state
 from .token_usage import aggregate_token_usage, format_token_usage
 
@@ -54,7 +55,7 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         "task_count": operator_report.get("task_count", 0),
         "blocked_count": operator_report.get("blocked_count", 0),
         "token_usage": token_usage,
-        "completion_summary": _completion_summary(
+        "completion_summary": build_completion_summary(
             run_id=run_dir.name,
             run_status=_run_status(payload, state),
             task_count=operator_report.get("task_count", 0),
@@ -244,91 +245,6 @@ def _integration_baseline_summary(run_dir, state):
     }
 
 
-def _completion_summary(run_id, run_status, task_count, blocked_count, task_reports, integration_baseline):
-    task_reports = [task for task in task_reports if isinstance(task, dict)]
-    what_changed = _unique_limited(
-        item
-        for task in task_reports
-        for item in _text_items(task.get("what_changed"))
-    )
-    changed_files = _unique_limited(
-        [
-            item
-            for task in task_reports
-            for item in _text_items(task.get("changed_files"))
-        ],
-        limit=12,
-    )
-    verification = _unique_limited(
-        item
-        for task in task_reports
-        for item in _text_items(task.get("verification"))
-    )
-    next_steps = _unique_limited(
-        item
-        for task in task_reports
-        for item in _text_items(task.get("next_steps"))
-    )
-    merge_recommendations = _unique_limited(
-        task.get("merge_recommendation")
-        for task in task_reports
-        if task.get("merge_recommendation")
-    )
-    if not what_changed and not task_reports:
-        what_changed = ["No task-level operator report was found in this run."]
-    return {
-        "status_line": _completion_status_line(run_status, task_count, blocked_count),
-        "what_changed": what_changed,
-        "changed_files": changed_files,
-        "verification": verification,
-        "integration": _completion_integration(task_reports),
-        "integration_recommendation": _integration_recommendation(
-            run_id,
-            blocked_count,
-            integration_baseline,
-            merge_recommendations,
-        ),
-        "next_steps": next_steps,
-        "merge_recommendations": merge_recommendations,
-    }
-
-
-def _completion_status_line(run_status, task_count, blocked_count):
-    task_label = "task" if task_count == 1 else "tasks"
-    blocked_label = "blocked task" if blocked_count == 1 else "blocked tasks"
-    return f"{run_status or 'unknown'}: {task_count} {task_label} reported, {blocked_count} {blocked_label}"
-
-
-def _completion_integration(task_reports):
-    integrations = _unique_limited(
-        task.get("integration")
-        for task in task_reports
-        if task.get("integration")
-    )
-    if not integrations:
-        return "not recorded"
-    if any(str(item).startswith("failed") for item in integrations):
-        return "blocked"
-    if integrations == ["passed"]:
-        return "passed"
-    return "; ".join(integrations)
-
-
-def _integration_recommendation(run_id, blocked_count, integration_baseline, merge_recommendations):
-    if blocked_count:
-        return "Do not integrate until blocked tasks are resolved."
-    branch = integration_baseline.get("branch") if isinstance(integration_baseline, dict) else None
-    if branch:
-        return (
-            "Review the final report, then run "
-            f"`agentteam integrate --taskpack {run_id}` from a clean target repository "
-            "if these changes should land."
-        )
-    if merge_recommendations:
-        return merge_recommendations[0]
-    return "No integration baseline was recorded; inspect the run report before merging manually."
-
-
 def _extend_summary_item(lines, heading, values):
     items = _text_items(values)
     if not items:
@@ -356,20 +272,6 @@ def _text_items(values):
     if isinstance(values, tuple):
         return [str(item) for item in values if item is not None and str(item)]
     return [str(values)] if str(values) else []
-
-
-def _unique_limited(values, limit=5):
-    seen = set()
-    items = []
-    for value in values:
-        text = str(value).strip() if value is not None else ""
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        items.append(text)
-        if len(items) >= limit:
-            break
-    return items
 
 
 def _first_text(values):

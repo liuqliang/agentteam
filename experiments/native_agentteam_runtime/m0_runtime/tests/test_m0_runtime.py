@@ -315,14 +315,17 @@ class M0RuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["event_type"], "notification_sent")
         text = calls[0]["payload"]["content"]["text"]
+        self.assertIn("Completion summary:", text)
         self.assertIn("What changed:", text)
         self.assertIn("优化了 IMU 解析和特征提取流程。", text)
         self.assertIn("Changed files:", text)
         self.assertIn("gesture_recognition/sim_eval.py", text)
         self.assertIn("Verification:", text)
         self.assertIn("compileall: passed", text)
-        self.assertIn("Integration: failed: FAILED (failures=1)", text)
-        self.assertIn("Merge: Do not merge until integration passes.", text)
+        self.assertIn("Integration: blocked", text)
+        self.assertIn("Integration recommendation: Do not merge until integration passes.", text)
+        self.assertIn("Next:", text)
+        self.assertIn("恢复不改变采样语义的优化，或重新导出 C 模型。", text)
 
     def test_two_phase_scheduler_notifies_manual_gate_after_canonical_event(self):
         class RecordingNotificationSink:

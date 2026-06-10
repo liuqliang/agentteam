@@ -6,6 +6,7 @@ import os
 import time
 import urllib.request
 
+from .completion_summary import build_completion_summary, extend_completion_summary_lines
 from .token_usage import format_token_usage
 
 
@@ -274,10 +275,20 @@ def _event_text(event, run_dir, project):
 
 
 def _operator_report_text(report):
-    lines = ["Operator report:"]
+    task_reports = report.get("task_reports", []) if isinstance(report.get("task_reports"), list) else []
+    summary = build_completion_summary(
+        run_id="unknown",
+        run_status="completed",
+        task_count=report.get("task_count", len(task_reports)),
+        blocked_count=report.get("blocked_count", 0),
+        task_reports=task_reports,
+    )
+    lines = []
+    extend_completion_summary_lines(lines, summary)
+    lines.append("Operator report:")
     if isinstance(report.get("token_usage"), dict):
         lines.append(format_token_usage(report.get("token_usage")))
-    for task in report.get("task_reports", []):
+    for task in task_reports:
         if not isinstance(task, dict):
             continue
         task_id = task.get("task_id") or "unknown"
