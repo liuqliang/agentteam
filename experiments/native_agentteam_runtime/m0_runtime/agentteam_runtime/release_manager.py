@@ -1,13 +1,20 @@
+import io
 import json
+import os
 import re
 import shutil
 import subprocess
+import tarfile
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
 
 RELEASE_POINTER_SCHEMA_VERSION = "agentteam_active_release.v1"
 RELEASE_MANIFEST_SCHEMA_VERSION = "agentteam_release_manifest.v1"
+RELEASE_MANIFEST_SCHEMA_VERSION_V2 = "agentteam_release_manifest.v2"
+PROJECT_RELEASE_REF_SCHEMA_VERSION = "agentteam_project_release_ref.v1"
+RUNTIME_RELEASE_STORE_ENV = "AGENTTEAM_RUNTIME_RELEASE_ROOT"
 TERMINAL_RUN_STATUSES = {"idle", "completed", "failed", "cancelled", "canceled"}
 
 
@@ -72,21 +79,128 @@ def install_release_from_checkout(checkout_root, work_root, release_id=None, act
     }
 
 
+def install_release_from_git(source_repo, source_ref, work_root, release_id=None, activate=True):
+    if not source_ref:
+        raise AgentTeamReleaseError("--ref is required with --from-git")
+    source_repo_path = Path(source_repo).expanduser()
+    if source_repo_path.exists():
+        source_repo_path = source_repo_path.resolve()
+        _require_git_repository(source_repo_path)
+        source_commit = _resolve_local_git_ref(source_repo_path, source_ref)
+        return _install_resolved_git_release(
+            source_repo_path,
+            str(source_repo_path),
+            source_ref,
+            source_commit,
+            work_root,
+            release_id=release_id,
+            activate=activate,
+        )
+    source_commit = _resolve_remote_git_ref(source_repo, source_ref)
+    with tempfile.TemporaryDirectory(prefix="agentteam-release-git-") as tmp:
+        checkout_root = Path(tmp) / "checkout"
+        _checkout_remote_git_commit(source_repo, source_commit, checkout_root)
+        return _install_resolved_git_release(
+            checkout_root,
+            str(source_repo),
+            source_ref,
+            source_commit,
+            work_root,
+            release_id=release_id,
+            activate=activate,
+        )
+
+
+def _install_resolved_git_release(
+    source_repo_path,
+    source_repo_identity,
+    source_ref,
+    source_commit,
+    work_root,
+    release_id=None,
+    activate=True,
+):
+    source_key = _source_key(source_repo_identity)
+    release_id = _safe_release_id(release_id or _release_id_from_ref(source_ref, source_commit))
+    release_store_root = runtime_release_store_root()
+    release_root = release_store_root / source_key / release_id
+    reused_existing_release = False
+    if release_root.exists():
+        manifest = _read_json_if_exists(release_root / "manifest.json")
+        if manifest.get("source_commit") != source_commit:
+            raise AgentTeamReleaseError(
+                f"release id already exists for another commit: {release_id}"
+            )
+        _validate_release_root(release_root)
+        reused_existing_release = True
+    else:
+        release_root.parent.mkdir(parents=True, exist_ok=True)
+        temp_release_root = release_root.with_name(f".{release_root.name}.tmp")
+        if temp_release_root.exists():
+            shutil.rmtree(temp_release_root)
+        temp_release_root.mkdir(parents=True)
+        try:
+            _export_git_tree(source_repo_path, source_commit, temp_release_root)
+            _validate_release_root(temp_release_root)
+            manifest = _git_release_manifest(
+                release_id,
+                temp_release_root,
+                source_key,
+                source_repo_identity,
+                source_ref,
+                source_commit,
+            )
+            _write_json(temp_release_root / "manifest.json", manifest)
+            temp_release_root.rename(release_root)
+            manifest = {**manifest, "release_root": str(release_root)}
+            _write_json(release_root / "manifest.json", manifest)
+        except Exception:
+            if temp_release_root.exists():
+                shutil.rmtree(temp_release_root)
+            raise
+    project_ref = _write_project_release_ref(
+        work_root,
+        {**manifest, "reused_existing_release": reused_existing_release},
+    )
+    active_release = None
+    if activate:
+        active_release = activate_release(work_root, release_id)
+    return {
+        "update_status": "installed",
+        "release": {**project_ref, "reused_existing_release": reused_existing_release},
+        "active_release": active_release,
+        "known_releases": known_releases(work_root),
+        "release_prune": None,
+    }
+
+
 def activate_release(work_root, release_id, update_status="activated"):
     work_root = Path(work_root).resolve()
     release_id = _safe_release_id(release_id)
-    manifest_path = releases_root(work_root) / release_id / "manifest.json"
-    if not manifest_path.exists():
+    manifest = release_manifest(work_root, release_id)
+    if not manifest:
         raise AgentTeamReleaseError(f"release not found: {release_id}")
-    manifest = _read_json_if_exists(manifest_path)
+    release_root = manifest.get("release_root") or str(releases_root(work_root) / release_id)
     activated_at = _utc_now()
     pointer = {
         "pointer_schema_version": RELEASE_POINTER_SCHEMA_VERSION,
         "release_id": release_id,
-        "release_root": manifest.get("release_root") or str(manifest_path.parent),
+        "release_root": release_root,
         "activated_at": activated_at,
         "update_status": update_status,
     }
+    for key in (
+        "manifest_schema_version",
+        "install_method",
+        "source_key",
+        "source_repo",
+        "source_ref",
+        "source_commit",
+        "source_root",
+        "source_git_commit",
+    ):
+        if manifest.get(key):
+            pointer[key] = manifest[key]
     _write_json(active_release_path(work_root), pointer)
     event_type = "rollback_activated" if update_status == "rollback_activated" else "update_activated"
     release_event = _append_release_event(work_root, pointer, event_type)
@@ -106,6 +220,11 @@ def read_active_release(work_root):
         "release_root": pointer.get("release_root"),
         "managed": bool(pointer.get("release_id")),
         "activated_at": pointer.get("activated_at"),
+        "install_method": pointer.get("install_method"),
+        "source_key": pointer.get("source_key"),
+        "source_repo": pointer.get("source_repo"),
+        "source_ref": pointer.get("source_ref"),
+        "source_commit": pointer.get("source_commit"),
     }
 
 
@@ -113,12 +232,24 @@ def known_releases(work_root):
     root = releases_root(work_root)
     if not root.exists():
         return []
-    releases = []
+    releases_by_id = {}
+    release_order = []
+
+    def add_release(manifest):
+        if not manifest:
+            return
+        release_id = manifest.get("release_id")
+        if not release_id:
+            return
+        if release_id not in releases_by_id:
+            release_order.append(release_id)
+        releases_by_id[release_id] = manifest
+
     for manifest_path in sorted(root.glob("*/manifest.json")):
-        manifest = _read_json_if_exists(manifest_path)
-        if manifest:
-            releases.append(manifest)
-    return releases
+        add_release(_read_json_if_exists(manifest_path))
+    for ref_path in sorted(project_release_refs_root(work_root).glob("*.json")):
+        add_release(_read_json_if_exists(ref_path))
+    return [releases_by_id[release_id] for release_id in release_order]
 
 
 def latest_installed_release(releases):
@@ -223,6 +354,10 @@ def releases_root(work_root):
     return Path(work_root).resolve() / "releases"
 
 
+def project_release_refs_root(work_root):
+    return releases_root(work_root) / "refs"
+
+
 def active_release_path(work_root):
     return releases_root(work_root) / "active.json"
 
@@ -231,18 +366,174 @@ def release_events_path(work_root):
     return releases_root(work_root) / "events.jsonl"
 
 
+def runtime_release_store_root():
+    configured = os.environ.get(RUNTIME_RELEASE_STORE_ENV)
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path.home() / ".local" / "share" / "agentteam" / "runtime-releases").resolve()
+
+
+def release_manifest(work_root, release_id):
+    release_id = _safe_release_id(release_id)
+    project_ref_path = project_release_refs_root(work_root) / f"{release_id}.json"
+    if project_ref_path.exists():
+        return _read_json_if_exists(project_ref_path)
+    manifest_path = releases_root(work_root) / release_id / "manifest.json"
+    if manifest_path.exists():
+        return _read_json_if_exists(manifest_path)
+    return {}
+
+
 def _copy_release_files(checkout_root, release_root):
-    launcher = checkout_root / "agentteam"
+    _validate_release_root(checkout_root)
+    release_root.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(checkout_root / "agentteam", release_root / "agentteam")
     runtime_package = checkout_root / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+    target_package = release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+    target_package.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(runtime_package, target_package)
+
+
+def _validate_release_root(release_root):
+    release_root = Path(release_root)
+    launcher = release_root / "agentteam"
+    runtime_package = release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
     if not launcher.exists():
         raise AgentTeamReleaseError(f"release source is missing launcher: {launcher}")
     if not runtime_package.exists():
         raise AgentTeamReleaseError(f"release source is missing runtime package: {runtime_package}")
-    release_root.mkdir(parents=True, exist_ok=False)
-    shutil.copy2(launcher, release_root / "agentteam")
-    target_package = release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
-    target_package.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(runtime_package, target_package)
+
+
+def _require_git_repository(source_repo):
+    completed = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "--git-dir"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AgentTeamReleaseError(f"source is not a git repository: {source_repo}")
+
+
+def _resolve_local_git_ref(source_repo, source_ref):
+    completed = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "--verify", f"{source_ref}^{{commit}}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AgentTeamReleaseError(
+            completed.stderr.strip() or f"git ref not found: {source_ref}"
+        )
+    return completed.stdout.strip()
+
+
+def _resolve_remote_git_ref(source_repo, source_ref):
+    completed = subprocess.run(
+        ["git", "ls-remote", str(source_repo), source_ref],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AgentTeamReleaseError(
+            completed.stderr.strip() or f"git ls-remote failed for {source_repo}"
+        )
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise AgentTeamReleaseError(f"git ref not found: {source_ref}")
+    peeled_tag = f"refs/tags/{source_ref}^{{}}"
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == peeled_tag:
+            return parts[0]
+    return lines[0].split()[0]
+
+
+def _checkout_remote_git_commit(source_repo, source_commit, checkout_root):
+    completed = subprocess.run(
+        ["git", "clone", "--no-checkout", str(source_repo), str(checkout_root)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AgentTeamReleaseError(
+            completed.stderr.strip() or f"git clone failed for {source_repo}"
+        )
+    completed = subprocess.run(
+        ["git", "-C", str(checkout_root), "checkout", "--detach", source_commit],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AgentTeamReleaseError(
+            completed.stderr.strip() or f"git checkout failed for {source_commit}"
+        )
+
+
+def _export_git_tree(source_repo, source_commit, release_root):
+    completed = subprocess.run(
+        ["git", "-C", str(source_repo), "archive", "--format=tar", source_commit],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AgentTeamReleaseError(
+            completed.stderr.decode("utf-8", errors="replace").strip()
+            or f"git archive failed for {source_commit}"
+        )
+    with tarfile.open(fileobj=io.BytesIO(completed.stdout), mode="r:") as archive:
+        archive.extractall(release_root)
+
+
+def _git_release_manifest(release_id, release_root, source_key, source_repo, source_ref, source_commit):
+    release_root = Path(release_root).resolve()
+    return {
+        "manifest_schema_version": RELEASE_MANIFEST_SCHEMA_VERSION_V2,
+        "install_method": "git_ref",
+        "release_id": release_id,
+        "release_root": str(release_root),
+        "source_key": source_key,
+        "source_repo": source_repo,
+        "source_ref": source_ref,
+        "source_commit": source_commit,
+        "installed_at": _utc_now(),
+        "launcher_path": str(release_root / "agentteam"),
+        "runtime_root": str(release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime"),
+    }
+
+
+def _write_project_release_ref(work_root, manifest):
+    project_ref = {
+        **manifest,
+        "project_release_ref_schema_version": PROJECT_RELEASE_REF_SCHEMA_VERSION,
+        "project_ref_written_at": _utc_now(),
+    }
+    _write_json(project_release_refs_root(work_root) / f"{manifest['release_id']}.json", project_ref)
+    return project_ref
+
+
+def _source_key(source_repo):
+    value = str(source_repo).strip()
+    value = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", value)
+    value = re.sub(r"\.git$", "", value)
+    value = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").lower()
+    return value or "source"
+
+
+def _release_id_from_ref(source_ref, source_commit):
+    ref_name = re.sub(r"^refs/(heads|tags)/", "", str(source_ref).strip())
+    ref_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", ref_name).strip(".-")
+    return _safe_release_id(f"{ref_name or 'git'}-{source_commit[:12]}")
 
 
 def _require_clean_checkout(checkout_root):

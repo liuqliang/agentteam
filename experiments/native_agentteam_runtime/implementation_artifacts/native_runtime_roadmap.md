@@ -611,7 +611,8 @@ Completed follow-up:
 
 ### M38: Git-Backed Runtime Release Store
 
-Status: proposed next milestone.
+Status: M38a and M38b implemented in the native-runtime branch. M38c global
+release cleanup protection remains follow-up work.
 
 Goal: make AgentTeam runtime updates reproducible and storage-efficient for
 local long-term use by installing framework releases from explicit local or
@@ -657,11 +658,11 @@ Acceptance:
 
 Short-term slices:
 
-- M38a: global release store layout, local `--from-git --ref` install, manifest
+- M38a implemented: global release store layout, local `--from-git --ref` install, manifest
   format, project pointer refs, and status/rollback compatibility.
-- M38b: remote git URL resolution and download with deterministic temporary
+- M38b implemented: remote git URL resolution and download with deterministic temporary
   checkouts, plus reuse of an already installed source commit.
-- M38c: global release reference discovery and cleanup protection across known
+- M38c pending: global release reference discovery and cleanup protection across known
   projects, with dry-run explanations.
 
 ### M39: Artifact Projection Database
@@ -761,6 +762,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is M38a. It implements the global git-backed runtime
-release store and local ref installation path before remote download and global
-cleanup are added.
+The next recommended step is M38c. It adds global release reference discovery
+and cleanup protection before old globally cached runtime releases can be
+deleted safely.

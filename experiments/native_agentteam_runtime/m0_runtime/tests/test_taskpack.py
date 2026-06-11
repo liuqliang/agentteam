@@ -84,6 +84,37 @@ def _write_jsonl(path, records):
     )
 
 
+def _write_agentteam_release_fixture(checkout, marker="fixture"):
+    runtime_pkg = checkout / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+    runtime_pkg.mkdir(parents=True, exist_ok=True)
+    (runtime_pkg / "__init__.py").write_text(f"# {marker} runtime\n", encoding="utf-8")
+    (checkout / "agentteam").write_text(
+        f"#!/usr/bin/env python3\nprint({marker!r})\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", f"{marker} agentteam release"],
+        cwd=checkout,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return _git_head(checkout)
+
+
+def _git_head(repo):
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
 def _read_jsonl(path):
     records = []
     if not path.exists():
@@ -3571,6 +3602,321 @@ class TaskpackTests(unittest.TestCase):
             self.assertNotIn("active_release_root", status_completed.stdout)
             self.assertNotIn("unmanaged_runs", status_completed.stdout)
             self.assertNotIn(str(work_root), status_completed.stdout)
+
+    def test_agentteam_cli_update_from_git_installs_global_release_pointer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            checkout = tmp_path / "checkout"
+            work_root = tmp_path / "agentteam-work"
+            global_store = tmp_path / "runtime-releases"
+            _init_repo(repo)
+            _init_repo(checkout)
+            source_commit = _write_agentteam_release_fixture(checkout, "git-fixture")
+            _init_agentteam_profile_for_test(repo, work_root, "update-project")
+            env = _test_env()
+            env["AGENTTEAM_RUNTIME_RELEASE_ROOT"] = str(global_store)
+
+            update_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--from-git",
+                    str(checkout),
+                    "--ref",
+                    "HEAD",
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(update_completed.returncode, 0, update_completed.stderr)
+            summary = json.loads(update_completed.stdout)
+            release = summary["release"]
+            release_id = release["release_id"]
+            release_root = Path(release["release_root"])
+            self.assertEqual(summary["update_status"], "installed")
+            self.assertEqual(release["manifest_schema_version"], "agentteam_release_manifest.v2")
+            self.assertEqual(release["install_method"], "git_ref")
+            self.assertEqual(release["source_repo"], str(checkout.resolve()))
+            self.assertEqual(release["source_ref"], "HEAD")
+            self.assertEqual(release["source_commit"], source_commit)
+            self.assertEqual(release_root.parent.parent, global_store.resolve())
+            self.assertEqual(summary["active_release"]["release_id"], release_id)
+            self.assertEqual(Path(summary["active_release"]["release_root"]), release_root)
+            self.assertTrue((release_root / "manifest.json").exists())
+            self.assertTrue((release_root / "agentteam").exists())
+            self.assertTrue(
+                (
+                    release_root
+                    / "experiments"
+                    / "native_agentteam_runtime"
+                    / "m0_runtime"
+                    / "agentteam_runtime"
+                    / "__init__.py"
+                ).exists()
+            )
+            self.assertTrue((work_root / "releases" / "refs" / f"{release_id}.json").exists())
+            self.assertFalse((work_root / "releases" / release_id).exists())
+            active = json.loads((work_root / "releases" / "active.json").read_text(encoding="utf-8"))
+            self.assertEqual(active["release_id"], release_id)
+            self.assertEqual(Path(active["release_root"]), release_root)
+            known_by_id = {item["release_id"]: item for item in summary["known_releases"]}
+            self.assertIn(release_id, known_by_id)
+            self.assertEqual(known_by_id[release_id]["source_commit"], source_commit)
+
+    def test_agentteam_cli_update_from_git_reuses_release_and_rolls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            checkout = tmp_path / "checkout"
+            work_root = tmp_path / "agentteam-work"
+            global_store = tmp_path / "runtime-releases"
+            _init_repo(repo)
+            _init_repo(checkout)
+            first_commit = _write_agentteam_release_fixture(checkout, "first")
+            _init_agentteam_profile_for_test(repo, work_root, "update-project")
+            env = _test_env()
+            env["AGENTTEAM_RUNTIME_RELEASE_ROOT"] = str(global_store)
+
+            first = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--from-git",
+                    str(checkout),
+                    "--ref",
+                    "HEAD",
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            repeat = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--from-git",
+                    str(checkout),
+                    "--ref",
+                    "HEAD",
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            second_commit = _write_agentteam_release_fixture(checkout, "second")
+            second = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--from-git",
+                    str(checkout),
+                    "--ref",
+                    "HEAD",
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(repeat.returncode, 0, repeat.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            first_summary = json.loads(first.stdout)
+            repeat_summary = json.loads(repeat.stdout)
+            second_summary = json.loads(second.stdout)
+            first_release = first_summary["release"]
+            second_release = second_summary["release"]
+            self.assertEqual(first_release["source_commit"], first_commit)
+            self.assertEqual(repeat_summary["release"]["release_root"], first_release["release_root"])
+            self.assertTrue(repeat_summary["release"]["reused_existing_release"])
+            self.assertEqual(second_release["source_commit"], second_commit)
+            self.assertNotEqual(second_release["release_id"], first_release["release_id"])
+            self.assertNotEqual(second_release["release_root"], first_release["release_root"])
+
+            rollback = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--rollback",
+                    first_release["release_id"],
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(rollback.returncode, 0, rollback.stderr)
+            rollback_summary = json.loads(rollback.stdout)
+            self.assertEqual(rollback_summary["active_release"]["release_id"], first_release["release_id"])
+            self.assertEqual(rollback_summary["active_release"]["release_root"], first_release["release_root"])
+            self.assertEqual(rollback_summary["release_event"]["event_type"], "rollback_activated")
+
+    def test_agentteam_cli_update_from_git_installs_from_remote_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            checkout = tmp_path / "checkout"
+            bare_repo = tmp_path / "agentteam.git"
+            work_root = tmp_path / "agentteam-work"
+            global_store = tmp_path / "runtime-releases"
+            _init_repo(repo)
+            _init_repo(checkout)
+            source_commit = _write_agentteam_release_fixture(checkout, "remote-fixture")
+            subprocess.run(
+                ["git", "clone", "--bare", str(checkout), str(bare_repo)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            source_url = bare_repo.resolve().as_uri()
+            _init_agentteam_profile_for_test(repo, work_root, "update-project")
+            env = _test_env()
+            env["AGENTTEAM_RUNTIME_RELEASE_ROOT"] = str(global_store)
+
+            update_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--from-git",
+                    source_url,
+                    "--ref",
+                    "HEAD",
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(update_completed.returncode, 0, update_completed.stderr)
+            summary = json.loads(update_completed.stdout)
+            release = summary["release"]
+            release_root = Path(release["release_root"])
+            self.assertEqual(release["source_repo"], source_url)
+            self.assertEqual(release["source_ref"], "HEAD")
+            self.assertEqual(release["source_commit"], source_commit)
+            self.assertEqual(release["install_method"], "git_ref")
+            self.assertEqual(release_root.parent.parent, global_store.resolve())
+            self.assertTrue((release_root / "agentteam").exists())
+            self.assertTrue((work_root / "releases" / "refs" / f"{release['release_id']}.json").exists())
+            self.assertFalse((work_root / "releases" / release["release_id"]).exists())
+
+    def test_agentteam_cli_update_from_git_missing_remote_ref_keeps_active_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            checkout = tmp_path / "checkout"
+            bare_repo = tmp_path / "agentteam.git"
+            work_root = tmp_path / "agentteam-work"
+            global_store = tmp_path / "runtime-releases"
+            _init_repo(repo)
+            _init_repo(checkout)
+            _write_agentteam_release_fixture(checkout, "remote-fixture")
+            subprocess.run(
+                ["git", "clone", "--bare", str(checkout), str(bare_repo)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            source_url = bare_repo.resolve().as_uri()
+            _init_agentteam_profile_for_test(repo, work_root, "update-project")
+            env = _test_env()
+            env["AGENTTEAM_RUNTIME_RELEASE_ROOT"] = str(global_store)
+
+            first = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--from-git",
+                    source_url,
+                    "--ref",
+                    "HEAD",
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            missing = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--from-git",
+                    source_url,
+                    "--ref",
+                    "missing-ref",
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            first_release = json.loads(first.stdout)["release"]
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("git ref not found", missing.stderr)
+            active = json.loads((work_root / "releases" / "active.json").read_text(encoding="utf-8"))
+            self.assertEqual(active["release_id"], first_release["release_id"])
+            self.assertEqual(active["release_root"], first_release["release_root"])
 
     def test_agentteam_cli_update_from_installs_and_activates_release(self):
         with tempfile.TemporaryDirectory() as tmp:

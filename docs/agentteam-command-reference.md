@@ -132,6 +132,8 @@ Examples:
 
 ```bash
 agentteam update --status
+agentteam update --from-git /home/liuql/projects/agentteam --ref native-runtime-m0
+agentteam update --from-git https://github.com/liuqliang/agentteam.git --ref v0.1.3
 agentteam update --from /home/liuql/projects/agentteam/.worktrees/native-runtime-m0 --release-id native-runtime-m0-<id>
 agentteam update --activate native-runtime-m0-<id>
 agentteam update --rollback native-runtime-m0-<older-id>
@@ -140,9 +142,16 @@ agentteam update --prune
 
 Notes:
 
+- `--from-git` installs from a local git repository or remote git URL at an
+  explicit ref, resolves it to a commit, stores the code under the global
+  runtime release cache, and activates a project-local pointer.
 - `--from` installs from a clean AgentTeam checkout and activates the new release.
-- New installs prune old completed-run releases by default, while protecting the
-  active release and releases pinned by nonterminal runs.
+- Legacy `--from` installs prune old completed-run project-local releases by
+  default, while protecting the active release and releases pinned by
+  nonterminal runs.
+- Git-backed releases are stored once under
+  `~/.local/share/agentteam/runtime-releases/<source-key>/<release-id>/`; each
+  project stores only refs, active release metadata, events, and run pins.
 - Use `--status` to see `active_release`, `latest_installed_release`, and whether
   active is latest.
 

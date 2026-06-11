@@ -43,7 +43,7 @@ Then run AgentTeam from a target project:
 ```bash
 cd /path/to/target-repo
 agentteam init --interactive
-agentteam update --from /home/liuql/projects/agentteam/.worktrees/native-runtime-m0 --release-id <release-id>
+agentteam update --from-git /home/liuql/projects/agentteam --ref native-runtime-m0
 agentteam update --status
 agentteam notify test
 agentteam start

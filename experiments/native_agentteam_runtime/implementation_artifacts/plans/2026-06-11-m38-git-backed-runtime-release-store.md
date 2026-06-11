@@ -10,27 +10,27 @@ copying the same framework code into every project.
 
 Deliver the minimal global release store and local git install path.
 
-- [ ] Add failing tests for installing from a temporary local git repository
+- [x] Add failing tests for installing from a temporary local git repository
       with `agentteam update --from-git <repo> --ref <ref> --json`.
-- [ ] Add failing tests that assert the installed code lands under
+- [x] Add failing tests that assert the installed code lands under
       `~/.local/share/agentteam/runtime-releases/<source-key>/<release-id>/`
       or a test-overridden equivalent global root.
-- [ ] Add failing tests that assert the project stores only
+- [x] Add failing tests that assert the project stores only
       `<work_root>/releases/refs/<release-id>.json`, `active.json`, and
       release events, not a full framework copy under project-local releases.
-- [ ] Extend `release_manager.py` with:
+- [x] Extend `release_manager.py` with:
       - source-key generation;
       - release-id generation from ref and commit;
       - local git ref resolution;
       - git archive export into the global store;
       - v2 manifest writing;
       - project ref writing.
-- [ ] Extend `agentteam update` parser and handler with
+- [x] Extend `agentteam update` parser and handler with
       `--from-git <repo>` and required `--ref <ref>`.
-- [ ] Preserve existing `--from <checkout>` behavior for compatibility.
-- [ ] Keep activation, rollback, prune status fields, release lifecycle events,
+- [x] Preserve existing `--from <checkout>` behavior for compatibility.
+- [x] Keep activation, rollback, prune status fields, release lifecycle events,
       and run release pinning compatible with both v1 and v2 manifests.
-- [ ] Run targeted release-manager and CLI update tests.
+- [x] Run targeted release-manager and CLI update tests.
 
 Acceptance:
 
@@ -44,12 +44,12 @@ Acceptance:
 
 Add remote git support without introducing network-dependent unit tests.
 
-- [ ] Add tests using a temporary bare git repository as a remote URL.
-- [ ] Resolve remote refs with `git ls-remote`.
-- [ ] Clone or fetch the resolved commit into a temporary checkout.
-- [ ] Reuse the M38a export path after checkout.
-- [ ] Clean temporary checkouts on success and on failure.
-- [ ] Fail without changing `active.json` when the remote ref is missing or the
+- [x] Add tests using a temporary bare git repository as a remote URL.
+- [x] Resolve remote refs with `git ls-remote`.
+- [x] Clone or fetch the resolved commit into a temporary checkout.
+- [x] Reuse the M38a export path after checkout.
+- [x] Clean temporary checkouts on success and on failure.
+- [x] Fail without changing `active.json` when the remote ref is missing or the
       checkout fails.
 
 Acceptance:

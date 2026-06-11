@@ -45,6 +45,7 @@ from .profile import (
 )
 from .release_manager import (
     activate_release,
+    install_release_from_git,
     install_release_from_checkout,
     record_active_release_for_run,
     prune_releases,
@@ -968,10 +969,12 @@ def _add_update_parser(subcommands):
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--status", action="store_true", help="Show active release, known releases, and run bindings.")
     action.add_argument("--from", dest="source_checkout", help="Install and activate a release from a clean checkout.")
+    action.add_argument("--from-git", dest="source_git", help="Install and activate a release from a git repository ref.")
     action.add_argument("--activate", help="Activate an already installed release id.")
     action.add_argument("--rollback", help="Activate an older release id.")
     action.add_argument("--prune", action="store_true", help="Prune old installed releases, keeping the active/latest release.")
-    parser.add_argument("--release-id", help="Release id to use with --from. Defaults to git commit.")
+    parser.add_argument("--ref", dest="source_ref", help="Git ref to use with --from-git.")
+    parser.add_argument("--release-id", help="Release id to use with --from or --from-git. Defaults to git commit/ref.")
     parser.add_argument("--json", action="store_true", help="Print update result as JSON instead of human text.")
     parser.set_defaults(handler=_handle_update)
 
@@ -2152,6 +2155,15 @@ def _handle_update(args):
     elif args.source_checkout:
         summary = install_release_from_checkout(
             args.source_checkout,
+            work_root,
+            release_id=args.release_id,
+            activate=True,
+        )
+        summary["project"] = profile.get("project_key") or "unknown"
+    elif args.source_git:
+        summary = install_release_from_git(
+            args.source_git,
+            args.source_ref,
             work_root,
             release_id=args.release_id,
             activate=True,
