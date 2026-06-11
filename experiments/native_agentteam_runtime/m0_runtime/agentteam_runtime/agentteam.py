@@ -102,6 +102,39 @@ _HELP_COMMANDS = [
         "examples": ["agentteam status --project-root <repo>"],
     },
     {
+        "name": "explain-status",
+        "summary": "Explain the latest status in operator-facing language.",
+        "examples": [
+            "agentteam explain-status --project-root <repo>",
+            "agentteam explain-status --taskpack <id> --json",
+        ],
+    },
+    {
+        "name": "logs",
+        "summary": "Tail compact runtime events for the latest or selected run.",
+        "examples": [
+            "agentteam logs --project-root <repo>",
+            "agentteam logs --taskpack <id> --lines 10",
+        ],
+    },
+    {
+        "name": "doctor",
+        "summary": "Check project profile, git repository, runtime prerequisites, and verification profile.",
+        "examples": [
+            "agentteam doctor --project-root <repo>",
+            "agentteam doctor --project-root <repo> --json",
+        ],
+    },
+    {
+        "name": "gc",
+        "summary": "Clean AgentTeam local storage such as old runtime releases.",
+        "examples": [
+            "agentteam gc --project-root <repo>",
+            "agentteam gc --project-root <repo> --force",
+        ],
+        "notes": ["Without --force this command reports what it would manage without deleting releases."],
+    },
+    {
         "name": "paths",
         "summary": "Show project, run, artifact, and integration baseline paths.",
         "examples": [
@@ -305,6 +338,10 @@ def _build_parser():
     _add_watch_parser(subcommands)
     _add_report_parser(subcommands)
     _add_chat_parser(subcommands)
+    _add_doctor_parser(subcommands)
+    _add_logs_parser(subcommands)
+    _add_explain_status_parser(subcommands)
+    _add_gc_parser(subcommands)
     _add_stop_parser(subcommands)
     _add_update_parser(subcommands)
     _add_paths_parser(subcommands)
@@ -812,6 +849,42 @@ def _add_chat_parser(subcommands):
         help="Optional Codex command prefix. Must appear last.",
     )
     parser.set_defaults(handler=_handle_chat)
+
+
+def _add_doctor_parser(subcommands):
+    parser = subcommands.add_parser("doctor", help="Check AgentTeam project configuration and prerequisites.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--json", action="store_true", help="Print doctor checks as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_doctor)
+
+
+def _add_logs_parser(subcommands):
+    parser = subcommands.add_parser("logs", help="Tail compact events for an AgentTeam run.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--taskpack", help="Run/taskpack id to inspect. Defaults to latest run id.")
+    parser.add_argument("--run-dir", help="Existing run directory to inspect. Overrides --taskpack.")
+    parser.add_argument("--lines", type=int, default=20, help="Number of latest events to print.")
+    parser.add_argument("--json", action="store_true", help="Print events as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_logs)
+
+
+def _add_explain_status_parser(subcommands):
+    parser = subcommands.add_parser("explain-status", help="Explain the current AgentTeam status.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--taskpack", help="Run/taskpack id to explain. Defaults to latest run id.")
+    parser.add_argument("--run-dir", help="Existing run directory to explain. Overrides --taskpack.")
+    parser.add_argument("--json", action="store_true", help="Print explanation as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_explain_status)
+
+
+def _add_gc_parser(subcommands):
+    parser = subcommands.add_parser("gc", help="Clean AgentTeam local storage for a project.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--keep-releases", type=int, default=1, help="Number of latest releases to retain.")
+    parser.add_argument("--stale-runs", action="store_true", help="Also repair stale running run state.")
+    parser.add_argument("--force", action="store_true", help="Actually delete eligible old releases.")
+    parser.add_argument("--json", action="store_true", help="Print cleanup result as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_gc)
 
 
 def _add_paths_parser(subcommands):
@@ -2220,6 +2293,105 @@ def _handle_chat(args):
     return 0
 
 
+def _handle_doctor(args):
+    project_root = Path(args.project_root or ".").resolve()
+    summary = _build_doctor_summary(project_root)
+    if args.json:
+        return summary
+    _write_doctor_text(summary)
+    return 0
+
+
+def _handle_logs(args):
+    profile = _watch_profile(args)
+    run_dir = _selected_run_dir(args, profile, command_name="logs")
+    if not run_dir.exists():
+        raise AgentTeamCliError("run not found", run_dir=str(run_dir))
+    events = _read_jsonl(run_dir / "events.jsonl")
+    line_count = max(int(args.lines or 0), 0)
+    selected = events[-line_count:] if line_count else []
+    summary = {
+        "logs_status": "ready",
+        "project": profile.get("project_key") or "unknown",
+        "latest_run": run_dir.name,
+        "run_dir": str(run_dir),
+        "event_count": len(events),
+        "returned_count": len(selected),
+        "events": selected,
+    }
+    if args.json:
+        return summary
+    _write_logs_text(summary)
+    return 0
+
+
+def _handle_explain_status(args):
+    profile = _watch_profile(args)
+    run_dir = _selected_run_dir(args, profile, command_name="explain-status")
+    if not run_dir.exists():
+        raise AgentTeamCliError("run not found", run_dir=str(run_dir))
+    status_summary = _build_run_status_summary(profile, run_dir)
+    explanation = _status_explanation(status_summary)
+    summary = {
+        "explain_status": "ready",
+        "project": status_summary["project"],
+        "latest_run": status_summary["latest_run"],
+        "overall_status": status_summary.get("overall_status") or status_summary.get("status"),
+        "run_status": status_summary.get("run_status") or status_summary.get("status"),
+        "liveness_status": status_summary.get("liveness_status"),
+        "active_phase": status_summary.get("active_phase"),
+        "explanation": explanation,
+        "next_action": _status_next_action(status_summary),
+        "run_dir": status_summary["run_dir"],
+    }
+    if args.json:
+        return {**summary, "status_summary": status_summary}
+    _write_explain_status_text(summary)
+    return 0
+
+
+def _handle_gc(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    work_root = Path(profile["work_root"]).resolve()
+    current_update_status = update_status(profile)
+    if args.force:
+        release_prune = prune_releases(work_root, keep_latest=args.keep_releases)
+        gc_status = "completed"
+    else:
+        known_releases = current_update_status.get("known_releases") or []
+        release_prune = {
+            "prune_status": "dry_run",
+            "keep_latest": max(0, int(args.keep_releases or 0)),
+            "known_release_ids": [
+                release.get("release_id")
+                for release in known_releases
+                if isinstance(release, dict) and release.get("release_id")
+            ],
+            "force_required": True,
+        }
+        gc_status = "dry_run"
+    stale_cleanup = None
+    if args.stale_runs:
+        stale_cleanup = cleanup_stale_runs(profile, operator="agentteam-gc") if args.force else {
+            "cleanup_status": "dry_run",
+            "force_required": True,
+        }
+    summary = {
+        "gc_status": gc_status,
+        "project": profile.get("project_key") or "unknown",
+        "project_root": str(project_root),
+        "work_root": str(work_root),
+        "force": bool(args.force),
+        "release_prune": release_prune,
+        "stale_run_cleanup": stale_cleanup,
+    }
+    if args.json:
+        return summary
+    _write_gc_text(summary)
+    return 0
+
+
 def _watch_profile(args):
     if args.project_root:
         return load_project_profile(Path(args.project_root).resolve())
@@ -2313,6 +2485,248 @@ def _write_update_text(summary):
     if deleted_release_ids:
         lines.append("pruned_releases:")
         lines.extend(f"  - {release_id}" for release_id in deleted_release_ids)
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _build_doctor_summary(project_root):
+    checks = []
+    profile = None
+    profile_path = profile_path_for_project(project_root)
+    git = _git_completed(project_root, ["rev-parse", "--is-inside-work-tree"], check=False)
+    if git.returncode == 0 and git.stdout.strip() == "true":
+        checks.append(_doctor_check("git_repository", "passed", "project root is inside a git repository"))
+    else:
+        checks.append(
+            _doctor_check(
+                "git_repository",
+                "failed",
+                "project root is not a git repository",
+                stderr=git.stderr.strip(),
+            )
+        )
+
+    try:
+        profile = load_project_profile(project_root)
+        checks.append(
+            _doctor_check(
+                "profile",
+                "passed",
+                "AgentTeam profile loaded",
+                profile_path=str(profile_path),
+                project=profile.get("project_key") or "unknown",
+            )
+        )
+    except AgentTeamProfileError as exc:
+        checks.append(
+            _doctor_check(
+                "profile",
+                "failed",
+                str(exc),
+                profile_path=str(profile_path),
+            )
+        )
+
+    if isinstance(profile, dict):
+        work_root = Path(profile.get("work_root") or "").expanduser()
+        work_root_status = "passed" if work_root.exists() else "warning"
+        checks.append(
+            _doctor_check(
+                "work_root",
+                work_root_status,
+                "work root exists" if work_root.exists() else "work root will be created when needed",
+                work_root=str(work_root),
+            )
+        )
+        checks.append(_doctor_verification_check(profile))
+        checks.append(_doctor_feishu_check(profile))
+    else:
+        checks.append(_doctor_check("verification_profile", "skipped", "profile is not available"))
+        checks.append(_doctor_check("feishu", "skipped", "profile is not available"))
+
+    codex_path = shutil.which("codex")
+    checks.append(
+        _doctor_check(
+            "codex_cli",
+            "passed" if codex_path else "warning",
+            "codex CLI found" if codex_path else "codex CLI was not found on PATH",
+            path=codex_path,
+        )
+    )
+    counts = _doctor_status_counts(checks)
+    return {
+        "doctor_status": "failed" if counts["failed"] else "passed",
+        "project_root": str(project_root),
+        "profile_path": str(profile_path),
+        "checks": checks,
+        "counts": counts,
+    }
+
+
+def _doctor_verification_check(profile):
+    verification = profile.get("verification_profile")
+    if not isinstance(verification, dict):
+        return _doctor_check("verification_profile", "failed", "verification profile is missing")
+    correctness = verification.get("correctness") if isinstance(verification.get("correctness"), dict) else {}
+    command = correctness.get("command")
+    if not _is_command_list(command):
+        return _doctor_check(
+            "verification_profile",
+            "failed",
+            "correctness command is missing or invalid",
+        )
+    performance = verification.get("performance") if isinstance(verification.get("performance"), dict) else {}
+    return _doctor_check(
+        "verification_profile",
+        "passed",
+        "correctness verification command is configured",
+        correctness_command=command,
+        performance_command=performance.get("command"),
+        metrics=performance.get("metrics") or [],
+    )
+
+
+def _doctor_feishu_check(profile):
+    feishu = profile.get("feishu") if isinstance(profile.get("feishu"), dict) else {}
+    if not feishu.get("enabled"):
+        return _doctor_check("feishu", "skipped", "Feishu notifications are not enabled")
+    webhook_env = feishu.get("webhook_env")
+    if not webhook_env:
+        return _doctor_check("feishu", "warning", "Feishu is enabled but webhook env is missing")
+    return _doctor_check(
+        "feishu",
+        "passed" if os.environ.get(webhook_env) else "warning",
+        "Feishu webhook env is set" if os.environ.get(webhook_env) else "Feishu webhook env is configured but unset",
+        webhook_env=webhook_env,
+        webhook_env_set=bool(os.environ.get(webhook_env)),
+        signing_secret_env=feishu.get("signing_secret_env"),
+    )
+
+
+def _doctor_check(name, status, summary, **details):
+    check = {
+        "name": name,
+        "status": status,
+        "summary": summary,
+    }
+    for key, value in details.items():
+        if value is not None:
+            check[key] = value
+    return check
+
+
+def _doctor_status_counts(checks):
+    counts = {"passed": 0, "warning": 0, "failed": 0, "skipped": 0}
+    for check in checks:
+        status = check.get("status")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _is_command_list(value):
+    return isinstance(value, list) and bool(value) and all(isinstance(part, str) for part in value)
+
+
+def _write_doctor_text(summary):
+    lines = [
+        f"doctor_status: {summary['doctor_status']}",
+        f"project_root: {summary['project_root']}",
+    ]
+    for check in summary.get("checks") or []:
+        lines.append(f"{check['name']}: {check['status']} - {check['summary']}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _write_logs_text(summary):
+    lines = [
+        f"run: {summary['latest_run']}",
+        f"events: {summary['returned_count']}/{summary['event_count']}",
+        f"run_dir: {summary['run_dir']}",
+    ]
+    lines.extend(_format_log_event(event) for event in summary.get("events") or [])
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _format_log_event(event):
+    event_id = event.get("event_id") or f"seq-{event.get('sequence', 'unknown')}"
+    event_type = event.get("event_type") or "unknown"
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    pieces = [str(event_id), str(event_type)]
+    for key in ("run_status", "scheduler_status", "task_id", "attempt_id"):
+        if payload.get(key):
+            pieces.append(f"{key}={payload[key]}")
+    return " ".join(pieces)
+
+
+def _write_explain_status_text(summary):
+    lines = [
+        f"project: {summary['project']}",
+        f"latest_run: {summary['latest_run']}",
+        f"overall_status: {summary['overall_status']}",
+        f"run_status: {summary['run_status']}",
+        f"liveness: {summary['liveness_status']}",
+        f"Explanation: {summary['explanation']}",
+        f"Next action: {summary['next_action']}",
+        f"run_dir: {summary['run_dir']}",
+    ]
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _status_explanation(summary):
+    overall_status = summary.get("overall_status") or summary.get("status")
+    if overall_status == "authoring":
+        return "taskpack authoring is currently active."
+    if overall_status == "manual_gate_required":
+        return "runtime is paused waiting for an operator answer."
+    if overall_status == "permission_required":
+        return "runtime is paused waiting for a permission decision."
+    if overall_status == "running":
+        return "at least one worker or runtime process is currently active."
+    if overall_status == "idle":
+        return "no worker or authoring process is currently active."
+    if overall_status == "blocked":
+        return "one or more tasks are blocked and need review before progress can continue."
+    if overall_status == "failed":
+        return "the run failed; inspect the report and recent logs before retrying."
+    return "status is available, but no specialized explanation is defined for it."
+
+
+def _status_next_action(summary):
+    overall_status = summary.get("overall_status") or summary.get("status")
+    if overall_status == "authoring":
+        return "wait for taskpack authoring to finish, or stop authoring if it is stale."
+    if overall_status == "manual_gate_required":
+        return "run agentteam resume --run-dir <run> --interactive."
+    if overall_status == "permission_required":
+        return "run agentteam permissions list --run-dir <run>."
+    if overall_status == "running":
+        return "watch progress or wait for the next state change."
+    if overall_status == "idle":
+        return "review the report, integrate accepted changes, or start a follow-up task."
+    if overall_status == "blocked":
+        return "inspect agentteam report and decide whether to retry, narrow scope, or change the task."
+    if overall_status == "failed":
+        return "inspect agentteam logs and report before continuing."
+    return "inspect agentteam status, logs, and report for details."
+
+
+def _write_gc_text(summary):
+    prune = summary.get("release_prune") or {}
+    lines = [
+        f"gc_status: {summary['gc_status']}",
+        f"project: {summary['project']}",
+        f"work_root: {summary['work_root']}",
+        f"release_prune: {prune.get('prune_status') or 'unknown'}",
+        f"deleted_releases: {len(prune.get('deleted_release_ids') or [])}",
+    ]
+    if prune.get("force_required"):
+        lines.append("force_required: true")
+    if summary.get("stale_run_cleanup"):
+        cleanup = summary["stale_run_cleanup"]
+        lines.append(f"stale_run_cleanup: {cleanup.get('cleanup_status') or cleanup.get('stop_status') or 'completed'}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 

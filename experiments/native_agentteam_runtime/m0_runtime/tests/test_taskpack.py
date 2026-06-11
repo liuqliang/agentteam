@@ -839,6 +839,103 @@ class TaskpackTests(unittest.TestCase):
             self.assertNotIn("{", completed.stdout)
             self.assertNotIn("profile_schema_version", completed.stdout)
 
+    def test_agentteam_cli_doctor_reports_profile_and_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "doctor-project")
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "doctor",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["doctor_status"], "passed")
+            check_names = [check["name"] for check in summary["checks"]]
+            self.assertIn("profile", check_names)
+            self.assertIn("git_repository", check_names)
+            self.assertIn("verification_profile", check_names)
+
+    def test_agentteam_cli_gc_prunes_old_releases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "gc-project")
+            old_release = work_root / "releases" / "old-release"
+            latest_release = work_root / "releases" / "latest-release"
+            old_release.mkdir(parents=True)
+            latest_release.mkdir(parents=True)
+            _write_json(
+                old_release / "manifest.json",
+                {
+                    "manifest_schema_version": "agentteam_release_manifest.v1",
+                    "release_id": "old-release",
+                    "release_root": str(old_release),
+                    "installed_at": "2026-06-10T00:00:00Z",
+                },
+            )
+            _write_json(
+                latest_release / "manifest.json",
+                {
+                    "manifest_schema_version": "agentteam_release_manifest.v1",
+                    "release_id": "latest-release",
+                    "release_root": str(latest_release),
+                    "installed_at": "2026-06-11T00:00:00Z",
+                },
+            )
+            _write_json(
+                work_root / "active_release.json",
+                {
+                    "pointer_schema_version": "agentteam_active_release.v1",
+                    "release_id": "latest-release",
+                    "release_root": str(latest_release),
+                    "activated_at": "2026-06-11T00:00:00Z",
+                },
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "gc",
+                    "--project-root",
+                    str(repo),
+                    "--force",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["gc_status"], "completed")
+            self.assertEqual(summary["release_prune"]["deleted_release_ids"], ["old-release"])
+            self.assertFalse(old_release.exists())
+            self.assertTrue(latest_release.exists())
+
     def test_agentteam_cli_notify_test_sends_feishu_message_from_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2029,6 +2126,71 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("inflight: 0", status_completed.stdout)
             self.assertIn("manual_gates: 0", status_completed.stdout)
             self.assertIn(str((work_root / "runs" / "cli-status-run").resolve()), status_completed.stdout)
+
+    def test_agentteam_cli_logs_tails_latest_run_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "logs-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "logs-project")
+            _write_completed_operator_run(run_dir)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "logs",
+                    "--project-root",
+                    str(repo),
+                    "--lines",
+                    "1",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("run: logs-run", completed.stdout)
+            self.assertIn("EVT-0001 run_completed", completed.stdout)
+
+    def test_agentteam_cli_explain_status_describes_idle_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "explain-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "explain-project")
+            _write_completed_operator_run(run_dir)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "explain-status",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("overall_status: idle", completed.stdout)
+            self.assertIn(
+                "Explanation: no worker or authoring process is currently active.",
+                completed.stdout,
+            )
 
     def test_agentteam_cli_status_reports_inflight_and_stopped_workers(self):
         with tempfile.TemporaryDirectory() as tmp:
