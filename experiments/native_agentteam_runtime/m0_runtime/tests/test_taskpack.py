@@ -30,7 +30,12 @@ from agentteam_runtime.agentteam import (
     _run_paths_for_frozen_taskpack,
     _set_taskpack_runtime_backend,
     _stop_authoring,
+    _write_execution_result_text,
     _write_status_text,
+)
+from agentteam_runtime.completion_summary import (
+    build_completion_summary,
+    extend_completion_summary_lines,
 )
 from agentteam_runtime.diagnostic_chat import (
     build_runtime_diagnostic_context,
@@ -295,6 +300,67 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 class TaskpackTests(unittest.TestCase):
+    def test_completion_summary_reports_evidence_gaps_when_worker_omits_fields(self):
+        summary = build_completion_summary(
+            run_id="gap-run",
+            run_status="completed",
+            task_count=1,
+            blocked_count=0,
+            task_reports=[
+                {
+                    "task_id": "TASK-001",
+                    "status": "implementation completed",
+                }
+            ],
+        )
+        lines = []
+
+        extend_completion_summary_lines(lines, summary)
+
+        self.assertIn("No changed files were reported.", summary["evidence_gaps"])
+        self.assertIn("No verification evidence was reported.", summary["evidence_gaps"])
+        self.assertIn("Evidence gaps:", lines)
+        self.assertIn("- No verification evidence was reported.", lines)
+
+    def test_execution_result_text_reports_followup_work_summary(self):
+        result = {
+            "status": "completed",
+            "taskpack_id": "follow-up-run",
+            "follow_up": {
+                "source_taskpack_id": "previous-run",
+                "source_report_path": "/tmp/previous-report.md",
+            },
+            "report": {
+                "report_path": "/tmp/follow-up-report.md",
+                "run_status": "completed",
+                "task_count": 1,
+                "blocked_count": 0,
+                "completion_summary": {
+                    "what_changed": ["Optimized the gesture scoring pipeline."],
+                    "changed_files": ["gesture_recognition/sim_eval.py"],
+                    "verification": ["local benchmark: passed"],
+                    "integration": "passed",
+                    "integration_recommendation": "Run `agentteam integrate --taskpack follow-up-run`.",
+                    "next_steps": ["Run the full competition validation package."],
+                    "evidence_gaps": [],
+                },
+            },
+            "paths": {"run_dir": "/tmp/follow-up-run"},
+        }
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            _write_execution_result_text(result)
+
+        output = stdout.getvalue()
+        self.assertIn("source_taskpack_id: previous-run", output)
+        self.assertIn("work_report: changed=Optimized the gesture scoring pipeline.", output)
+        self.assertIn("files=gesture_recognition/sim_eval.py", output)
+        self.assertIn("verification=local benchmark: passed", output)
+        self.assertIn("integration=passed", output)
+        self.assertIn("recommendation: merge=Run `agentteam integrate --taskpack follow-up-run`.", output)
+        self.assertIn("next=Run the full competition validation package.", output)
+
     def test_runtime_diagnostic_context_summarizes_failed_integration(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = _write_failed_integration_run(Path(tmp) / "runs" / "taskpack-5")
@@ -1518,10 +1584,13 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("status: completed\n", completed.stdout)
             self.assertIn("taskpack_id: cli-start-progress\n", completed.stdout)
-            self.assertIn("changed: Worker did not provide a natural-language change summary.\n", completed.stdout)
-            self.assertIn("integration: blocked\n", completed.stdout)
             self.assertIn(
-                "integration_recommendation: Do not merge until integration passes.\n",
+                "work_report: changed=Worker did not provide a natural-language change summary.",
+                completed.stdout,
+            )
+            self.assertIn("integration=blocked", completed.stdout)
+            self.assertIn(
+                "recommendation: merge=Do not merge until integration passes.",
                 completed.stdout,
             )
             self.assertIn("report:", completed.stdout)

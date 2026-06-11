@@ -114,6 +114,7 @@ def render_run_completion_report(report):
         if summary.get("integration_recommendation"):
             lines.append(f"- Integration recommendation: {summary['integration_recommendation']}")
         _extend_summary_item(lines, "Next", summary.get("next_steps"))
+        _extend_summary_item(lines, "Evidence gaps", summary.get("evidence_gaps"))
 
     task_reports = (
         report.get("operator_report", {}).get("task_reports", [])
@@ -171,9 +172,22 @@ def concise_report_lines(report, max_tasks=3):
     changed = _first_text(summary.get("what_changed"))
     if changed:
         lines.append(f"changed: {changed}")
+    changed_file = _first_text(summary.get("changed_files"))
+    if changed_file:
+        lines.append(f"changed_files: {changed_file}")
+    verification = _first_text(summary.get("verification"))
+    if verification:
+        lines.append(f"verification: {verification}")
+    if summary.get("integration"):
+        lines.append(f"integration: {summary['integration']}")
+    if summary.get("integration_recommendation"):
+        lines.append(f"integration_recommendation: {summary['integration_recommendation']}")
     next_step = _first_text(summary.get("next_steps"))
     if next_step:
         lines.append(f"next: {next_step}")
+    evidence_gap = _first_text(summary.get("evidence_gaps"))
+    if evidence_gap:
+        lines.append(f"evidence_gap: {evidence_gap}")
     task_reports = (
         report.get("operator_report", {}).get("task_reports", [])
         if isinstance(report.get("operator_report"), dict)

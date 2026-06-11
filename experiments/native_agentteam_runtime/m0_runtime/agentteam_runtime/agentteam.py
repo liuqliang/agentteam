@@ -2883,11 +2883,6 @@ def _write_execution_result_text(result):
     report = result.get("report") if isinstance(result.get("report"), dict) else {}
     paths = result.get("paths") if isinstance(result.get("paths"), dict) else {}
     follow_up = result.get("follow_up") if isinstance(result.get("follow_up"), dict) else {}
-    artifact_snapshot = (
-        result.get("artifact_snapshot")
-        if isinstance(result.get("artifact_snapshot"), dict)
-        else {}
-    )
     lines = [
         f"status: {result.get('status') or result.get('continue_status') or 'unknown'}",
         f"taskpack_id: {result.get('taskpack_id') or 'unknown'}",
@@ -2905,33 +2900,50 @@ def _write_execution_result_text(result):
         )
         if isinstance(report.get("token_usage"), dict):
             lines.append(format_token_usage(report.get("token_usage"), label="tokens"))
-        if not follow_up:
-            completion_summary = (
-                report.get("completion_summary")
-                if isinstance(report.get("completion_summary"), dict)
-                else {}
-            )
-            changed = _first_non_empty_text(completion_summary.get("what_changed"))
-            if changed:
-                lines.append(f"changed: {changed}")
-            if completion_summary.get("integration"):
-                lines.append(f"integration: {completion_summary['integration']}")
-            if completion_summary.get("integration_recommendation"):
-                lines.append(f"integration_recommendation: {completion_summary['integration_recommendation']}")
-            next_step = _first_non_empty_text(completion_summary.get("next_steps"))
-            if next_step:
-                lines.append(f"next: {next_step}")
+        completion_summary = (
+            report.get("completion_summary")
+            if isinstance(report.get("completion_summary"), dict)
+            else {}
+        )
+        work_report = _compact_key_value_line(
+            "work_report",
+            [
+                ("changed", _first_non_empty_text(completion_summary.get("what_changed"))),
+                ("files", _first_non_empty_text(completion_summary.get("changed_files"))),
+                ("verification", _first_non_empty_text(completion_summary.get("verification"))),
+                ("integration", completion_summary.get("integration")),
+            ],
+        )
+        if work_report:
+            lines.append(work_report)
+        recommendation = _compact_key_value_line(
+            "recommendation",
+            [
+                ("merge", completion_summary.get("integration_recommendation")),
+                ("next", _first_non_empty_text(completion_summary.get("next_steps"))),
+                ("evidence_gap", _first_non_empty_text(completion_summary.get("evidence_gaps"))),
+            ],
+        )
+        if recommendation:
+            lines.append(recommendation)
         if report.get("report_path"):
             lines.append(f"report: {report['report_path']}")
-    if follow_up.get("source_report_path"):
-        lines.append(f"source_report: {follow_up['source_report_path']}")
-    if artifact_snapshot:
-        lines.append(f"artifact_trace: {_artifact_snapshot_text(artifact_snapshot)}")
     run_dir = paths.get("run_dir")
     if run_dir:
         lines.append(f"run_dir: {run_dir}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
+
+
+def _compact_key_value_line(label, items):
+    parts = [
+        f"{key}={value}"
+        for key, value in items
+        if value is not None and str(value).strip()
+    ]
+    if not parts:
+        return None
+    return f"{label}: " + "; ".join(parts)
 
 
 def _artifact_snapshot_progress(snapshot):

@@ -39,12 +39,19 @@ def build_completion_summary(
     )
     if not what_changed and not task_reports:
         what_changed = ["No task-level operator report was found in this run."]
+    integration = _completion_integration(task_reports)
+    evidence_gaps = _completion_evidence_gaps(
+        what_changed=what_changed,
+        changed_files=changed_files,
+        verification=verification,
+        integration=integration,
+    )
     return {
         "status_line": _completion_status_line(run_status, task_count, blocked_count),
         "what_changed": what_changed,
         "changed_files": changed_files,
         "verification": verification,
-        "integration": _completion_integration(task_reports),
+        "integration": integration,
         "integration_recommendation": _integration_recommendation(
             run_id,
             blocked_count,
@@ -53,6 +60,7 @@ def build_completion_summary(
         ),
         "next_steps": next_steps,
         "merge_recommendations": merge_recommendations,
+        "evidence_gaps": evidence_gaps,
     }
 
 
@@ -70,6 +78,20 @@ def extend_completion_summary_lines(lines, summary):
     if summary.get("integration_recommendation"):
         lines.append(f"Integration recommendation: {summary['integration_recommendation']}")
     _extend_section(lines, "Next:", summary.get("next_steps"))
+    _extend_section(lines, "Evidence gaps:", summary.get("evidence_gaps"))
+
+
+def _completion_evidence_gaps(what_changed, changed_files, verification, integration):
+    gaps = []
+    if not what_changed:
+        gaps.append("No natural-language change summary was reported.")
+    if not changed_files:
+        gaps.append("No changed files were reported.")
+    if not verification:
+        gaps.append("No verification evidence was reported.")
+    if integration == "not recorded":
+        gaps.append("No integration status was recorded.")
+    return gaps
 
 
 def _effective_blocked_count(blocked_count, task_reports):
