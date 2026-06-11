@@ -4,7 +4,9 @@ from pathlib import Path
 
 
 PROFILE_SCHEMA_VERSION = "agentteam_profile.v1"
+VERIFICATION_PROFILE_SCHEMA_VERSION = "agentteam_verification_profile.v1"
 LOCAL_PROFILE_EXCLUDE_PATTERN = ".agentteam/"
+DEFAULT_CORRECTNESS_COMMAND = ["python3", "-m", "unittest", "discover"]
 
 
 class AgentTeamProfileError(RuntimeError):
@@ -38,6 +40,7 @@ def build_project_profile(
     feishu_enabled=False,
     feishu_webhook_env=None,
     feishu_signing_secret_env=None,
+    verification_profile=None,
 ):
     project_key = _safe_project_key(project_key or default_project_key(project_root))
     if author_runtime not in {"fake", "codex"}:
@@ -67,7 +70,47 @@ def build_project_profile(
             "webhook_env": feishu_webhook_env if feishu_enabled else None,
             "signing_secret_env": feishu_signing_secret_env if feishu_enabled else None,
         },
+        "verification_profile": normalize_verification_profile(verification_profile),
     }
+
+
+def normalize_verification_profile(profile=None):
+    profile = profile if isinstance(profile, dict) else {}
+    correctness = profile.get("correctness") if isinstance(profile.get("correctness"), dict) else {}
+    performance = profile.get("performance") if isinstance(profile.get("performance"), dict) else {}
+    correctness_command = _command_or_default(
+        correctness.get("command"),
+        DEFAULT_CORRECTNESS_COMMAND,
+        "verification_profile.correctness.command",
+    )
+    performance_command = performance.get("command")
+    if performance_command is not None:
+        performance_command = _command_or_default(
+            performance_command,
+            None,
+            "verification_profile.performance.command",
+        )
+    metrics = performance.get("metrics", [])
+    if not isinstance(metrics, list) or not all(isinstance(metric, str) and metric for metric in metrics):
+        raise AgentTeamProfileError("verification_profile.performance.metrics must be a string array")
+    return {
+        "verification_profile_schema_version": VERIFICATION_PROFILE_SCHEMA_VERSION,
+        "correctness": {"command": correctness_command},
+        "performance": {
+            "command": performance_command,
+            "metrics": list(metrics),
+        },
+    }
+
+
+def _command_or_default(command, default, field_name):
+    if command is None:
+        if default is None:
+            return None
+        return list(default)
+    if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+        raise AgentTeamProfileError(f"{field_name} must be a non-empty string array")
+    return list(command)
 
 
 def write_project_profile(project_root, profile, force=False):

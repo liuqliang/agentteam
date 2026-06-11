@@ -400,6 +400,19 @@ def _add_init_parser(subcommands):
         action="store_true",
         help="Default to committing integration worktree changes after verification passes.",
     )
+    parser.add_argument(
+        "--verification-command-json",
+        help="Project correctness verification command as a JSON string array.",
+    )
+    parser.add_argument(
+        "--performance-command-json",
+        help="Optional project performance benchmark command as a JSON string array.",
+    )
+    parser.add_argument(
+        "--metric",
+        action="append",
+        help="Performance or quality metric name tracked by the project. Repeat for multiple metrics.",
+    )
     _add_notification_args(parser, notification_project_default=None)
     parser.add_argument(
         "--force",
@@ -985,9 +998,11 @@ def _handle_taskpack_new(args):
     if not write_scope:
         write_scope_text = _prompt_text("Write scope", required=True)
         write_scope = [write_scope_text]
+    verification_profile = profile.get("verification_profile")
+    default_verification_command = _profile_correctness_command(verification_profile)
     verification_command = _parse_verification_command_arg(
         args.verification_command_json,
-        default=["python3", "-m", "unittest", "discover"],
+        default=default_verification_command,
     )
     draft = draft_taskpack_files(
         project_root=project_root,
@@ -997,6 +1012,7 @@ def _handle_taskpack_new(args):
         read_scope=args.read_scope or ["."],
         write_scope=write_scope,
         verification_command=verification_command,
+        verification_profile=verification_profile,
         allow_merge=args.allow_merge,
         codex_timeout_seconds=args.codex_timeout_seconds,
     )
@@ -1036,6 +1052,49 @@ def _parse_verification_command_arg(raw_command, default):
     if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
         raise AgentTeamCliError("--verification-command-json must be a non-empty string array")
     return command
+
+
+def _verification_profile_from_args(args):
+    profile = {}
+    verification_command_json = getattr(args, "verification_command_json", None)
+    performance_command_json = getattr(args, "performance_command_json", None)
+    metrics = getattr(args, "metric", None) or []
+    if verification_command_json:
+        profile["correctness"] = {
+            "command": _parse_command_json_arg(
+                verification_command_json,
+                "--verification-command-json",
+            )
+        }
+    if performance_command_json or metrics:
+        performance = {"metrics": list(metrics)}
+        if performance_command_json:
+            performance["command"] = _parse_command_json_arg(
+                performance_command_json,
+                "--performance-command-json",
+            )
+        profile["performance"] = performance
+    return profile
+
+
+def _parse_command_json_arg(raw_command, flag):
+    try:
+        command = json.loads(raw_command)
+    except json.JSONDecodeError as exc:
+        raise AgentTeamCliError(f"{flag} must be valid JSON", error=str(exc)) from exc
+    if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+        raise AgentTeamCliError(f"{flag} must be a non-empty string array")
+    return command
+
+
+def _profile_correctness_command(verification_profile):
+    if isinstance(verification_profile, dict):
+        correctness = verification_profile.get("correctness")
+        if isinstance(correctness, dict):
+            command = correctness.get("command")
+            if isinstance(command, list) and command and all(isinstance(part, str) for part in command):
+                return command
+    return ["python3", "-m", "unittest", "discover"]
 
 
 def _write_taskpack_new_text(summary):
@@ -1393,6 +1452,7 @@ def _handle_submit(args):
         taskpack_id=args.taskpack_id,
         codex_command=args.codex_command,
         codex_timeout_seconds=args.codex_timeout_seconds,
+        verification_profile=getattr(args, "verification_profile", None),
         progress_callback=_author_progress_callback(progress),
     )
     _progress(progress, f"draft accepted: {draft['taskpack_id']}")
@@ -3564,6 +3624,7 @@ def _profile_from_args(args, project_root):
         feishu_enabled=bool(args.feishu_webhook_env),
         feishu_webhook_env=args.feishu_webhook_env,
         feishu_signing_secret_env=args.feishu_signing_secret_env,
+        verification_profile=_verification_profile_from_args(args),
     )
 
 
@@ -3623,6 +3684,7 @@ def _prompt_project_profile(args, project_root):
         feishu_enabled=feishu_enabled,
         feishu_webhook_env=feishu_webhook_env,
         feishu_signing_secret_env=feishu_signing_secret_env,
+        verification_profile=_verification_profile_from_args(args),
     )
 
 
@@ -3656,6 +3718,7 @@ def _submit_args_from_profile(args, project_root, profile):
         if args.feishu_signing_secret_env is not None
         else (feishu.get("signing_secret_env") if feishu_enabled else None),
         codex_command=args.codex_command,
+        verification_profile=profile.get("verification_profile"),
     )
 
 

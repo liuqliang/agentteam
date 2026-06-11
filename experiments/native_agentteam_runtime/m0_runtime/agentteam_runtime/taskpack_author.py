@@ -14,6 +14,7 @@ from .taskpack import (
     _default_goal_alignment,
     _default_required_deliverables,
     _default_work_type,
+    _normalize_taskpack_verification_profile,
     _require_contained_path,
     _resolve_draft_taskpack_id,
     draft_taskpack_files,
@@ -38,6 +39,7 @@ def draft_taskpack_from_goal(
     taskpack_id=None,
     codex_command=None,
     codex_timeout_seconds=600,
+    verification_profile=None,
     progress_callback=None,
     progress_interval_seconds=30.0,
 ):
@@ -49,7 +51,8 @@ def draft_taskpack_from_goal(
             taskpack_id=taskpack_id,
             read_scope=["."],
             write_scope=[".agentteam/generated/"],
-            verification_command=["python3", "-m", "unittest", "discover"],
+            verification_command=None,
+            verification_profile=verification_profile,
             codex_timeout_seconds=codex_timeout_seconds,
         )
     if author_runtime == "codex":
@@ -60,6 +63,7 @@ def draft_taskpack_from_goal(
             taskpack_id=taskpack_id,
             codex_command=codex_command,
             codex_timeout_seconds=codex_timeout_seconds,
+            verification_profile=verification_profile,
             progress_callback=progress_callback,
             progress_interval_seconds=progress_interval_seconds,
         )
@@ -73,6 +77,7 @@ def _draft_with_codex(
     taskpack_id=None,
     codex_command=None,
     codex_timeout_seconds=600,
+    verification_profile=None,
     progress_callback=None,
     progress_interval_seconds=30.0,
 ):
@@ -110,6 +115,7 @@ def _draft_with_codex(
         taskpack_dir=taskpack_dir,
         author_context_dir=author_context_dir,
         repo_map=repo_map,
+        verification_profile=verification_profile,
     )
     prompt_path = author_context_dir / "author_prompt.md"
     prompt_path.write_text(prompt, encoding="utf-8")
@@ -150,6 +156,7 @@ def _draft_with_codex(
 
     _verify_required_taskpack_files(taskpack_dir)
     _canonicalize_codex_taskpack_files(taskpack_dir)
+    _apply_verification_profile_to_taskpack(taskpack_dir, verification_profile)
     validate_taskpack(taskpack_dir)
     return {
         "taskpack_dir": str(taskpack_dir),
@@ -276,8 +283,10 @@ def _author_prompt(
     taskpack_dir,
     author_context_dir,
     repo_map,
+    verification_profile=None,
 ):
     repo_paths = repo_map["paths"]
+    verification_profile_json = json.dumps(verification_profile or {}, sort_keys=True)
     return "\n".join(
         [
             "You are the AgentTeam taskpack author.",
@@ -303,6 +312,9 @@ def _author_prompt(
             f"- manifest: {repo_paths['manifest_path']}",
             f"- inventory: {repo_paths['inventory_path']}",
             f"- symbols: {repo_paths['symbols_path']}",
+            "",
+            "Project verification profile:",
+            verification_profile_json,
             "",
             "The runtime loader currently reads taskpack.yaml as JSON despite the .yaml suffix.",
             "Use valid JSON for taskpack.yaml, agent_pool.json, backlog.json, and verification.json.",
@@ -349,6 +361,8 @@ def _author_prompt(
             "- backlog item read_scope is a non-empty string array",
             "- backlog item write_scope is a narrow repository-relative string array; never use repository root",
             "- verification.command is a non-empty string array using an allowed executable such as python3",
+            "- if the project verification profile has correctness.command, use it as verification.command",
+            "- copy any project performance command and metrics into verification.performance",
             "- README.md briefly summarizes the taskpack goal, scopes, and verification command",
             "",
             "When finished, exit successfully. Do not print a long explanation.",
@@ -466,6 +480,25 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
         if canonical_command != command:
             verification["command"] = canonical_command
             _write_json(verification_path, verification)
+
+
+def _apply_verification_profile_to_taskpack(taskpack_dir, verification_profile):
+    if not verification_profile:
+        return
+    taskpack_dir = Path(taskpack_dir)
+    profile = _normalize_taskpack_verification_profile(verification_profile)
+    taskpack = _read_json(taskpack_dir / "taskpack.yaml")
+    files = taskpack.get("files") if isinstance(taskpack.get("files"), dict) else {}
+    verification_path = taskpack_dir / files.get("verification", "verification.json")
+    verification = _read_json(verification_path)
+    if not isinstance(verification, dict):
+        return
+    verification["verification_profile"] = profile
+    verification["command"] = profile["correctness"]["command"]
+    performance = profile.get("performance") if isinstance(profile.get("performance"), dict) else {}
+    if performance.get("command") or performance.get("metrics"):
+        verification["performance"] = performance
+    _write_json(verification_path, verification)
 
 
 def _canonical_verification_command(command, project_root):

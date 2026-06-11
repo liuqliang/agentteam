@@ -752,6 +752,55 @@ class TaskpackTests(unittest.TestCase):
             self.assertNotIn("https://open.feishu.cn", serialized)
             self.assertNotIn("secret-token", serialized)
 
+    def test_agentteam_cli_init_writes_project_verification_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "benchmark-project",
+                    "--work-root",
+                    str(work_root),
+                    "--verification-command-json",
+                    json.dumps(["python3", "tools/check.py"]),
+                    "--performance-command-json",
+                    json.dumps(["python3", "tools/bench.py", "--json"]),
+                    "--metric",
+                    "accuracy",
+                    "--metric",
+                    "latency_ms",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            profile = json.loads((repo / ".agentteam" / "profile.json").read_text(encoding="utf-8"))
+            verification_profile = profile["verification_profile"]
+            self.assertEqual(
+                verification_profile["correctness"]["command"],
+                ["python3", "tools/check.py"],
+            )
+            self.assertEqual(
+                verification_profile["performance"]["command"],
+                ["python3", "tools/bench.py", "--json"],
+            )
+            self.assertEqual(verification_profile["performance"]["metrics"], ["accuracy", "latency_ms"])
+
     def test_agentteam_cli_init_text_is_concise_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1055,6 +1104,12 @@ class TaskpackTests(unittest.TestCase):
                     "fake",
                     "--runtime",
                     "auto",
+                    "--verification-command-json",
+                    json.dumps(["python3", "-c", "print('profile-check')"]),
+                    "--performance-command-json",
+                    json.dumps(["python3", "tools/bench.py", "--json"]),
+                    "--metric",
+                    "latency_ms",
                 ],
                 env=_test_env(),
                 stdout=subprocess.PIPE,
@@ -1093,6 +1148,9 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["profile"]["profile_path"], str((repo / ".agentteam" / "profile.json").resolve()))
             self.assertEqual(summary["paths"]["work_root"], str(work_root.resolve()))
             self.assertTrue((work_root / "drafts" / "cli-start-profile").exists())
+            loaded = load_taskpack(work_root / "frozen" / "cli-start-profile")
+            self.assertEqual(loaded["verification"]["command"], ["python3", "-c", "print('profile-check')"])
+            self.assertEqual(loaded["verification"]["performance"]["metrics"], ["latency_ms"])
             self.assertEqual(summary["run"]["scheduler_status"], "idle")
             baseline_worktree = work_root / "runs" / "cli-start-profile" / "integration-baseline"
             self.assertTrue(baseline_worktree.exists())
@@ -5339,6 +5397,14 @@ class TaskpackTests(unittest.TestCase):
                 work_root=work_root,
                 author_runtime="codex",
                 default_runtime="auto",
+                verification_profile={
+                    "verification_profile_schema_version": "agentteam_verification_profile.v1",
+                    "correctness": {"command": ["python3", "tools/check.py"]},
+                    "performance": {
+                        "command": ["python3", "tools/bench.py", "--json"],
+                        "metrics": ["accuracy", "latency_ms"],
+                    },
+                },
             )
             write_project_profile(repo, profile, force=True)
 
@@ -5350,7 +5416,7 @@ class TaskpackTests(unittest.TestCase):
                     taskpack_id="quick-optimization",
                     read_scope=["."],
                     write_scope=["src/"],
-                    verification_command_json=json.dumps(["python3", "-c", "print('ok')"]),
+                    verification_command_json=None,
                     allow_merge=False,
                     codex_timeout_seconds=123,
                     freeze=True,
@@ -5364,6 +5430,13 @@ class TaskpackTests(unittest.TestCase):
             self.assertTrue((frozen_dir / "taskpack.yaml").exists())
             validation = validate_taskpack(frozen_dir)
             self.assertEqual(validation["status"], "accepted")
+            loaded = load_taskpack(frozen_dir)
+            self.assertEqual(loaded["verification"]["command"], ["python3", "tools/check.py"])
+            self.assertEqual(
+                loaded["verification"]["performance"]["command"],
+                ["python3", "tools/bench.py", "--json"],
+            )
+            self.assertEqual(loaded["verification"]["performance"]["metrics"], ["accuracy", "latency_ms"])
 
     def test_draft_taskpack_files_writes_expected_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:

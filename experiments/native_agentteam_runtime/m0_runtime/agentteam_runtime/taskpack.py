@@ -9,10 +9,12 @@ from pathlib import Path
 
 TASKPACK_SCHEMA_VERSION = "taskpack.v1"
 TASKPACK_SEMANTIC_CONTRACT_VERSION = "task_semantics.v1"
+TASKPACK_VERIFICATION_PROFILE_SCHEMA_VERSION = "agentteam_verification_profile.v1"
 DEFAULT_WORKER_ROLE = "implementation_worker"
 DEFAULT_DAEMON_MAX_STEPS = 45000
 DEFAULT_CODEX_RUNTIME_TIMEOUT_SECONDS = 3600
 DEFAULT_LEASE_TIMEOUT_GRACE_SECONDS = 60
+DEFAULT_VERIFICATION_COMMAND = ["python3", "-m", "unittest", "discover"]
 TASKPACK_TRANSLATABLE_RUNTIME_BACKENDS = {"fake", "codex"}
 TASKPACK_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 TASKPACK_GOAL_KINDS = {"implementation", "optimization", "audit"}
@@ -57,6 +59,7 @@ def draft_taskpack_files(
     read_scope=None,
     write_scope=None,
     verification_command=None,
+    verification_profile=None,
     allow_merge=False,
     codex_timeout_seconds=1800,
 ):
@@ -68,11 +71,9 @@ def draft_taskpack_files(
 
     read_scope = _string_list(read_scope, ["."], "read_scope")
     write_scope = _string_list(write_scope, [".agentteam/generated/"], "write_scope")
-    verification_command = _string_list(
-        verification_command,
-        ["python3", "-m", "unittest", "discover"],
-        "verification_command",
-    )
+    verification_profile = _normalize_taskpack_verification_profile(verification_profile)
+    default_verification_command = verification_profile["correctness"]["command"]
+    verification_command = _string_list(verification_command, default_verification_command, "verification_command")
     goal_kind = classify_goal_kind(goal)
 
     taskpack_dir.mkdir(parents=True, exist_ok=False)
@@ -146,11 +147,17 @@ def draft_taskpack_files(
     verification = {
         "verification_schema_version": "taskpack_verification.v1",
         "command": verification_command,
+        "verification_profile": verification_profile,
         "success_criteria": [
             "verification command exits with code 0",
             "runtime validation accepts changed files inside declared write_scope",
         ],
     }
+    performance_profile = verification_profile.get("performance")
+    if isinstance(performance_profile, dict) and (
+        performance_profile.get("command") or performance_profile.get("metrics")
+    ):
+        verification["performance"] = performance_profile
 
     _write_json(taskpack_dir / "taskpack.yaml", taskpack)
     _write_json(taskpack_dir / "agent_pool.json", agent_pool)
@@ -385,6 +392,45 @@ def _verification_command_allowed(executable, project_root):
     except ValueError:
         return False
     return relative.as_posix() in {".venv/bin/python", "venv/bin/python"} and executable_path.is_file()
+
+
+def _normalize_taskpack_verification_profile(profile=None):
+    profile = profile if isinstance(profile, dict) else {}
+    correctness = profile.get("correctness") if isinstance(profile.get("correctness"), dict) else {}
+    performance = profile.get("performance") if isinstance(profile.get("performance"), dict) else {}
+    correctness_command = _profile_command_or_default(
+        correctness.get("command"),
+        DEFAULT_VERIFICATION_COMMAND,
+        "verification_profile.correctness.command",
+    )
+    performance_command = performance.get("command")
+    if performance_command is not None:
+        performance_command = _profile_command_or_default(
+            performance_command,
+            None,
+            "verification_profile.performance.command",
+        )
+    metrics = performance.get("metrics", [])
+    if not isinstance(metrics, list) or not all(isinstance(metric, str) and metric for metric in metrics):
+        raise TaskpackValidationError("verification_profile.performance.metrics must be a string array")
+    return {
+        "verification_profile_schema_version": TASKPACK_VERIFICATION_PROFILE_SCHEMA_VERSION,
+        "correctness": {"command": correctness_command},
+        "performance": {
+            "command": performance_command,
+            "metrics": list(metrics),
+        },
+    }
+
+
+def _profile_command_or_default(command, default, field_name):
+    if command is None:
+        if default is None:
+            return None
+        return list(default)
+    if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+        raise TaskpackValidationError(f"{field_name} must be a non-empty string array")
+    return list(command)
 
 
 def _default_goal_alignment(goal):
