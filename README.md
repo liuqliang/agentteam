@@ -28,6 +28,9 @@ manual `PYTHONPATH` setup:
 ./agentteam --help
 ```
 
+For command usage, operational recipes, and side effects, see
+[`docs/agentteam-command-reference.md`](docs/agentteam-command-reference.md).
+
 For repeated local use, install a user-level command:
 
 ```bash
