@@ -127,9 +127,11 @@ _HELP_COMMANDS = [
         "examples": [
             "agentteam notify test --project-root <repo>",
             "agentteam notify test --dry-run --json",
+            "agentteam notify run-completed --project-root <repo> --taskpack <id>",
         ],
         "subcommands": [
             "test: send a diagnostic Feishu notification from the current project profile",
+            "run-completed: resend a completion summary for an existing run",
         ],
     },
     {
@@ -842,6 +844,23 @@ def _add_notify_parser(subcommands):
     test_parser.add_argument("--dry-run", action="store_true", help="Validate configuration without sending.")
     test_parser.add_argument("--json", action="store_true", help="Print notification test result as JSON.")
     test_parser.set_defaults(handler=_handle_notify)
+
+    run_completed_parser = notify_subcommands.add_parser(
+        "run-completed",
+        help="Send or resend a run_completed notification for an existing run.",
+    )
+    run_completed_parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    run_completed_parser.add_argument("--taskpack", help="Run/taskpack id to notify. Defaults to latest run id.")
+    run_completed_parser.add_argument("--run-dir", help="Existing run directory to notify. Overrides --taskpack.")
+    run_completed_parser.add_argument("--notification-project", help="Project label used in the notification.")
+    run_completed_parser.add_argument("--feishu-webhook-env", help="Override the profile Feishu webhook env var name.")
+    run_completed_parser.add_argument(
+        "--feishu-signing-secret-env",
+        help="Override the profile Feishu signing secret env var name.",
+    )
+    run_completed_parser.add_argument("--dry-run", action="store_true", help="Build notification payload without sending.")
+    run_completed_parser.add_argument("--json", action="store_true", help="Print notification result as JSON.")
+    run_completed_parser.set_defaults(handler=_handle_notify)
 
 
 def _add_status_parser(subcommands):
@@ -1725,6 +1744,12 @@ def _handle_notify(args):
             return summary
         _write_notify_text(summary)
         return 0
+    if args.notify_command == "run-completed":
+        summary = _notify_run_completed(args)
+        if args.json:
+            return summary
+        _write_notify_text(summary)
+        return 0
     raise AgentTeamCliError("unknown notify command", command=args.notify_command)
 
 
@@ -1791,6 +1816,101 @@ def _notify_test(args):
     if summary["notify_status"] != "sent":
         raise AgentTeamCliError("Feishu notification test failed", **summary)
     return summary
+
+
+def _notify_run_completed(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    run_dir = _selected_run_dir(args, profile, command_name="notify run-completed")
+    project = (
+        args.notification_project
+        or profile.get("notification_project")
+        or profile.get("project_key")
+        or project_root.name
+    )
+    webhook_env = _profile_feishu_value(args, profile, "webhook_env")
+    signing_secret_env = _profile_feishu_value(args, profile, "signing_secret_env")
+    if not webhook_env:
+        raise AgentTeamCliError(
+            "Feishu webhook env is not configured",
+            project=str(project_root),
+        )
+    webhook_url = os.environ.get(webhook_env)
+    if not webhook_url:
+        raise AgentTeamCliError(
+            "Feishu webhook env value is not set",
+            webhook_env=webhook_env,
+            project=str(project_root),
+        )
+    signing_secret = os.environ.get(signing_secret_env) if signing_secret_env else None
+    report = build_run_completion_report(
+        run_dir,
+        project=project,
+        write_files=False,
+    )
+    event = _run_completed_notification_event(report)
+    summary = {
+        "notify_status": "dry_run" if args.dry_run else "pending",
+        "provider": "feishu",
+        "project": project,
+        "project_root": str(project_root),
+        "taskpack_id": run_dir.name,
+        "run_dir": str(run_dir),
+        "webhook_env": webhook_env,
+        "webhook_env_set": True,
+        "signing_secret_env": signing_secret_env,
+        "signing_enabled": bool(signing_secret),
+        "event_type": event["event_type"],
+        "run_status": report.get("run_status"),
+        "task_count": report.get("task_count", 0),
+        "blocked_count": report.get("blocked_count", 0),
+    }
+    if args.dry_run:
+        return summary
+
+    notifier = FeishuWebhookNotifier(
+        webhook_url=webhook_url,
+        signing_secret=signing_secret,
+        project=project,
+    )
+    result = notifier.notify_event(event, run_dir=str(run_dir))
+    payload = result.get("payload") if isinstance(result, dict) else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    summary.update(
+        {
+            "notify_status": payload.get("notification_status") or "unknown",
+            "source_event_type": payload.get("source_event_type"),
+            "message_summary": payload.get("message_summary"),
+        }
+    )
+    if payload.get("error_class"):
+        summary["error_class"] = payload["error_class"]
+    if payload.get("error_summary"):
+        summary["error_summary"] = payload["error_summary"]
+    if summary["notify_status"] != "sent":
+        raise AgentTeamCliError("Feishu run-completed notification failed", **summary)
+    return summary
+
+
+def _run_completed_notification_event(report):
+    run_id = report.get("run_id") or "unknown"
+    return {
+        "event_id": f"notify-run-completed-{run_id}",
+        "sequence": 0,
+        "event_type": "run_completed",
+        "actor": "agentteam-cli",
+        "target_agent_id": None,
+        "idempotency_key": f"notify:run_completed:{run_id}",
+        "correlation_id": f"run:{run_id}",
+        "payload": {
+            "run_status": report.get("run_status") or "completed",
+            "scheduler_status": report.get("scheduler_status"),
+            "task_count": report.get("task_count", 0),
+            "blocked_count": report.get("blocked_count", 0),
+            "operator_report": report.get("operator_report") or {},
+        },
+    }
 
 
 def _notify_test_event(project, message=None):

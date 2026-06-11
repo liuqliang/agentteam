@@ -57,7 +57,12 @@ merge guidance, and next steps when worker reports provide those fields.
 Feishu run-completion notifications use the same summary before any task-level
 detail, so milestone results are readable from the chat message itself.
 Use `agentteam notify test` after configuring Feishu in `agentteam init` to send
-one diagnostic message through the same project webhook.
+one diagnostic message through the same project webhook. If a completed run
+missed its notification, resend the completion summary without rerunning work:
+
+```bash
+agentteam notify run-completed --taskpack <taskpack-id>
+```
 
 When the task is already clear, bypass Codex taskpack authoring and create an
 explicit operator taskpack from the project profile:

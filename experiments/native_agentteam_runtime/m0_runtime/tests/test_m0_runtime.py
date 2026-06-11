@@ -5001,6 +5001,134 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(result["processed_task_ids"], ["TASK-001"])
             self.assertEqual(result["inflight_count"], 0)
 
+    def test_supervised_two_phase_scheduler_emits_run_lifecycle_notifications(self):
+        class RecordingNotificationSink:
+            def __init__(self):
+                self.calls = []
+
+            def notify(self, event, context):
+                self.calls.append({"event": event, "context": context})
+                return {
+                    "event_type": "notification_sent",
+                    "actor": "agent-notifier",
+                    "target_agent_id": None,
+                    "idempotency_key": f"notification:{event['event_id']}",
+                    "correlation_id": event["correlation_id"],
+                    "payload": {
+                        "provider": "feishu",
+                        "project": "agentteam",
+                        "source_event_type": event["event_type"],
+                        "source_event_id": event["event_id"],
+                        "source_event_sequence": event["sequence"],
+                        "notification_status": "sent",
+                        "message_summary": event["event_type"],
+                    },
+                }
+
+        class ImmediateResultWorkerPool:
+            def __init__(self):
+                self.result_written = False
+
+            def start(self):
+                return {"worker_pool_status": "started"}
+
+            def stop(self):
+                return {"worker_pool_status": "stopped"}
+
+            def health_check(self):
+                return {
+                    "pool_status": "running",
+                    "workers": [{"worker_agent_id": "agent-repo-map", "worker_status": "running"}],
+                }
+
+            def supervise_once(self):
+                if self.result_written:
+                    return self._supervision_result()
+                state_path = output_dir / "state" / "two_phase_scheduler_state.json"
+                if not state_path.exists():
+                    return self._supervision_result()
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                inflight = state.get("inflight_attempts", [])
+                if not inflight:
+                    return self._supervision_result()
+                attempt = inflight[0]
+                _append_runtime_result(
+                    attempt["outbox_path"],
+                    attempt["message_id"],
+                    attempt["task_id"],
+                    attempt["attempt_id"],
+                    attempt["lease_id"],
+                    "completed",
+                    [],
+                )
+                self.result_written = True
+                return self._supervision_result()
+
+            def _supervision_result(self):
+                health = self.health_check()
+                return {
+                    "supervision_status": health["pool_status"],
+                    "restarted_count": 0,
+                    "before": health,
+                    "restart": {"restarted_count": 0},
+                    "after": health,
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            _write_agent_pool_with_agent_roles(agent_pool_path, [("agent-repo-map", "repo_map_agent")])
+            sink = RecordingNotificationSink()
+            args = SimpleNamespace(
+                agent_pool=str(agent_pool_path),
+                backlog=str(backlog_path),
+                output_dir=str(output_dir),
+                project_root=None,
+                max_inflight=1,
+                max_attempts=1,
+                lease_timeout_seconds=900,
+                integrate_accepted_patch=False,
+                commit_verified_integration=False,
+                auto_decompose_backlog=False,
+                decomposition_milestone_id="M21",
+                decomposition_planner_role="task_planner",
+                decomposition_default_worker_role="repo_map_agent",
+                planner_context_artifact=[],
+                planner_context_excerpt_chars=1200,
+                max_steps=10,
+            )
+
+            result = _run_supervised_two_phase_scheduler(
+                args,
+                integration_verification_command=None,
+                worker_pool=ImmediateResultWorkerPool(),
+                notification_sink=sink,
+            )
+
+            self.assertEqual(result["scheduler_status"], "idle")
+            self.assertEqual(
+                [call["event"]["event_type"] for call in sink.calls],
+                ["run_started", "run_completed"],
+            )
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                [event["event_type"] for event in events if event["event_type"].startswith("run_")],
+                ["run_started", "run_completed"],
+            )
+            self.assertEqual(
+                [
+                    event["payload"]["source_event_type"]
+                    for event in events
+                    if event["event_type"] == "notification_sent"
+                ],
+                ["run_started", "run_completed"],
+            )
+
     def test_cli_two_phase_worker_pool_can_auto_decompose_with_fake_planner(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

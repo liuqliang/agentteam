@@ -459,6 +459,10 @@ def _run_supervised_two_phase_scheduler(
         decomposition_context_excerpt_chars=args.planner_context_excerpt_chars,
         notification_sink=notification_sink,
     )
+    scheduler._emit_run_event_once(
+        "run_started",
+        scheduler._run_event_payload("running", {"max_ticks": args.max_steps}),
+    )
     supervision = []
     tick_count = 0
     stalled_wait_ticks = 0
@@ -473,6 +477,10 @@ def _run_supervised_two_phase_scheduler(
         last_tick = scheduler.tick()
         supervision.append(worker_pool.supervise_once())
         if last_tick["tick_status"] == "idle":
+            scheduler._emit_run_event_once(
+                "run_completed",
+                scheduler._run_event_payload("completed", {"tick_count": tick_count}),
+            )
             result = {
                 **scheduler.summary(),
                 "scheduler_status": "idle",
@@ -489,6 +497,10 @@ def _run_supervised_two_phase_scheduler(
             if stalled_wait_ticks >= args.max_steps:
                 scheduler.state["scheduler_status"] = "max_ticks_reached"
                 scheduler._write_state()
+                scheduler._emit_run_event_once(
+                    "run_timed_out",
+                    scheduler._run_event_payload("max_ticks_reached", {"tick_count": tick_count}),
+                )
                 result = {
                     **scheduler.summary(),
                     "scheduler_status": "max_ticks_reached",

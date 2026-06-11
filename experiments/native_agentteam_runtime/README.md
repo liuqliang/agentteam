@@ -119,7 +119,12 @@ Runtime artifacts are written under the configured `work_root`, typically
 If Feishu is configured, `agentteam notify test` sends one diagnostic
 `run_completed` message through the same project webhook. Use
 `agentteam notify test --dry-run --json` to validate the selected environment
-variable names without sending.
+variable names without sending. If a completed run missed its message, resend
+the real completion summary from existing run artifacts:
+
+```bash
+agentteam notify run-completed --taskpack <taskpack-id>
+```
 
 If the operator already knows the task shape and scopes, use `taskpack new` to
 create a taskpack without invoking Codex authoring:
@@ -391,7 +396,10 @@ notification sending without failing the run. Event payloads never include the
 webhook URL or signing secret.
 For project profiles created with `agentteam init`, run
 `agentteam notify test --project-root /path/to/repo` to verify the webhook
-outside a full scheduler run.
+outside a full scheduler run. Use
+`agentteam notify run-completed --project-root /path/to/repo --taskpack <id>` to
+manually resend the completion summary for an existing run; this does not rerun
+workers or modify the target repository.
 
 When a run reaches `run_completed`, the scheduler attaches an operator report
 derived from worker output, changed files, verification, and integration state.

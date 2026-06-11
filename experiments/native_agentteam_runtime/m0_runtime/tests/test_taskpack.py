@@ -743,6 +743,83 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("AgentTeam notification test for notify-project.", message)
             self.assertIn("If you receive this message, Feishu notification delivery works.", message)
 
+    def test_agentteam_cli_notify_run_completed_sends_existing_run_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "completed-run"
+            _init_repo(repo)
+            _write_completed_operator_run(run_dir)
+            server, payloads = _start_webhook_capture_server()
+            try:
+                env = _test_env()
+                env["AGENTTEAM_FEISHU_TEST_WEBHOOK"] = (
+                    f"http://127.0.0.1:{server.server_port}/hook"
+                )
+                init_completed = subprocess.run(
+                    [
+                        "python3",
+                        "-m",
+                        "agentteam_runtime.agentteam",
+                        "init",
+                        "--project-root",
+                        str(repo),
+                        "--project-key",
+                        "notify-run-project",
+                        "--work-root",
+                        str(work_root),
+                        "--author-runtime",
+                        "fake",
+                        "--runtime",
+                        "fake",
+                        "--notification-project",
+                        "notify-run-project",
+                        "--feishu-webhook-env",
+                        "AGENTTEAM_FEISHU_TEST_WEBHOOK",
+                    ],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+
+                completed = subprocess.run(
+                    [
+                        "python3",
+                        "-m",
+                        "agentteam_runtime.agentteam",
+                        "notify",
+                        "run-completed",
+                        "--project-root",
+                        str(repo),
+                        "--taskpack",
+                        "completed-run",
+                        "--json",
+                    ],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["notify_status"], "sent")
+            self.assertEqual(summary["event_type"], "run_completed")
+            self.assertEqual(summary["taskpack_id"], "completed-run")
+            self.assertEqual(len(payloads), 1)
+            message = payloads[0]["content"]["text"]
+            self.assertIn("[AgentTeam] run_completed", message)
+            self.assertIn("Scanned the repository and implemented one evidence-backed optimization.", message)
+            self.assertIn("gesture_recognition/sim_eval.py", message)
+
     def test_agentteam_cli_notify_test_requires_configured_feishu_webhook(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
