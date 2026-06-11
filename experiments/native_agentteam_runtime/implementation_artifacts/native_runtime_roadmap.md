@@ -578,8 +578,6 @@ event types still listed below.
 Goal: make long-running operation understandable and controllable while allowing
 the AgentTeam framework itself to be updated without breaking active runs.
 
-Status: proposed.
-
 Scope:
 
 - make `agentteam status` and `agentteam taskpack list` distinguish true live
@@ -611,6 +609,63 @@ Remaining follow-up:
   sparse notification policy;
 - add more lifecycle telemetry for release activate/rollback.
 
+### M38: Artifact Projection Database
+
+Status: proposed next milestone.
+
+Goal: add a local SQLite projection layer that makes long-running project state
+fast to query, summarize, clean up, and diagnose while keeping file-backed
+artifacts as the audit authority.
+
+Decision: use a hybrid store. `events.jsonl`, frozen taskpacks, patch files,
+reports, and integration baseline metadata remain authoritative artifacts.
+`agentteam.db` is a rebuildable projection and index. DB corruption must not
+invalidate an existing run, and DB writes must not be required for a worker
+attempt to finish.
+
+Scope:
+
+- create `<work_root>/agentteam.db` as a project-local projection database;
+- define schema-versioned tables for runs, taskpacks, tasks, attempts, events,
+  artifact metadata, integrations, reports, token usage, manual gates,
+  permission requests, and releases;
+- keep SQLite in WAL mode with short single-writer transactions;
+- index existing authoritative artifacts by physical path, logical type,
+  content hash, run id, task id, attempt id, size, and retention policy;
+- add `agentteam db check` and `agentteam db rebuild` so the projection can be
+  validated and regenerated from `frozen/`, `runs/`, reports, state files, and
+  event logs;
+- make `status`, `logs`, `taskpack list`, `report`, `update --status`, and
+  `gc` eligible to read from the DB first, with file replay fallback;
+- expose aggregate statistics for token usage, attempts, failures, runtime
+  duration, and integration outcomes through a small `stats` command or view;
+- improve `gc` so it can distinguish authoritative artifacts, rebuildable
+  caches, old releases, orphaned runs, and protected active or nonterminal
+  state.
+
+Acceptance:
+
+- deleting `agentteam.db` and running rebuild recreates the same run/task/event
+  summaries from authoritative files;
+- `status` and `logs` return correct results when the DB is present and when it
+  is absent;
+- DB writes are best-effort projections and never replace append-only event
+  writes;
+- artifact metadata records content hashes and sizes for reports, patches,
+  taskpacks, state snapshots, role contexts, and repo contexts;
+- `gc --dry-run` can explain what would be deleted and why using indexed
+  artifact metadata;
+- normal unit tests use temporary SQLite files and require no live model calls.
+
+Short-term slices:
+
+- M38a: schema, migration log, event/taskpack/run projection, `db check`, and
+  `db rebuild`.
+- M38b: read-through query path for `status`, `logs`, `taskpack list`, and
+  report metadata with file replay fallback.
+- M38c: artifact metadata hashes, token/stat aggregation, and DB-backed smart
+  `gc --dry-run`.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -620,8 +675,8 @@ These items should wait until M23-M30 have made the local runtime reliable:
 - Richer repository analysis using language-aware tools such as compilers, LSP,
   build systems, and static analyzers, with compact summaries fed to repo and
   role context packages after the M32 MVP is validated.
-- A stronger durable store if file locking and JSONL replay become insufficient
-  for long project runs.
+- Moving from a rebuildable DB projection to a DB-primary artifact store, if the
+  hybrid M38 path proves reliable and file-backed replay becomes the bottleneck.
 - Policy-governed semantic feedback where implementation evidence can propose
   updates to design authority artifacts without letting ordinary workers edit
   those artifacts directly.
@@ -651,7 +706,7 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is M37. It addresses the operator visibility and
-safe-update gap discovered during the first non-fixture pilot attempt. Inflight
+The next recommended step is M38a. It builds the minimal SQLite projection and
+rebuild path before any command starts depending on the database. Inflight
 migration remains a separate M29 decision gate because it changes ownership of
 already leased work.
