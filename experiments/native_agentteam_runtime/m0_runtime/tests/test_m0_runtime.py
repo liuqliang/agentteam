@@ -4646,11 +4646,35 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue((second_worktree / "generated" / "baseline_one.json").exists())
 
     def test_two_phase_failed_integration_verification_does_not_advance_baseline(self):
+        class RecordingNotificationSink:
+            def __init__(self):
+                self.calls = []
+
+            def notify(self, event, context):
+                self.calls.append({"event": event, "context": context})
+                return {
+                    "event_type": "notification_sent",
+                    "actor": "agent-notifier",
+                    "target_agent_id": None,
+                    "idempotency_key": f"notification:{event['event_id']}",
+                    "correlation_id": event["correlation_id"],
+                    "payload": {
+                        "provider": "feishu",
+                        "project": "agentteam",
+                        "source_event_type": event["event_type"],
+                        "source_event_id": event["event_id"],
+                        "source_event_sequence": event["sequence"],
+                        "notification_status": "sent",
+                        "message_summary": event["event_type"],
+                    },
+                }
+
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             repo = tmp_path / "repo"
             output_dir = tmp_path / "run"
             agent_pool_path = tmp_path / "agent_pool.json"
+            sink = RecordingNotificationSink()
             _init_git_repo(repo)
             source_head = _git_rev_parse(repo, "HEAD")
             backlog_path = _write_backlog(
@@ -4667,6 +4691,7 @@ class M0RuntimeTests(unittest.TestCase):
                 project_root=repo,
                 max_inflight=1,
                 integrate_accepted_patch=True,
+                notification_sink=sink,
                 integration_verification_command=[
                     sys.executable,
                     "-c",
@@ -4702,6 +4727,19 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertFalse((baseline_worktree / "generated" / "failing.json").exists())
             self.assertEqual(_git_status_short(baseline_worktree), "")
             self.assertEqual(_git_rev_parse(repo, "HEAD"), source_head)
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            blocked = [event for event in events if event["event_type"] == "integration_blocked"]
+            self.assertEqual(len(blocked), 1)
+            self.assertEqual(blocked[0]["payload"]["block_reason"], "verification_failed")
+            self.assertEqual(blocked[0]["payload"]["task_id"], "TASK-001")
+            self.assertEqual(blocked[0]["payload"]["attempt_id"], "TASK-001-ATTEMPT-001")
+            self.assertEqual(
+                [call["event"]["event_type"] for call in sink.calls],
+                ["integration_blocked"],
+            )
 
     def test_two_phase_scheduler_dispatches_multiple_tasks_before_collecting(self):
         with tempfile.TemporaryDirectory() as tmp:

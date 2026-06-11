@@ -1048,6 +1048,26 @@ class TwoPhaseFileScheduler:
                     )
                     events.append(
                         self._event(
+                            "integration_blocked",
+                            "agent-scheduler",
+                            inflight["agent_id"],
+                            f"integration-blocked:{inflight['attempt_id']}",
+                            inflight["correlation_id"],
+                            {
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "lease_id": inflight["lease_id"],
+                                "block_reason": "verification_failed",
+                                "patch_path": str(patch_path),
+                                **integration,
+                                **verification,
+                                **baseline_commit,
+                                **rollback,
+                            },
+                        )
+                    )
+                    events.append(
+                        self._event(
                             "integration_baseline_commit_evaluated",
                             "agent-scheduler",
                             inflight["agent_id"],

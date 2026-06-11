@@ -84,6 +84,18 @@ def _write_jsonl(path, records):
     )
 
 
+def _read_jsonl(path):
+    records = []
+    if not path.exists():
+        return records
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+
 class _WebhookCaptureHandler(BaseHTTPRequestHandler):
     payloads = None
 
@@ -2470,6 +2482,14 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["processes"]["live"], 0)
             self.assertEqual(text_completed.returncode, 0, text_completed.stderr)
             self.assertIn("liveness: running-stale", text_completed.stdout)
+            events = _read_jsonl(run_dir / "events.jsonl")
+            stale_events = [
+                event for event in events
+                if event.get("event_type") == "run_stale_detected"
+            ]
+            self.assertEqual(len(stale_events), 1)
+            self.assertEqual(stale_events[0]["payload"]["liveness_status"], "running-stale")
+            self.assertEqual(stale_events[0]["payload"]["run_id"], "stale-run")
 
     def test_agentteam_cli_status_reports_running_alive_liveness(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3373,6 +3393,90 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["latest_installed_release"]["release_id"], "release-a")
             self.assertEqual(summary["runs_by_release"]["release-a"], ["managed-run"])
             self.assertEqual(summary["unmanaged_runs"], ["unmanaged-run"])
+
+    def test_agentteam_cli_update_activate_and_rollback_record_release_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "update-project")
+            for release_id in ["release-a", "release-b"]:
+                release_root = work_root / "releases" / release_id
+                release_root.mkdir(parents=True)
+                _write_json(
+                    release_root / "manifest.json",
+                    {
+                        "manifest_schema_version": "agentteam_release_manifest.v1",
+                        "release_id": release_id,
+                        "release_root": str(release_root),
+                        "source_root": str(tmp_path / "checkout" / release_id),
+                        "installed_at": (
+                            "2026-06-08T09:00:00Z"
+                            if release_id == "release-a"
+                            else "2026-06-08T10:00:00Z"
+                        ),
+                    },
+                )
+            _write_json(
+                work_root / "releases" / "active.json",
+                {
+                    "release_id": "release-a",
+                    "release_root": str(work_root / "releases" / "release-a"),
+                },
+            )
+
+            activate_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--activate",
+                    "release-b",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            rollback_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "update",
+                    "--project-root",
+                    str(repo),
+                    "--rollback",
+                    "release-a",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(activate_completed.returncode, 0, activate_completed.stderr)
+            self.assertEqual(rollback_completed.returncode, 0, rollback_completed.stderr)
+            activate_summary = json.loads(activate_completed.stdout)
+            rollback_summary = json.loads(rollback_completed.stdout)
+            self.assertEqual(activate_summary["release_event"]["event_type"], "update_activated")
+            self.assertEqual(activate_summary["release_event"]["release_id"], "release-b")
+            self.assertEqual(rollback_summary["release_event"]["event_type"], "rollback_activated")
+            self.assertEqual(rollback_summary["release_event"]["release_id"], "release-a")
+            release_events = _read_jsonl(work_root / "releases" / "events.jsonl")
+            self.assertEqual(
+                [event["event_type"] for event in release_events],
+                ["update_activated", "rollback_activated"],
+            )
+            self.assertEqual([event["sequence"] for event in release_events], [1, 2])
 
     def test_agentteam_cli_update_status_text_lists_release_ids_only(self):
         with tempfile.TemporaryDirectory() as tmp:

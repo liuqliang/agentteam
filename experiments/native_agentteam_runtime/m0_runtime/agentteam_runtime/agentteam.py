@@ -1833,9 +1833,62 @@ def _format_utc_timestamp(timestamp):
     return timestamp.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _record_run_stale_detected_if_needed(run_dir, summary):
+    if summary.get("liveness_status") != "running-stale":
+        return None
+    return _append_run_event_once(
+        run_dir,
+        "run_stale_detected",
+        {
+            "run_id": Path(run_dir).resolve().name,
+            "run_status": summary.get("run_status") or summary.get("status"),
+            "overall_status": summary.get("overall_status"),
+            "liveness_status": summary.get("liveness_status"),
+            "processes": summary.get("processes"),
+            "workers": summary.get("workers"),
+            "runtime_release": summary.get("runtime_release"),
+        },
+    )
+
+
+def _append_run_event_once(run_dir, event_type, payload):
+    run_dir = Path(run_dir).resolve()
+    events_path = run_dir / "events.jsonl"
+    events = _read_jsonl(events_path)
+    for event in events:
+        if event.get("event_type") == event_type:
+            return event
+    sequence = max(
+        [
+            int(event.get("sequence", 0))
+            for event in events
+            if isinstance(event, dict) and str(event.get("sequence", "")).isdigit()
+        ],
+        default=0,
+    ) + 1
+    event = {
+        "event_id": f"EVT-{sequence:04d}",
+        "sequence": sequence,
+        "time": _format_utc_timestamp(datetime.now(UTC)),
+        "event_type": event_type,
+        "actor": "agentteam-cli",
+        "target_agent_id": None,
+        "idempotency_key": f"{event_type}:{run_dir.name}",
+        "correlation_id": f"run:{run_dir.name}",
+        "run_id": run_dir.name,
+        "step_id": "STEP-RUN",
+        "payload": payload,
+    }
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    with events_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(event, sort_keys=True) + "\n")
+    return event
+
+
 def _handle_status(args):
     project_root = Path(args.project_root or ".").resolve()
     profile = load_project_profile(project_root)
+    run_dir = None
     try:
         run_dir = _canonical_run_dir(Path(args.run_dir).resolve()) if args.run_dir else _latest_run_dir(profile)
         summary = _build_run_status_summary(profile, run_dir)
@@ -1845,6 +1898,10 @@ def _handle_status(args):
             summary = _build_project_status_summary(profile, authoring)
         else:
             raise exc
+    if run_dir is not None and summary.get("status_scope") != "project":
+        stale_event = _record_run_stale_detected_if_needed(run_dir, summary)
+        if stale_event:
+            summary["stale_event"] = stale_event
     if args.json:
         return summary
     if summary.get("status_scope") == "project":
@@ -2126,6 +2183,9 @@ def _handle_update(args):
     else:
         raise AgentTeamCliError("update action is required")
     summary = _attach_release_status_fields(summary, profile)
+    active_release = summary.get("active_release")
+    if isinstance(active_release, dict) and isinstance(active_release.get("release_event"), dict):
+        summary["release_event"] = active_release["release_event"]
     if args.json:
         return summary
     _write_update_text(summary)
@@ -2238,6 +2298,7 @@ def _handle_watch(args):
     printed = 0
     while max_lines is None or printed < max_lines:
         summary = _build_run_status_summary(profile, run_dir)
+        _record_run_stale_detected_if_needed(run_dir, summary)
         cursor, events = read_event_records_since(run_dir / "events.jsonl", cursor, max_records=20)
         _write_watch_line(summary, events, json_lines=args.json_lines)
         printed += 1

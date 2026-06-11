@@ -572,8 +572,8 @@ Remaining follow-up work:
 
 ### M37: Operator Control Plane And Versioned Update
 
-Status: implemented in the native-runtime branch, with follow-up notification
-event types still listed below.
+Status: implemented in the native-runtime branch, including the follow-up
+notification and release lifecycle telemetry listed below.
 
 Goal: make long-running operation understandable and controllable while allowing
 the AgentTeam framework itself to be updated without breaking active runs.
@@ -603,7 +603,7 @@ Acceptance:
   commands, and leaves existing run release bindings unchanged.
 - taskpack delete supports dry-run cleanup and requires explicit run deletion.
 
-Remaining follow-up:
+Completed follow-up:
 
 - emit dedicated `integration_blocked` and `run_stale_detected` events for the
   sparse notification policy;

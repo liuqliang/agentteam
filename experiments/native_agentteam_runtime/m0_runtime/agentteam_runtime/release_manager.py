@@ -79,15 +79,18 @@ def activate_release(work_root, release_id, update_status="activated"):
     if not manifest_path.exists():
         raise AgentTeamReleaseError(f"release not found: {release_id}")
     manifest = _read_json_if_exists(manifest_path)
+    activated_at = _utc_now()
     pointer = {
         "pointer_schema_version": RELEASE_POINTER_SCHEMA_VERSION,
         "release_id": release_id,
         "release_root": manifest.get("release_root") or str(manifest_path.parent),
-        "activated_at": _utc_now(),
+        "activated_at": activated_at,
         "update_status": update_status,
     }
     _write_json(active_release_path(work_root), pointer)
-    return pointer
+    event_type = "rollback_activated" if update_status == "rollback_activated" else "update_activated"
+    release_event = _append_release_event(work_root, pointer, event_type)
+    return {**pointer, "release_event": release_event}
 
 
 def read_active_release(work_root):
@@ -224,6 +227,10 @@ def active_release_path(work_root):
     return releases_root(work_root) / "active.json"
 
 
+def release_events_path(work_root):
+    return releases_root(work_root) / "events.jsonl"
+
+
 def _copy_release_files(checkout_root, release_root):
     launcher = checkout_root / "agentteam"
     runtime_package = checkout_root / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
@@ -338,10 +345,57 @@ def _read_json_if_exists(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _read_jsonl_if_exists(path):
+    path = Path(path)
+    records = []
+    if not path.exists():
+        return records
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+
 def _write_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _append_jsonl(path, records):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _append_release_event(work_root, pointer, event_type):
+    events_path = release_events_path(work_root)
+    existing = _read_jsonl_if_exists(events_path)
+    sequence = max(
+        [
+            int(event.get("sequence", 0))
+            for event in existing
+            if isinstance(event, dict) and str(event.get("sequence", "")).isdigit()
+        ],
+        default=0,
+    ) + 1
+    event = {
+        "event_schema_version": "agentteam_release_event.v1",
+        "event_id": f"REL-EVT-{sequence:04d}",
+        "sequence": sequence,
+        "time": pointer.get("activated_at") or _utc_now(),
+        "event_type": event_type,
+        "release_id": pointer.get("release_id"),
+        "release_root": pointer.get("release_root"),
+        "update_status": pointer.get("update_status"),
+        "activated_at": pointer.get("activated_at"),
+    }
+    _append_jsonl(events_path, [event])
+    return event
 
 
 def _utc_now():
