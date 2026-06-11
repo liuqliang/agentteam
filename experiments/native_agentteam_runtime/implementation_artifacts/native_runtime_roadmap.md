@@ -609,9 +609,64 @@ Completed follow-up:
   sparse notification policy;
 - add more lifecycle telemetry for release activate/rollback.
 
-### M38: Artifact Projection Database
+### M38: Git-Backed Runtime Release Store
 
 Status: proposed next milestone.
+
+Goal: make AgentTeam runtime updates reproducible and storage-efficient for
+local long-term use by installing framework releases from explicit local or
+remote git refs into a global immutable release store.
+
+Decision: do not introduce binary packaging or cross-platform release artifacts
+yet. Use git as the version authority. A release is identified by source repo,
+source ref, resolved commit SHA, and a generated release id. The release code is
+stored once under a global cache, while each project stores only active release
+pointers, release events, and run-level release pins.
+
+Scope:
+
+- add `agentteam update --from-git <repo> --ref <ref>` for both local git repos
+  and remote git URLs;
+- resolve every requested ref to an exact commit before installation;
+- install the resolved source tree into
+  `~/.local/share/agentteam/runtime-releases/<source-key>/<release-id>/`;
+- keep project-local release state as pointers under
+  `<work_root>/releases/`, not full framework copies;
+- write project-local ref metadata so `update --status`, `rollback`, and run
+  pinning continue to work per project;
+- protect globally cached releases that are active or pinned by any known
+  project before global cleanup deletes them;
+- preserve the existing side-by-side update rule: existing runs keep using the
+  release they started with, and new runs use the active release.
+
+Acceptance:
+
+- installing from a local repo ref records `source_repo`, `source_ref`,
+  `source_commit`, `source_key`, `release_id`, and global `release_root`;
+- installing from a remote git URL resolves the ref, downloads the matching
+  source into the global release store, and activates the project pointer;
+- re-installing the same source commit reuses the existing global release store
+  entry instead of copying code into every project;
+- `agentteam update --status` clearly shows active, latest installed, known
+  project references, and whether the active release is latest;
+- `agentteam update --rollback <release-id>` activates a project-local pointer
+  to an already installed global release;
+- cleanup can report and avoid deleting releases referenced by active project
+  pointers or nonterminal run pins;
+- normal unit tests use local temporary git repositories and require no network.
+
+Short-term slices:
+
+- M38a: global release store layout, local `--from-git --ref` install, manifest
+  format, project pointer refs, and status/rollback compatibility.
+- M38b: remote git URL resolution and download with deterministic temporary
+  checkouts, plus reuse of an already installed source commit.
+- M38c: global release reference discovery and cleanup protection across known
+  projects, with dry-run explanations.
+
+### M39: Artifact Projection Database
+
+Status: deferred until after M38 release management.
 
 Goal: add a local SQLite projection layer that makes long-running project state
 fast to query, summarize, clean up, and diagnose while keeping file-backed
@@ -659,11 +714,11 @@ Acceptance:
 
 Short-term slices:
 
-- M38a: schema, migration log, event/taskpack/run projection, `db check`, and
+- M39a: schema, migration log, event/taskpack/run projection, `db check`, and
   `db rebuild`.
-- M38b: read-through query path for `status`, `logs`, `taskpack list`, and
+- M39b: read-through query path for `status`, `logs`, `taskpack list`, and
   report metadata with file replay fallback.
-- M38c: artifact metadata hashes, token/stat aggregation, and DB-backed smart
+- M39c: artifact metadata hashes, token/stat aggregation, and DB-backed smart
   `gc --dry-run`.
 
 ## Longer-Term Route
@@ -676,7 +731,7 @@ These items should wait until M23-M30 have made the local runtime reliable:
   build systems, and static analyzers, with compact summaries fed to repo and
   role context packages after the M32 MVP is validated.
 - Moving from a rebuildable DB projection to a DB-primary artifact store, if the
-  hybrid M38 path proves reliable and file-backed replay becomes the bottleneck.
+  hybrid M39 path proves reliable and file-backed replay becomes the bottleneck.
 - Policy-governed semantic feedback where implementation evidence can propose
   updates to design authority artifacts without letting ordinary workers edit
   those artifacts directly.
@@ -706,7 +761,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is M38a. It builds the minimal SQLite projection and
-rebuild path before any command starts depending on the database. Inflight
-migration remains a separate M29 decision gate because it changes ownership of
-already leased work.
+The next recommended step is M38a. It implements the global git-backed runtime
+release store and local ref installation path before remote download and global
+cleanup are added.
