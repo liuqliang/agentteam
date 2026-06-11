@@ -818,6 +818,11 @@ def _add_integrate_parser(subcommands):
     parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
     parser.add_argument("--taskpack", help="Run/taskpack id to integrate. Defaults to latest run id.")
     parser.add_argument("--run-dir", help="Existing run directory to integrate. Overrides --taskpack.")
+    parser.add_argument(
+        "--rebase",
+        action="store_true",
+        help="Rebase the integration baseline onto the current target HEAD before merging.",
+    )
     parser.add_argument("--json", action="store_true", help="Print integration result as JSON instead of human text.")
     parser.set_defaults(handler=_handle_integrate)
 
@@ -1730,7 +1735,7 @@ def _handle_integrate(args):
     project_root = Path(args.project_root or ".").resolve()
     profile = load_project_profile(project_root)
     run_dir = _selected_run_dir(args, profile, command_name="integrate")
-    summary = _integrate_run_baseline(project_root, profile, run_dir)
+    summary = _integrate_run_baseline(project_root, profile, run_dir, rebase=args.rebase)
     if args.json:
         return summary
     _write_integrate_text(summary)
@@ -2670,7 +2675,7 @@ def _write_paths_text(summary):
     sys.stdout.flush()
 
 
-def _integrate_run_baseline(project_root, profile, run_dir):
+def _integrate_run_baseline(project_root, profile, run_dir, rebase=False):
     run_dir = Path(run_dir).resolve()
     run_status = _build_run_status_summary(profile, run_dir)
     if run_status.get("status") not in {"idle", "completed"}:
@@ -2698,6 +2703,7 @@ def _integrate_run_baseline(project_root, profile, run_dir):
         return {
             "integrate_status": "up_to_date",
             "merge_status": "up_to_date",
+            "rebase_status": "not_needed",
             "project": profile.get("project_key") or "unknown",
             "taskpack_id": run_dir.name,
             "project_root": str(project_root),
@@ -2707,20 +2713,45 @@ def _integrate_run_baseline(project_root, profile, run_dir):
             "after_head": current_head,
         }
     ancestor = _git_completed(project_root, ["merge-base", "--is-ancestor", "HEAD", branch], check=False)
+    merge_status = "fast_forward"
     if ancestor.returncode != 0:
-        raise AgentTeamCliError(
-            "integration baseline is not a fast-forward of target HEAD",
-            project_root=str(project_root),
-            run_dir=str(run_dir),
-            branch=branch,
-            current_head=current_head,
-            integration_baseline_head=branch_head,
-        )
+        if rebase:
+            rebase_result = _rebase_integration_baseline(project_root, run_dir, baseline, current_head)
+            if rebase_result["rebase_status"] == "conflict":
+                return {
+                    "integrate_status": "blocked",
+                    "merge_status": "not_merged",
+                    "rebase_status": "conflict",
+                    "project": profile.get("project_key") or "unknown",
+                    "taskpack_id": run_dir.name,
+                    "project_root": str(project_root),
+                    "run_dir": str(run_dir),
+                    "integration_baseline": {**baseline, "head_sha": branch_head},
+                    "before_head": current_head,
+                    "after_head": current_head,
+                    "conflicted_files": rebase_result["conflicted_files"],
+                    "rebase_stdout": rebase_result.get("stdout", ""),
+                    "rebase_stderr": rebase_result.get("stderr", ""),
+                    "rebase_abort_status": rebase_result.get("abort_status"),
+                }
+            branch_head = rebase_result["head_sha"]
+            baseline = {**baseline, "head_sha": branch_head}
+            merge_status = "rebased_fast_forward"
+        else:
+            raise AgentTeamCliError(
+                "integration baseline is not a fast-forward of target HEAD",
+                project_root=str(project_root),
+                run_dir=str(run_dir),
+                branch=branch,
+                current_head=current_head,
+                integration_baseline_head=branch_head,
+            )
     merge = _git_completed(project_root, ["merge", "--ff-only", branch])
     after_head = _git_stdout(project_root, ["rev-parse", "HEAD"])
     return {
         "integrate_status": "merged",
-        "merge_status": "fast_forward",
+        "merge_status": merge_status,
+        "rebase_status": "rebased" if merge_status == "rebased_fast_forward" else "not_needed",
         "project": profile.get("project_key") or "unknown",
         "taskpack_id": run_dir.name,
         "project_root": str(project_root),
@@ -2733,11 +2764,68 @@ def _integrate_run_baseline(project_root, profile, run_dir):
     }
 
 
+def _rebase_integration_baseline(project_root, run_dir, baseline, current_head):
+    worktree_path = baseline.get("worktree_path")
+    if not worktree_path:
+        raise AgentTeamCliError("integration baseline worktree not found", run_dir=str(run_dir))
+    worktree = Path(worktree_path)
+    if not worktree.exists():
+        raise AgentTeamCliError("integration baseline worktree not found", run_dir=str(run_dir), worktree_path=str(worktree))
+    dirty_status = _git_stdout(worktree, ["status", "--porcelain=v1", "--untracked-files=all"])
+    if dirty_status:
+        raise AgentTeamCliError(
+            "integration baseline worktree must be clean before rebase",
+            run_dir=str(run_dir),
+            worktree_path=str(worktree),
+            dirty_status=dirty_status,
+        )
+    rebase = _git_completed(worktree, ["rebase", current_head], check=False)
+    if rebase.returncode != 0:
+        conflicted_files = _git_conflicted_files(worktree)
+        abort = _git_completed(worktree, ["rebase", "--abort"], check=False)
+        return {
+            "rebase_status": "conflict",
+            "conflicted_files": conflicted_files,
+            "stdout": rebase.stdout,
+            "stderr": rebase.stderr,
+            "abort_status": "aborted" if abort.returncode == 0 else "abort_failed",
+            "abort_stdout": abort.stdout,
+            "abort_stderr": abort.stderr,
+        }
+    head_sha = _git_stdout(worktree, ["rev-parse", "HEAD"])
+    _update_integration_baseline_head(run_dir, head_sha)
+    return {
+        "rebase_status": "rebased",
+        "head_sha": head_sha,
+        "stdout": rebase.stdout,
+        "stderr": rebase.stderr,
+    }
+
+
+def _git_conflicted_files(repo):
+    output = _git_completed(repo, ["diff", "--name-only", "--diff-filter=U"], check=False).stdout
+    return [line for line in output.splitlines() if line.strip()]
+
+
+def _update_integration_baseline_head(run_dir, head_sha):
+    state_path = run_dir / "state" / "two_phase_scheduler_state.json"
+    if not state_path.exists():
+        state_path = run_dir / "state" / "scheduler_state.json"
+    if not state_path.exists():
+        return
+    state = _read_json_if_exists(state_path)
+    baseline = state.get("integration_baseline") if isinstance(state.get("integration_baseline"), dict) else {}
+    baseline["integration_baseline_head_sha"] = head_sha
+    state["integration_baseline"] = baseline
+    _write_json(state_path, state)
+
+
 def _write_integrate_text(summary):
     baseline = summary.get("integration_baseline") or {}
     lines = [
         f"integrate_status: {summary['integrate_status']}",
         f"merge_status: {summary['merge_status']}",
+        f"rebase_status: {summary.get('rebase_status') or 'not_requested'}",
         f"project: {summary['project']}",
         f"taskpack_id: {summary['taskpack_id']}",
         f"integration_baseline_branch: {baseline.get('branch') or 'none'}",
@@ -2745,6 +2833,8 @@ def _write_integrate_text(summary):
         f"after_head: {summary.get('after_head') or 'unknown'}",
         f"run_dir: {summary['run_dir']}",
     ]
+    if summary.get("conflicted_files"):
+        lines.append(f"conflicted_files: {', '.join(summary['conflicted_files'])}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 

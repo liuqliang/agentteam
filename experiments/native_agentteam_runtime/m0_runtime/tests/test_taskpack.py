@@ -296,6 +296,61 @@ def _write_completed_operator_run(run_dir):
     return run_dir
 
 
+def _init_agentteam_profile_for_test(repo, work_root, project_key):
+    completed = subprocess.run(
+        [
+            "python3",
+            "-m",
+            "agentteam_runtime.agentteam",
+            "init",
+            "--project-root",
+            str(repo),
+            "--project-key",
+            project_key,
+            "--work-root",
+            str(work_root),
+            "--author-runtime",
+            "fake",
+            "--runtime",
+            "fake",
+        ],
+        env=_test_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr)
+    return completed
+
+
+def _start_fake_agentteam_run_for_test(repo, goal, taskpack_id):
+    completed = subprocess.run(
+        [
+            "python3",
+            "-m",
+            "agentteam_runtime.agentteam",
+            "start",
+            "--project-root",
+            str(repo),
+            "--goal",
+            goal,
+            "--taskpack-id",
+            taskpack_id,
+            "--json",
+        ],
+        env=_test_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr)
+    return completed
+
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
@@ -1287,6 +1342,157 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["merge_status"], "fast_forward")
             self.assertEqual(summary["after_head"], baseline_head)
             self.assertEqual((repo / "README.md").read_text(encoding="utf-8"), "# fixture\n\nintegrated\n")
+
+    def test_agentteam_cli_integrate_rebases_diverged_baseline_before_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "rebase-integrate-project")
+            _start_fake_agentteam_run_for_test(
+                repo,
+                "Create a run for rebase integration.",
+                "rebase-integrate-run",
+            )
+            baseline_worktree = work_root / "runs" / "rebase-integrate-run" / "integration-baseline"
+            (baseline_worktree / "agentteam-result.txt").write_text("baseline change\n", encoding="utf-8")
+            subprocess.run(["git", "add", "agentteam-result.txt"], cwd=baseline_worktree, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "agentteam baseline change"],
+                cwd=baseline_worktree,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            (repo / "main-change.txt").write_text("main branch change\n", encoding="utf-8")
+            subprocess.run(["git", "add", "main-change.txt"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "main branch advanced"],
+                cwd=repo,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "integrate",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "rebase-integrate-run",
+                    "--rebase",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["integrate_status"], "merged")
+            self.assertEqual(summary["rebase_status"], "rebased")
+            self.assertEqual(summary["merge_status"], "rebased_fast_forward")
+            self.assertEqual((repo / "main-change.txt").read_text(encoding="utf-8"), "main branch change\n")
+            self.assertEqual((repo / "agentteam-result.txt").read_text(encoding="utf-8"), "baseline change\n")
+            self.assertEqual(summary["after_head"], summary["integration_baseline"]["head_sha"])
+
+    def test_agentteam_cli_integrate_rebase_conflict_returns_blocked_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "conflict-integrate-project")
+            _start_fake_agentteam_run_for_test(
+                repo,
+                "Create a run for conflict integration.",
+                "conflict-integrate-run",
+            )
+            baseline_worktree = work_root / "runs" / "conflict-integrate-run" / "integration-baseline"
+            (baseline_worktree / "README.md").write_text("# fixture\n\nbaseline change\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=baseline_worktree, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "agentteam conflicting baseline"],
+                cwd=baseline_worktree,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            (repo / "README.md").write_text("# fixture\n\nmain change\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "main conflicting change"],
+                cwd=repo,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            before_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            ).stdout.strip()
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "integrate",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "conflict-integrate-run",
+                    "--rebase",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["integrate_status"], "blocked")
+            self.assertEqual(summary["rebase_status"], "conflict")
+            self.assertEqual(summary["merge_status"], "not_merged")
+            self.assertEqual(summary["conflicted_files"], ["README.md"])
+            after_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            self.assertEqual(after_head, before_head)
+            self.assertEqual((repo / "README.md").read_text(encoding="utf-8"), "# fixture\n\nmain change\n")
+            baseline_status = subprocess.run(
+                ["git", "status", "--porcelain=v1"],
+                cwd=baseline_worktree,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            self.assertEqual(baseline_status, "")
 
     def test_agentteam_cli_integrate_requires_clean_target_repository(self):
         with tempfile.TemporaryDirectory() as tmp:
