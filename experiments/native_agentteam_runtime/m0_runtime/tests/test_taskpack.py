@@ -4188,6 +4188,77 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn("optimization taskpack requires", str(raised.exception))
 
+    def test_validate_taskpack_rejects_goal_kind_downgrade_for_optimization_goal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="阅读这个比赛代码仓库并检查能否优化现有工作。",
+                draft_root=drafts,
+                taskpack_id="misclassified-optimization",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["goal_kind"] = "audit"
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("goal_kind must match original_goal classification: optimization", str(raised.exception))
+
+    def test_canonicalize_codex_taskpack_restores_optimization_goal_kind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Optimize existing competition repository latency.",
+                draft_root=drafts,
+                taskpack_id="canonicalize-optimization",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["goal_kind"] = "audit"
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+
+            _canonicalize_codex_taskpack_files(result["taskpack_dir"])
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            self.assertEqual(loaded["taskpack"]["goal_kind"], "optimization")
+            self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
+
+    def test_validate_taskpack_rejects_optimization_task_that_loses_optimization_intent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="对比赛代码仓库进行阅读，并检查能否优化现有工作。",
+                draft_root=drafts,
+                taskpack_id="lost-optimization-intent",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["objective"] = "Audit repository completeness and fix concrete in-repo gaps."
+            backlog["items"][0]["goal_alignment"] = "Check whether the repository is ready to submit."
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("optimization task must preserve optimization intent", str(raised.exception))
+
     def test_taskpack_author_uses_unique_implicit_id_when_default_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

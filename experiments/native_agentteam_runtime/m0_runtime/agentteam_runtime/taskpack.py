@@ -17,6 +17,32 @@ TASKPACK_TRANSLATABLE_RUNTIME_BACKENDS = {"fake", "codex"}
 TASKPACK_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 TASKPACK_GOAL_KINDS = {"implementation", "optimization", "audit"}
 OPTIMIZATION_CODE_WORK_TYPES = {"code_implementation", "code_investigation"}
+OPTIMIZATION_INTENT_MARKERS = [
+    "optimize",
+    "optimization",
+    "improve",
+    "performance",
+    "accuracy",
+    "latency",
+    "throughput",
+    "benchmark",
+    "metric",
+    "profile",
+    "hotspot",
+    "baseline",
+    "speed",
+    "优化",
+    "改进",
+    "提升",
+    "性能",
+    "准确率",
+    "精度",
+    "加速",
+    "比赛",
+    "指标",
+    "延迟",
+    "耗时",
+]
 
 
 class TaskpackValidationError(ValueError):
@@ -203,15 +229,19 @@ def validate_taskpack(taskpack_dir):
     if semantic_contract_enabled and not _is_non_empty_string(taskpack.get("original_goal")):
         errors.append("original_goal must be a non-empty string")
     effective_goal = taskpack.get("original_goal") or taskpack.get("goal") or ""
+    classified_goal_kind = classify_goal_kind(effective_goal)
     goal_kind = taskpack.get("goal_kind")
     if semantic_contract_enabled:
         if goal_kind is None:
-            goal_kind = classify_goal_kind(effective_goal)
+            goal_kind = classified_goal_kind
         elif not _is_non_empty_string(goal_kind):
             errors.append("goal_kind must be a non-empty string")
-            goal_kind = classify_goal_kind(effective_goal)
+            goal_kind = classified_goal_kind
         elif goal_kind not in TASKPACK_GOAL_KINDS:
             errors.append(f"goal_kind must be one of: {', '.join(sorted(TASKPACK_GOAL_KINDS))}")
+        elif classified_goal_kind != "implementation" and goal_kind != classified_goal_kind:
+            errors.append(f"goal_kind must match original_goal classification: {classified_goal_kind}")
+            goal_kind = classified_goal_kind
     try:
         _validate_taskpack_runtime_backend(taskpack.get("runtime"))
     except TaskpackValidationError as exc:
@@ -261,6 +291,8 @@ def validate_taskpack(taskpack_dir):
             errors.append(f"{task_id_label} required_deliverables entries must be non-empty strings")
         elif semantic_contract_enabled and goal_kind == "optimization" and _is_optimization_code_item(item):
             has_optimization_code_item = True
+            if not _optimization_item_preserves_goal_intent(item):
+                errors.append(f"{task_id_label} optimization task must preserve optimization intent")
             missing = _missing_optimization_deliverables(deliverables)
             if missing:
                 errors.append(
@@ -365,25 +397,6 @@ def _default_goal_alignment(goal):
 
 def classify_goal_kind(goal):
     normalized = str(goal or "").lower()
-    optimization_markers = [
-        "optimize",
-        "optimization",
-        "improve",
-        "performance",
-        "accuracy",
-        "latency",
-        "throughput",
-        "benchmark",
-        "metric",
-        "优化",
-        "改进",
-        "提升",
-        "性能",
-        "准确率",
-        "精度",
-        "加速",
-        "比赛",
-    ]
     audit_markers = [
         "audit",
         "review",
@@ -393,7 +406,7 @@ def classify_goal_kind(goal):
         "审计",
         "评估",
     ]
-    if any(marker in normalized for marker in optimization_markers):
+    if any(marker in normalized for marker in OPTIMIZATION_INTENT_MARKERS):
         return "optimization"
     if any(marker in normalized for marker in audit_markers):
         return "audit"
@@ -445,6 +458,17 @@ def _is_optimization_code_item(item):
     if not isinstance(write_scope, list) or not write_scope:
         return False
     return not _write_scope_is_document_only(write_scope)
+
+
+def _optimization_item_preserves_goal_intent(item):
+    text = " ".join(
+        str(value or "")
+        for value in [
+            item.get("objective"),
+            item.get("goal_alignment"),
+        ]
+    ).lower()
+    return any(marker in text for marker in OPTIMIZATION_INTENT_MARKERS)
 
 
 def _missing_optimization_deliverables(deliverables):

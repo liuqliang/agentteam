@@ -328,6 +328,11 @@ def _author_prompt(
                 "must set taskpack.goal_kind to optimization"
             ),
             (
+                "- never downgrade an optimization goal into an audit/completeness task; the executable "
+                "task objective or goal_alignment must preserve optimization, performance, metric, "
+                "accuracy, latency, or benchmark intent"
+            ),
+            (
                 "- optimization taskpacks must include at least one ready backlog item with work_type "
                 "code_implementation or code_investigation and non-document write_scope"
             ),
@@ -392,7 +397,12 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
         if not taskpack.get("original_goal") and taskpack.get("goal"):
             taskpack["original_goal"] = taskpack["goal"]
         effective_goal = taskpack.get("original_goal") or taskpack.get("goal")
-        goal_kind = taskpack.get("goal_kind") or classify_goal_kind(effective_goal)
+        classified_goal_kind = classify_goal_kind(effective_goal)
+        declared_goal_kind = taskpack.get("goal_kind")
+        if classified_goal_kind != "implementation" and declared_goal_kind != classified_goal_kind:
+            goal_kind = classified_goal_kind
+        else:
+            goal_kind = declared_goal_kind or classified_goal_kind
         taskpack["goal_kind"] = goal_kind
         _write_json(taskpack_dir / "taskpack.yaml", taskpack)
     else:
