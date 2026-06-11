@@ -23,12 +23,14 @@ from agentteam_runtime import (
 )
 from agentteam_runtime.agentteam import (
     _build_project_authoring_summary,
+    _build_run_status_summary,
     _canonical_run_dir,
     _handle_taskpack_new,
     _handle_run,
     _run_paths_for_frozen_taskpack,
     _set_taskpack_runtime_backend,
     _stop_authoring,
+    _write_status_text,
 )
 from agentteam_runtime.diagnostic_chat import (
     build_runtime_diagnostic_context,
@@ -1688,7 +1690,8 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(status_completed.returncode, 0, status_completed.stderr)
             self.assertIn("project: status-project", status_completed.stdout)
             self.assertIn("latest_run: cli-status-run", status_completed.stdout)
-            self.assertIn("status: idle", status_completed.stdout)
+            self.assertIn("overall_status: idle", status_completed.stdout)
+            self.assertIn("run_status: idle", status_completed.stdout)
             self.assertIn("tasks: 1 done, 0 blocked", status_completed.stdout)
             self.assertIn("inflight: 0", status_completed.stdout)
             self.assertIn("manual_gates: 0", status_completed.stdout)
@@ -1801,7 +1804,8 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(status_completed.returncode, 0, status_completed.stderr)
             self.assertIn("latest_run: inflight-run", status_completed.stdout)
-            self.assertIn("status: max_ticks_reached", status_completed.stdout)
+            self.assertIn("overall_status: max_ticks_reached", status_completed.stdout)
+            self.assertIn("run_status: max_ticks_reached", status_completed.stdout)
             self.assertIn("tokens: total=900 input=700 output=200 reported=1/1", status_completed.stdout)
             self.assertIn("inflight: 1", status_completed.stdout)
             self.assertIn("workers: 1 stopped, 0 running, 0 quarantined", status_completed.stdout)
@@ -1809,6 +1813,76 @@ class TaskpackTests(unittest.TestCase):
                 "last_worker: implementation-worker-1 stopped exit_code=-15 stopped_by=terminated",
                 status_completed.stdout,
             )
+
+    def test_agentteam_cli_status_reports_active_authoring_over_idle_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "previous-run"
+            author_dir = work_root / "drafts" / ".follow-up-author"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "status-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            _write_completed_operator_run(run_dir)
+            author_dir.mkdir(parents=True)
+            _write_json(
+                author_dir / "author_state.json",
+                {
+                    "author_status": "running",
+                    "taskpack_id": "follow-up",
+                    "pid": os.getpid(),
+                    "started_at": "2026-06-11T00:00:00Z",
+                    "updated_at": "2026-06-11T00:00:01Z",
+                    "elapsed_seconds": 1.0,
+                },
+            )
+
+            status_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(status_completed.returncode, 0, status_completed.stderr)
+            self.assertIn("latest_run: previous-run", status_completed.stdout)
+            self.assertIn("overall_status: authoring", status_completed.stdout)
+            self.assertIn("run_status: idle", status_completed.stdout)
+            self.assertIn("active_phase: authoring", status_completed.stdout)
+            self.assertIn("active_authoring: follow-up", status_completed.stdout)
 
     def test_agentteam_cli_status_reports_running_stale_liveness(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4723,6 +4797,68 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["active_count"], 1)
             self.assertEqual(summary["latest"]["taskpack_id"], "running")
             self.assertEqual(summary["latest"]["liveness_status"], "running-alive")
+
+    def test_run_status_summary_reports_overall_authoring_when_followup_author_is_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = work_root / "runs" / "previous-run"
+            author_dir = work_root / "drafts" / ".follow-up-author"
+            _write_completed_operator_run(run_dir)
+            author_dir.mkdir(parents=True)
+            _write_json(
+                author_dir / "author_state.json",
+                {
+                    "author_status": "running",
+                    "taskpack_id": "follow-up",
+                    "pid": os.getpid(),
+                    "started_at": "2026-06-11T00:00:00Z",
+                    "updated_at": "2026-06-11T00:00:01Z",
+                    "elapsed_seconds": 1.0,
+                },
+            )
+            profile = {"project_key": "fixture", "work_root": str(work_root)}
+
+            summary = _build_run_status_summary(profile, run_dir)
+
+            self.assertEqual(summary["status"], "idle")
+            self.assertEqual(summary["run_status"], "idle")
+            self.assertEqual(summary["overall_status"], "authoring")
+            self.assertEqual(summary["active_phase"], "authoring")
+            self.assertEqual(summary["active_authoring"]["taskpack_id"], "follow-up")
+
+    def test_status_text_separates_overall_and_run_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = work_root / "runs" / "previous-run"
+            author_dir = work_root / "drafts" / ".follow-up-author"
+            _write_completed_operator_run(run_dir)
+            author_dir.mkdir(parents=True)
+            _write_json(
+                author_dir / "author_state.json",
+                {
+                    "author_status": "running",
+                    "taskpack_id": "follow-up",
+                    "pid": os.getpid(),
+                    "started_at": "2026-06-11T00:00:00Z",
+                    "updated_at": "2026-06-11T00:00:01Z",
+                    "elapsed_seconds": 1.0,
+                },
+            )
+            profile = {"project_key": "fixture", "work_root": str(work_root)}
+            summary = _build_run_status_summary(profile, run_dir)
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                _write_status_text(summary)
+
+            output = stdout.getvalue()
+            self.assertIn("overall_status: authoring", output)
+            self.assertIn("run_status: idle", output)
+            self.assertIn("active_phase: authoring", output)
+            self.assertIn("active_authoring: follow-up", output)
+            self.assertNotIn("\nstatus: idle\n", output)
 
     def test_stop_authoring_terminates_recorded_author_pid(self):
         with tempfile.TemporaryDirectory() as tmp:

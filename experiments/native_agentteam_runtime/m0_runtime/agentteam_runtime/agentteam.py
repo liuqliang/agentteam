@@ -2338,10 +2338,15 @@ def _latest_run_dir(profile):
 
 
 def _build_project_status_summary(profile, authoring):
+    active_authoring = _active_authoring_record(authoring)
     return {
         "status_scope": "project",
         "project": profile.get("project_key") or "unknown",
         "status": "authoring",
+        "overall_status": "authoring",
+        "run_status": None,
+        "active_phase": "authoring",
+        "active_authoring": active_authoring,
         "authoring": authoring,
         "work_root": profile.get("work_root"),
     }
@@ -2361,6 +2366,40 @@ def _build_project_authoring_summary(profile):
         "latest": latest,
         "active": active,
     }
+
+
+def _active_authoring_record(authoring):
+    if not isinstance(authoring, dict) or not authoring.get("active_count"):
+        return None
+    active = authoring.get("active")
+    if isinstance(active, list) and active:
+        return active[-1]
+    latest = authoring.get("latest")
+    if isinstance(latest, dict) and latest.get("liveness_status") == "running-alive":
+        return latest
+    return None
+
+
+def _overall_run_status(run_status, liveness_status, manual_gate_count, permission_request_count, authoring):
+    if _active_authoring_record(authoring):
+        return "authoring"
+    if manual_gate_count:
+        return "manual_gate_required"
+    if permission_request_count:
+        return "permission_required"
+    if liveness_status == "running-alive":
+        return "running"
+    return run_status or "unknown"
+
+
+def _active_phase_for_status(overall_status):
+    phase_by_status = {
+        "authoring": "authoring",
+        "manual_gate_required": "manual_gate",
+        "permission_required": "permission_request",
+        "running": "runtime",
+    }
+    return phase_by_status.get(overall_status)
 
 
 def _authoring_state_records(profile):
@@ -2520,10 +2559,23 @@ def _build_run_status_summary(profile, run_dir):
     integration_counts = _status_integration_counts(snapshot)
     manual_gate_count = _waiting_manual_gate_count(snapshot)
     permission_request_count = _waiting_permission_request_count(snapshot)
+    authoring = _build_project_authoring_summary(profile)
+    run_status = _status_run_state(snapshot, state)
+    overall_status = _overall_run_status(
+        run_status,
+        liveness["liveness_status"],
+        manual_gate_count,
+        permission_request_count,
+        authoring,
+    )
     summary = {
         "project": profile.get("project_key") or "unknown",
         "latest_run": run_dir.name,
-        "status": _status_run_state(snapshot, state),
+        "status": run_status,
+        "overall_status": overall_status,
+        "run_status": run_status,
+        "active_phase": _active_phase_for_status(overall_status),
+        "active_authoring": _active_authoring_record(authoring),
         "liveness_status": liveness["liveness_status"],
         "runtime_release": liveness["runtime_release"],
         "processes": liveness["processes"],
@@ -2537,7 +2589,7 @@ def _build_run_status_summary(profile, run_dir):
         "manual_gates": manual_gate_count,
         "permission_requests": permission_request_count,
         "last_failure": _status_last_failure(snapshot, state),
-        "authoring": _build_project_authoring_summary(profile),
+        "authoring": authoring,
         "run_dir": str(run_dir),
     }
     return summary
@@ -2743,7 +2795,8 @@ def _write_status_text(summary):
     lines = [
         f"project: {summary['project']}",
         f"latest_run: {summary['latest_run']}",
-        f"status: {summary['status']}",
+        f"overall_status: {summary.get('overall_status') or summary['status']}",
+        f"run_status: {summary.get('run_status') or summary['status']}",
         f"liveness: {summary['liveness_status']}",
         (
             "tasks: "
@@ -2758,6 +2811,16 @@ def _write_status_text(summary):
         f"manual_gates: {summary['manual_gates']}",
         f"permission_requests: {summary['permission_requests']}",
     ]
+    if summary.get("active_phase"):
+        lines.append(f"active_phase: {summary['active_phase']}")
+    active_authoring = summary.get("active_authoring")
+    if isinstance(active_authoring, dict):
+        lines.append(
+            "active_authoring: "
+            f"{active_authoring.get('taskpack_id') or 'unknown'} "
+            f"liveness={active_authoring.get('liveness_status') or 'unknown'} "
+            f"elapsed_seconds={active_authoring.get('elapsed_seconds') or 0}"
+        )
     if summary["workers"]["total"]:
         lines.append(
             "workers: "
@@ -2788,9 +2851,19 @@ def _write_project_status_text(summary):
     latest = authoring.get("latest") or {}
     lines = [
         f"project: {summary['project']}",
-        f"status: {summary['status']}",
+        f"overall_status: {summary.get('overall_status') or summary['status']}",
+        f"run_status: {summary.get('run_status') or 'none'}",
+        f"active_phase: {summary.get('active_phase') or 'none'}",
         f"authoring: {authoring.get('active_count', 0)} active, {authoring.get('total_count', 0)} recorded",
     ]
+    active_authoring = summary.get("active_authoring")
+    if isinstance(active_authoring, dict):
+        lines.append(
+            "active_authoring: "
+            f"{active_authoring.get('taskpack_id') or 'unknown'} "
+            f"liveness={active_authoring.get('liveness_status') or 'unknown'} "
+            f"elapsed_seconds={active_authoring.get('elapsed_seconds') or 0}"
+        )
     if latest:
         lines.extend(
             [
