@@ -427,6 +427,10 @@ agentteam logs --run-dir <run-dir> --json
 Text output shows the run id, returned event count, run directory, and compact
 event lines.
 
+When `<work_root>/agentteam.db` exists and is fresh, logs may read events from
+the projection database. If the projection is missing, stale, or unreadable,
+the command falls back to `events.jsonl`.
+
 ### `agentteam report`
 
 Renders a human-readable run completion report.

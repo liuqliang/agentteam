@@ -45,6 +45,7 @@ from .profile import (
 )
 from .projection_db import (
     check_project_projection_db,
+    read_projected_run_events,
     read_projected_taskpacks,
     rebuild_project_projection_db,
 )
@@ -2458,7 +2459,9 @@ def _handle_logs(args):
     run_dir = _selected_run_dir(args, profile, command_name="logs")
     if not run_dir.exists():
         raise AgentTeamCliError("run not found", run_dir=str(run_dir))
-    events = _read_jsonl(run_dir / "events.jsonl")
+    projected = read_projected_run_events(profile.get("work_root") or run_dir.parent.parent, run_dir.name)
+    projection_source = "db" if projected is not None else "files"
+    events = projected["events"] if projected is not None else _read_jsonl(run_dir / "events.jsonl")
     line_count = max(int(args.lines or 0), 0)
     selected = events[-line_count:] if line_count else []
     summary = {
@@ -2466,6 +2469,7 @@ def _handle_logs(args):
         "project": profile.get("project_key") or "unknown",
         "latest_run": run_dir.name,
         "run_dir": str(run_dir),
+        "projection_source": projection_source,
         "event_count": len(events),
         "returned_count": len(selected),
         "events": selected,

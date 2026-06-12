@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-PROJECTION_SCHEMA_VERSION = "agentteam_projection.v1"
+PROJECTION_SCHEMA_VERSION = "agentteam_projection.v2"
 
 
 def project_projection_db_path(work_root):
@@ -108,6 +108,38 @@ def read_projected_taskpacks(work_root):
             }
             for row in rows
         ],
+    }
+
+
+def read_projected_run_events(work_root, run_id):
+    check = check_project_projection_db(work_root)
+    if check["check_status"] != "passed":
+        return None
+    db_path = project_projection_db_path(work_root)
+    try:
+        with sqlite3.connect(db_path) as connection:
+            rows = connection.execute(
+                """
+                select event_json
+                from events
+                where run_id = ?
+                order by sequence
+                """,
+                (run_id,),
+            ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    events = []
+    for row in rows:
+        try:
+            events.append(json.loads(row[0]))
+        except (TypeError, json.JSONDecodeError):
+            continue
+    return {
+        "projection_source": "db",
+        "db_path": str(db_path),
+        "check": check,
+        "events": events,
     }
 
 
@@ -226,6 +258,7 @@ def _create_projection_schema(connection):
             step_id text,
             time text,
             payload_json text,
+            event_json text,
             primary key(run_id, sequence)
         )
         """
@@ -331,8 +364,9 @@ def _write_projection_rows(connection, projection):
             lease_id,
             step_id,
             time,
-            payload_json
-        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            payload_json,
+            event_json
+        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [event for run in runs for event in run["events"]],
     )
@@ -494,6 +528,7 @@ def _event_projection(run_id, event):
         event.get("step_id"),
         event.get("time"),
         json.dumps(payload, sort_keys=True),
+        json.dumps(event, sort_keys=True),
     )
 
 

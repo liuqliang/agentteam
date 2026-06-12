@@ -63,6 +63,10 @@ _EXPORTS = {
         ".projection_db",
         "read_projected_taskpacks",
     ),
+    "read_projected_run_events": (
+        ".projection_db",
+        "read_projected_run_events",
+    ),
     "rebuild_project_projection_db": (
         ".projection_db",
         "rebuild_project_projection_db",

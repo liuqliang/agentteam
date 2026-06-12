@@ -2466,6 +2466,92 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("run: logs-run", completed.stdout)
             self.assertIn("EVT-0001 run_completed", completed.stdout)
 
+    def test_agentteam_cli_logs_can_read_fresh_projection_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "logs-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "logs-project")
+            _write_completed_operator_run(run_dir)
+            rebuild_project_projection_db(work_root)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "logs",
+                    "--project-root",
+                    str(repo),
+                    "--lines",
+                    "1",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["projection_source"], "db")
+            self.assertEqual(summary["event_count"], 1)
+            self.assertEqual(summary["events"][0]["event_type"], "run_completed")
+
+    def test_agentteam_cli_logs_falls_back_when_projection_db_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "logs-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "logs-project")
+            _write_completed_operator_run(run_dir)
+            rebuild_project_projection_db(work_root)
+            with (run_dir / "events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "event_id": "EVT-0002",
+                            "event_type": "backlog_updated",
+                            "sequence": 2,
+                            "time": "2026-06-12T00:00:01Z",
+                            "payload": {"task_id": "optimize-pipeline"},
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "logs",
+                    "--project-root",
+                    str(repo),
+                    "--lines",
+                    "1",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["projection_source"], "files")
+            self.assertEqual(summary["event_count"], 2)
+            self.assertEqual(summary["events"][0]["event_type"], "backlog_updated")
+
     def test_agentteam_cli_explain_status_describes_idle_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
