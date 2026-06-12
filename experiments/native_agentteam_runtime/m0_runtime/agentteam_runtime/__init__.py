@@ -67,6 +67,10 @@ _EXPORTS = {
         ".projection_db",
         "read_projected_run_events",
     ),
+    "read_projected_run_metadata": (
+        ".projection_db",
+        "read_projected_run_metadata",
+    ),
     "rebuild_project_projection_db": (
         ".projection_db",
         "rebuild_project_projection_db",

@@ -461,6 +461,11 @@ Side effects:
 - Writes report artifacts under the run's report/artifact area.
 - Does not change the target repository.
 
+When `<work_root>/agentteam.db` exists and is fresh, JSON output includes
+projected run/report metadata such as the indexed `report_path`. Report content
+is still generated from authoritative run files. If the projection is missing
+or stale, JSON output marks the projection source as `files`.
+
 ### `agentteam paths`
 
 Shows the important local paths for a project or run.

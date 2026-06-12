@@ -47,6 +47,7 @@ from .profile import (
 from .projection_db import (
     check_project_projection_db,
     read_projected_run_events,
+    read_projected_run_metadata,
     read_projected_taskpacks,
     rebuild_project_projection_db,
 )
@@ -2407,6 +2408,10 @@ def _handle_report(args):
     run_dir = _watch_run_dir(args, profile)
     if not run_dir.exists():
         raise AgentTeamCliError("run not found", run_dir=str(run_dir))
+    projected_run = read_projected_run_metadata(
+        profile.get("work_root") or run_dir.parent.parent,
+        run_dir.name,
+    )
     report = build_run_completion_report(
         run_dir,
         project=profile.get("project_key") or "unknown",
@@ -2418,7 +2423,12 @@ def _handle_report(args):
         project=profile.get("project_key") or "unknown",
     )
     if args.json:
-        report = {**report, "artifact_snapshot": artifact_snapshot}
+        report = {
+            **report,
+            "artifact_snapshot": artifact_snapshot,
+            "projection_source": "db" if projected_run is not None else "files",
+            "projection_run": projected_run["run"] if projected_run is not None else None,
+        }
         return report
     sys.stdout.write(render_run_completion_report(report))
     sys.stdout.flush()

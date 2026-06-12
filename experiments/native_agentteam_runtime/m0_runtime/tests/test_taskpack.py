@@ -747,6 +747,91 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("test_host_c_model_matches_exported_python_reference_exactly", rendered)
             self.assertIn("Read-only role", rendered)
 
+    def test_agentteam_cli_report_json_includes_fresh_projection_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "report-db-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "report-db-project")
+            _write_completed_operator_run(run_dir)
+            _write_json(run_dir / "reports" / "final_report.json", {"run_id": "report-db-run"})
+            rebuild_project_projection_db(work_root)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "report",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["projection_source"], "db")
+            self.assertEqual(
+                summary["projection_run"]["report_path"],
+                str((run_dir / "reports" / "final_report.json").resolve()),
+            )
+
+    def test_agentteam_cli_report_json_falls_back_when_projection_db_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "report-db-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "report-db-project")
+            _write_completed_operator_run(run_dir)
+            _write_json(run_dir / "reports" / "final_report.json", {"run_id": "report-db-run"})
+            rebuild_project_projection_db(work_root)
+            with (run_dir / "events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "event_id": "EVT-0002",
+                            "event_type": "backlog_updated",
+                            "sequence": 2,
+                            "time": "2026-06-12T00:00:01Z",
+                            "payload": {"task_id": "optimize-pipeline"},
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "report",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["projection_source"], "files")
+            self.assertIsNone(summary["projection_run"])
+
     def test_agentteam_cli_chat_prints_diagnostic_context_as_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = _write_failed_integration_run(Path(tmp) / "runs" / "taskpack-5")
@@ -2636,6 +2721,42 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["projection_source"], "files")
             self.assertEqual(summary["event_count"], 2)
             self.assertEqual(summary["events"][0]["event_type"], "backlog_updated")
+
+    def test_agentteam_cli_logs_falls_back_when_projection_db_is_corrupt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "logs-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "logs-project")
+            _write_completed_operator_run(run_dir)
+            work_root.mkdir(parents=True, exist_ok=True)
+            (work_root / "agentteam.db").write_text("not sqlite", encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "logs",
+                    "--project-root",
+                    str(repo),
+                    "--lines",
+                    "1",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["projection_source"], "files")
+            self.assertEqual(summary["event_count"], 1)
 
     def test_agentteam_cli_explain_status_describes_idle_run(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -69,11 +69,11 @@ Use the projection as an optional read accelerator without changing authority.
 - [x] Add stale DB fallback tests for `status --json`.
 - [x] Let `status --json` replay events from the projection when it is present
       and fresh, while retaining file-backed liveness/state reads.
-- [ ] Add file fallback tests for missing/corrupt DB on the remaining read
+- [x] Add file fallback tests for missing/corrupt DB on the remaining read
       paths.
-- [ ] Let report metadata read from the projection when it is present and
+- [x] Let report metadata read from the projection when it is present and
       fresh.
-- [ ] Keep exact user-facing output compatible with existing tests.
+- [x] Keep exact user-facing output compatible with existing tests.
 
 ## M40c Artifact Metadata And Smart GC
 

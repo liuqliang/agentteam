@@ -143,6 +143,56 @@ def read_projected_run_events(work_root, run_id):
     }
 
 
+def read_projected_run_metadata(work_root, run_id):
+    check = check_project_projection_db(work_root)
+    if check["check_status"] != "passed":
+        return None
+    db_path = project_projection_db_path(work_root)
+    try:
+        with sqlite3.connect(db_path) as connection:
+            row = connection.execute(
+                """
+                select
+                    run_id,
+                    run_dir,
+                    run_status,
+                    scheduler_status,
+                    event_count,
+                    latest_event_sequence,
+                    latest_event_type,
+                    latest_event_time,
+                    state_path,
+                    events_path,
+                    report_path
+                from runs
+                where run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+    except sqlite3.DatabaseError:
+        return None
+    if row is None:
+        return None
+    return {
+        "projection_source": "db",
+        "db_path": str(db_path),
+        "check": check,
+        "run": {
+            "run_id": row[0],
+            "run_dir": row[1],
+            "run_status": row[2],
+            "scheduler_status": row[3],
+            "event_count": row[4],
+            "latest_event_sequence": row[5],
+            "latest_event_type": row[6],
+            "latest_event_time": row[7],
+            "state_path": row[8],
+            "events_path": row[9],
+            "report_path": row[10],
+        },
+    }
+
+
 def _scan_work_root(work_root):
     return {
         "runs": _scan_runs(work_root / "runs"),

@@ -719,7 +719,7 @@ Short-term slices:
 
 ### M40: Artifact Projection Database
 
-Status: M40a implemented; M40b partially implemented; M40c pending.
+Status: M40a and M40b implemented; M40c pending.
 
 Goal: add a local SQLite projection layer that makes long-running project state
 fast to query, summarize, clean up, and diagnose while keeping file-backed
