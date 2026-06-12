@@ -360,6 +360,8 @@ def build_project_stats(work_root):
         projection_source="files",
         check_status=check.get("check_status"),
         db_path=str(project_projection_db_path(work_root)),
+        projection_warning="projection_db_unavailable",
+        next_action="run agentteam db rebuild",
     )
 
 
@@ -859,7 +861,15 @@ def _artifact_retention_explanations():
     ]
 
 
-def _project_stats_from_projection(projection, *, projection_source, check_status, db_path):
+def _project_stats_from_projection(
+    projection,
+    *,
+    projection_source,
+    check_status,
+    db_path,
+    projection_warning=None,
+    next_action=None,
+):
     counts = _projection_counts(projection)
     return _project_stats_payload(
         projection_source=projection_source,
@@ -883,6 +893,8 @@ def _project_stats_from_projection(projection, *, projection_source, check_statu
                 for row in projection["run_stats"]
             ]
         ),
+        projection_warning=projection_warning,
+        next_action=next_action,
     )
 
 
@@ -895,8 +907,10 @@ def _project_stats_payload(
     artifact_types,
     retention_policies,
     token_usage,
+    projection_warning=None,
+    next_action=None,
 ):
-    return {
+    payload = {
         "stats_status": "ok",
         "projection_source": projection_source,
         "check_status": check_status,
@@ -915,6 +929,11 @@ def _project_stats_payload(
         },
         "token_usage": token_usage,
     }
+    if projection_warning:
+        payload["projection_warning"] = projection_warning
+    if next_action:
+        payload["next_action"] = next_action
+    return payload
 
 
 def _group_rows_to_count_bytes(rows):

@@ -212,6 +212,8 @@ Behavior:
 - Uses a fresh `<work_root>/agentteam.db` projection when available.
 - Falls back to scanning authoritative files under `frozen/` and `runs/` when
   the DB is missing, stale, or unreadable.
+- File-scan fallback includes `projection_warning: projection_db_unavailable`
+  and `next_action: run agentteam db rebuild`.
 - Does not rebuild the DB automatically and does not mutate runtime state.
 - JSON output includes counts, evidence status counts, artifact type/retention
   summaries, artifact bytes, and aggregate token usage.
@@ -260,6 +262,9 @@ Behavior:
   It does not change counts.
 - Artifact deletion is disabled in M42: `artifact_retention_plan.deletion_enabled`
   is always `false`, even when `--force` is present.
+- If the projection DB is missing or stale, the artifact retention plan reports
+  `projection_warning: projection_db_unavailable` and
+  `next_action: run agentteam db rebuild`.
 - With `--global-releases`, also scans
   `~/.local/share/agentteam/runtime-releases/<source-key>/<release-id>/`.
   Global releases are protected when any known work root references them through

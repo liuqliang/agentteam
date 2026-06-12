@@ -713,6 +713,8 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(stats["taskpacks"], 1)
             self.assertEqual(stats["events"], 1)
             self.assertEqual(stats["tasks"], 1)
+            self.assertEqual(stats["projection_warning"], "projection_db_unavailable")
+            self.assertEqual(stats["next_action"], "run agentteam db rebuild")
             self.assertGreaterEqual(stats["artifacts"]["total_count"], 4)
             self.assertEqual(stats["token_usage"]["total_tokens"], 1500)
 
@@ -1831,6 +1833,8 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(plan["plan_status"], "unavailable")
             self.assertFalse(plan["deletion_enabled"])
             self.assertEqual(plan["candidate_count"], 0)
+            self.assertEqual(plan["projection_warning"], "projection_db_unavailable")
+            self.assertEqual(plan["next_action"], "run agentteam db rebuild")
 
     def test_agentteam_cli_notify_test_sends_feishu_message_from_profile(self):
         with tempfile.TemporaryDirectory() as tmp:

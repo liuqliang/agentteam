@@ -813,6 +813,22 @@ Implemented:
 - reports an unavailable plan when the projection DB is missing or stale,
   rather than falling back to unsafe path guesses.
 
+### M43: Projection Guidance
+
+Status: implemented.
+
+Goal: make stale or missing projection states directly actionable.
+
+Implemented:
+
+- `agentteam stats` file-scan fallback now includes
+  `projection_warning: projection_db_unavailable` and
+  `next_action: run agentteam db rebuild`;
+- human `agentteam stats` text prints `next_action` when present;
+- `agentteam gc --artifacts` unavailable plans include the same warning and
+  next action;
+- no automatic rebuild was added, preserving read-only command behavior.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -853,6 +869,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is M43. It should validate retention planning against
-real runs and improve stale-projection guidance before any artifact deletion
+The next recommended step is M44. It should validate projection-backed stats
+and retention planning against real completed runs before any artifact deletion
 feature is considered.

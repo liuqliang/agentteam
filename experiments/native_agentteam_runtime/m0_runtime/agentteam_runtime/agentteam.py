@@ -2607,6 +2607,8 @@ def _gc_artifact_retention_plan(work_root, limit):
         "projection_source": "files",
         "plan_status": "unavailable",
         "check_status": "failed",
+        "projection_warning": "projection_db_unavailable",
+        "next_action": "run agentteam db rebuild",
         "deletion_enabled": False,
         "candidate_count": 0,
         "candidate_bytes": 0,
@@ -3132,6 +3134,8 @@ def _write_stats_text(summary):
         f"artifact_bytes: {artifacts.get('total_bytes', 0)}",
         format_token_usage(token_usage, label="tokens"),
     ]
+    if summary.get("next_action"):
+        lines.append(f"next_action: {summary['next_action']}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 
