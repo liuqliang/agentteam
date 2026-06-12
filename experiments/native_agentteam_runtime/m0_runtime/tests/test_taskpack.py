@@ -3449,6 +3449,101 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("stale-listed", list_completed.stdout)
             self.assertIn("run_status=running-stale", list_completed.stdout)
 
+    def test_agentteam_cli_taskpack_list_can_read_fresh_projection_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "list-db-project")
+            _write_completed_operator_run(work_root / "runs" / "listed-db")
+            _write_json(
+                work_root / "frozen" / "listed-db" / "taskpack.json",
+                {
+                    "taskpack_id": "listed-db",
+                    "goal": "List through projection DB.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            rebuild_project_projection_db(work_root)
+
+            list_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "list",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(list_completed.returncode, 0, list_completed.stderr)
+            summary = json.loads(list_completed.stdout)
+            self.assertEqual(summary["projection_source"], "db")
+            self.assertEqual(summary["frozen_count"], 1)
+            self.assertEqual(summary["taskpacks"][0]["taskpack_id"], "listed-db")
+            self.assertEqual(summary["taskpacks"][0]["run_status"], "idle")
+
+    def test_agentteam_cli_taskpack_list_falls_back_when_projection_db_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "list-db-project")
+            _write_json(
+                work_root / "frozen" / "listed-db" / "taskpack.json",
+                {
+                    "taskpack_id": "listed-db",
+                    "goal": "List through projection DB.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            rebuild_project_projection_db(work_root)
+            _write_json(
+                work_root / "frozen" / "listed-after-rebuild" / "taskpack.json",
+                {
+                    "taskpack_id": "listed-after-rebuild",
+                    "goal": "Force stale projection.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+
+            list_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "list",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(list_completed.returncode, 0, list_completed.stderr)
+            summary = json.loads(list_completed.stdout)
+            self.assertEqual(summary["projection_source"], "files")
+            self.assertEqual(summary["frozen_count"], 2)
+            self.assertEqual(
+                {item["taskpack_id"] for item in summary["taskpacks"]},
+                {"listed-db", "listed-after-rebuild"},
+            )
+
     def test_agentteam_cli_taskpack_delete_dry_run_reports_paths_without_mutating(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

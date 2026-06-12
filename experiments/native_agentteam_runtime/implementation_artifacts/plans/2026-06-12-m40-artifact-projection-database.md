@@ -60,9 +60,13 @@ Expected: all tests pass and whitespace check reports no errors.
 
 Use the projection as an optional read accelerator without changing authority.
 
-- [ ] Add file fallback tests for missing/corrupt DB.
-- [ ] Let `status`, `logs`, `taskpack list`, and report metadata read from the
-      projection when it is present and fresh.
+- [x] Add file fallback tests for stale DB on `taskpack list`.
+- [x] Let `taskpack list --json` read frozen taskpack rows from the projection
+      when it is present and fresh.
+- [ ] Add file fallback tests for missing/corrupt DB on the remaining read
+      paths.
+- [ ] Let `status`, `logs`, and report metadata read from the projection when
+      it is present and fresh.
 - [ ] Keep exact user-facing output compatible with existing tests.
 
 ## M40c Artifact Metadata And Smart GC

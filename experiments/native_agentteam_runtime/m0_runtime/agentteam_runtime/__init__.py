@@ -59,6 +59,10 @@ _EXPORTS = {
     "read_integration_batches": (".integration_batch", "read_integration_batches"),
     "read_scheduler_state_index": (".m0_runtime", "read_scheduler_state_index"),
     "read_integration_queue": (".integration_queue", "read_integration_queue"),
+    "read_projected_taskpacks": (
+        ".projection_db",
+        "read_projected_taskpacks",
+    ),
     "rebuild_project_projection_db": (
         ".projection_db",
         "rebuild_project_projection_db",

@@ -690,6 +690,12 @@ agentteam taskpack list
 agentteam taskpack list --json
 ```
 
+When `<work_root>/agentteam.db` exists and `agentteam db check` would pass,
+JSON output may read frozen taskpack rows from the projection database. Run
+liveness is still checked from live run files so stale/running state remains
+accurate. If the projection is missing or stale, the command falls back to file
+scanning.
+
 ### `agentteam taskpack delete`
 
 Deletes draft/frozen taskpack files, and optionally the run directory.

@@ -45,6 +45,7 @@ from .profile import (
 )
 from .projection_db import (
     check_project_projection_db,
+    read_projected_taskpacks,
     rebuild_project_projection_db,
 )
 from .release_manager import (
@@ -1348,6 +1349,20 @@ def _frozen_taskpack_list_summary(profile):
     work_root = Path(profile["work_root"]).resolve()
     frozen_root = work_root / "frozen"
     run_root = work_root / "runs"
+    projected = read_projected_taskpacks(work_root)
+    if projected is not None:
+        taskpacks = [
+            _taskpack_list_item_from_projection(profile, run_root, item)
+            for item in projected["taskpacks"]
+        ]
+        return {
+            "project": profile.get("project_key") or "unknown",
+            "frozen_root": str(frozen_root),
+            "frozen_count": len(taskpacks),
+            "projection_source": "db",
+            "projection_db_path": projected["db_path"],
+            "taskpacks": taskpacks,
+        }
     taskpacks = []
     if frozen_root.exists():
         for frozen_dir in sorted(path for path in frozen_root.iterdir() if path.is_dir()):
@@ -1370,8 +1385,25 @@ def _frozen_taskpack_list_summary(profile):
         "project": profile.get("project_key") or "unknown",
         "frozen_root": str(frozen_root),
         "frozen_count": len(taskpacks),
+        "projection_source": "files",
         "taskpacks": taskpacks,
     }
+
+
+def _taskpack_list_item_from_projection(profile, run_root, projected):
+    taskpack_id = projected["taskpack_id"]
+    run_dir = run_root / taskpack_id
+    item = {
+        "taskpack_id": taskpack_id,
+        "goal": projected.get("goal"),
+        "frozen_dir": projected["frozen_dir"],
+        "run_dir": str(run_dir.resolve()) if run_dir.exists() else None,
+        "run_status": "not_run",
+    }
+    if run_dir.exists():
+        run_summary = _build_run_status_summary(profile, run_dir)
+        item["run_status"] = run_summary.get("liveness_status") or run_summary["status"]
+    return item
 
 
 def _write_taskpack_list_text(summary):

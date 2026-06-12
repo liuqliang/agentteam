@@ -78,6 +78,39 @@ def check_project_projection_db(work_root):
     }
 
 
+def read_projected_taskpacks(work_root):
+    check = check_project_projection_db(work_root)
+    if check["check_status"] != "passed":
+        return None
+    db_path = project_projection_db_path(work_root)
+    try:
+        with sqlite3.connect(db_path) as connection:
+            rows = connection.execute(
+                """
+                select taskpack_id, taskpack_dir, metadata_path, goal, validation_status
+                from taskpacks
+                order by taskpack_id
+                """
+            ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    return {
+        "projection_source": "db",
+        "db_path": str(db_path),
+        "check": check,
+        "taskpacks": [
+            {
+                "taskpack_id": row[0],
+                "frozen_dir": row[1],
+                "metadata_path": row[2],
+                "goal": row[3],
+                "validation_status": row[4],
+            }
+            for row in rows
+        ],
+    }
+
+
 def _scan_work_root(work_root):
     return {
         "runs": _scan_runs(work_root / "runs"),
