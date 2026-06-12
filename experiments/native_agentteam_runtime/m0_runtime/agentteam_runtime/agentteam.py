@@ -46,6 +46,7 @@ from .profile import (
 )
 from .projection_db import (
     check_project_projection_db,
+    read_projected_artifact_summary,
     read_projected_run_events,
     read_projected_run_metadata,
     read_projected_taskpacks,
@@ -2546,6 +2547,7 @@ def _handle_gc(args):
     global_release_prune = None
     if args.global_releases:
         global_release_prune = prune_global_releases(work_root, force=args.force)
+    artifact_projection = _gc_artifact_projection_summary(work_root)
     summary = {
         "gc_status": gc_status,
         "project": profile.get("project_key") or "unknown",
@@ -2555,11 +2557,90 @@ def _handle_gc(args):
         "release_prune": release_prune,
         "global_release_prune": global_release_prune,
         "stale_run_cleanup": stale_cleanup,
+        "artifact_projection": artifact_projection,
     }
     if args.json:
         return summary
     _write_gc_text(summary)
     return 0
+
+
+def _gc_artifact_projection_summary(work_root):
+    projected = read_projected_artifact_summary(work_root)
+    if projected is None:
+        return {
+            "projection_source": "files",
+            "check_status": "unavailable",
+            "total_artifacts": 0,
+            "total_bytes": 0,
+            "artifact_types": {},
+            "retention_policies": {
+                "authoritative": 0,
+                "protected": 0,
+                "rebuildable": 0,
+            },
+            "retention_bytes": {
+                "authoritative": 0,
+                "protected": 0,
+                "rebuildable": 0,
+            },
+            "dry_run_explanations": [
+                {
+                    "retention_policy": "unindexed",
+                    "reason": "artifact projection is missing, stale, or unreadable; run agentteam db rebuild for artifact-level cleanup explanations.",
+                }
+            ],
+        }
+    retention_policies = {
+        "authoritative": 0,
+        "protected": 0,
+        "rebuildable": 0,
+        **(projected.get("retention_policies") or {}),
+    }
+    retention_bytes = {
+        "authoritative": 0,
+        "protected": 0,
+        "rebuildable": 0,
+        **(projected.get("retention_bytes") or {}),
+    }
+    return {
+        "projection_source": "db",
+        "db_path": projected.get("db_path"),
+        "check_status": projected.get("check_status"),
+        "total_artifacts": projected.get("total_artifacts", 0),
+        "total_bytes": projected.get("total_bytes", 0),
+        "artifact_types": projected.get("artifact_types") or {},
+        "retention_policies": retention_policies,
+        "retention_bytes": retention_bytes,
+        "run_token_usage": projected.get("run_token_usage") or [],
+        "dry_run_explanations": _gc_artifact_dry_run_explanations(retention_policies),
+    }
+
+
+def _gc_artifact_dry_run_explanations(retention_policies):
+    explanations = [
+        {
+            "retention_policy": "authoritative",
+            "artifact_count": retention_policies.get("authoritative", 0),
+            "reason": "authoritative audit artifacts such as events, state, reports, patches, and frozen taskpacks are not removed by gc.",
+        },
+        {
+            "retention_policy": "protected",
+            "artifact_count": retention_policies.get("protected", 0),
+            "reason": "protected artifacts are tied to active or nonterminal run state and are not cleanup candidates.",
+        },
+        {
+            "retention_policy": "rebuildable",
+            "artifact_count": retention_policies.get("rebuildable", 0),
+            "reason": "rebuildable derived artifacts such as role and repo contexts may become cleanup candidates after explicit retention policy support.",
+        },
+    ]
+    return [
+        explanation
+        for explanation in explanations
+        if explanation["artifact_count"] > 0
+        or explanation["retention_policy"] in {"authoritative", "rebuildable"}
+    ]
 
 
 def _handle_db(args):
@@ -2927,6 +3008,11 @@ def _write_gc_text(summary):
     if summary.get("stale_run_cleanup"):
         cleanup = summary["stale_run_cleanup"]
         lines.append(f"stale_run_cleanup: {cleanup.get('cleanup_status') or cleanup.get('stop_status') or 'completed'}")
+    artifact_projection = summary.get("artifact_projection") or {}
+    if artifact_projection:
+        lines.append(f"artifact_projection: {artifact_projection.get('projection_source') or 'unknown'}")
+        lines.append(f"artifact_count: {artifact_projection.get('total_artifacts', 0)}")
+        lines.append(f"artifact_bytes: {artifact_projection.get('total_bytes', 0)}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 

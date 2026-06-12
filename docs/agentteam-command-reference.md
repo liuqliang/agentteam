@@ -182,11 +182,11 @@ Important behavior:
   authoritative records.
 - `rebuild` scans `frozen/` and `runs/`, writes a temporary database, then
   replaces the old projection only after a successful rebuild.
-- `check` compares projected counts with a fresh file scan and reports
-  mismatches such as stale event counts. It does not mutate files.
-- M40a indexes runs, taskpacks, events, tasks, and compact evidence summaries.
-  Later milestones may add artifact hashes, token aggregates, and DB-assisted
-  cleanup.
+- `check` compares projected counts and artifact digest with a fresh file scan
+  and reports mismatches such as stale event counts or changed artifact
+  content. It does not mutate files.
+- The projection indexes runs, taskpacks, events, tasks, compact evidence
+  summaries, artifact hashes/sizes, and per-run token/stat aggregates.
 
 ### `agentteam gc`
 
@@ -217,6 +217,12 @@ Behavior:
 - With `--force`, deletes eligible old releases through the release manager.
 - Keeps the configured number of latest releases plus protected active or
   nonterminal-run releases.
+- If `<work_root>/agentteam.db` is fresh, dry-run output also includes an
+  `artifact_projection` summary: artifact count, bytes, artifact types,
+  retention policy counts, token usage rows, and explanations for
+  authoritative versus rebuildable artifacts.
+- Artifact projection output is explanatory in M40c. `agentteam gc` does not
+  delete run artifacts or context artifacts yet.
 - With `--global-releases`, also scans
   `~/.local/share/agentteam/runtime-releases/<source-key>/<release-id>/`.
   Global releases are protected when any known work root references them through

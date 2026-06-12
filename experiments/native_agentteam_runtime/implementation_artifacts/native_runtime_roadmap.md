@@ -719,7 +719,7 @@ Short-term slices:
 
 ### M40: Artifact Projection Database
 
-Status: M40a and M40b implemented; M40c pending.
+Status: M40a, M40b, and M40c implemented.
 
 Goal: add a local SQLite projection layer that makes long-running project state
 fast to query, summarize, clean up, and diagnose while keeping file-backed
@@ -773,8 +773,10 @@ Short-term slices:
   `db check`, and `db rebuild`.
 - M40b: read-through query path for `status`, `logs`, `taskpack list`, and
   report metadata with file replay fallback.
-- M40c: artifact metadata hashes, token/stat aggregation, and DB-backed smart
-  `gc --dry-run`.
+- M40c implemented: artifact metadata hashes, token/stat aggregation, and
+  DB-backed `gc --dry-run` explanations for authoritative and rebuildable
+  artifacts. M40c does not delete run artifacts; it only indexes and explains
+  them.
 
 ## Longer-Term Route
 

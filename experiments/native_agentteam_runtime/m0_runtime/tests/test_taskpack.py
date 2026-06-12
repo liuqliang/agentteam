@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -509,6 +510,139 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("events", failed["mismatches"])
             self.assertEqual(failed["expected"]["events"], 2)
             self.assertEqual(failed["actual"]["events"], 1)
+
+    def test_project_projection_db_rebuild_indexes_artifacts_and_run_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = _write_completed_operator_run(work_root / "runs" / "projection-run")
+            state_path = run_dir / "state" / "two_phase_scheduler_state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["steps"] = [
+                {
+                    "task_id": "optimize-pipeline",
+                    "result": {
+                        "task_id": "optimize-pipeline",
+                        "attempt_id": "optimize-pipeline-ATTEMPT-001",
+                        "evidence_level": "L2",
+                        "evidence_status": "complete",
+                        "trace_carrier": [{"type": "file", "path": "reports/final_report.md"}],
+                        "missing_evidence": [],
+                    },
+                }
+            ]
+            _write_json(state_path, state)
+            _write_json(run_dir / "reports" / "final_report.json", {"run_id": "projection-run"})
+            report_markdown = run_dir / "reports" / "final_report.md"
+            report_markdown.parent.mkdir(parents=True, exist_ok=True)
+            report_markdown.write_text("completed report\n", encoding="utf-8")
+            patch_path = run_dir / "steps" / "STEP-0001-optimize-pipeline" / "result.patch"
+            patch_path.parent.mkdir(parents=True, exist_ok=True)
+            patch_path.write_text("diff --git a/a b/a\n", encoding="utf-8")
+            _write_json(
+                run_dir / "role_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json",
+                {"context_schema_version": "role_context.v1"},
+            )
+            _write_json(
+                run_dir / "repo_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json",
+                {"repo_context_schema_version": "repo_context.v1"},
+            )
+            taskpack_path = work_root / "frozen" / "projection-run" / "taskpack.json"
+            _write_json(
+                taskpack_path,
+                {
+                    "taskpack_id": "projection-run",
+                    "goal": "Project projection fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+
+            summary = rebuild_project_projection_db(work_root)
+
+            self.assertGreaterEqual(summary["artifacts"], 7)
+            self.assertEqual(summary["run_stats"], 1)
+            self.assertGreater(summary["artifact_bytes"], 0)
+            db_path = Path(summary["db_path"])
+            expected_report_sha = hashlib.sha256(
+                report_markdown.read_bytes()
+            ).hexdigest()
+            with sqlite3.connect(db_path) as connection:
+                table_names = {
+                    row[0]
+                    for row in connection.execute(
+                        "select name from sqlite_master where type='table'"
+                    )
+                }
+                artifact_types = {
+                    row[0]
+                    for row in connection.execute(
+                        "select distinct artifact_type from artifacts"
+                    ).fetchall()
+                }
+                report_row = connection.execute(
+                    """
+                    select size_bytes, sha256, retention_policy
+                    from artifacts
+                    where path = ?
+                    """,
+                    (str(report_markdown.resolve()),),
+                ).fetchone()
+                stats_row = connection.execute(
+                    """
+                    select run_id, input_tokens, output_tokens, total_tokens,
+                           artifact_count, artifact_bytes
+                    from run_stats
+                    where run_id = ?
+                    """,
+                    ("projection-run",),
+                ).fetchone()
+                evidence_row = connection.execute(
+                    """
+                    select content_size_bytes, content_sha256, source_path
+                    from evidence_summaries
+                    where run_id = ? and task_id = ?
+                    """,
+                    ("projection-run", "optimize-pipeline"),
+                ).fetchone()
+
+            self.assertTrue({"artifacts", "run_stats"}.issubset(table_names))
+            self.assertTrue(
+                {
+                    "event_log",
+                    "report",
+                    "patch",
+                    "taskpack",
+                    "state_snapshot",
+                    "role_context",
+                    "repo_context",
+                }.issubset(artifact_types)
+            )
+            self.assertEqual(
+                report_row,
+                (len("completed report\n".encode("utf-8")), expected_report_sha, "authoritative"),
+            )
+            self.assertEqual(stats_row[:4], ("projection-run", 1200, 300, 1500))
+            self.assertGreaterEqual(stats_row[4], 7)
+            self.assertGreater(stats_row[5], 0)
+            self.assertGreater(evidence_row[0], 0)
+            self.assertEqual(len(evidence_row[1]), 64)
+            self.assertEqual(evidence_row[2], str(state_path.resolve()))
+
+    def test_project_projection_db_check_detects_artifact_content_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = _write_completed_operator_run(work_root / "runs" / "projection-run")
+            report_path = run_dir / "reports" / "final_report.md"
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text("alpha\n", encoding="utf-8")
+            rebuild_project_projection_db(work_root)
+
+            report_path.write_text("bravo\n", encoding="utf-8")
+            failed = check_project_projection_db(work_root)
+
+            self.assertEqual(failed["check_status"], "failed")
+            self.assertIn("artifact_digest", failed["mismatches"])
 
     def test_agentteam_cli_db_rebuild_and_check_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1327,6 +1461,70 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["release_prune"]["deleted_release_ids"], ["old-release"])
             self.assertFalse(old_release.exists())
             self.assertTrue(latest_release.exists())
+
+    def test_agentteam_cli_gc_dry_run_explains_projected_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "gc-artifact-project")
+            run_dir = _write_completed_operator_run(work_root / "runs" / "projection-run")
+            _write_json(run_dir / "reports" / "final_report.json", {"run_id": "projection-run"})
+            _write_json(
+                run_dir / "repo_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json",
+                {"repo_context_schema_version": "repo_context.v1"},
+            )
+            _write_json(
+                work_root / "frozen" / "projection-run" / "taskpack.json",
+                {
+                    "taskpack_id": "projection-run",
+                    "goal": "Project projection fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            rebuild_project_projection_db(work_root)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "gc",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            artifact_projection = summary["artifact_projection"]
+            self.assertEqual(artifact_projection["projection_source"], "db")
+            self.assertEqual(artifact_projection["check_status"], "passed")
+            self.assertGreaterEqual(artifact_projection["total_artifacts"], 3)
+            self.assertGreater(artifact_projection["total_bytes"], 0)
+            self.assertGreaterEqual(
+                artifact_projection["retention_policies"]["authoritative"],
+                1,
+            )
+            self.assertGreaterEqual(
+                artifact_projection["retention_policies"]["rebuildable"],
+                1,
+            )
+            self.assertIn("report", artifact_projection["artifact_types"])
+            self.assertIn("repo_context", artifact_projection["artifact_types"])
+            explanation_policies = {
+                item["retention_policy"]
+                for item in artifact_projection["dry_run_explanations"]
+            }
+            self.assertIn("authoritative", explanation_policies)
+            self.assertIn("rebuildable", explanation_policies)
 
     def test_agentteam_cli_notify_test_sends_feishu_message_from_profile(self):
         with tempfile.TemporaryDirectory() as tmp:

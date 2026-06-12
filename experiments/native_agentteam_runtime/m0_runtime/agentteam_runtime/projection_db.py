@@ -1,10 +1,12 @@
 import json
+import hashlib
 import os
 import sqlite3
 from pathlib import Path
 
+from .token_usage import normalize_token_usage, token_usage_from_state
 
-PROJECTION_SCHEMA_VERSION = "agentteam_projection.v2"
+PROJECTION_SCHEMA_VERSION = "agentteam_projection.v3"
 
 
 def project_projection_db_path(work_root):
@@ -61,9 +63,20 @@ def check_project_projection_db(work_root):
             "mismatches": ["db_unreadable"],
             "error": str(exc),
         }
+    mismatch_keys = [
+        "runs",
+        "taskpacks",
+        "events",
+        "tasks",
+        "evidence_summaries",
+        "artifacts",
+        "artifact_bytes",
+        "artifact_digest",
+        "run_stats",
+    ]
     mismatches = [
         key
-        for key in ["runs", "taskpacks", "events", "tasks", "evidence_summaries"]
+        for key in mismatch_keys
         if expected.get(key) != actual.get(key)
     ]
     if schema_version != PROJECTION_SCHEMA_VERSION:
@@ -193,10 +206,84 @@ def read_projected_run_metadata(work_root, run_id):
     }
 
 
-def _scan_work_root(work_root):
+def read_projected_artifact_summary(work_root):
+    check = check_project_projection_db(work_root)
+    if check["check_status"] != "passed":
+        return None
+    db_path = project_projection_db_path(work_root)
+    try:
+        with sqlite3.connect(db_path) as connection:
+            artifact_type_rows = connection.execute(
+                """
+                select artifact_type, count(*), coalesce(sum(size_bytes), 0)
+                from artifacts
+                group by artifact_type
+                order by artifact_type
+                """
+            ).fetchall()
+            retention_rows = connection.execute(
+                """
+                select retention_policy, count(*), coalesce(sum(size_bytes), 0)
+                from artifacts
+                group by retention_policy
+                order by retention_policy
+                """
+            ).fetchall()
+            stats_rows = connection.execute(
+                """
+                select run_id, total_tokens, input_tokens, output_tokens,
+                       cached_input_tokens, reasoning_tokens, token_usage_status
+                from run_stats
+                order by run_id
+                """
+            ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    total_artifacts = sum(row[1] for row in artifact_type_rows)
+    total_bytes = sum(row[2] for row in artifact_type_rows)
     return {
-        "runs": _scan_runs(work_root / "runs"),
-        "taskpacks": _scan_taskpacks(work_root / "frozen"),
+        "projection_source": "db",
+        "db_path": str(db_path),
+        "check": check,
+        "check_status": check["check_status"],
+        "total_artifacts": total_artifacts,
+        "total_bytes": total_bytes,
+        "artifact_types": {
+            row[0]: {"count": row[1], "bytes": row[2]}
+            for row in artifact_type_rows
+        },
+        "retention_policies": {
+            row[0]: row[1]
+            for row in retention_rows
+        },
+        "retention_bytes": {
+            row[0]: row[2]
+            for row in retention_rows
+        },
+        "run_token_usage": [
+            {
+                "run_id": row[0],
+                "total_tokens": row[1],
+                "input_tokens": row[2],
+                "output_tokens": row[3],
+                "cached_input_tokens": row[4],
+                "reasoning_tokens": row[5],
+                "token_usage_status": row[6],
+            }
+            for row in stats_rows
+        ],
+    }
+
+
+def _scan_work_root(work_root):
+    runs = _scan_runs(work_root / "runs")
+    taskpacks = _scan_taskpacks(work_root / "frozen")
+    artifacts = _scan_artifacts(work_root, runs, taskpacks)
+    return {
+        "runs": runs,
+        "taskpacks": taskpacks,
+        "artifacts": artifacts,
+        "run_stats": _run_stats(runs, artifacts),
     }
 
 
@@ -228,7 +315,8 @@ def _scan_runs(runs_root):
                     for event in events
                 ],
                 "tasks": _task_projections(run_dir.name, state, events),
-                "evidence_summaries": _evidence_projections(run_dir.name, state),
+                "evidence_summaries": _evidence_projections(run_dir.name, state, state_path),
+                "token_usage": _run_token_usage(events, state),
             }
         )
     return runs
@@ -333,7 +421,49 @@ def _create_projection_schema(connection):
             evidence_level text,
             evidence_status text,
             trace_carrier_json text,
-            missing_evidence_json text
+            missing_evidence_json text,
+            source_path text,
+            content_size_bytes integer,
+            content_sha256 text
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table if not exists artifacts(
+            artifact_id text primary key,
+            artifact_type text not null,
+            run_id text,
+            taskpack_id text,
+            task_id text,
+            attempt_id text,
+            path text not null,
+            size_bytes integer not null,
+            sha256 text not null,
+            retention_policy text not null,
+            authority text not null,
+            source text,
+            mtime_ns integer
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table if not exists run_stats(
+            run_id text primary key,
+            task_count integer not null,
+            event_count integer not null,
+            evidence_summary_count integer not null,
+            artifact_count integer not null,
+            artifact_bytes integer not null,
+            token_usage_status text,
+            reported_attempt_count integer,
+            unreported_attempt_count integer,
+            input_tokens integer,
+            output_tokens integer,
+            total_tokens integer,
+            cached_input_tokens integer,
+            reasoning_tokens integer
         )
         """
     )
@@ -348,6 +478,8 @@ def _create_projection_schema(connection):
 def _write_projection_rows(connection, projection):
     runs = projection["runs"]
     taskpacks = projection["taskpacks"]
+    artifacts = projection["artifacts"]
+    run_stats = projection["run_stats"]
     connection.executemany(
         """
         insert into runs(
@@ -440,14 +572,58 @@ def _write_projection_rows(connection, projection):
             evidence_level,
             evidence_status,
             trace_carrier_json,
-            missing_evidence_json
-        ) values(?, ?, ?, ?, ?, ?, ?)
+            missing_evidence_json,
+            source_path,
+            content_size_bytes,
+            content_sha256
+        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             evidence
             for run in runs
             for evidence in run["evidence_summaries"]
         ],
+    )
+    connection.executemany(
+        """
+        insert into artifacts(
+            artifact_id,
+            artifact_type,
+            run_id,
+            taskpack_id,
+            task_id,
+            attempt_id,
+            path,
+            size_bytes,
+            sha256,
+            retention_policy,
+            authority,
+            source,
+            mtime_ns
+        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [artifact for artifact in artifacts],
+    )
+    connection.executemany(
+        """
+        insert into run_stats(
+            run_id,
+            task_count,
+            event_count,
+            evidence_summary_count,
+            artifact_count,
+            artifact_bytes,
+            token_usage_status,
+            reported_attempt_count,
+            unreported_attempt_count,
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cached_input_tokens,
+            reasoning_tokens
+        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [stats for stats in run_stats],
     )
 
 
@@ -467,6 +643,10 @@ def _projection_counts(projection):
             len(run["evidence_summaries"])
             for run in projection["runs"]
         ),
+        "artifacts": len(projection["artifacts"]),
+        "artifact_bytes": sum(artifact[7] for artifact in projection["artifacts"]),
+        "artifact_digest": _artifact_digest(projection["artifacts"]),
+        "run_stats": len(projection["run_stats"]),
         "evidence": evidence_counts,
     }
 
@@ -479,6 +659,10 @@ def _database_counts(db_path):
             "events": _table_count(connection, "events"),
             "tasks": _table_count(connection, "tasks"),
             "evidence_summaries": _table_count(connection, "evidence_summaries"),
+            "artifacts": _table_count(connection, "artifacts"),
+            "artifact_bytes": _database_artifact_bytes(connection),
+            "artifact_digest": _database_artifact_digest(connection),
+            "run_stats": _table_count(connection, "run_stats"),
             "evidence": _database_evidence_counts(connection),
         }
 
@@ -505,6 +689,26 @@ def _database_evidence_counts(connection):
         """
     ).fetchall()
     return {status: count for status, count in rows}
+
+
+def _database_artifact_bytes(connection):
+    row = connection.execute(
+        "select coalesce(sum(size_bytes), 0) from artifacts"
+    ).fetchone()
+    return row[0] if row else 0
+
+
+def _database_artifact_digest(connection):
+    rows = connection.execute(
+        """
+        select artifact_id, artifact_type, run_id, taskpack_id, task_id,
+               attempt_id, path, size_bytes, sha256, retention_policy, authority,
+               source, mtime_ns
+        from artifacts
+        order by path, artifact_type, artifact_id
+        """
+    ).fetchall()
+    return _artifact_digest(rows)
 
 
 def _read_json_if_exists(path):
@@ -609,7 +813,289 @@ def _task_projections(run_id, state, events):
     return [tasks[task_id] for task_id in sorted(tasks)]
 
 
-def _evidence_projections(run_id, state):
+def _scan_artifacts(work_root, runs, taskpacks):
+    artifacts = []
+    seen = set()
+    for run in runs:
+        run_id = run["run_id"]
+        run_dir = Path(run["run_dir"])
+        _append_artifact(
+            artifacts,
+            seen,
+            run_dir / "events.jsonl",
+            "event_log",
+            run_id=run_id,
+            retention_policy="authoritative",
+            authority="file",
+            source="run",
+        )
+        for path in _iter_files(run_dir / "reports"):
+            _append_artifact(
+                artifacts,
+                seen,
+                path,
+                "report",
+                run_id=run_id,
+                retention_policy="authoritative",
+                authority="file",
+                source="run",
+            )
+        for path in _iter_files(run_dir / "state", suffixes={".json"}):
+            _append_artifact(
+                artifacts,
+                seen,
+                path,
+                "state_snapshot",
+                run_id=run_id,
+                retention_policy="authoritative",
+                authority="file",
+                source="run",
+            )
+        for path in _iter_files(run_dir / "steps", suffixes={".patch", ".diff"}):
+            task_id, attempt_id = _task_attempt_from_patch_path(path)
+            _append_artifact(
+                artifacts,
+                seen,
+                path,
+                "patch",
+                run_id=run_id,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                retention_policy="authoritative",
+                authority="file",
+                source="run",
+            )
+        for path in _iter_files(run_dir / "patches", suffixes={".patch", ".diff"}):
+            task_id, attempt_id = _task_attempt_from_patch_path(path)
+            _append_artifact(
+                artifacts,
+                seen,
+                path,
+                "patch",
+                run_id=run_id,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                retention_policy="authoritative",
+                authority="file",
+                source="run",
+            )
+        for path in _iter_files(run_dir / "role_contexts", suffixes={".json"}):
+            task_id, attempt_id = _task_attempt_from_context_path(path)
+            _append_artifact(
+                artifacts,
+                seen,
+                path,
+                "role_context",
+                run_id=run_id,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                retention_policy="rebuildable",
+                authority="derived",
+                source="run",
+            )
+        for path in _iter_files(run_dir / "repo_contexts", suffixes={".json"}):
+            task_id, attempt_id = _task_attempt_from_context_path(path)
+            _append_artifact(
+                artifacts,
+                seen,
+                path,
+                "repo_context",
+                run_id=run_id,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                retention_policy="rebuildable",
+                authority="derived",
+                source="run",
+            )
+    for taskpack in taskpacks:
+        taskpack_dir = Path(taskpack["taskpack_dir"])
+        for path in _iter_files(taskpack_dir):
+            _append_artifact(
+                artifacts,
+                seen,
+                path,
+                "taskpack",
+                taskpack_id=taskpack["taskpack_id"],
+                retention_policy="authoritative",
+                authority="file",
+                source="taskpack",
+            )
+    return sorted(artifacts, key=lambda artifact: (artifact[6], artifact[1], artifact[0]))
+
+
+def _append_artifact(
+    artifacts,
+    seen,
+    path,
+    artifact_type,
+    *,
+    run_id=None,
+    taskpack_id=None,
+    task_id=None,
+    attempt_id=None,
+    retention_policy,
+    authority,
+    source,
+):
+    row = _artifact_row(
+        path,
+        artifact_type,
+        run_id=run_id,
+        taskpack_id=taskpack_id,
+        task_id=task_id,
+        attempt_id=attempt_id,
+        retention_policy=retention_policy,
+        authority=authority,
+        source=source,
+    )
+    if row is None:
+        return
+    key = (row[1], row[6])
+    if key in seen:
+        return
+    seen.add(key)
+    artifacts.append(row)
+
+
+def _artifact_row(
+    path,
+    artifact_type,
+    *,
+    run_id=None,
+    taskpack_id=None,
+    task_id=None,
+    attempt_id=None,
+    retention_policy,
+    authority,
+    source,
+):
+    path = Path(path)
+    if not path.exists() or not path.is_file():
+        return None
+    payload = path.read_bytes()
+    resolved = str(path.resolve())
+    artifact_id = hashlib.sha256(
+        f"{artifact_type}\0{resolved}".encode("utf-8")
+    ).hexdigest()
+    stat = path.stat()
+    return (
+        artifact_id,
+        artifact_type,
+        run_id,
+        taskpack_id,
+        task_id,
+        attempt_id,
+        resolved,
+        len(payload),
+        hashlib.sha256(payload).hexdigest(),
+        retention_policy,
+        authority,
+        source,
+        stat.st_mtime_ns,
+    )
+
+
+def _iter_files(root, suffixes=None):
+    root = Path(root)
+    if not root.exists():
+        return []
+    suffixes = {suffix.lower() for suffix in suffixes} if suffixes else None
+    files = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if suffixes and path.suffix.lower() not in suffixes:
+            continue
+        files.append(path)
+    return sorted(files)
+
+
+def _task_attempt_from_context_path(path):
+    stem = Path(path).stem
+    attempt_id = stem.rsplit("-", 1)[0] if "-" in stem else None
+    return _task_id_from_attempt_id(attempt_id), attempt_id
+
+
+def _task_attempt_from_patch_path(path):
+    path = Path(path)
+    attempt_id = None
+    task_id = None
+    for parent in [path.parent, *path.parents]:
+        name = parent.name
+        if name.startswith("STEP-"):
+            parts = name.split("-", 2)
+            if len(parts) == 3:
+                task_id = parts[2]
+                break
+    if "-ATTEMPT-" in path.stem:
+        attempt_id = path.stem
+        task_id = task_id or _task_id_from_attempt_id(attempt_id)
+    return task_id, attempt_id
+
+
+def _task_id_from_attempt_id(attempt_id):
+    if not attempt_id or "-ATTEMPT-" not in attempt_id:
+        return None
+    return attempt_id.split("-ATTEMPT-", 1)[0]
+
+
+def _run_stats(runs, artifacts):
+    rows = []
+    for run in runs:
+        run_id = run["run_id"]
+        run_artifacts = [
+            artifact
+            for artifact in artifacts
+            if artifact[2] == run_id or artifact[3] == run_id
+        ]
+        usage = run.get("token_usage") if isinstance(run.get("token_usage"), dict) else {}
+        rows.append(
+            (
+                run_id,
+                len(run["tasks"]),
+                run["event_count"],
+                len(run["evidence_summaries"]),
+                len(run_artifacts),
+                sum(artifact[7] for artifact in run_artifacts),
+                usage.get("usage_status"),
+                usage.get("reported_attempt_count"),
+                usage.get("unreported_attempt_count"),
+                usage.get("input_tokens"),
+                usage.get("output_tokens"),
+                usage.get("total_tokens"),
+                usage.get("cached_input_tokens"),
+                usage.get("reasoning_tokens"),
+            )
+        )
+    return rows
+
+
+def _run_token_usage(events, state):
+    for event in sorted(events, key=lambda item: item.get("sequence", 0), reverse=True):
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        report = payload.get("operator_report") if isinstance(payload.get("operator_report"), dict) else {}
+        raw_usage = report.get("token_usage")
+        normalized = normalize_token_usage(raw_usage)
+        if normalized:
+            raw = raw_usage if isinstance(raw_usage, dict) else {}
+            return {
+                "usage_status": raw.get("usage_status") or "reported",
+                "reported_attempt_count": raw.get("reported_attempt_count"),
+                "unreported_attempt_count": raw.get("unreported_attempt_count"),
+                **normalized,
+            }
+    return token_usage_from_state(state)
+
+
+def _artifact_digest(artifacts):
+    digest = hashlib.sha256()
+    for artifact in sorted(artifacts, key=lambda row: (row[6], row[1], row[0])):
+        digest.update(json.dumps(artifact, sort_keys=True).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _evidence_projections(run_id, state, state_path):
     rows = []
     for step in state.get("steps", []):
         if not isinstance(step, dict):
@@ -627,15 +1113,28 @@ def _evidence_projections(run_id, state):
             ]
         ):
             continue
+        row_payload = {
+            "run_id": run_id,
+            "task_id": step.get("task_id") or result.get("task_id"),
+            "attempt_id": result.get("attempt_id"),
+            "evidence_level": result.get("evidence_level"),
+            "evidence_status": result.get("evidence_status"),
+            "trace_carrier": result.get("trace_carrier", []),
+            "missing_evidence": result.get("missing_evidence", []),
+        }
+        content = json.dumps(row_payload, sort_keys=True).encode("utf-8")
         rows.append(
             (
-                run_id,
-                step.get("task_id") or result.get("task_id"),
-                result.get("attempt_id"),
-                result.get("evidence_level"),
-                result.get("evidence_status"),
-                json.dumps(result.get("trace_carrier", []), sort_keys=True),
-                json.dumps(result.get("missing_evidence", []), sort_keys=True),
+                row_payload["run_id"],
+                row_payload["task_id"],
+                row_payload["attempt_id"],
+                row_payload["evidence_level"],
+                row_payload["evidence_status"],
+                json.dumps(row_payload["trace_carrier"], sort_keys=True),
+                json.dumps(row_payload["missing_evidence"], sort_keys=True),
+                str(Path(state_path).resolve()) if Path(state_path).exists() else None,
+                len(content),
+                hashlib.sha256(content).hexdigest(),
             )
         )
     return rows

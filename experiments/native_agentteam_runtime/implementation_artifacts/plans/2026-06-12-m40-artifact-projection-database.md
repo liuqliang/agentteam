@@ -79,10 +79,10 @@ Use the projection as an optional read accelerator without changing authority.
 
 Add artifact-level indexing and cleanup explanations.
 
-- [ ] Add content hash and size metadata for reports, patches, taskpacks,
+- [x] Add content hash and size metadata for reports, patches, taskpacks,
       state snapshots, role contexts, repo contexts, and evidence summaries.
-- [ ] Add token/stat aggregates.
-- [ ] Teach `gc --dry-run` to use indexed metadata to explain protected and
+- [x] Add token/stat aggregates.
+- [x] Teach `gc --dry-run` to use indexed metadata to explain protected and
       rebuildable artifacts.
 
 ## Out Of Scope For M40a

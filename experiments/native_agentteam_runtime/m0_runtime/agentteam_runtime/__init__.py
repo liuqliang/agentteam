@@ -71,6 +71,10 @@ _EXPORTS = {
         ".projection_db",
         "read_projected_run_metadata",
     ),
+    "read_projected_artifact_summary": (
+        ".projection_db",
+        "read_projected_artifact_summary",
+    ),
     "rebuild_project_projection_db": (
         ".projection_db",
         "rebuild_project_projection_db",

@@ -37,9 +37,9 @@ The projection module owns:
 Writes are rebuildable and best-effort. Runtime workers and scheduler event
 writes must not depend on database writes succeeding.
 
-## Initial Schema
+## Schema Slices
 
-M40a starts with only the tables needed for reliable rebuild and check:
+M40a started with only the tables needed for reliable rebuild and check:
 
 - `schema_info`: schema version and creation metadata;
 - `runs`: one row per run directory, including run id, run dir, status, event
@@ -52,8 +52,19 @@ M40a starts with only the tables needed for reliable rebuild and check:
 - `evidence_summaries`: compact evidence level/status rows from scheduler
   step results.
 
-Later slices may add artifact hashes, token aggregates, release references,
-manual gates, permission requests, and integration queue details.
+M40c adds the first artifact-level index:
+
+- `artifacts`: physical artifact path, logical type, run/task/attempt ids when
+  known, content hash, size, source, authority, and retention policy;
+- `run_stats`: per-run task/event/evidence/artifact counts, artifact bytes, and
+  token usage aggregates.
+
+`evidence_summaries` also carries a deterministic content hash and size for
+the serialized summary row. These rows are still projected facts, not a new
+authority.
+
+Later slices may add release references, manual gates, permission requests,
+integration queue details, and DB-backed statistics views.
 
 ## CLI Contract
 
@@ -76,9 +87,13 @@ evidence: complete=4, incomplete=1
 ```
 
 `check` validates that the database exists, has the expected schema version,
-and that projected counts match a fresh file scan. If the database is missing
-or stale, it reports the mismatch; it does not rebuild unless the operator
-runs `rebuild`.
+and that projected counts plus artifact digest match a fresh file scan. If the
+database is missing or stale, it reports the mismatch; it does not rebuild
+unless the operator runs `rebuild`.
+
+`gc --dry-run` may read a fresh projection to summarize artifact counts, bytes,
+retention policies, and token usage. It explains authoritative artifacts and
+rebuildable context artifacts, but M40c does not delete run artifacts.
 
 ## Failure Handling
 
@@ -95,6 +110,6 @@ database.
 
 - no DB-primary artifact storage;
 - no replacement of `events.jsonl`;
-- no DB-first `status` or `logs` reads in M40a;
-- no smart GC decisions in M40a;
+- no DB-primary `status` or `logs` authority;
+- no automatic run artifact deletion in M40c;
 - no live model calls in tests.
