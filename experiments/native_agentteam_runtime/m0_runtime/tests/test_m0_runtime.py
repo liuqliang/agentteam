@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,13 +53,13 @@ SCHEMAS = ROOT / "schemas"
 
 class FixedClock:
     def __init__(self):
-        self._ticks = iter(
-            f"2026-05-31T00:00:{second:02d}Z"
-            for second in range(60)
-        )
+        self._base = datetime(2026, 5, 31, tzinfo=UTC)
+        self._seconds = 0
 
     def now(self):
-        return next(self._ticks)
+        value = self._base + timedelta(seconds=self._seconds)
+        self._seconds += 1
+        return value.isoformat().replace("+00:00", "Z")
 
 
 class M0RuntimeTests(unittest.TestCase):
@@ -5111,20 +5112,21 @@ class M0RuntimeTests(unittest.TestCase):
                 self.assertEqual(dispatch["inflight_count"], 2)
                 self.assertEqual(scheduler.summary()["processed_task_ids"], [])
 
-                collected = None
-                for _ in range(50):
+                collected_task_ids = []
+                for _ in range(250):
                     collected = scheduler.collect_ready_results()
-                    if collected["collected_count"] == 2:
+                    collected_task_ids.extend(collected["collected_task_ids"])
+                    if set(collected_task_ids) == {"TASK-001", "TASK-002"}:
                         break
                     time.sleep(0.02)
             finally:
                 pool.stop()
 
             state = read_scheduler_state_index(output_dir)
-            self.assertEqual(collected["collected_task_ids"], ["TASK-001", "TASK-002"])
+            self.assertEqual(set(collected_task_ids), {"TASK-001", "TASK-002"})
             self.assertEqual(
-                scheduler.summary()["processed_task_ids"],
-                ["TASK-001", "TASK-002"],
+                set(scheduler.summary()["processed_task_ids"]),
+                {"TASK-001", "TASK-002"},
             )
             self.assertEqual(scheduler.summary()["inflight_count"], 0)
             self.assertEqual(

@@ -43,6 +43,10 @@ _EXPORTS = {
         ".notifications",
         "build_feishu_notification_sink_from_env",
     ),
+    "check_project_projection_db": (
+        ".projection_db",
+        "check_project_projection_db",
+    ),
     "classify_attempt_outcome": (".m0_runtime", "classify_attempt_outcome"),
     "draft_taskpack_files": (".taskpack", "draft_taskpack_files"),
     "draft_taskpack_from_goal": (".taskpack_author", "draft_taskpack_from_goal"),
@@ -55,6 +59,10 @@ _EXPORTS = {
     "read_integration_batches": (".integration_batch", "read_integration_batches"),
     "read_scheduler_state_index": (".m0_runtime", "read_scheduler_state_index"),
     "read_integration_queue": (".integration_queue", "read_integration_queue"),
+    "rebuild_project_projection_db": (
+        ".projection_db",
+        "rebuild_project_projection_db",
+    ),
     "resolve_permission_request": (".m0_runtime", "resolve_permission_request"),
     "replay_events": (".m0_runtime", "replay_events"),
     "run_file_daemon": (".daemon", "run_file_daemon"),

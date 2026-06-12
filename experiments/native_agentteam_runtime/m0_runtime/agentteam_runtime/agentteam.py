@@ -43,6 +43,10 @@ from .profile import (
     profile_path_for_project,
     write_project_profile,
 )
+from .projection_db import (
+    check_project_projection_db,
+    rebuild_project_projection_db,
+)
 from .release_manager import (
     activate_release,
     install_release_from_git,
@@ -117,6 +121,17 @@ _HELP_COMMANDS = [
         "examples": [
             "agentteam logs --project-root <repo>",
             "agentteam logs --taskpack <id> --lines 10",
+        ],
+    },
+    {
+        "name": "db",
+        "summary": "Rebuild or check the project-level artifact projection database.",
+        "examples": [
+            "agentteam db rebuild --project-root <repo>",
+            "agentteam db check --project-root <repo> --json",
+        ],
+        "notes": [
+            "The database is a rebuildable projection; file artifacts remain authoritative.",
         ],
     },
     {
@@ -341,6 +356,7 @@ def _build_parser():
     _add_watch_parser(subcommands)
     _add_report_parser(subcommands)
     _add_chat_parser(subcommands)
+    _add_db_parser(subcommands)
     _add_doctor_parser(subcommands)
     _add_logs_parser(subcommands)
     _add_explain_status_parser(subcommands)
@@ -852,6 +868,33 @@ def _add_chat_parser(subcommands):
         help="Optional Codex command prefix. Must appear last.",
     )
     parser.set_defaults(handler=_handle_chat)
+
+
+def _add_db_parser(subcommands):
+    parser = subcommands.add_parser(
+        "db",
+        help="Rebuild or check the project artifact projection database.",
+    )
+    db_subcommands = parser.add_subparsers(
+        dest="db_command",
+        required=True,
+        parser_class=JsonArgumentParser,
+    )
+    rebuild = db_subcommands.add_parser(
+        "rebuild",
+        help="Rebuild <work_root>/agentteam.db from authoritative files.",
+    )
+    rebuild.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    rebuild.add_argument("--json", action="store_true", help="Print rebuild summary as JSON.")
+    rebuild.set_defaults(handler=_handle_db)
+
+    check = db_subcommands.add_parser(
+        "check",
+        help="Check whether <work_root>/agentteam.db matches authoritative files.",
+    )
+    check.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    check.add_argument("--json", action="store_true", help="Print check summary as JSON.")
+    check.set_defaults(handler=_handle_db)
 
 
 def _add_doctor_parser(subcommands):
@@ -2472,6 +2515,28 @@ def _handle_gc(args):
     return 0
 
 
+def _handle_db(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    work_root = Path(profile["work_root"]).resolve()
+    if args.db_command == "rebuild":
+        summary = rebuild_project_projection_db(work_root)
+    elif args.db_command == "check":
+        summary = check_project_projection_db(work_root)
+    else:
+        raise AgentTeamCliError("unsupported db command", db_command=args.db_command)
+    summary = {
+        **summary,
+        "project": profile.get("project_key") or "unknown",
+        "project_root": str(project_root),
+        "work_root": str(work_root),
+    }
+    if args.json:
+        return summary
+    _write_db_text(summary)
+    return 0
+
+
 def _watch_profile(args):
     if args.project_root:
         return load_project_profile(Path(args.project_root).resolve())
@@ -2817,6 +2882,38 @@ def _write_gc_text(summary):
         lines.append(f"stale_run_cleanup: {cleanup.get('cleanup_status') or cleanup.get('stop_status') or 'completed'}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
+
+
+def _write_db_text(summary):
+    status = summary.get("db_status") or summary.get("check_status") or "unknown"
+    lines = [
+        f"db_status: {status}",
+        f"project: {summary.get('project') or 'unknown'}",
+        f"db_path: {summary.get('db_path') or 'unknown'}",
+        f"runs: {summary.get('runs', summary.get('actual', {}).get('runs', 0))}",
+        f"taskpacks: {summary.get('taskpacks', summary.get('actual', {}).get('taskpacks', 0))}",
+        f"events: {summary.get('events', summary.get('actual', {}).get('events', 0))}",
+        f"tasks: {summary.get('tasks', summary.get('actual', {}).get('tasks', 0))}",
+        f"evidence: {_format_projection_evidence(summary)}",
+    ]
+    mismatches = summary.get("mismatches")
+    if mismatches:
+        lines.append(f"mismatches: {', '.join(mismatches)}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _format_projection_evidence(summary):
+    evidence = summary.get("evidence")
+    if not isinstance(evidence, dict):
+        actual = summary.get("actual") if isinstance(summary.get("actual"), dict) else {}
+        evidence = actual.get("evidence") if isinstance(actual.get("evidence"), dict) else {}
+    parts = [
+        f"{status}={evidence[status]}"
+        for status in sorted(evidence)
+        if evidence.get(status)
+    ]
+    return ", ".join(parts) if parts else "none"
 
 
 def _attach_release_status_fields(summary, profile):

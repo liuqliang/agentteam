@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,10 @@ from agentteam_runtime.diagnostic_chat import (
     render_runtime_diagnostic_context,
 )
 from agentteam_runtime.profile import build_project_profile, write_project_profile
+from agentteam_runtime.projection_db import (
+    check_project_projection_db,
+    rebuild_project_projection_db,
+)
 from agentteam_runtime.taskpack_author import _command_list
 from agentteam_runtime.taskpack_author import _canonicalize_codex_taskpack_files
 
@@ -398,6 +403,175 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 class TaskpackTests(unittest.TestCase):
+    def test_project_projection_db_rebuild_indexes_runs_taskpacks_events_and_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = _write_completed_operator_run(work_root / "runs" / "projection-run")
+            state_path = run_dir / "state" / "two_phase_scheduler_state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["steps"] = [
+                {
+                    "task_id": "optimize-pipeline",
+                    "result": {
+                        "attempt_id": "optimize-pipeline-ATTEMPT-001",
+                        "evidence_level": "L2",
+                        "evidence_status": "incomplete",
+                        "trace_carrier": [{"type": "event", "path": "EVT-0001"}],
+                        "missing_evidence": ["review_result"],
+                    },
+                }
+            ]
+            _write_json(state_path, state)
+            _write_json(
+                work_root / "frozen" / "projection-run" / "taskpack.json",
+                {
+                    "taskpack_id": "projection-run",
+                    "goal": "Project projection fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+
+            summary = rebuild_project_projection_db(work_root)
+
+            self.assertEqual(summary["db_status"], "rebuilt")
+            self.assertEqual(summary["runs"], 1)
+            self.assertEqual(summary["taskpacks"], 1)
+            self.assertEqual(summary["events"], 1)
+            self.assertEqual(summary["tasks"], 1)
+            self.assertEqual(summary["evidence"], {"incomplete": 1})
+            db_path = Path(summary["db_path"])
+            with sqlite3.connect(db_path) as connection:
+                table_names = {
+                    row[0]
+                    for row in connection.execute(
+                        "select name from sqlite_master where type='table'"
+                    )
+                }
+                run_rows = connection.execute(
+                    "select run_id, event_count, latest_event_type from runs"
+                ).fetchall()
+                evidence_rows = connection.execute(
+                    "select run_id, task_id, attempt_id, evidence_level, evidence_status, missing_evidence_json from evidence_summaries"
+                ).fetchall()
+
+            self.assertTrue(
+                {
+                    "schema_info",
+                    "runs",
+                    "taskpacks",
+                    "events",
+                    "tasks",
+                    "evidence_summaries",
+                }.issubset(table_names)
+            )
+            self.assertEqual(run_rows, [("projection-run", 1, "run_completed")])
+            self.assertEqual(
+                evidence_rows,
+                [
+                    (
+                        "projection-run",
+                        "optimize-pipeline",
+                        "optimize-pipeline-ATTEMPT-001",
+                        "L2",
+                        "incomplete",
+                        '["review_result"]',
+                    )
+                ],
+            )
+
+    def test_project_projection_db_check_detects_stale_event_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = _write_completed_operator_run(work_root / "runs" / "projection-run")
+            rebuild_project_projection_db(work_root)
+
+            passed = check_project_projection_db(work_root)
+            with (run_dir / "events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "event_id": "EVT-0002",
+                            "event_type": "backlog_updated",
+                            "sequence": 2,
+                            "time": "2026-06-12T00:00:01Z",
+                            "payload": {"task_id": "optimize-pipeline"},
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+            failed = check_project_projection_db(work_root)
+
+            self.assertEqual(passed["check_status"], "passed")
+            self.assertEqual(failed["check_status"], "failed")
+            self.assertIn("events", failed["mismatches"])
+            self.assertEqual(failed["expected"]["events"], 2)
+            self.assertEqual(failed["actual"]["events"], 1)
+
+    def test_agentteam_cli_db_rebuild_and_check_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "projection-cli")
+            _write_completed_operator_run(work_root / "runs" / "projection-run")
+            _write_json(
+                work_root / "frozen" / "projection-run" / "taskpack.json",
+                {
+                    "taskpack_id": "projection-run",
+                    "goal": "Project projection CLI fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+
+            rebuild_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "db",
+                    "rebuild",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            check_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "db",
+                    "check",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(rebuild_completed.returncode, 0, rebuild_completed.stderr)
+            self.assertEqual(check_completed.returncode, 0, check_completed.stderr)
+            rebuild_summary = json.loads(rebuild_completed.stdout)
+            check_summary = json.loads(check_completed.stdout)
+            self.assertEqual(rebuild_summary["db_status"], "rebuilt")
+            self.assertEqual(rebuild_summary["project"], "projection-cli")
+            self.assertEqual(rebuild_summary["runs"], 1)
+            self.assertEqual(check_summary["check_status"], "passed")
+            self.assertEqual(check_summary["db_path"], rebuild_summary["db_path"])
+
     def test_completion_summary_reports_evidence_gaps_when_worker_omits_fields(self):
         summary = build_completion_summary(
             run_id="gap-run",

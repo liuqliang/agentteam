@@ -37,7 +37,7 @@ compact for terminal use.
 
 | Group | Commands | Purpose |
 | --- | --- | --- |
-| Project setup | `init`, `doctor`, `update`, `gc` | Configure and maintain the local AgentTeam installation for a project. |
+| Project setup | `init`, `doctor`, `update`, `db`, `gc` | Configure and maintain the local AgentTeam installation for a project. |
 | Run lifecycle | `start`, `next`, `continue`, `stop`, `status`, `explain-status`, `watch`, `logs`, `report`, `paths` | Start work, inspect progress, stop safely, and understand completed runs. |
 | Result integration | `integrate` | Merge verified integration-baseline changes back to the target repository. |
 | Notification | `notify` | Test Feishu delivery or resend completion summaries. |
@@ -154,6 +154,39 @@ Notes:
   project stores only refs, active release metadata, events, and run pins.
 - Use `--status` to see `active_release`, `latest_installed_release`, and whether
   active is latest.
+
+### `agentteam db`
+
+Rebuilds or checks the project-level artifact projection database at
+`<work_root>/agentteam.db`.
+
+Use it when:
+
+- You want faster project-level inspection in future DB-backed commands.
+- You suspect the projection is stale or missing.
+- You deleted `agentteam.db` and want to regenerate it from authoritative files.
+
+Examples:
+
+```bash
+agentteam db rebuild
+agentteam db check
+agentteam db rebuild --project-root /path/to/repo --json
+agentteam db check --project-root /path/to/repo --json
+```
+
+Important behavior:
+
+- `agentteam.db` is a rebuildable projection. Frozen taskpacks, run
+  directories, `events.jsonl`, reports, patches, and state snapshots remain the
+  authoritative records.
+- `rebuild` scans `frozen/` and `runs/`, writes a temporary database, then
+  replaces the old projection only after a successful rebuild.
+- `check` compares projected counts with a fresh file scan and reports
+  mismatches such as stale event counts. It does not mutate files.
+- M40a indexes runs, taskpacks, events, tasks, and compact evidence summaries.
+  Later milestones may add artifact hashes, token aggregates, and DB-assisted
+  cleanup.
 
 ### `agentteam gc`
 

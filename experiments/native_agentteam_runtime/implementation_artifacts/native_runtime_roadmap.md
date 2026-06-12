@@ -719,7 +719,7 @@ Short-term slices:
 
 ### M40: Artifact Projection Database
 
-Status: deferred until after M39 establishes the runtime evidence contract.
+Status: M40a implemented; M40b/M40c pending.
 
 Goal: add a local SQLite projection layer that makes long-running project state
 fast to query, summarize, clean up, and diagnose while keeping file-backed
@@ -737,7 +737,7 @@ Scope:
 - define schema-versioned tables for runs, taskpacks, tasks, attempts, events,
   artifact metadata, integrations, reports, token usage, manual gates,
   permission requests, releases, and evidence summaries;
-- keep SQLite in WAL mode with short single-writer transactions;
+- keep rebuild writes atomic with a temporary database and short transactions;
 - index existing authoritative artifacts by physical path, logical type,
   content hash, run id, task id, attempt id, size, and retention policy;
 - add `agentteam db check` and `agentteam db rebuild` so the projection can be
@@ -769,7 +769,7 @@ Acceptance:
 
 Short-term slices:
 
-- M40a: schema, migration log, event/taskpack/run/evidence projection,
+- M40a implemented: schema, event/taskpack/run/evidence projection,
   `db check`, and `db rebuild`.
 - M40b: read-through query path for `status`, `logs`, `taskpack list`, and
   report metadata with file replay fallback.
