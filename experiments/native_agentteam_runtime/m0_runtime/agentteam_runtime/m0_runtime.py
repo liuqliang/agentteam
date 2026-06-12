@@ -1864,6 +1864,10 @@ def _create_sqlite_state_schema(connection):
 
 
 def replay_events(events_path):
+    return replay_event_records(_read_jsonl(events_path))
+
+
+def replay_event_records(events):
     snapshot = {
         "tasks": {},
         "attempts": {},
@@ -1873,7 +1877,7 @@ def replay_events(events_path):
         "manual_gates": {},
         "permission_requests": {},
     }
-    for event in _read_jsonl(events_path):
+    for event in events:
         payload = event["payload"]
         task_id = payload.get("task_id")
         attempt_id = payload.get("attempt_id")

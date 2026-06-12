@@ -72,6 +72,7 @@ _EXPORTS = {
         "rebuild_project_projection_db",
     ),
     "resolve_permission_request": (".m0_runtime", "resolve_permission_request"),
+    "replay_event_records": (".m0_runtime", "replay_event_records"),
     "replay_events": (".m0_runtime", "replay_events"),
     "run_file_daemon": (".daemon", "run_file_daemon"),
     "run_scheduler_loop": (".m0_runtime", "run_scheduler_loop"),

@@ -366,6 +366,12 @@ Text output includes:
 - worker summary
 - run directory
 
+When `<work_root>/agentteam.db` exists and is fresh, status JSON may replay
+events from the projection database. Live process/liveness, worker registry,
+and scheduler state are still read from files so current execution state stays
+accurate. If the projection is missing or stale, status falls back to
+`events.jsonl`.
+
 ### `agentteam explain-status`
 
 Turns status into a short natural-language explanation and next action.

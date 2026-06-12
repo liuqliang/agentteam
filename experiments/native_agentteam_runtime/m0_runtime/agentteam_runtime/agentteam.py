@@ -20,6 +20,7 @@ from .artifact_repo import snapshot_run_artifacts_safe
 from .m0_runtime import (
     answer_manual_gate,
     list_permission_requests,
+    replay_event_records,
     replay_events,
     resolve_permission_request,
 )
@@ -3247,7 +3248,16 @@ def _run_paths_for_frozen_taskpack(frozen_taskpack_dir, run_root):
 def _build_run_status_summary(profile, run_dir):
     run_dir = Path(run_dir).resolve()
     events_path = run_dir / "events.jsonl"
-    snapshot = replay_events(events_path) if events_path.exists() else {}
+    projected_events = read_projected_run_events(
+        profile.get("work_root") or run_dir.parent.parent,
+        run_dir.name,
+    )
+    if projected_events is not None:
+        snapshot = replay_event_records(projected_events["events"])
+        projection_source = "db"
+    else:
+        snapshot = replay_events(events_path) if events_path.exists() else {}
+        projection_source = "files"
     state = _read_json_if_exists(run_dir / "state" / "two_phase_scheduler_state.json")
     if not state:
         state = _read_json_if_exists(run_dir / "state" / "scheduler_state.json")
@@ -3292,6 +3302,7 @@ def _build_run_status_summary(profile, run_dir):
         "last_failure": _status_last_failure(snapshot, state),
         "authoring": authoring,
         "run_dir": str(run_dir),
+        "projection_source": projection_source,
     }
     return summary
 
