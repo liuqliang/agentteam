@@ -6559,6 +6559,31 @@ class TaskpackTests(unittest.TestCase):
     def test_codex_taskpack_author_default_command_allows_non_git_draft_root(self):
         self.assertEqual(_command_list(None), ["codex", "exec", "--skip-git-repo-check"])
 
+    def test_codex_taskpack_author_preserves_validation_error_for_non_object_taskpack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            taskpack_dir = tmp_path / "drafts" / "codex-invalid-taskpack"
+            taskpack_dir.mkdir(parents=True)
+            (taskpack_dir / "taskpack.yaml").write_text("[]", encoding="utf-8")
+            (taskpack_dir / "agent_pool.json").write_text(
+                json.dumps({"agents": []}),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "backlog.json").write_text(
+                json.dumps({"items": []}),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "verification.json").write_text(
+                json.dumps({"command": ["python3", "-m", "unittest", "discover"]}),
+                encoding="utf-8",
+            )
+
+            _canonicalize_codex_taskpack_files(taskpack_dir)
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(taskpack_dir)
+            self.assertIn("taskpack must be an object", str(raised.exception))
+
     def test_codex_taskpack_author_canonicalizes_common_schema_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

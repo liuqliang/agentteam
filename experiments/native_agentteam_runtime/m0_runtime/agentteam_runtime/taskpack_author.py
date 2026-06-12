@@ -422,7 +422,8 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
     else:
         effective_goal = None
         goal_kind = "implementation"
-    files = taskpack.get("files") if isinstance(taskpack.get("files"), dict) else {}
+    taskpack_data = taskpack if isinstance(taskpack, dict) else {}
+    files = taskpack_data.get("files") if isinstance(taskpack_data.get("files"), dict) else {}
 
     agent_pool_path = taskpack_dir / files.get("agent_pool", "agent_pool.json")
     agent_pool = _read_json(agent_pool_path)
@@ -455,11 +456,11 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
                 item["work_type"] = _default_work_type(goal_kind)
             if not item.get("goal_alignment"):
                 item["goal_alignment"] = _default_goal_alignment(
-                    taskpack.get("original_goal") or taskpack.get("goal") or item.get("objective")
+                    taskpack_data.get("original_goal") or taskpack_data.get("goal") or item.get("objective")
                 )
             if not item.get("required_deliverables"):
                 item["required_deliverables"] = _default_required_deliverables(
-                    taskpack.get("original_goal") or taskpack.get("goal") or item.get("objective")
+                    taskpack_data.get("original_goal") or taskpack_data.get("goal") or item.get("objective")
                 )
             elif goal_kind == "optimization" and isinstance(item.get("required_deliverables"), list):
                 for deliverable in _default_required_deliverables(effective_goal):
@@ -475,7 +476,7 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
     verification = _read_json(verification_path)
     if isinstance(verification, dict):
         command = verification.get("command")
-        project_root = taskpack.get("project_root")
+        project_root = taskpack_data.get("project_root")
         canonical_command = _canonical_verification_command(command, project_root)
         if canonical_command != command:
             verification["command"] = canonical_command

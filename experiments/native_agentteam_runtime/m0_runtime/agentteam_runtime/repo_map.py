@@ -535,6 +535,9 @@ def _inventory_entry(project_root, relative_path, max_file_bytes, warnings):
     except FileNotFoundError:
         warnings.append({"path": relative_path, "warning": "missing_during_scan"})
         return None
+    if not file_path.is_file():
+        warnings.append({"path": relative_path, "warning": "tracked_path_is_not_file"})
+        return None
 
     entry = {
         "path": relative_path,

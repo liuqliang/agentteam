@@ -761,6 +761,45 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(files["pkg/module.py"]["category"], "source")
             self.assertEqual(len(files["pkg/module.py"]["sha256"]), 64)
 
+    def test_repo_map_skips_tracked_gitlink_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "runtime"
+            _init_git_repo(repo)
+            (repo / "vendor").mkdir()
+            subprocess.run(
+                [
+                    "git",
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    "160000",
+                    "0123456789012345678901234567890123456789",
+                    "vendor/submodule",
+                ],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "add gitlink"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            (repo / "vendor" / "submodule").mkdir()
+
+            repo_map = build_repository_map(repo, output_dir)
+
+            files = {entry["path"]: entry for entry in repo_map["inventory"]["files"]}
+            warnings = {
+                (warning.get("path"), warning.get("warning"))
+                for warning in repo_map["manifest"]["warnings"]
+            }
+            self.assertNotIn("vendor/submodule", files)
+            self.assertIn(("vendor/submodule", "tracked_path_is_not_file"), warnings)
+
     def test_repo_map_reuses_cache_for_clean_same_head(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
