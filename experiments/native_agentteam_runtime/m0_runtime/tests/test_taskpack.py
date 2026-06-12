@@ -4203,6 +4203,201 @@ class TaskpackTests(unittest.TestCase):
             self.assertTrue((work_root / "releases" / "active-release").exists())
             self.assertFalse((work_root / "releases" / "old-release").exists())
 
+    def test_global_release_prune_explains_protected_and_orphaned_roots(self):
+        from agentteam_runtime.release_manager import prune_global_releases
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            global_store = tmp_path / "agentteam-home" / "runtime-releases"
+            source_root = global_store / "source-a"
+            work_root = tmp_path / "agentteam-home" / "project-a"
+            other_work_root = tmp_path / "agentteam-home" / "project-b"
+
+            release_roots = {}
+            for release_id in ["active-release", "ref-release", "running-release", "orphan-release"]:
+                release_root = source_root / release_id
+                release_root.mkdir(parents=True)
+                (release_root / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "manifest_schema_version": "agentteam_release_manifest.v2",
+                            "install_method": "git_ref",
+                            "release_id": release_id,
+                            "release_root": str(release_root),
+                            "source_key": "source-a",
+                            "installed_at": f"2026-06-12T00:00:0{len(release_roots)}Z",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                release_roots[release_id] = release_root
+
+            (work_root / "releases").mkdir(parents=True)
+            (work_root / "releases" / "active.json").write_text(
+                json.dumps(
+                    {
+                        "release_id": "active-release",
+                        "release_root": str(release_roots["active-release"]),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            refs_root = work_root / "releases" / "refs"
+            refs_root.mkdir(parents=True)
+            (refs_root / "ref-release.json").write_text(
+                json.dumps(
+                    {
+                        "release_id": "ref-release",
+                        "release_root": str(release_roots["ref-release"]),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            running_state = other_work_root / "runs" / "running-run" / "state"
+            running_state.mkdir(parents=True)
+            (running_state / "two_phase_scheduler_state.json").write_text(
+                json.dumps(
+                    {
+                        "scheduler_status": "running",
+                        "runtime_release_id": "running-release",
+                        "runtime_release_root": str(release_roots["running-release"]),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            dry_run = prune_global_releases(
+                work_root,
+                release_store_root=global_store,
+                force=False,
+            )
+
+            statuses = {item["release_id"]: item for item in dry_run["global_releases"]}
+            self.assertEqual(dry_run["prune_status"], "dry_run")
+            self.assertEqual(dry_run["deletable_global_release_ids"], ["orphan-release"])
+            self.assertEqual(
+                dry_run["protected_global_release_ids"],
+                ["active-release", "ref-release", "running-release"],
+            )
+            self.assertIn("active_project", statuses["active-release"]["protection_reasons"])
+            self.assertIn("project_ref", statuses["ref-release"]["protection_reasons"])
+            self.assertIn("nonterminal_run", statuses["running-release"]["protection_reasons"])
+            self.assertEqual(statuses["orphan-release"]["status"], "deletable")
+            self.assertTrue(release_roots["orphan-release"].exists())
+
+            pruned = prune_global_releases(
+                work_root,
+                release_store_root=global_store,
+                force=True,
+            )
+
+            self.assertEqual(pruned["prune_status"], "pruned")
+            self.assertEqual(pruned["deleted_global_release_ids"], ["orphan-release"])
+            self.assertTrue(release_roots["active-release"].exists())
+            self.assertTrue(release_roots["ref-release"].exists())
+            self.assertTrue(release_roots["running-release"].exists())
+            self.assertFalse(release_roots["orphan-release"].exists())
+
+    def test_agentteam_cli_gc_global_releases_requires_force_and_deletes_orphans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            agentteam_home = tmp_path / "agentteam-home"
+            global_store = agentteam_home / "runtime-releases"
+            work_root = agentteam_home / "gc-global-project"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "gc-global-project")
+
+            source_root = global_store / "source-a"
+            active_release = source_root / "active-release"
+            orphan_release = source_root / "orphan-release"
+            for release_id, release_root in [
+                ("active-release", active_release),
+                ("orphan-release", orphan_release),
+            ]:
+                release_root.mkdir(parents=True)
+                (release_root / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "manifest_schema_version": "agentteam_release_manifest.v2",
+                            "install_method": "git_ref",
+                            "release_id": release_id,
+                            "release_root": str(release_root),
+                            "source_key": "source-a",
+                            "installed_at": "2026-06-12T00:00:00Z",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            (work_root / "releases").mkdir(parents=True)
+            (work_root / "releases" / "active.json").write_text(
+                json.dumps(
+                    {
+                        "release_id": "active-release",
+                        "release_root": str(active_release),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            env = _test_env()
+            env["AGENTTEAM_RUNTIME_RELEASE_ROOT"] = str(global_store)
+            dry_run_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "gc",
+                    "--project-root",
+                    str(repo),
+                    "--global-releases",
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(dry_run_completed.returncode, 0, dry_run_completed.stderr)
+            dry_run_summary = json.loads(dry_run_completed.stdout)
+            self.assertEqual(dry_run_summary["gc_status"], "dry_run")
+            self.assertEqual(
+                dry_run_summary["global_release_prune"]["deletable_global_release_ids"],
+                ["orphan-release"],
+            )
+            self.assertTrue(orphan_release.exists())
+
+            force_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "gc",
+                    "--project-root",
+                    str(repo),
+                    "--global-releases",
+                    "--force",
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(force_completed.returncode, 0, force_completed.stderr)
+            force_summary = json.loads(force_completed.stdout)
+            self.assertEqual(force_summary["gc_status"], "completed")
+            self.assertEqual(
+                force_summary["global_release_prune"]["deleted_global_release_ids"],
+                ["orphan-release"],
+            )
+            self.assertTrue(active_release.exists())
+            self.assertFalse(orphan_release.exists())
+
     def test_agentteam_cli_start_records_active_runtime_release(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

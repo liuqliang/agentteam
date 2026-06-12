@@ -63,15 +63,15 @@ Acceptance:
 
 Make cleanup aware of shared global releases.
 
-- [ ] Add reference discovery for known project profiles under
+- [x] Add reference discovery for known project work roots under
       `~/.local/share/agentteam`.
-- [ ] Compute global release reference status from project active pointers,
+- [x] Compute global release reference status from project active pointers,
       project refs, and nonterminal run pins.
-- [ ] Extend `agentteam gc` or `agentteam update --prune` with dry-run metadata
+- [x] Extend `agentteam gc` or `agentteam update --prune` with dry-run metadata
       for protected and deletable global releases.
-- [ ] Only delete global releases with explicit force and no active or
+- [x] Only delete global releases with explicit force and no active or
       nonterminal references.
-- [ ] Add tests for protected active releases, pinned run releases, orphaned
+- [x] Add tests for protected active releases, pinned run releases, orphaned
       release roots, and dry-run explanations.
 
 Acceptance:

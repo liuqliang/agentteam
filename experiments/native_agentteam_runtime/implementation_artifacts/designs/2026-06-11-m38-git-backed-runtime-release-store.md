@@ -140,9 +140,10 @@ A global release is protected when:
 - any nonterminal run is pinned to it;
 - a project-local ref still points to it and cleanup is not explicitly global.
 
-M38c adds reference discovery across known project roots before deleting global
-release directories. Before M38c, cleanup should avoid deleting global runtime
-releases automatically.
+M38c adds reference discovery across known work roots before deleting global
+release directories. Global cleanup is explicit through
+`agentteam gc --global-releases`; without `--force`, it reports protected and
+deletable releases without deleting them.
 
 ## Errors
 
@@ -178,5 +179,5 @@ Core tests:
 - no GitHub Release asset downloads;
 - no cross-platform build matrix;
 - no DB-backed release index yet;
-- no automatic deletion of globally cached releases until reference protection
-  exists.
+- no automatic deletion of globally cached releases; shared global cleanup
+  requires `agentteam gc --global-releases --force`.

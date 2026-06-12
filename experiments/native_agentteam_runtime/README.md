@@ -284,13 +284,18 @@ agentteam taskpack delete --project-root /path/to/repo --taskpack old-id --delet
 Deletion is scoped to the profile `work_root`. A run directory is never deleted
 unless both `--delete-run` and `--force` are present.
 
-Versioned framework updates are side-by-side releases under the project
-`work_root`:
+Versioned framework updates are side-by-side releases. Legacy `update --from`
+copies the framework under the project `work_root`; git-backed `update
+--from-git` installs the resolved git ref once under the shared global runtime
+release store and records only project-local refs:
 
 ```bash
 agentteam update --project-root /path/to/repo --status
 agentteam update --project-root /path/to/repo --from /path/to/agentteam/checkout --release-id m37-local
+agentteam update --project-root /path/to/repo --from-git /home/liuql/projects/agentteam --ref native-runtime-m0
 agentteam update --project-root /path/to/repo --rollback previous-release-id
+agentteam gc --project-root /path/to/repo --global-releases
+agentteam gc --project-root /path/to/repo --global-releases --force
 ```
 
 Plain `update --status` output is intentionally concise: it lists the active
@@ -301,6 +306,9 @@ run bindings, unmanaged runs, or source metadata.
 package into `<work_root>/releases/<release-id>`, and switches `active.json` for
 future commands. Existing run state is not rewritten. New runs record
 `runtime_release_id` and `runtime_release_root` when an active release exists.
+Use `agentteam gc --global-releases` to dry-run shared release cleanup. Add
+`--force` only when you want to delete orphaned global release roots that are
+not active, not referenced by project refs, and not pinned by nonterminal runs.
 
 If a runtime worker cannot safely continue without operator guidance, it returns
 `result_status: "blocked"` with `output.manual_gate.question`. The two-phase

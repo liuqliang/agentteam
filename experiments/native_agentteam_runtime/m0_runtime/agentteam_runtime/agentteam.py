@@ -48,6 +48,7 @@ from .release_manager import (
     install_release_from_git,
     install_release_from_checkout,
     record_active_release_for_run,
+    prune_global_releases,
     prune_releases,
     update_status,
 )
@@ -131,6 +132,7 @@ _HELP_COMMANDS = [
         "summary": "Clean AgentTeam local storage such as old runtime releases.",
         "examples": [
             "agentteam gc --project-root <repo>",
+            "agentteam gc --project-root <repo> --global-releases",
             "agentteam gc --project-root <repo> --force",
         ],
         "notes": ["Without --force this command reports what it would manage without deleting releases."],
@@ -883,6 +885,7 @@ def _add_gc_parser(subcommands):
     parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
     parser.add_argument("--keep-releases", type=int, default=1, help="Number of latest releases to retain.")
     parser.add_argument("--stale-runs", action="store_true", help="Also repair stale running run state.")
+    parser.add_argument("--global-releases", action="store_true", help="Also scan the shared global runtime release store.")
     parser.add_argument("--force", action="store_true", help="Actually delete eligible old releases.")
     parser.add_argument("--json", action="store_true", help="Print cleanup result as JSON instead of human text.")
     parser.set_defaults(handler=_handle_gc)
@@ -2450,6 +2453,9 @@ def _handle_gc(args):
             "cleanup_status": "dry_run",
             "force_required": True,
         }
+    global_release_prune = None
+    if args.global_releases:
+        global_release_prune = prune_global_releases(work_root, force=args.force)
     summary = {
         "gc_status": gc_status,
         "project": profile.get("project_key") or "unknown",
@@ -2457,6 +2463,7 @@ def _handle_gc(args):
         "work_root": str(work_root),
         "force": bool(args.force),
         "release_prune": release_prune,
+        "global_release_prune": global_release_prune,
         "stale_run_cleanup": stale_cleanup,
     }
     if args.json:
@@ -2797,6 +2804,14 @@ def _write_gc_text(summary):
     ]
     if prune.get("force_required"):
         lines.append("force_required: true")
+    global_prune = summary.get("global_release_prune") or {}
+    if global_prune:
+        lines.append(f"global_release_prune: {global_prune.get('prune_status') or 'unknown'}")
+        lines.append(f"global_protected_releases: {len(global_prune.get('protected_global_release_ids') or [])}")
+        lines.append(f"global_deletable_releases: {len(global_prune.get('deletable_global_release_ids') or [])}")
+        lines.append(f"global_deleted_releases: {len(global_prune.get('deleted_global_release_ids') or [])}")
+        if global_prune.get("force_required"):
+            lines.append("global_force_required: true")
     if summary.get("stale_run_cleanup"):
         cleanup = summary["stale_run_cleanup"]
         lines.append(f"stale_run_cleanup: {cleanup.get('cleanup_status') or cleanup.get('stop_status') or 'completed'}")

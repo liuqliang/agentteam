@@ -162,6 +162,8 @@ Cleans local AgentTeam storage for a project.
 Use it when:
 
 - Old runtime releases are accumulating under `work_root/releases`.
+- Git-backed runtime releases are accumulating under the shared global release
+  store.
 - You want a cleanup entry point separate from update.
 - You want to repair stale run state with `--stale-runs`.
 
@@ -169,8 +171,10 @@ Examples:
 
 ```bash
 agentteam gc
+agentteam gc --global-releases
 agentteam gc --force
 agentteam gc --keep-releases 2 --force
+agentteam gc --global-releases --force
 agentteam gc --stale-runs --force
 ```
 
@@ -180,6 +184,13 @@ Behavior:
 - With `--force`, deletes eligible old releases through the release manager.
 - Keeps the configured number of latest releases plus protected active or
   nonterminal-run releases.
+- With `--global-releases`, also scans
+  `~/.local/share/agentteam/runtime-releases/<source-key>/<release-id>/`.
+  Global releases are protected when any known work root references them through
+  `active.json`, `releases/refs/*.json`, or a nonterminal run pin.
+- Global release deletion is explicit: `agentteam gc --global-releases` only
+  explains protected and deletable releases; `--force` is required to delete
+  orphaned global release roots.
 
 ## Run Lifecycle
 
@@ -766,5 +777,7 @@ agentteam next --from-taskpack <taskpack-id> --goal "continue with the next safe
 ```bash
 agentteam update --status
 agentteam gc
+agentteam gc --global-releases
 agentteam gc --force
+agentteam gc --global-releases --force
 ```

@@ -326,6 +326,61 @@ def prune_releases(work_root, keep_latest=1):
     }
 
 
+def prune_global_releases(work_root=None, force=False, release_store_root=None):
+    store_root = Path(release_store_root).expanduser().resolve() if release_store_root else runtime_release_store_root()
+    work_roots = _discover_known_work_roots(work_root, store_root)
+    references = _global_release_references(work_roots)
+    references_by_root = {}
+    for reference in references:
+        release_root = reference.get("release_root")
+        if release_root:
+            references_by_root.setdefault(release_root, []).append(reference)
+
+    global_releases = []
+    deleted_global_releases = []
+    protected_release_ids = []
+    deletable_release_ids = []
+    for release in _global_release_candidates(store_root):
+        release_references = references_by_root.get(release["release_root"], [])
+        protection_reasons = sorted(
+            {
+                reference["reference_type"]
+                for reference in release_references
+                if reference.get("reference_type")
+            }
+        )
+        status = "protected" if release_references else "deletable"
+        record = {
+            **release,
+            "status": status,
+            "protection_reasons": protection_reasons,
+            "references": release_references,
+        }
+        if status == "protected":
+            protected_release_ids.append(release["release_id"])
+        else:
+            deletable_release_ids.append(release["release_id"])
+            if force and Path(release["release_root"]).exists():
+                shutil.rmtree(release["release_root"])
+                deleted_global_releases.append(release)
+        global_releases.append(record)
+
+    return {
+        "prune_status": "pruned" if force else "dry_run",
+        "release_store_root": str(store_root),
+        "force": bool(force),
+        "force_required": bool(deletable_release_ids and not force),
+        "known_work_roots": [str(path) for path in work_roots],
+        "protected_global_release_ids": sorted(protected_release_ids),
+        "deletable_global_release_ids": sorted(deletable_release_ids),
+        "deleted_global_release_ids": sorted(
+            release["release_id"] for release in deleted_global_releases
+        ),
+        "deleted_global_releases": deleted_global_releases,
+        "global_releases": global_releases,
+    }
+
+
 def record_active_release_for_run(run_dir, work_root):
     active = read_active_release(work_root)
     if not active.get("release_id"):
@@ -608,6 +663,128 @@ def _nonterminal_run_release_ids(work_root):
         if not scheduler_status or scheduler_status not in TERMINAL_RUN_STATUSES:
             release_ids.append(release_id)
     return release_ids
+
+
+def _discover_known_work_roots(current_work_root, release_store_root):
+    roots = []
+
+    def add_root(path):
+        if not path:
+            return
+        path = Path(path).expanduser().resolve()
+        if path in roots:
+            return
+        if path.exists() or path == Path(current_work_root or "").expanduser().resolve():
+            roots.append(path)
+
+    if current_work_root:
+        add_root(current_work_root)
+    agentteam_home = Path(release_store_root).expanduser().resolve().parent
+    if agentteam_home.exists():
+        for candidate in sorted(path for path in agentteam_home.iterdir() if path.is_dir()):
+            if candidate.resolve() == Path(release_store_root).expanduser().resolve():
+                continue
+            if _looks_like_work_root(candidate):
+                add_root(candidate)
+    return roots
+
+
+def _looks_like_work_root(path):
+    path = Path(path)
+    return any((path / name).exists() for name in ("releases", "runs", "drafts", "frozen"))
+
+
+def _global_release_candidates(release_store_root):
+    release_store_root = Path(release_store_root).expanduser().resolve()
+    if not release_store_root.exists():
+        return []
+    candidates = []
+    for source_dir in sorted(path for path in release_store_root.iterdir() if path.is_dir()):
+        if source_dir.name.startswith("."):
+            continue
+        for release_root in sorted(path for path in source_dir.iterdir() if path.is_dir()):
+            if release_root.name.startswith("."):
+                continue
+            manifest = _read_json_if_exists(release_root / "manifest.json")
+            release_id = manifest.get("release_id") or release_root.name
+            candidates.append(
+                {
+                    "release_id": release_id,
+                    "source_key": manifest.get("source_key") or source_dir.name,
+                    "release_root": str(release_root.resolve()),
+                    "manifest_release_root": manifest.get("release_root"),
+                    "installed_at": manifest.get("installed_at"),
+                    "install_method": manifest.get("install_method"),
+                    "source_repo": manifest.get("source_repo"),
+                    "source_ref": manifest.get("source_ref"),
+                    "source_commit": manifest.get("source_commit"),
+                }
+            )
+    return candidates
+
+
+def _global_release_references(work_roots):
+    references = []
+    for work_root in work_roots:
+        work_root = Path(work_root).expanduser().resolve()
+        active = _read_json_if_exists(active_release_path(work_root))
+        reference = _global_release_reference(active, work_root, "active_project")
+        if reference:
+            references.append(reference)
+
+        refs_root = project_release_refs_root(work_root)
+        if refs_root.exists():
+            for ref_path in sorted(refs_root.glob("*.json")):
+                reference = _global_release_reference(
+                    _read_json_if_exists(ref_path),
+                    work_root,
+                    "project_ref",
+                    ref_path=ref_path,
+                )
+                if reference:
+                    references.append(reference)
+
+        run_root = work_root / "runs"
+        if not run_root.exists():
+            continue
+        for run_dir in sorted(path for path in run_root.iterdir() if path.is_dir()):
+            state = _run_state(run_dir)
+            if not isinstance(state, dict):
+                continue
+            scheduler_status = state.get("scheduler_status")
+            if scheduler_status and scheduler_status in TERMINAL_RUN_STATUSES:
+                continue
+            reference = _global_release_reference(
+                {
+                    "release_id": state.get("runtime_release_id"),
+                    "release_root": state.get("runtime_release_root"),
+                },
+                work_root,
+                "nonterminal_run",
+                run_id=run_dir.name,
+            )
+            if reference:
+                references.append(reference)
+    return references
+
+
+def _global_release_reference(record, work_root, reference_type, ref_path=None, run_id=None):
+    if not isinstance(record, dict):
+        return None
+    release_root = record.get("release_root")
+    if not release_root:
+        return None
+    reference = {
+        "reference_type": reference_type,
+        "work_root": str(Path(work_root).expanduser().resolve()),
+        "release_id": record.get("release_id"),
+        "release_root": str(Path(release_root).expanduser().resolve()),
+    }
+    if ref_path:
+        reference["ref_path"] = str(Path(ref_path).expanduser().resolve())
+    if run_id:
+        reference["run_id"] = run_id
+    return reference
 
 
 def _safe_release_id(value):

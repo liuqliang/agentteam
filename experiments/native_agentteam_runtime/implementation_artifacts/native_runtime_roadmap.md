@@ -611,8 +611,7 @@ Completed follow-up:
 
 ### M38: Git-Backed Runtime Release Store
 
-Status: M38a and M38b implemented in the native-runtime branch. M38c global
-release cleanup protection remains follow-up work.
+Status: implemented in the native-runtime branch.
 
 Goal: make AgentTeam runtime updates reproducible and storage-efficient for
 local long-term use by installing framework releases from explicit local or
@@ -658,12 +657,14 @@ Acceptance:
 
 Short-term slices:
 
-- M38a implemented: global release store layout, local `--from-git --ref` install, manifest
-  format, project pointer refs, and status/rollback compatibility.
-- M38b implemented: remote git URL resolution and download with deterministic temporary
-  checkouts, plus reuse of an already installed source commit.
-- M38c pending: global release reference discovery and cleanup protection across known
-  projects, with dry-run explanations.
+- M38a implemented: global release store layout, local `--from-git --ref`
+  install, manifest format, project pointer refs, and status/rollback
+  compatibility.
+- M38b implemented: remote git URL resolution and download with deterministic
+  temporary checkouts, plus reuse of an already installed source commit.
+- M38c implemented: global release reference discovery and cleanup protection
+  across known work roots, with dry-run explanations and explicit-force orphan
+  deletion through `agentteam gc --global-releases`.
 
 ### M39: Runtime SOP Evidence Contract
 
@@ -815,7 +816,5 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is M38c. It adds global release reference discovery
-and cleanup protection before old globally cached runtime releases can be
-deleted safely. After M38c, M39 should establish the runtime SOP evidence
+The next recommended step is M39. It should establish the runtime SOP evidence
 contract before the database projection work begins in M40.
