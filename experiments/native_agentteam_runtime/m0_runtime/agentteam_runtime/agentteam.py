@@ -3148,6 +3148,7 @@ def _build_run_status_summary(profile, run_dir):
         "processes": liveness["processes"],
         "tasks": task_counts,
         "integration": integration_counts,
+        "evidence": _status_evidence_counts(state),
         "integration_baseline": _paths_integration_baseline(run_dir, state),
         "inflight": _status_inflight_attempts(state),
         "workers": _status_worker_counts(worker_registry),
@@ -3456,6 +3457,7 @@ def _write_status_text(summary):
             f"{summary['tasks']['blocked']} blocked"
         ),
         f"integration: {summary['integration']['blocked']} blocked",
+        *_status_evidence_lines(summary.get("evidence")),
         f"integration_baseline_branch: {summary['integration_baseline'].get('branch') or 'none'}",
         f"integration_baseline_head: {summary['integration_baseline'].get('head_sha') or 'unknown'}",
         format_token_usage(summary.get("token_usage"), label="tokens"),
@@ -3655,6 +3657,34 @@ def _status_inflight_attempts(state):
         if isinstance(attempt, dict) and attempt.get("task_id")
     ]
     return {"total": len(attempts), "tasks": tasks}
+
+
+def _status_evidence_counts(state):
+    counts = {"complete": 0, "incomplete": 0, "blocked": 0, "escalated": 0}
+    steps = state.get("steps") if isinstance(state, dict) else None
+    if not isinstance(steps, list):
+        return counts
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        result = step.get("result")
+        if not isinstance(result, dict):
+            continue
+        status = result.get("evidence_status")
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def _status_evidence_lines(evidence):
+    if not isinstance(evidence, dict):
+        return []
+    parts = [
+        f"{status}={evidence.get(status, 0)}"
+        for status in ["complete", "incomplete", "blocked", "escalated"]
+        if evidence.get(status, 0)
+    ]
+    return [f"evidence: {', '.join(parts)}"] if parts else []
 
 
 def _status_integration_counts(snapshot):

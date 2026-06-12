@@ -668,7 +668,7 @@ Short-term slices:
 
 ### M39: Runtime SOP Evidence Contract
 
-Status: planned after M38c.
+Status: implemented.
 
 Goal: adapt the single-agent implementation SOP into a native runtime contract
 that the scheduler can enforce before introducing a database projection layer.
@@ -697,24 +697,24 @@ Scope:
 
 Acceptance:
 
-- the roadmap and runtime design docs explicitly distinguish worker task risk,
+- implemented: the roadmap and runtime design docs explicitly distinguish worker task risk,
   milestone risk, and semantic architecture risk;
-- task proposal validation can represent or reject `L3` without dispatching it
+- implemented: task proposal validation can represent or reject `L3` without dispatching it
   to ordinary writable workers;
-- a generated `L3` proposal is routed to semantic escalation state, produces an
+- implemented: a generated `L3` proposal is routed to semantic escalation state, produces an
   inspectable event, and waits for semantic architecture handling;
-- `L2` results with missing required evidence are visible but cannot enter
+- implemented: `L2` results with missing required evidence are visible but cannot enter
   verified integration;
-- `status` and `report` can summarize evidence completeness for completed,
+- implemented: `status` and `report` can summarize evidence completeness for completed,
   blocked, and escalated work;
-- normal unit tests use fake/shell workers and require no live model calls.
+- implemented: normal unit tests use fake/shell workers and require no live model calls.
 
 Short-term slices:
 
-- M39a: runtime SOP contract document and risk/evidence data model.
-- M39b: proposal validation and scheduler routing for `L3` semantic
+- M39a implemented: runtime SOP contract document and risk/evidence data model.
+- M39b implemented: proposal validation and scheduler routing for `L3` semantic
   escalation.
-- M39c: `L2` evidence gate, result/report evidence summaries, and regression
+- M39c implemented: `L2` evidence gate, result/report evidence summaries, and regression
   tests.
 
 ### M40: Artifact Projection Database
@@ -816,5 +816,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is M39. It should establish the runtime SOP evidence
-contract before the database projection work begins in M40.
+The next recommended step is M40. It should add a rebuildable SQLite projection
+for status, logs, taskpack metadata, release references, and evidence summaries
+while keeping file-backed artifacts authoritative.

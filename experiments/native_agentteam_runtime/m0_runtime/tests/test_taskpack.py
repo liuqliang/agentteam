@@ -420,6 +420,96 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("Evidence gaps:", lines)
         self.assertIn("- No verification evidence was reported.", lines)
 
+    def test_completion_summary_reports_evidence_status_counts(self):
+        summary = build_completion_summary(
+            run_id="evidence-run",
+            run_status="completed",
+            task_count=2,
+            blocked_count=0,
+            task_reports=[
+                {
+                    "task_id": "TASK-001",
+                    "status": "implementation completed",
+                    "what_changed": ["Changed one file."],
+                    "changed_files": ["src/a.py"],
+                    "verification": ["unit: passed"],
+                    "integration": "passed",
+                    "evidence_status": "complete",
+                },
+                {
+                    "task_id": "TASK-002",
+                    "status": "implementation completed, integration blocked",
+                    "what_changed": ["Changed another file."],
+                    "changed_files": ["src/b.py"],
+                    "verification": ["unit: passed"],
+                    "integration": "blocked",
+                    "evidence_status": "incomplete",
+                    "missing_evidence": ["review_result"],
+                },
+            ],
+        )
+        lines = []
+
+        extend_completion_summary_lines(lines, summary)
+
+        self.assertEqual(
+            summary["evidence_status_counts"],
+            {"complete": 1, "incomplete": 1, "blocked": 0, "escalated": 0},
+        )
+        self.assertIn("Evidence status:", lines)
+        self.assertIn("- incomplete: 1", lines)
+
+    def test_run_status_summary_reports_evidence_counts_from_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = work_root / "runs" / "evidence-run"
+            state_dir = run_dir / "state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "two_phase_scheduler_state.json").write_text(
+                json.dumps(
+                    {
+                        "scheduler_status": "idle",
+                        "backlog": {"items": []},
+                        "inflight_attempts": [],
+                        "steps": [
+                            {
+                                "task_id": "TASK-001",
+                                "result": {
+                                    "evidence_status": "complete",
+                                    "evidence_level": "L1",
+                                },
+                            },
+                            {
+                                "task_id": "TASK-002",
+                                "result": {
+                                    "evidence_status": "incomplete",
+                                    "evidence_level": "L2",
+                                },
+                            },
+                        ],
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            profile = {"project_key": "fixture", "work_root": str(work_root)}
+
+            summary = _build_run_status_summary(profile, run_dir)
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                _write_status_text(summary)
+
+            self.assertEqual(
+                summary["evidence"],
+                {"complete": 1, "incomplete": 1, "blocked": 0, "escalated": 0},
+            )
+            self.assertIn(
+                "evidence: complete=1, incomplete=1",
+                stdout.getvalue(),
+            )
+
     def test_execution_result_text_reports_followup_work_summary(self):
         result = {
             "status": "completed",

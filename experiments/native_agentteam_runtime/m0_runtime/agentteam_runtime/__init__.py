@@ -50,6 +50,7 @@ _EXPORTS = {
     "feishu_custom_bot_sign": (".notifications", "feishu_custom_bot_sign"),
     "load_taskpack": (".taskpack", "load_taskpack"),
     "list_permission_requests": (".m0_runtime", "list_permission_requests"),
+    "normalize_evidence_summary": (".task_proposal", "normalize_evidence_summary"),
     "normalize_task_proposal": (".task_proposal", "normalize_task_proposal"),
     "read_integration_batches": (".integration_batch", "read_integration_batches"),
     "read_scheduler_state_index": (".m0_runtime", "read_scheduler_state_index"),

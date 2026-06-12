@@ -77,12 +77,14 @@ class FakeRuntimeAdapter:
                 ),
                 encoding="utf-8",
             )
+        evidence_summary = _fake_evidence_summary(message["payload"], changed_files)
         return {
             "result_status": "completed",
             "changed_files": changed_files,
             "output": {
                 "adapter": "fake",
                 "operator_summary": _fake_operator_summary(message["payload"], changed_files),
+                "evidence_summary": evidence_summary,
             },
         }
 
@@ -371,6 +373,7 @@ class CodexRuntimeAdapter:
                 *self._role_prompt_contract_lines(message),
                 *self._role_context_package_lines(message),
                 *self._repo_context_package_lines(message),
+                *self._evidence_policy_lines(message),
                 "Return exactly one JSON object as the final response.",
                 "The JSON object must have this shape:",
                 '{"result_status":"completed|blocked|failed|cancelled","changed_files":["path"],"output":{}}',
@@ -464,6 +467,18 @@ class CodexRuntimeAdapter:
             "Repo context package:",
             str(repo_context_path),
             "Read repo_context_path before selecting implementation files.",
+        ]
+
+    def _evidence_policy_lines(self, message):
+        policy = message["payload"].get("evidence_policy")
+        if not isinstance(policy, dict):
+            return []
+        return [
+            "Evidence policy:",
+            json.dumps(policy, sort_keys=True),
+            "Final JSON output must include output.evidence_summary with evidence_level, evidence_status, trace_carrier, and missing_evidence.",
+            "Use evidence_status complete only when trace_carrier records concrete evidence for this task.",
+            "For L2 or L3 evidence, incomplete evidence blocks patch integration; list missing_evidence instead of omitting uncertain proof.",
         ]
 
 
@@ -2582,6 +2597,25 @@ def _fake_operator_summary(payload, changed_files):
         "deliverables": deliverables,
         "merge_recommendation": "Review accepted patch before merging.",
         "next_steps": [],
+    }
+
+
+def _fake_evidence_summary(payload, changed_files):
+    policy = payload.get("evidence_policy")
+    evidence_level = "L1"
+    if isinstance(policy, dict) and policy.get("evidence_level"):
+        evidence_level = policy["evidence_level"]
+    return {
+        "evidence_level": evidence_level,
+        "evidence_status": "complete",
+        "trace_carrier": [
+            {
+                "kind": "fake_runtime",
+                "path": changed_files[0] if changed_files else "no_patch",
+                "summary": "Fake runtime produced deterministic test evidence.",
+            }
+        ],
+        "missing_evidence": [],
     }
 
 

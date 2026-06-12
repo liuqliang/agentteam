@@ -1,5 +1,7 @@
 _VALID_BACKLOG_STATUSES = {"ready", "blocked"}
-_VALID_RISK_TARGETS = {"L0", "L1", "L2"}
+_VALID_RISK_TARGETS = {"L0", "L1", "L2", "L3"}
+_VALID_EVIDENCE_STATUSES = {"complete", "incomplete", "escalated", "blocked"}
+SEMANTIC_ARCHITECTURE_ROLE = "semantic_architecture_agent"
 
 
 def normalize_task_proposal(
@@ -63,11 +65,13 @@ def _normalize_task(
 
     task_id = _required_string(raw_task, "task_id")
     objective = _required_string(raw_task, "objective")
-    required_role = _required_string(raw_task, "required_role")
-    if allowed_roles is not None and required_role not in allowed_roles:
-        raise ValueError(f"unknown required_role: {required_role}")
     risk_target = _required_string(raw_task, "risk_target")
     _validate_risk_target(risk_target)
+    required_role = _required_string(raw_task, "required_role")
+    if risk_target == "L3":
+        required_role = SEMANTIC_ARCHITECTURE_ROLE
+    if allowed_roles is not None and required_role not in allowed_roles:
+        raise ValueError(f"unknown required_role: {required_role}")
     milestone_id = _optional_string(raw_task, "milestone_id", default_milestone_id)
     backlog_status = _optional_string(raw_task, "backlog_status", "ready")
     if backlog_status not in _VALID_BACKLOG_STATUSES:
@@ -88,13 +92,13 @@ def _normalize_task(
     _validate_write_scope(write_scope, allowed_write_scopes)
     _validate_risk_scope_size(risk_target, write_scope)
     blockers = _string_list(raw_task, "blockers")
-    backlog_status, blockers = _apply_risk_policy(
+    backlog_status, blockers, risk_fields = _apply_risk_policy(
         risk_target,
         backlog_status,
         blockers,
     )
 
-    return {
+    task = {
         "task_id": task_id,
         "milestone_id": milestone_id,
         "objective": objective,
@@ -120,6 +124,30 @@ def _normalize_task(
         "write_scope": write_scope,
         "required_role": required_role,
         "blockers": blockers,
+    }
+    task.update(risk_fields)
+    return task
+
+
+def normalize_evidence_summary(summary, default_level="L1"):
+    summary = summary if isinstance(summary, dict) else {}
+    evidence_level = summary.get("evidence_level", default_level)
+    _validate_risk_target(evidence_level)
+    missing_evidence = _string_list(summary, "missing_evidence")
+    evidence_status = summary.get(
+        "evidence_status",
+        "incomplete" if missing_evidence else "complete",
+    )
+    if evidence_status not in _VALID_EVIDENCE_STATUSES:
+        raise ValueError(f"unsupported evidence_status: {evidence_status}")
+    trace_carrier = summary.get("trace_carrier", [])
+    if not isinstance(trace_carrier, list) or not all(isinstance(item, dict) for item in trace_carrier):
+        raise ValueError("trace_carrier must be a list of objects")
+    return {
+        "evidence_level": evidence_level,
+        "evidence_status": evidence_status,
+        "trace_carrier": [dict(item) for item in trace_carrier],
+        "missing_evidence": missing_evidence,
     }
 
 
@@ -178,12 +206,17 @@ def _validate_risk_scope_size(risk_target, write_scope):
 
 
 def _apply_risk_policy(risk_target, backlog_status, blockers):
-    if risk_target != "L2":
-        return backlog_status, blockers
-    normalized_blockers = list(blockers)
-    if "requires_review" not in normalized_blockers:
-        normalized_blockers.append("requires_review")
-    return "blocked", normalized_blockers
+    if risk_target == "L2":
+        normalized_blockers = list(blockers)
+        if "requires_review" not in normalized_blockers:
+            normalized_blockers.append("requires_review")
+        return "blocked", normalized_blockers, {}
+    if risk_target == "L3":
+        return backlog_status, blockers, {
+            "semantic_escalation_status": "required",
+            "recommended_role": SEMANTIC_ARCHITECTURE_ROLE,
+        }
+    return backlog_status, blockers, {}
 
 
 def _validate_generated_dependency_cycles(tasks):

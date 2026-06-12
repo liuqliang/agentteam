@@ -30,6 +30,7 @@ from agentteam_runtime import (
     build_runtime_observability,
     classify_attempt_outcome,
     normalize_task_proposal,
+    normalize_evidence_summary,
     read_integration_batches,
     read_integration_queue,
     read_scheduler_state_index,
@@ -1393,6 +1394,54 @@ class M0RuntimeTests(unittest.TestCase):
 
         self.assertEqual(task["backlog_status"], "blocked")
         self.assertEqual(task["blockers"], ["requires_review"])
+
+    def test_task_proposal_routes_l3_generated_task_to_semantic_escalation(self):
+        proposal = {
+            "milestone_id": "M39",
+            "tasks": [
+                {
+                    "task_id": "TASK-M39-ARCH-001",
+                    "objective": "Resolve a semantic architecture contract change.",
+                    "read_scope": ["design/"],
+                    "write_scope": ["design/architecture.md"],
+                    "required_role": "implementation_worker",
+                    "risk_target": "L3",
+                    "depends_on": [],
+                    "blockers": [],
+                }
+            ],
+        }
+
+        normalized = normalize_task_proposal(proposal)
+        task = normalized["tasks"][0]
+
+        self.assertEqual(task["backlog_status"], "ready")
+        self.assertEqual(task["blockers"], [])
+        self.assertEqual(task["semantic_escalation_status"], "required")
+        self.assertEqual(task["required_role"], "semantic_architecture_agent")
+        self.assertEqual(task["recommended_role"], "semantic_architecture_agent")
+
+    def test_evidence_summary_defaults_and_preserves_missing_items(self):
+        summary = normalize_evidence_summary(
+            {
+                "evidence_level": "L2",
+                "trace_carrier": [{"type": "event", "path": "EVT-0001"}],
+                "missing_evidence": ["review_result"],
+            },
+            default_level="L1",
+        )
+
+        self.assertEqual(summary["evidence_level"], "L2")
+        self.assertEqual(summary["evidence_status"], "incomplete")
+        self.assertEqual(summary["trace_carrier"], [{"type": "event", "path": "EVT-0001"}])
+        self.assertEqual(summary["missing_evidence"], ["review_result"])
+
+        default_summary = normalize_evidence_summary({}, default_level="L1")
+
+        self.assertEqual(default_summary["evidence_level"], "L1")
+        self.assertEqual(default_summary["evidence_status"], "complete")
+        self.assertEqual(default_summary["trace_carrier"], [])
+        self.assertEqual(default_summary["missing_evidence"], [])
 
     def test_run_simulation_dispatches_ready_task_and_validates_result(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3677,6 +3726,44 @@ class M0RuntimeTests(unittest.TestCase):
                 ["Inspect read_scope before writing."],
             )
 
+    def test_two_phase_scheduler_dispatch_includes_evidence_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            task = _backlog_task("TASK-001", write_scope=["generated/"])
+            task["risk_target"] = "L2"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[task],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+            )
+
+            scheduler.dispatch_ready()
+
+            message = _read_first_jsonl(
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-001"
+                / "mailboxes"
+                / "agent-repo-map"
+                / "inbox.jsonl"
+            )
+            policy = message["payload"]["evidence_policy"]
+
+            self.assertEqual(policy["evidence_level"], "L2")
+            self.assertTrue(policy["integration_requires_complete_evidence"])
+            self.assertEqual(policy["required_result_key"], "evidence_summary")
+            self.assertIn("trace_carrier", policy["required_fields"])
+            self.assertIn("missing_evidence", policy["required_fields"])
+
     def test_two_phase_scheduler_dispatch_writes_role_context_package(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -4084,6 +4171,173 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 [item["task_id"] for item in scheduler.state["backlog"]["items"]],
                 ["DECOMPOSE-M21-001", "TASK-M21-001"],
+            )
+
+    def test_two_phase_scheduler_records_l3_semantic_escalation_from_planner_proposal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[])
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [
+                    ("agent-planner", "task_planner"),
+                    ("agent-arch", "semantic_architecture_agent"),
+                    ("agent-repo-map", "repo_map_agent"),
+                ],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                auto_decompose=True,
+                decomposition_milestone_id="M39",
+                decomposition_allowed_write_scopes=["design/"],
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                "DECOMPOSE-M39-001",
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                [],
+                {
+                    "task_proposal": {
+                        "milestone_id": "M39",
+                        "tasks": [
+                            {
+                                "task_id": "TASK-M39-ARCH-001",
+                                "objective": "Resolve a semantic architecture ambiguity.",
+                                "read_scope": ["design/"],
+                                "write_scope": ["design/architecture.md"],
+                                "required_role": "semantic_architecture_agent",
+                                "risk_target": "L3",
+                                "depends_on": [],
+                                "blockers": [],
+                            }
+                        ],
+                    }
+                },
+            )
+
+            collected = scheduler.collect_ready_results()
+            next_dispatch = scheduler.dispatch_ready()
+            generated_task = scheduler._task_by_id("TASK-M39-ARCH-001")
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            escalation_events = [
+                event for event in events if event["event_type"] == "semantic_escalation_required"
+            ]
+
+            self.assertEqual(collected["results"][0]["decomposition_status"], "applied")
+            self.assertEqual(next_dispatch["dispatch_status"], "dispatched")
+            self.assertEqual(next_dispatch["dispatched_task_ids"], ["TASK-M39-ARCH-001"])
+            self.assertEqual(generated_task["backlog_status"], "ready")
+            self.assertEqual(generated_task["blockers"], [])
+            self.assertEqual(generated_task["required_role"], "semantic_architecture_agent")
+            self.assertEqual(generated_task["recommended_role"], "semantic_architecture_agent")
+            self.assertEqual(len(escalation_events), 1)
+            self.assertEqual(
+                escalation_events[0]["payload"],
+                {
+                    "task_id": "TASK-M39-ARCH-001",
+                    "source_task_id": "DECOMPOSE-M39-001",
+                    "risk_target": "L3",
+                    "reason": "semantic_escalation_required",
+                    "recommended_role": "semantic_architecture_agent",
+                    "semantic_escalation_status": "required",
+                },
+            )
+
+    def test_two_phase_scheduler_opens_manual_gate_for_unresolved_l3_semantic_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            task = _backlog_task(
+                "TASK-M39-ARCH-001",
+                write_scope=[],
+                required_role="semantic_architecture_agent",
+            )
+            task["risk_target"] = "L3"
+            task["semantic_escalation_status"] = "required"
+            task["recommended_role"] = "semantic_architecture_agent"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=[],
+                tasks=[task],
+            )
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [("agent-arch", "semantic_architecture_agent")],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+
+            dispatch = scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "blocked",
+                [],
+                {
+                    "manual_gate": {
+                        "question": "Which semantic architecture route should be authoritative?",
+                        "options": ["route-a", "route-b"],
+                        "reason": "semantic_architecture_agent could not resolve the decision.",
+                    },
+                    "evidence_summary": {
+                        "evidence_level": "L3",
+                        "evidence_status": "blocked",
+                        "trace_carrier": [
+                            {
+                                "type": "semantic_proposal",
+                                "path": "events.jsonl",
+                            }
+                        ],
+                        "missing_evidence": ["operator_decision"],
+                    },
+                },
+            )
+
+            collect = scheduler.collect_ready_results()
+            snapshot = replay_events(output_dir / "events.jsonl")
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            manual_gate = [
+                event
+                for event in events
+                if event["event_type"] == "manual_gate_required"
+            ][0]
+
+            self.assertEqual(dispatch["dispatched_task_ids"], ["TASK-M39-ARCH-001"])
+            self.assertEqual(collect["results"][0]["validation_status"], "rejected")
+            self.assertEqual(
+                manual_gate["payload"]["question_id"],
+                "Q-TASK-M39-ARCH-001-ATTEMPT-001",
+            )
+            self.assertEqual(
+                snapshot["manual_gates"]["Q-TASK-M39-ARCH-001-ATTEMPT-001"]["gate_status"],
+                "waiting",
             )
 
     def test_two_phase_scheduler_records_decomposition_lineage_and_milestone_state(self):
@@ -4569,6 +4823,77 @@ class M0RuntimeTests(unittest.TestCase):
                 ],
                 "committed",
             )
+
+    def test_two_phase_scheduler_blocks_l2_integration_when_evidence_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            task = _backlog_task("TASK-L2-001", write_scope=["generated/"])
+            task["risk_target"] = "L2"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[task],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                integrate_accepted_patch=True,
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            worktree_path = Path(inflight["worktree_path"])
+            target = worktree_path / "generated" / "l2_result.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"risk": "L2"}), encoding="utf-8")
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                ["generated/l2_result.json"],
+                {
+                    "operator_summary": {
+                        "what_changed": ["Implemented the L2 patch."],
+                        "verification_summary": ["unit fixture: passed"],
+                    },
+                    "evidence_summary": {
+                        "evidence_level": "L2",
+                        "missing_evidence": ["review_result"],
+                    },
+                },
+            )
+
+            collected = scheduler.collect_ready_results()
+            result = collected["results"][0]
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            event_types = {event["event_type"] for event in events}
+
+            self.assertEqual(result["validation_status"], "accepted")
+            self.assertTrue(Path(result["patch_path"]).exists())
+            self.assertEqual(result["evidence_status"], "incomplete")
+            self.assertEqual(result["missing_evidence"], ["review_result"])
+            self.assertEqual(result["integration_status"], "blocked")
+            self.assertEqual(result["integration_block_reason"], "evidence_incomplete")
+            self.assertEqual(result["integration_queue_status"], "not_queued")
+            self.assertEqual(result["integration_verification_status"], "not_requested")
+            self.assertIn("evidence_incomplete", event_types)
+            self.assertIn("integration_blocked_by_evidence", event_types)
+            self.assertNotIn("integration_queued", event_types)
+            self.assertNotIn("patch_integrated", event_types)
 
     def test_two_phase_worker_attempts_start_from_updated_integration_baseline(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8100,6 +8425,44 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("Repo context package:", prompt)
         self.assertIn("ATTEMPT-001-repo_map_agent.json", prompt)
         self.assertIn("Read repo_context_path before selecting implementation files.", prompt)
+
+    def test_codex_runtime_adapter_includes_evidence_policy_contract(self):
+        message = {
+            "message_id": "MSG-0001",
+            "from_agent": "agent-scheduler",
+            "to_agent": "agent-repo-map",
+            "message_type": "dispatch_task",
+            "correlation_id": "TASK-001:ATTEMPT-001",
+            "created_at": "2026-06-03T00:00:00Z",
+            "lease_expires_at": "2026-06-03T00:15:00Z",
+            "payload": {
+                "task_id": "TASK-001",
+                "attempt_id": "ATTEMPT-001",
+                "lease_id": "LEASE-001",
+                "objective": "Implement a bounded change.",
+                "read_scope": ["."],
+                "write_scope": ["generated/"],
+                "evidence_policy": {
+                    "evidence_level": "L2",
+                    "integration_requires_complete_evidence": True,
+                    "required_result_key": "evidence_summary",
+                    "required_fields": [
+                        "evidence_level",
+                        "evidence_status",
+                        "trace_carrier",
+                        "missing_evidence",
+                    ],
+                },
+            },
+        }
+
+        prompt = CodexRuntimeAdapter(command=["codex", "exec"])._build_prompt(message)
+
+        self.assertIn("Evidence policy:", prompt)
+        self.assertIn("output.evidence_summary", prompt)
+        self.assertIn("trace_carrier", prompt)
+        self.assertIn("missing_evidence", prompt)
+        self.assertIn("L2", prompt)
 
     def test_codex_runtime_adapter_runs_planner_with_fallback_worktree_path(self):
         with tempfile.TemporaryDirectory() as tmp:

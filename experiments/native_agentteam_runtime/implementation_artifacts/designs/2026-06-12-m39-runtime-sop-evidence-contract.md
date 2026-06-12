@@ -99,6 +99,11 @@ Worker and scheduler-visible result summaries should support these fields:
 The fields are summaries, not a new authority layer. Source events, reports,
 patches, and semantic proposals remain the evidence carriers.
 
+Dispatch messages include an `evidence_policy` object that names the required
+result key and fields. Codex worker prompts must surface this policy so workers
+return `output.evidence_summary` instead of leaving the scheduler to infer
+missing evidence after the fact.
+
 ## Scheduler Policy
 
 Task proposal validation may accept `L0`, `L1`, `L2`, and `L3` as declared risk

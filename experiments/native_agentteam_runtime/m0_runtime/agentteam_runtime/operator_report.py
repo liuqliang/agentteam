@@ -111,6 +111,16 @@ def render_run_completion_report(report):
         _extend_summary_item(lines, "Verification", summary.get("verification"))
         if summary.get("integration"):
             lines.append(f"- Integration: {summary['integration']}")
+        evidence_status = summary.get("evidence_status_counts")
+        if isinstance(evidence_status, dict) and any(evidence_status.values()):
+            lines.append(
+                "- Evidence status: "
+                + ", ".join(
+                    f"{status}={evidence_status.get(status, 0)}"
+                    for status in ["complete", "incomplete", "blocked", "escalated"]
+                    if evidence_status.get(status, 0)
+                )
+            )
         if summary.get("integration_recommendation"):
             lines.append(f"- Integration recommendation: {summary['integration_recommendation']}")
         _extend_summary_item(lines, "Next", summary.get("next_steps"))
@@ -147,6 +157,13 @@ def render_run_completion_report(report):
         _extend_bullets(lines, "Verification", task.get("verification"))
         if task.get("integration"):
             lines.append(f"- Integration: {task['integration']}")
+        if task.get("evidence_status"):
+            lines.append(
+                f"- Evidence: {task.get('evidence_level') or 'unknown'} "
+                f"{task['evidence_status']}"
+            )
+        if task.get("missing_evidence"):
+            _extend_bullets(lines, "Missing evidence", task.get("missing_evidence"))
         if task.get("merge_recommendation"):
             lines.append(f"- Merge: {task['merge_recommendation']}")
         if isinstance(task.get("token_usage"), dict):
@@ -180,6 +197,15 @@ def concise_report_lines(report, max_tasks=3):
         lines.append(f"verification: {verification}")
     if summary.get("integration"):
         lines.append(f"integration: {summary['integration']}")
+    evidence_status = summary.get("evidence_status_counts")
+    if isinstance(evidence_status, dict):
+        nonzero = [
+            f"{status}={evidence_status.get(status, 0)}"
+            for status in ["complete", "incomplete", "blocked", "escalated"]
+            if evidence_status.get(status, 0)
+        ]
+        if nonzero:
+            lines.append(f"evidence_status: {', '.join(nonzero)}")
     if summary.get("integration_recommendation"):
         lines.append(f"integration_recommendation: {summary['integration_recommendation']}")
     next_step = _first_text(summary.get("next_steps"))

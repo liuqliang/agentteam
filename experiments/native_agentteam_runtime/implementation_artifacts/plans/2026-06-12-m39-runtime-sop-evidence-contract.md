@@ -30,17 +30,17 @@ behavior.
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py`
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py`
 
-- [ ] Add failing tests that assert `risk_target == "L3"` is recognized as a
-      supported declared level, but is not normalized as a ready implementation
-      task.
-- [ ] Add failing tests for evidence summary normalization:
+- [x] Add failing tests that assert `risk_target == "L3"` is recognized as a
+      supported declared level, retargeted to `semantic_architecture_agent`,
+      and not normalized as an ordinary implementation-worker task.
+- [x] Add failing tests for evidence summary normalization:
       `evidence_level`, `evidence_status`, `trace_carrier`, and
       `missing_evidence`.
-- [ ] Add small helper functions or dataclasses near existing task/result
+- [x] Add small helper functions or dataclasses near existing task/result
       normalization code rather than introducing a separate framework.
-- [ ] Keep `L0` and `L1` behavior backward compatible when workers do not
+- [x] Keep `L0` and `L1` behavior backward compatible when workers do not
       provide explicit evidence fields.
-- [ ] Run:
+- [x] Run:
 
 ```bash
 env PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime python3 -m unittest \
@@ -62,18 +62,18 @@ workers.
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py`
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py`
 
-- [ ] Add failing proposal-quality tests that an `L3` generated proposal becomes
-      a blocked semantic escalation candidate with a stable blocker reason such
-      as `semantic_escalation_required`.
-- [ ] Add failing scheduler tests that `L3` backlog items are not dispatched to
+- [x] Add failing proposal-quality tests that an `L3` generated proposal is
+      retargeted to `semantic_architecture_agent` with stable semantic
+      escalation metadata.
+- [x] Add failing scheduler tests that `L3` backlog items are not dispatched to
       `implementation-worker` roles.
-- [ ] Add an event payload for `semantic_escalation_required` containing
+- [x] Add an event payload for `semantic_escalation_required` containing
       `task_id`, declared risk, reason, source proposal id, and recommended
       role `semantic_architecture_agent`.
-- [ ] Add a manual gate path for unresolved semantic architecture decisions.
+- [x] Add a manual gate path for unresolved semantic architecture decisions.
       The gate should be opened only when the semantic architecture step reports
       unresolved, not simply because a task was classified `L3`.
-- [ ] Run:
+- [x] Run:
 
 ```bash
 env PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime python3 -m unittest \
@@ -96,16 +96,16 @@ Capture incomplete results but stop under-evidenced changes before integration.
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py`
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py`
 
-- [ ] Add failing tests where an `L2` worker returns a patch and
+- [x] Add failing tests where an `L2` worker returns a patch and
       `evidence_status == "incomplete"`.
-- [ ] Assert the result is retained for inspection, but integration is blocked
+- [x] Assert the result is retained for inspection, but integration is blocked
       with `integration_blocked_by_evidence`.
-- [ ] Add report/status summary tests for completed, blocked, and escalated
+- [x] Add report/status summary tests for completed, blocked, and escalated
       evidence counts.
-- [ ] Reuse existing sparse notification/report summary paths so Feishu receives
+- [x] Reuse existing sparse notification/report summary paths so Feishu receives
       semantic completion text instead of raw logs when a taskpack becomes idle,
       blocked, or escalated.
-- [ ] Run:
+- [x] Run:
 
 ```bash
 env PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime python3 -m unittest \

@@ -46,12 +46,14 @@ def build_completion_summary(
         verification=verification,
         integration=integration,
     )
+    evidence_status_counts = _evidence_status_counts(task_reports)
     return {
         "status_line": _completion_status_line(run_status, task_count, blocked_count),
         "what_changed": what_changed,
         "changed_files": changed_files,
         "verification": verification,
         "integration": integration,
+        "evidence_status_counts": evidence_status_counts,
         "integration_recommendation": _integration_recommendation(
             run_id,
             blocked_count,
@@ -79,6 +81,13 @@ def extend_completion_summary_lines(lines, summary):
         lines.append(f"Integration recommendation: {summary['integration_recommendation']}")
     _extend_section(lines, "Next:", summary.get("next_steps"))
     _extend_section(lines, "Evidence gaps:", summary.get("evidence_gaps"))
+    evidence_status_counts = summary.get("evidence_status_counts")
+    if isinstance(evidence_status_counts, dict) and any(evidence_status_counts.values()):
+        lines.append("Evidence status:")
+        for status in ["complete", "incomplete", "blocked", "escalated"]:
+            count = evidence_status_counts.get(status, 0)
+            if count:
+                lines.append(f"- {status}: {count}")
 
 
 def _completion_evidence_gaps(what_changed, changed_files, verification, integration):
@@ -103,6 +112,15 @@ def _effective_blocked_count(blocked_count, task_reports):
         if "blocked" in str(task.get("status") or "")
         or str(task.get("integration") or "").startswith("failed")
     )
+
+
+def _evidence_status_counts(task_reports):
+    counts = {"complete": 0, "incomplete": 0, "blocked": 0, "escalated": 0}
+    for task in task_reports:
+        status = task.get("evidence_status")
+        if status in counts:
+            counts[status] += 1
+    return counts
 
 
 def _completion_status_line(run_status, task_count, blocked_count):

@@ -32,7 +32,7 @@ from .m0_runtime import (
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
 from .notifications import DEFAULT_NOTIFICATION_EVENT_TYPES
 from .planner_context import build_planner_context
-from .task_proposal import normalize_task_proposal
+from .task_proposal import normalize_evidence_summary, normalize_task_proposal
 from .token_usage import aggregate_token_usage, token_usage_from_result
 
 
@@ -339,6 +339,7 @@ class TwoPhaseFileScheduler:
                 "required_deliverables": task.get("required_deliverables", []),
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
+                **_evidence_policy_fields(task),
                 **_operator_guidance_fields(task),
                 **_permission_grant_fields(task),
                 **_role_prompt_fields(agent_pool, agent, task),
@@ -593,6 +594,7 @@ class TwoPhaseFileScheduler:
             "integration_queue_item_id": None,
             "integration_queue_path": str(integration_queue_path(self.output_dir)),
         }
+        result.update(_runtime_evidence_summary(task, runtime_result))
         integration_events = self._integrate_accepted_result(
             inflight,
             result,
@@ -860,6 +862,25 @@ class TwoPhaseFileScheduler:
         result["decomposition_status"] = "applied"
         result["generated_task_ids"] = normalized["generated_task_ids"]
         result["generated_task_count"] = len(normalized["generated_task_ids"])
+        semantic_escalation_events = [
+            self._event(
+                "semantic_escalation_required",
+                "agent-scheduler",
+                generated_task.get("recommended_role"),
+                f"semantic-escalation:{generated_task['task_id']}",
+                inflight["correlation_id"],
+                {
+                    "task_id": generated_task["task_id"],
+                    "source_task_id": task["task_id"],
+                    "risk_target": generated_task.get("risk_target"),
+                    "reason": "semantic_escalation_required",
+                    "recommended_role": generated_task.get("recommended_role"),
+                    "semantic_escalation_status": generated_task.get("semantic_escalation_status"),
+                },
+            )
+            for generated_task in normalized["tasks"]
+            if generated_task.get("risk_target") == "L3"
+        ]
         return [
             self._event(
                 "backlog_updated",
@@ -876,7 +897,7 @@ class TwoPhaseFileScheduler:
                     "generated_task_ids": normalized["generated_task_ids"],
                 },
             )
-        ]
+        ] + semantic_escalation_events
 
     def _read_planner_context(self, task):
         context_path = task.get("planner_context_path")
@@ -943,6 +964,45 @@ class TwoPhaseFileScheduler:
     def _integrate_accepted_result(self, inflight, result, patch_path, outcome):
         if outcome["validation_status"] != "accepted":
             return []
+        if _integration_blocked_by_evidence(result, patch_path):
+            result["integration_status"] = "blocked"
+            result["integration_block_reason"] = "evidence_incomplete"
+            return [
+                self._event(
+                    "evidence_incomplete",
+                    "agent-scheduler",
+                    inflight["agent_id"],
+                    f"evidence-incomplete:{inflight['attempt_id']}",
+                    inflight["correlation_id"],
+                    {
+                        "task_id": inflight["task_id"],
+                        "attempt_id": inflight["attempt_id"],
+                        "lease_id": inflight["lease_id"],
+                        "evidence_level": result.get("evidence_level"),
+                        "evidence_status": result.get("evidence_status"),
+                        "missing_evidence": result.get("missing_evidence", []),
+                        "trace_carrier": result.get("trace_carrier", []),
+                    },
+                ),
+                self._event(
+                    "integration_blocked_by_evidence",
+                    "agent-scheduler",
+                    inflight["agent_id"],
+                    f"integration-blocked-by-evidence:{inflight['attempt_id']}",
+                    inflight["correlation_id"],
+                    {
+                        "task_id": inflight["task_id"],
+                        "attempt_id": inflight["attempt_id"],
+                        "lease_id": inflight["lease_id"],
+                        "block_reason": "evidence_incomplete",
+                        "patch_path": str(patch_path) if patch_path else None,
+                        "evidence_level": result.get("evidence_level"),
+                        "evidence_status": result.get("evidence_status"),
+                        "missing_evidence": result.get("missing_evidence", []),
+                        "trace_carrier": result.get("trace_carrier", []),
+                    },
+                ),
+            ]
         events = []
         if patch_path:
             queue = upsert_integration_queue_item(self.output_dir, result)
@@ -1549,6 +1609,47 @@ def _decomposition_validation_payload(result):
     return payload
 
 
+def _runtime_evidence_summary(task, runtime_result):
+    output = runtime_result.get("output", {}) if isinstance(runtime_result.get("output"), dict) else {}
+    raw = output.get("evidence_summary")
+    if raw is None and any(
+        key in output
+        for key in (
+            "evidence_level",
+            "evidence_status",
+            "trace_carrier",
+            "missing_evidence",
+        )
+    ):
+        raw = output
+    if raw is None:
+        raw = {}
+    risk_target = task.get("risk_target") or "L1"
+    if risk_target in {"L2", "L3"} and not raw:
+        raw = {
+            "evidence_level": risk_target,
+            "missing_evidence": ["evidence_summary"],
+        }
+    summary = normalize_evidence_summary(raw, default_level=risk_target)
+    return {
+        "evidence_summary": summary,
+        "evidence_level": summary["evidence_level"],
+        "evidence_status": summary["evidence_status"],
+        "trace_carrier": summary["trace_carrier"],
+        "missing_evidence": summary["missing_evidence"],
+    }
+
+
+def _integration_blocked_by_evidence(result, patch_path):
+    if not patch_path:
+        return False
+    if result.get("evidence_level") not in {"L2", "L3"}:
+        return False
+    if result.get("evidence_status") != "complete":
+        return True
+    return bool(result.get("missing_evidence"))
+
+
 def _decomposition_wave_from_task_id(task_id):
     try:
         return int(str(task_id).rsplit("-", 1)[1])
@@ -1646,6 +1747,10 @@ def _operator_task_report(step, result):
         "changed_files": _operator_changed_files(result),
         "verification": _operator_verification(output, operator_summary),
         "integration": _operator_integration_summary(result),
+        "evidence_level": result.get("evidence_level"),
+        "evidence_status": result.get("evidence_status"),
+        "trace_carrier": result.get("trace_carrier", []),
+        "missing_evidence": result.get("missing_evidence", []),
         "merge_recommendation": _operator_merge_recommendation(result, operator_summary),
         "next_steps": _operator_next_steps(result, operator_summary),
         "token_usage": token_usage_from_result(result),
@@ -1857,6 +1962,25 @@ def _operator_guidance_fields(task):
         if isinstance(item, dict)
     ]
     return {"operator_guidance": safe_guidance} if safe_guidance else {}
+
+
+def _evidence_policy_fields(task):
+    evidence_level = task.get("risk_target")
+    if evidence_level not in {"L0", "L1", "L2", "L3"}:
+        evidence_level = "L1"
+    return {
+        "evidence_policy": {
+            "evidence_level": evidence_level,
+            "required_result_key": "evidence_summary",
+            "required_fields": [
+                "evidence_level",
+                "evidence_status",
+                "trace_carrier",
+                "missing_evidence",
+            ],
+            "integration_requires_complete_evidence": evidence_level in {"L2", "L3"},
+        }
+    }
 
 
 def _permission_grant_fields(task):
