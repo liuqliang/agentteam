@@ -37,7 +37,7 @@ compact for terminal use.
 
 | Group | Commands | Purpose |
 | --- | --- | --- |
-| Project setup | `init`, `doctor`, `update`, `db`, `gc` | Configure and maintain the local AgentTeam installation for a project. |
+| Project setup | `init`, `doctor`, `update`, `db`, `stats`, `gc` | Configure, inspect, and maintain the local AgentTeam installation for a project. |
 | Run lifecycle | `start`, `next`, `continue`, `stop`, `status`, `explain-status`, `watch`, `logs`, `report`, `paths` | Start work, inspect progress, stop safely, and understand completed runs. |
 | Result integration | `integrate` | Merge verified integration-baseline changes back to the target repository. |
 | Notification | `notify` | Test Feishu delivery or resend completion summaries. |
@@ -187,6 +187,34 @@ Important behavior:
   content. It does not mutate files.
 - The projection indexes runs, taskpacks, events, tasks, compact evidence
   summaries, artifact hashes/sizes, and per-run token/stat aggregates.
+
+### `agentteam stats`
+
+Shows compact project-level statistics from AgentTeam runtime artifacts.
+
+Use it when:
+
+- You want to know how many runs, taskpacks, events, tasks, and artifacts exist.
+- You want an artifact footprint summary without reading long logs.
+- You want a quick token usage summary across indexed runs.
+- You want to see whether the command used a fresh DB projection or file scan.
+
+Examples:
+
+```bash
+agentteam stats
+agentteam stats --json
+agentteam stats --project-root /path/to/repo --json
+```
+
+Behavior:
+
+- Uses a fresh `<work_root>/agentteam.db` projection when available.
+- Falls back to scanning authoritative files under `frozen/` and `runs/` when
+  the DB is missing, stale, or unreadable.
+- Does not rebuild the DB automatically and does not mutate runtime state.
+- JSON output includes counts, evidence status counts, artifact type/retention
+  summaries, artifact bytes, and aggregate token usage.
 
 ### `agentteam gc`
 

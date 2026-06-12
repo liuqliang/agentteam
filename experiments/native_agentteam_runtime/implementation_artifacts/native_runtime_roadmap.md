@@ -778,6 +778,23 @@ Short-term slices:
   artifacts. M40c does not delete run artifacts; it only indexes and explains
   them.
 
+### M41: Project Stats Command
+
+Status: implemented.
+
+Goal: expose the M40 projection as a compact read-only operator summary.
+
+Implemented:
+
+- added `agentteam stats` with JSON and compact text output;
+- reads a fresh `<work_root>/agentteam.db` when available;
+- falls back to direct `frozen/` and `runs/` file scanning when the DB is
+  missing, stale, or unreadable;
+- reports run, taskpack, event, task, evidence, artifact, artifact byte,
+  retention policy, artifact type, and token usage summaries;
+- keeps the command diagnostic only: no automatic rebuild, cleanup, or runtime
+  mutation.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -818,6 +835,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is M40. It should add a rebuildable SQLite projection
-for status, logs, taskpack metadata, release references, and evidence summaries
-while keeping file-backed artifacts authoritative.
+The next recommended step is M42. It should add a conservative retention
+planning view for rebuildable artifacts, using the M40 projection to explain
+candidate context/cache cleanup without deleting run artifacts by default.

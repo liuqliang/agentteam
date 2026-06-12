@@ -275,6 +275,22 @@ def read_projected_artifact_summary(work_root):
     }
 
 
+def build_project_stats(work_root):
+    work_root = Path(work_root).resolve()
+    check = check_project_projection_db(work_root)
+    if check["check_status"] == "passed":
+        stats = _project_stats_from_database(work_root, check)
+        if stats is not None:
+            return stats
+    projection = _scan_work_root(work_root)
+    return _project_stats_from_projection(
+        projection,
+        projection_source="files",
+        check_status=check.get("check_status"),
+        db_path=str(project_projection_db_path(work_root)),
+    )
+
+
 def _scan_work_root(work_root):
     runs = _scan_runs(work_root / "runs")
     taskpacks = _scan_taskpacks(work_root / "frozen")
@@ -709,6 +725,171 @@ def _database_artifact_digest(connection):
         """
     ).fetchall()
     return _artifact_digest(rows)
+
+
+def _project_stats_from_database(work_root, check):
+    db_path = project_projection_db_path(work_root)
+    try:
+        with sqlite3.connect(db_path) as connection:
+            counts = _database_counts(db_path)
+            artifact_type_rows = connection.execute(
+                """
+                select artifact_type, count(*), coalesce(sum(size_bytes), 0)
+                from artifacts
+                group by artifact_type
+                order by artifact_type
+                """
+            ).fetchall()
+            retention_rows = connection.execute(
+                """
+                select retention_policy, count(*), coalesce(sum(size_bytes), 0)
+                from artifacts
+                group by retention_policy
+                order by retention_policy
+                """
+            ).fetchall()
+            token_rows = connection.execute(
+                """
+                select token_usage_status, reported_attempt_count,
+                       unreported_attempt_count, input_tokens, output_tokens,
+                       total_tokens, cached_input_tokens, reasoning_tokens
+                from run_stats
+                order by run_id
+                """
+            ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    return _project_stats_payload(
+        projection_source="db",
+        check_status=check.get("check_status"),
+        db_path=str(db_path),
+        counts=counts,
+        artifact_types=_group_rows_to_count_bytes(artifact_type_rows),
+        retention_policies=_group_rows_to_count_bytes(retention_rows),
+        token_usage=_aggregate_token_usage_from_rows(token_rows),
+    )
+
+
+def _project_stats_from_projection(projection, *, projection_source, check_status, db_path):
+    counts = _projection_counts(projection)
+    return _project_stats_payload(
+        projection_source=projection_source,
+        check_status=check_status,
+        db_path=db_path,
+        counts=counts,
+        artifact_types=_artifact_count_bytes_by_index(projection["artifacts"], 1),
+        retention_policies=_artifact_count_bytes_by_index(projection["artifacts"], 9),
+        token_usage=_aggregate_token_usage_from_rows(
+            [
+                (
+                    row[6],
+                    row[7],
+                    row[8],
+                    row[9],
+                    row[10],
+                    row[11],
+                    row[12],
+                    row[13],
+                )
+                for row in projection["run_stats"]
+            ]
+        ),
+    )
+
+
+def _project_stats_payload(
+    *,
+    projection_source,
+    check_status,
+    db_path,
+    counts,
+    artifact_types,
+    retention_policies,
+    token_usage,
+):
+    return {
+        "stats_status": "ok",
+        "projection_source": projection_source,
+        "check_status": check_status,
+        "db_path": db_path,
+        "runs": counts.get("runs", 0),
+        "taskpacks": counts.get("taskpacks", 0),
+        "events": counts.get("events", 0),
+        "tasks": counts.get("tasks", 0),
+        "evidence_summaries": counts.get("evidence_summaries", 0),
+        "evidence": counts.get("evidence", {}),
+        "artifacts": {
+            "total_count": counts.get("artifacts", 0),
+            "total_bytes": counts.get("artifact_bytes", 0),
+            "by_type": artifact_types,
+            "by_retention": retention_policies,
+        },
+        "token_usage": token_usage,
+    }
+
+
+def _group_rows_to_count_bytes(rows):
+    return {
+        row[0]: {
+            "count": row[1],
+            "bytes": row[2],
+        }
+        for row in rows
+    }
+
+
+def _artifact_count_bytes_by_index(artifacts, index):
+    grouped = {}
+    for artifact in artifacts:
+        key = artifact[index]
+        grouped.setdefault(key, {"count": 0, "bytes": 0})
+        grouped[key]["count"] += 1
+        grouped[key]["bytes"] += artifact[7]
+    return dict(sorted(grouped.items()))
+
+
+def _aggregate_token_usage_from_rows(rows):
+    rows = list(rows)
+    total_tokens = _sum_optional(row[5] for row in rows)
+    input_tokens = _sum_optional(row[3] for row in rows)
+    output_tokens = _sum_optional(row[4] for row in rows)
+    cached_input_tokens = _sum_optional(row[6] for row in rows)
+    reasoning_tokens = _sum_optional(row[7] for row in rows)
+    reported_attempt_count = _sum_ints(row[1] for row in rows)
+    unreported_attempt_count = _sum_ints(row[2] for row in rows)
+    if total_tokens is None and input_tokens is None and output_tokens is None:
+        usage_status = "unavailable"
+    elif unreported_attempt_count:
+        usage_status = "partial"
+    else:
+        usage_status = "reported"
+    return {
+        "usage_status": usage_status,
+        "reported_attempt_count": reported_attempt_count,
+        "unreported_attempt_count": unreported_attempt_count,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "reasoning_tokens": reasoning_tokens,
+    }
+
+
+def _sum_optional(values):
+    numbers = [
+        value
+        for value in values
+        if isinstance(value, int) and not isinstance(value, bool)
+    ]
+    return sum(numbers) if numbers else None
+
+
+def _sum_ints(values):
+    return sum(
+        value
+        for value in values
+        if isinstance(value, int) and not isinstance(value, bool)
+    )
 
 
 def _read_json_if_exists(path):

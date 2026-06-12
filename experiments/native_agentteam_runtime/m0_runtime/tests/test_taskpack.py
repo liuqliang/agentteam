@@ -44,6 +44,7 @@ from agentteam_runtime.diagnostic_chat import (
     render_runtime_diagnostic_context,
 )
 from agentteam_runtime.profile import build_project_profile, write_project_profile
+import agentteam_runtime.projection_db as projection_db
 from agentteam_runtime.projection_db import (
     check_project_projection_db,
     rebuild_project_projection_db,
@@ -644,6 +645,77 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(failed["check_status"], "failed")
             self.assertIn("artifact_digest", failed["mismatches"])
 
+    def test_project_stats_reads_fresh_projection_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = _write_completed_operator_run(work_root / "runs" / "stats-run")
+            state_path = run_dir / "state" / "two_phase_scheduler_state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["steps"] = [
+                {
+                    "task_id": "optimize-pipeline",
+                    "result": {
+                        "task_id": "optimize-pipeline",
+                        "attempt_id": "optimize-pipeline-ATTEMPT-001",
+                        "evidence_level": "L2",
+                        "evidence_status": "complete",
+                        "trace_carrier": [],
+                        "missing_evidence": [],
+                    },
+                }
+            ]
+            _write_json(state_path, state)
+            _write_json(run_dir / "reports" / "final_report.json", {"run_id": "stats-run"})
+            _write_json(
+                work_root / "frozen" / "stats-run" / "taskpack.json",
+                {
+                    "taskpack_id": "stats-run",
+                    "goal": "Project stats fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            rebuild_project_projection_db(work_root)
+
+            stats = projection_db.build_project_stats(work_root)
+
+            self.assertEqual(stats["projection_source"], "db")
+            self.assertEqual(stats["check_status"], "passed")
+            self.assertEqual(stats["runs"], 1)
+            self.assertEqual(stats["taskpacks"], 1)
+            self.assertEqual(stats["events"], 1)
+            self.assertEqual(stats["tasks"], 1)
+            self.assertEqual(stats["evidence"], {"complete": 1})
+            self.assertGreaterEqual(stats["artifacts"]["total_count"], 4)
+            self.assertGreater(stats["artifacts"]["total_bytes"], 0)
+            self.assertEqual(stats["token_usage"]["total_tokens"], 1500)
+
+    def test_project_stats_falls_back_to_files_when_projection_db_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = _write_completed_operator_run(work_root / "runs" / "stats-run")
+            _write_json(run_dir / "reports" / "final_report.json", {"run_id": "stats-run"})
+            _write_json(
+                work_root / "frozen" / "stats-run" / "taskpack.json",
+                {
+                    "taskpack_id": "stats-run",
+                    "goal": "Project stats fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+
+            stats = projection_db.build_project_stats(work_root)
+
+            self.assertEqual(stats["projection_source"], "files")
+            self.assertEqual(stats["check_status"], "failed")
+            self.assertEqual(stats["runs"], 1)
+            self.assertEqual(stats["taskpacks"], 1)
+            self.assertEqual(stats["events"], 1)
+            self.assertEqual(stats["tasks"], 1)
+            self.assertGreaterEqual(stats["artifacts"]["total_count"], 4)
+            self.assertEqual(stats["token_usage"]["total_tokens"], 1500)
+
     def test_agentteam_cli_db_rebuild_and_check_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -705,6 +777,93 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(rebuild_summary["runs"], 1)
             self.assertEqual(check_summary["check_status"], "passed")
             self.assertEqual(check_summary["db_path"], rebuild_summary["db_path"])
+
+    def test_agentteam_cli_stats_json_reads_fresh_projection_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "stats-cli")
+            run_dir = _write_completed_operator_run(work_root / "runs" / "stats-run")
+            _write_json(run_dir / "reports" / "final_report.json", {"run_id": "stats-run"})
+            _write_json(
+                work_root / "frozen" / "stats-run" / "taskpack.json",
+                {
+                    "taskpack_id": "stats-run",
+                    "goal": "Project stats CLI fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            rebuild_project_projection_db(work_root)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "stats",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["project"], "stats-cli")
+            self.assertEqual(summary["projection_source"], "db")
+            self.assertEqual(summary["runs"], 1)
+            self.assertEqual(summary["taskpacks"], 1)
+            self.assertEqual(summary["token_usage"]["total_tokens"], 1500)
+
+    def test_agentteam_cli_stats_json_falls_back_to_files_without_projection_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "stats-cli")
+            run_dir = _write_completed_operator_run(work_root / "runs" / "stats-run")
+            _write_json(run_dir / "reports" / "final_report.json", {"run_id": "stats-run"})
+            _write_json(
+                work_root / "frozen" / "stats-run" / "taskpack.json",
+                {
+                    "taskpack_id": "stats-run",
+                    "goal": "Project stats CLI fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "stats",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["projection_source"], "files")
+            self.assertEqual(summary["check_status"], "failed")
+            self.assertEqual(summary["runs"], 1)
+            self.assertEqual(summary["taskpacks"], 1)
+            self.assertEqual(summary["token_usage"]["total_tokens"], 1500)
 
     def test_completion_summary_reports_evidence_gaps_when_worker_omits_fields(self):
         summary = build_completion_summary(

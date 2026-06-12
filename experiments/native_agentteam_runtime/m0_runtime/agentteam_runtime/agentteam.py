@@ -45,6 +45,7 @@ from .profile import (
     write_project_profile,
 )
 from .projection_db import (
+    build_project_stats,
     check_project_projection_db,
     read_projected_artifact_summary,
     read_projected_run_events,
@@ -111,6 +112,17 @@ _HELP_COMMANDS = [
         "name": "status",
         "summary": "Show the latest run state, including liveness and workers.",
         "examples": ["agentteam status --project-root <repo>"],
+    },
+    {
+        "name": "stats",
+        "summary": "Show compact project-level run, artifact, evidence, and token statistics.",
+        "examples": [
+            "agentteam stats --project-root <repo>",
+            "agentteam stats --project-root <repo> --json",
+        ],
+        "notes": [
+            "Uses a fresh agentteam.db projection when available and falls back to file scanning otherwise.",
+        ],
     },
     {
         "name": "explain-status",
@@ -371,6 +383,7 @@ def _build_parser():
     _add_paths_parser(subcommands)
     _add_integrate_parser(subcommands)
     _add_notify_parser(subcommands)
+    _add_stats_parser(subcommands)
     _add_status_parser(subcommands)
     return parser
 
@@ -1012,6 +1025,13 @@ def _add_status_parser(subcommands):
     parser.add_argument("--run-dir", help="Specific run directory to summarize. Defaults to latest profile run.")
     parser.add_argument("--json", action="store_true", help="Print status as JSON instead of human text.")
     parser.set_defaults(handler=_handle_status)
+
+
+def _add_stats_parser(subcommands):
+    parser = subcommands.add_parser("stats", help="Show AgentTeam project-level statistics.")
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--json", action="store_true", help="Print stats as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_stats)
 
 
 def _add_update_parser(subcommands):
@@ -2665,6 +2685,22 @@ def _handle_db(args):
     return 0
 
 
+def _handle_stats(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    work_root = Path(profile["work_root"]).resolve()
+    summary = {
+        **build_project_stats(work_root),
+        "project": profile.get("project_key") or "unknown",
+        "project_root": str(project_root),
+        "work_root": str(work_root),
+    }
+    if args.json:
+        return summary
+    _write_stats_text(summary)
+    return 0
+
+
 def _watch_profile(args):
     if args.project_root:
         return load_project_profile(Path(args.project_root).resolve())
@@ -3032,6 +3068,27 @@ def _write_db_text(summary):
     mismatches = summary.get("mismatches")
     if mismatches:
         lines.append(f"mismatches: {', '.join(mismatches)}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _write_stats_text(summary):
+    artifacts = summary.get("artifacts") if isinstance(summary.get("artifacts"), dict) else {}
+    token_usage = summary.get("token_usage") if isinstance(summary.get("token_usage"), dict) else {}
+    lines = [
+        f"stats_status: {summary.get('stats_status') or 'unknown'}",
+        f"project: {summary.get('project') or 'unknown'}",
+        f"projection_source: {summary.get('projection_source') or 'unknown'}",
+        f"check_status: {summary.get('check_status') or 'unknown'}",
+        f"runs: {summary.get('runs', 0)}",
+        f"taskpacks: {summary.get('taskpacks', 0)}",
+        f"events: {summary.get('events', 0)}",
+        f"tasks: {summary.get('tasks', 0)}",
+        f"evidence: {_format_projection_evidence(summary)}",
+        f"artifacts: {artifacts.get('total_count', 0)}",
+        f"artifact_bytes: {artifacts.get('total_bytes', 0)}",
+        format_token_usage(token_usage, label="tokens"),
+    ]
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 

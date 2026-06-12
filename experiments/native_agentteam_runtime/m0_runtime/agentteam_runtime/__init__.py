@@ -38,6 +38,7 @@ _EXPORTS = {
     "build_repo_context": (".repo_map", "build_repo_context"),
     "build_repository_map": (".repo_map", "build_repository_map"),
     "build_runtime_observability": (".observability", "build_runtime_observability"),
+    "build_project_stats": (".projection_db", "build_project_stats"),
     "build_taskpack_runtime_args": (".taskpack", "build_taskpack_runtime_args"),
     "build_feishu_notification_sink_from_env": (
         ".notifications",
