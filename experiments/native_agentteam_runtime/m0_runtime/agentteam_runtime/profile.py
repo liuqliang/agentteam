@@ -7,6 +7,13 @@ PROFILE_SCHEMA_VERSION = "agentteam_profile.v1"
 VERIFICATION_PROFILE_SCHEMA_VERSION = "agentteam_verification_profile.v1"
 LOCAL_PROFILE_EXCLUDE_PATTERN = ".agentteam/"
 DEFAULT_CORRECTNESS_COMMAND = ["python3", "-m", "unittest", "discover"]
+AGENTTEAM_NATIVE_RUNTIME_CORRECTNESS_COMMAND = [
+    "python3",
+    "-m",
+    "unittest",
+    "experiments.native_agentteam_runtime.m0_runtime.tests.test_taskpack",
+    "experiments.native_agentteam_runtime.m0_runtime.tests.test_m0_runtime",
+]
 
 
 class AgentTeamProfileError(RuntimeError):
@@ -70,7 +77,7 @@ def build_project_profile(
             "webhook_env": feishu_webhook_env if feishu_enabled else None,
             "signing_secret_env": feishu_signing_secret_env if feishu_enabled else None,
         },
-        "verification_profile": normalize_verification_profile(verification_profile),
+        "verification_profile": effective_project_verification_profile(project_root, verification_profile),
     }
 
 
@@ -101,6 +108,40 @@ def normalize_verification_profile(profile=None):
             "metrics": list(metrics),
         },
     }
+
+
+def effective_project_verification_profile(project_root, profile=None):
+    normalized = normalize_verification_profile(profile)
+    project_default = project_default_correctness_command(project_root)
+    if (
+        project_default != DEFAULT_CORRECTNESS_COMMAND
+        and normalized["correctness"]["command"] == DEFAULT_CORRECTNESS_COMMAND
+    ):
+        normalized = {
+            **normalized,
+            "correctness": {"command": project_default},
+        }
+    return normalized
+
+
+def project_default_correctness_command(project_root):
+    return (
+        list(AGENTTEAM_NATIVE_RUNTIME_CORRECTNESS_COMMAND)
+        if _looks_like_agentteam_native_runtime_project(project_root)
+        else list(DEFAULT_CORRECTNESS_COMMAND)
+    )
+
+
+def _looks_like_agentteam_native_runtime_project(project_root):
+    if not project_root:
+        return False
+    root = Path(project_root)
+    runtime_root = root / "experiments" / "native_agentteam_runtime" / "m0_runtime"
+    return (
+        (runtime_root / "agentteam_runtime" / "__init__.py").is_file()
+        and (runtime_root / "tests" / "test_taskpack.py").is_file()
+        and (runtime_root / "tests" / "test_m0_runtime.py").is_file()
+    )
 
 
 def _command_or_default(command, default, field_name):

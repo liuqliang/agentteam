@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import subprocess
 import tempfile
@@ -3048,9 +3049,19 @@ def _git_apply_reverse_check(worktree, patch_path):
 
 
 def run_integration_verification(command, integration_worktree_path):
+    env = os.environ.copy()
+    native_runtime_path = _native_runtime_pythonpath(integration_worktree_path)
+    if native_runtime_path:
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            native_runtime_path
+            if not existing
+            else native_runtime_path + os.pathsep + existing
+        )
     completed = subprocess.run(
         list(command),
         cwd=integration_worktree_path,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -3062,6 +3073,18 @@ def run_integration_verification(command, integration_worktree_path):
         "integration_verification_stdout": completed.stdout,
         "integration_verification_stderr": completed.stderr,
     }
+
+
+def _native_runtime_pythonpath(integration_worktree_path):
+    runtime_root = (
+        Path(integration_worktree_path)
+        / "experiments"
+        / "native_agentteam_runtime"
+        / "m0_runtime"
+    )
+    if (runtime_root / "agentteam_runtime" / "__init__.py").is_file():
+        return str(runtime_root.resolve())
+    return None
 
 
 def evaluate_integration_commit(attempt, task_id, attempt_id):

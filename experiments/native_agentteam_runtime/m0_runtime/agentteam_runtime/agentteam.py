@@ -40,6 +40,7 @@ from .profile import (
     build_project_profile,
     default_project_key,
     default_work_root,
+    effective_project_verification_profile,
     load_project_profile,
     profile_path_for_project,
     write_project_profile,
@@ -1152,7 +1153,10 @@ def _handle_taskpack_new(args):
     if not write_scope:
         write_scope_text = _prompt_text("Write scope", required=True)
         write_scope = [write_scope_text]
-    verification_profile = profile.get("verification_profile")
+    verification_profile = effective_project_verification_profile(
+        project_root,
+        profile.get("verification_profile"),
+    )
     default_verification_command = _profile_correctness_command(verification_profile)
     verification_command = _parse_verification_command_arg(
         args.verification_command_json,
@@ -4594,7 +4598,10 @@ def _submit_args_from_profile(args, project_root, profile):
         if args.feishu_signing_secret_env is not None
         else (feishu.get("signing_secret_env") if feishu_enabled else None),
         codex_command=args.codex_command,
-        verification_profile=profile.get("verification_profile"),
+        verification_profile=effective_project_verification_profile(
+            project_root,
+            profile.get("verification_profile"),
+        ),
     )
 
 

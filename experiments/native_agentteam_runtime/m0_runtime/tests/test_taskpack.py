@@ -31,6 +31,7 @@ from agentteam_runtime.agentteam import (
     _handle_run,
     _run_paths_for_frozen_taskpack,
     _set_taskpack_runtime_backend,
+    _submit_args_from_profile,
     _stop_authoring,
     _write_execution_result_text,
     _write_status_text,
@@ -1608,6 +1609,105 @@ class TaskpackTests(unittest.TestCase):
                 ["python3", "tools/bench.py", "--json"],
             )
             self.assertEqual(verification_profile["performance"]["metrics"], ["accuracy", "latency_ms"])
+
+    def test_agentteam_cli_init_infers_native_runtime_verification_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            runtime_root = repo / "experiments" / "native_agentteam_runtime" / "m0_runtime"
+            (runtime_root / "agentteam_runtime").mkdir(parents=True)
+            (runtime_root / "agentteam_runtime" / "__init__.py").write_text("", encoding="utf-8")
+            (runtime_root / "tests").mkdir()
+            (runtime_root / "tests" / "test_taskpack.py").write_text("", encoding="utf-8")
+            (runtime_root / "tests" / "test_m0_runtime.py").write_text("", encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "agentteam-native",
+                    "--work-root",
+                    str(work_root),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            profile = json.loads((repo / ".agentteam" / "profile.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                profile["verification_profile"]["correctness"]["command"],
+                [
+                    "python3",
+                    "-m",
+                    "unittest",
+                    "experiments.native_agentteam_runtime.m0_runtime.tests.test_taskpack",
+                    "experiments.native_agentteam_runtime.m0_runtime.tests.test_m0_runtime",
+                ],
+            )
+
+    def test_submit_args_upgrade_legacy_native_runtime_default_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            runtime_root = repo / "experiments" / "native_agentteam_runtime" / "m0_runtime"
+            (runtime_root / "agentteam_runtime").mkdir(parents=True)
+            (runtime_root / "agentteam_runtime" / "__init__.py").write_text("", encoding="utf-8")
+            (runtime_root / "tests").mkdir()
+            (runtime_root / "tests" / "test_taskpack.py").write_text("", encoding="utf-8")
+            (runtime_root / "tests" / "test_m0_runtime.py").write_text("", encoding="utf-8")
+            args = SimpleNamespace(
+                goal="Improve reports.",
+                work_root=None,
+                taskpack_id=None,
+                author_runtime=None,
+                runtime=None,
+                codex_timeout_seconds=600,
+                one_shot=None,
+                max_inflight=None,
+                max_attempts=None,
+                commit_verified_integration=None,
+                notification_project=None,
+                feishu_webhook_env=None,
+                feishu_signing_secret_env=None,
+                codex_command=None,
+            )
+            profile = {
+                "project_key": "agentteam-native",
+                "work_root": str(tmp_path / "work"),
+                "author_runtime": "codex",
+                "default_runtime": "codex",
+                "verification_profile": {
+                    "verification_profile_schema_version": "agentteam_verification_profile.v1",
+                    "correctness": {"command": ["python3", "-m", "unittest", "discover"]},
+                    "performance": {"command": None, "metrics": []},
+                },
+            }
+
+            submit_args = _submit_args_from_profile(args, repo, profile)
+
+            self.assertEqual(
+                submit_args.verification_profile["correctness"]["command"],
+                [
+                    "python3",
+                    "-m",
+                    "unittest",
+                    "experiments.native_agentteam_runtime.m0_runtime.tests.test_taskpack",
+                    "experiments.native_agentteam_runtime.m0_runtime.tests.test_m0_runtime",
+                ],
+            )
 
     def test_agentteam_cli_init_text_is_concise_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:

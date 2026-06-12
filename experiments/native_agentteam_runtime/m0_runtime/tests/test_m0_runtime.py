@@ -43,7 +43,7 @@ from agentteam_runtime import (
 )
 from agentteam_runtime.agentteam import _run_runtime_command_with_progress
 from agentteam_runtime.cli import _run_supervised_two_phase_scheduler
-from agentteam_runtime.m0_runtime import apply_patch_to_integration_worktree
+from agentteam_runtime.m0_runtime import apply_patch_to_integration_worktree, run_integration_verification
 from agentteam_runtime.two_phase_scheduler import _runtime_evidence_summary
 
 
@@ -7998,6 +7998,32 @@ class M0RuntimeTests(unittest.TestCase):
                 snapshot["attempts"]["ATTEMPT-001"]["integration_verification_status"],
                 "passed",
             )
+
+    def test_integration_verification_adds_native_runtime_pythonpath(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp) / "repo"
+            runtime_root = worktree / "experiments" / "native_agentteam_runtime" / "m0_runtime"
+            package_root = runtime_root / "agentteam_runtime"
+            package_root.mkdir(parents=True)
+            (package_root / "__init__.py").write_text("VALUE = 7\n", encoding="utf-8")
+
+            result = run_integration_verification(
+                [
+                    "python3",
+                    "-c",
+                    (
+                        "import agentteam_runtime, os, sys; "
+                        "expected = sys.argv[1]; "
+                        "assert os.environ.get('PYTHONPATH', '').split(os.pathsep)[0] == expected; "
+                        "assert agentteam_runtime.VALUE == 7"
+                    ),
+                    str(runtime_root),
+                ],
+                worktree,
+            )
+
+            self.assertEqual(result["integration_verification_status"], "passed")
+            self.assertEqual(result["integration_verification_exit_code"], 0)
 
     def test_integration_verification_command_failure_is_recorded_without_rejecting_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
