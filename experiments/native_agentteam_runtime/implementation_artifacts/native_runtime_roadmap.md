@@ -829,6 +829,42 @@ Implemented:
   next action;
 - no automatic rebuild was added, preserving read-only command behavior.
 
+### M45: Deterministic Chinese Operator Brief
+
+Status: implemented in the native-runtime branch.
+
+Goal: add a deterministic Chinese-language operator brief to completion reports
+and Feishu `run_completed` notifications so Chinese-speaking operators can
+quickly scan what changed, what was verified, the merge recommendation, and the
+next action without treating localized prose as runtime authority.
+
+Decision: the M45 brief is additive and rule-based. It reads existing structured
+completion/report fields, emits bounded Chinese text with stable labels and
+ordering, and preserves the existing JSON result, English report content,
+evidence fields, and integration gates as the authoritative record. It must not
+call an LLM, translate raw transcripts or patches, infer unstated results, or
+approve a merge.
+
+Scope:
+
+- add a report-facing Chinese brief derived from existing operator completion
+  fields;
+- render the same bounded brief in Feishu `run_completed` notifications;
+- keep Feishu outbound-only and notification failures non-blocking;
+- document the exact contract in
+  `implementation_artifacts/designs/2026-06-12-m45-chinese-operator-brief.md`.
+
+Acceptance:
+
+- completion reports preserve existing structured fields and include the
+  Chinese brief as an additional operator-facing view;
+- Feishu `run_completed` messages include the same brief while preserving
+  existing redaction, size, and sparse-notification constraints;
+- deterministic tests prove identical input produces identical output without
+  live model calls or network calls;
+- the brief never changes task status, evidence status, integration policy,
+  merge behavior, resume behavior, or artifact retention behavior.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -869,6 +905,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is M44. It should validate projection-backed stats
-and retention planning against real completed runs before any artifact deletion
-feature is considered.
+The next recommended step is to validate M45 on real completed runs, then choose
+between operator-gated self-improvement workflow hardening and projection-backed
+retention validation before any artifact deletion feature is considered.

@@ -1630,7 +1630,15 @@ def _runtime_evidence_summary(task, runtime_result):
             "evidence_level": risk_target,
             "missing_evidence": ["evidence_summary"],
         }
-    summary = normalize_evidence_summary(raw, default_level=risk_target)
+    try:
+        summary = normalize_evidence_summary(raw, default_level=risk_target)
+    except ValueError as exc:
+        summary = {
+            "evidence_level": risk_target,
+            "evidence_status": "incomplete",
+            "trace_carrier": [],
+            "missing_evidence": [f"invalid_evidence_summary: {exc}"],
+        }
     return {
         "evidence_summary": summary,
         "evidence_level": summary["evidence_level"],

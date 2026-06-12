@@ -106,6 +106,7 @@ def render_run_completion_report(report):
         lines.extend(["", "## Operator Summary"])
         if summary.get("status_line"):
             lines.append(f"- Status: {summary['status_line']}")
+        _extend_summary_item(lines, "中文简报", summary.get("chinese_operator_brief"))
         _extend_summary_item(lines, "What changed", summary.get("what_changed"))
         _extend_summary_item(lines, "Changed files", summary.get("changed_files"))
         _extend_summary_item(lines, "Verification", summary.get("verification"))
@@ -186,6 +187,8 @@ def concise_report_lines(report, max_tasks=3):
     if isinstance(token_usage, dict):
         lines.append(format_token_usage(token_usage, label="tokens"))
     summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
+    for brief_line in _text_items(summary.get("chinese_operator_brief"))[:3]:
+        lines.append(f"中文简报: {brief_line}")
     changed = _first_text(summary.get("what_changed"))
     if changed:
         lines.append(f"changed: {changed}")

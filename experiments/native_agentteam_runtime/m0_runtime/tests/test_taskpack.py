@@ -43,6 +43,7 @@ from agentteam_runtime.diagnostic_chat import (
     build_runtime_diagnostic_context,
     render_runtime_diagnostic_context,
 )
+from agentteam_runtime.operator_report import concise_report_lines
 from agentteam_runtime.profile import build_project_profile, write_project_profile
 import agentteam_runtime.projection_db as projection_db
 from agentteam_runtime.projection_db import (
@@ -980,6 +981,44 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("Evidence status:", lines)
         self.assertIn("- incomplete: 1", lines)
 
+    def test_completion_summary_builds_deterministic_chinese_operator_brief(self):
+        summary = build_completion_summary(
+            run_id="brief-run",
+            run_status="completed",
+            task_count=1,
+            blocked_count=0,
+            task_reports=[
+                {
+                    "task_id": "TASK-001",
+                    "status": "implementation completed",
+                    "what_changed": ["Optimized the gesture scoring pipeline."],
+                    "changed_files": ["gesture_recognition/sim_eval.py"],
+                    "verification": ["unit_tests: passed"],
+                    "integration": "passed",
+                    "merge_recommendation": "Review accepted patch before merging.",
+                    "next_steps": ["Run full validation."],
+                }
+            ],
+        )
+        lines = []
+
+        extend_completion_summary_lines(lines, summary)
+
+        self.assertEqual(
+            summary["chinese_operator_brief"],
+            [
+                "本次运行已完成，共 1 个任务，0 个阻塞。",
+                "主要变更：Optimized the gesture scoring pipeline.",
+                "涉及文件：gesture_recognition/sim_eval.py",
+                "验证情况：unit_tests: passed",
+                "集成状态：已通过",
+                "合并建议：Review accepted patch before merging.",
+                "下一步：Run full validation.",
+            ],
+        )
+        self.assertIn("中文简报:", lines)
+        self.assertIn("- 本次运行已完成，共 1 个任务，0 个阻塞。", lines)
+
     def test_run_status_summary_reports_evidence_counts_from_steps(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1281,6 +1320,8 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("## Operator Summary", completed.stdout)
             self.assertIn("What changed: Scanned the repository", completed.stdout)
             self.assertIn("Integration: passed", completed.stdout)
+            self.assertIn("中文简报:", completed.stdout)
+            self.assertIn("本次运行已完成，共 1 个任务，0 个阻塞。", completed.stdout)
             self.assertIn("Integration recommendation: Review the final report, then run `agentteam integrate --taskpack taskpack-7` from a clean target repository if these changes should land.", completed.stdout)
             self.assertIn("Scanned the repository", completed.stdout)
             self.assertIn("gesture_recognition/sim_eval.py", completed.stdout)
@@ -1298,6 +1339,10 @@ class TaskpackTests(unittest.TestCase):
                 report_json["completion_summary"]["next_steps"],
                 ["Run the full competition validation package."],
             )
+            self.assertEqual(
+                report_json["completion_summary"]["chinese_operator_brief"][0],
+                "本次运行已完成，共 1 个任务，0 个阻塞。",
+            )
             artifacts_root = Path(tmp) / "artifacts"
             self.assertTrue((artifacts_root / ".git").exists())
             self.assertTrue((artifacts_root / "runs" / "taskpack-7" / "reports" / "final_report.md").exists())
@@ -1313,6 +1358,30 @@ class TaskpackTests(unittest.TestCase):
                 "runs/taskpack-7/reports/final_report.md",
                 tracked_completed.stdout.splitlines(),
             )
+
+    def test_concise_report_lines_include_chinese_operator_brief(self):
+        lines = concise_report_lines(
+            {
+                "report_path": "/tmp/final_report.md",
+                "run_status": "completed",
+                "task_count": 1,
+                "blocked_count": 0,
+                "completion_summary": {
+                    "what_changed": ["Optimized the gesture scoring pipeline."],
+                    "changed_files": ["gesture_recognition/sim_eval.py"],
+                    "verification": ["unit_tests: passed"],
+                    "integration": "passed",
+                    "chinese_operator_brief": [
+                        "本次运行已完成，共 1 个任务，0 个阻塞。",
+                        "主要变更：Optimized the gesture scoring pipeline.",
+                    ],
+                },
+                "operator_report": {"task_reports": []},
+            }
+        )
+
+        self.assertIn("中文简报: 本次运行已完成，共 1 个任务，0 个阻塞。", lines)
+        self.assertIn("中文简报: 主要变更：Optimized the gesture scoring pipeline.", lines)
 
     def test_install_local_replaces_existing_launcher_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:

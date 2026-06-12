@@ -379,6 +379,7 @@ class CodexRuntimeAdapter:
                 '{"result_status":"completed|blocked|failed|cancelled","changed_files":["path"],"output":{}}',
                 "For completed or failed work, output must include operator_summary for the human operator.",
                 "operator_summary must be natural language, not a patch dump: include what_changed, measured_result, verification_summary, merge_recommendation, and next_steps.",
+                "operator_summary natural-language fields must be written in Chinese (zh-CN); keep code symbols, file paths, commands, and metric names literal.",
                 "If mailbox payload has required_deliverables, operator_summary.deliverables must be a list of objects.",
                 "Each deliverables item must use the exact required deliverable string in its deliverable field and include summary plus evidence.",
                 "All changed_files entries must be relative paths inside the declared write_scope.",
@@ -477,6 +478,7 @@ class CodexRuntimeAdapter:
             "Evidence policy:",
             json.dumps(policy, sort_keys=True),
             "Final JSON output must include output.evidence_summary with evidence_level, evidence_status, trace_carrier, and missing_evidence.",
+            "trace_carrier must be a list of objects, for example [{'type':'command','command':'...','result':'...'}].",
             "Use evidence_status complete only when trace_carrier records concrete evidence for this task.",
             "For L2 or L3 evidence, incomplete evidence blocks patch integration; list missing_evidence instead of omitting uncertain proof.",
         ]

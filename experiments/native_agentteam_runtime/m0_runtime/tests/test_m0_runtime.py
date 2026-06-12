@@ -44,6 +44,7 @@ from agentteam_runtime import (
 from agentteam_runtime.agentteam import _run_runtime_command_with_progress
 from agentteam_runtime.cli import _run_supervised_two_phase_scheduler
 from agentteam_runtime.m0_runtime import apply_patch_to_integration_worktree
+from agentteam_runtime.two_phase_scheduler import _runtime_evidence_summary
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -318,6 +319,9 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertEqual(result["event_type"], "notification_sent")
         text = calls[0]["payload"]["content"]["text"]
         self.assertIn("Completion summary:", text)
+        self.assertIn("中文简报:", text)
+        self.assertIn("本次运行已完成，共 1 个任务，1 个阻塞。", text)
+        self.assertIn("主要变更：优化了 IMU 解析和特征提取流程。", text)
         self.assertIn("What changed:", text)
         self.assertIn("优化了 IMU 解析和特征提取流程。", text)
         self.assertIn("Changed files:", text)
@@ -1482,6 +1486,25 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertEqual(default_summary["evidence_status"], "complete")
         self.assertEqual(default_summary["trace_carrier"], [])
         self.assertEqual(default_summary["missing_evidence"], [])
+
+    def test_runtime_evidence_summary_degrades_malformed_trace_carrier(self):
+        result = _runtime_evidence_summary(
+            {"risk_target": "L1"},
+            {
+                "output": {
+                    "evidence_summary": {
+                        "evidence_level": "L1",
+                        "evidence_status": "complete",
+                        "trace_carrier": {"command": "python3 -m unittest"},
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(result["evidence_level"], "L1")
+        self.assertEqual(result["evidence_status"], "incomplete")
+        self.assertEqual(result["trace_carrier"], [])
+        self.assertIn("invalid_evidence_summary: trace_carrier must be a list of objects", result["missing_evidence"])
 
     def test_run_simulation_dispatches_ready_task_and_validates_result(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8414,6 +8437,7 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("required_output_keys", prompt)
         self.assertIn("operator_summary", prompt)
         self.assertIn("what_changed", prompt)
+        self.assertIn("operator_summary natural-language fields must be written in Chinese", prompt)
 
     def test_codex_runtime_adapter_includes_role_context_path(self):
         message = {
@@ -8502,6 +8526,7 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("Evidence policy:", prompt)
         self.assertIn("output.evidence_summary", prompt)
         self.assertIn("trace_carrier", prompt)
+        self.assertIn("trace_carrier must be a list of objects", prompt)
         self.assertIn("missing_evidence", prompt)
         self.assertIn("L2", prompt)
 

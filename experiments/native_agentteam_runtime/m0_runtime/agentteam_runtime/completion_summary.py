@@ -1,3 +1,6 @@
+from .operator_brief import build_chinese_operator_brief
+
+
 def build_completion_summary(
     run_id,
     run_status,
@@ -47,7 +50,7 @@ def build_completion_summary(
         integration=integration,
     )
     evidence_status_counts = _evidence_status_counts(task_reports)
-    return {
+    summary = {
         "status_line": _completion_status_line(run_status, task_count, blocked_count),
         "what_changed": what_changed,
         "changed_files": changed_files,
@@ -64,6 +67,14 @@ def build_completion_summary(
         "merge_recommendations": merge_recommendations,
         "evidence_gaps": evidence_gaps,
     }
+    summary["chinese_operator_brief"] = build_chinese_operator_brief(
+        run_id=run_id,
+        run_status=run_status,
+        task_count=task_count,
+        blocked_count=blocked_count,
+        completion_summary=summary,
+    )
+    return summary
 
 
 def extend_completion_summary_lines(lines, summary):
@@ -72,6 +83,7 @@ def extend_completion_summary_lines(lines, summary):
     lines.append("Completion summary:")
     if summary.get("status_line"):
         lines.append(f"Status: {summary['status_line']}")
+    _extend_section(lines, "中文简报:", summary.get("chinese_operator_brief"))
     _extend_section(lines, "What changed:", summary.get("what_changed"))
     _extend_section(lines, "Changed files:", summary.get("changed_files"))
     _extend_section(lines, "Verification:", summary.get("verification"))
