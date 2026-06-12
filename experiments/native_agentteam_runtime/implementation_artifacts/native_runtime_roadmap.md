@@ -665,9 +665,60 @@ Short-term slices:
 - M38c pending: global release reference discovery and cleanup protection across known
   projects, with dry-run explanations.
 
-### M39: Artifact Projection Database
+### M39: Runtime SOP Evidence Contract
 
-Status: deferred until after M38 release management.
+Status: planned after M38c.
+
+Goal: adapt the single-agent implementation SOP into a native runtime contract
+that the scheduler can enforce before introducing a database projection layer.
+
+Decision: do not copy the outer `design/` SOP file layout into the runtime.
+The runtime should preserve the same risk/evidence intent through its own
+objects: taskpacks, backlog items, dispatch events, worker results, reports,
+integration gates, and semantic escalation events.
+
+Scope:
+
+- define the runtime-owned evidence levels for `L0`, `L1`, `L2`, and `L3`;
+- make `L3` an escalation-only path owned by a dedicated
+  `semantic_architecture_agent`, not an ordinary implementation-worker task;
+- let the semantic architecture agent maintain semantic design proposals and
+  authority-update drafts, while the scheduler pauses for the user only when
+  that agent cannot resolve the architecture question;
+- require missing `L2` evidence to block integration, not merely worker result
+  capture;
+- add result/report fields such as `evidence_level`, `evidence_status`,
+  `trace_carrier`, and `missing_evidence`;
+- expose evidence status through `status`, `report`, and important lifecycle
+  events without requiring long per-task trace files;
+- keep `events.jsonl` and compact worker results sufficient for normal `L0`
+  and `L1` work.
+
+Acceptance:
+
+- the roadmap and runtime design docs explicitly distinguish worker task risk,
+  milestone risk, and semantic architecture risk;
+- task proposal validation can represent or reject `L3` without dispatching it
+  to ordinary writable workers;
+- a generated `L3` proposal is routed to semantic escalation state, produces an
+  inspectable event, and waits for semantic architecture handling;
+- `L2` results with missing required evidence are visible but cannot enter
+  verified integration;
+- `status` and `report` can summarize evidence completeness for completed,
+  blocked, and escalated work;
+- normal unit tests use fake/shell workers and require no live model calls.
+
+Short-term slices:
+
+- M39a: runtime SOP contract document and risk/evidence data model.
+- M39b: proposal validation and scheduler routing for `L3` semantic
+  escalation.
+- M39c: `L2` evidence gate, result/report evidence summaries, and regression
+  tests.
+
+### M40: Artifact Projection Database
+
+Status: deferred until after M39 establishes the runtime evidence contract.
 
 Goal: add a local SQLite projection layer that makes long-running project state
 fast to query, summarize, clean up, and diagnose while keeping file-backed
@@ -684,7 +735,7 @@ Scope:
 - create `<work_root>/agentteam.db` as a project-local projection database;
 - define schema-versioned tables for runs, taskpacks, tasks, attempts, events,
   artifact metadata, integrations, reports, token usage, manual gates,
-  permission requests, and releases;
+  permission requests, releases, and evidence summaries;
 - keep SQLite in WAL mode with short single-writer transactions;
 - index existing authoritative artifacts by physical path, logical type,
   content hash, run id, task id, attempt id, size, and retention policy;
@@ -694,7 +745,8 @@ Scope:
 - make `status`, `logs`, `taskpack list`, `report`, `update --status`, and
   `gc` eligible to read from the DB first, with file replay fallback;
 - expose aggregate statistics for token usage, attempts, failures, runtime
-  duration, and integration outcomes through a small `stats` command or view;
+  duration, evidence completeness, and integration outcomes through a small
+  `stats` command or view;
 - improve `gc` so it can distinguish authoritative artifacts, rebuildable
   caches, old releases, orphaned runs, and protected active or nonterminal
   state.
@@ -708,18 +760,19 @@ Acceptance:
 - DB writes are best-effort projections and never replace append-only event
   writes;
 - artifact metadata records content hashes and sizes for reports, patches,
-  taskpacks, state snapshots, role contexts, and repo contexts;
+  taskpacks, state snapshots, role contexts, repo contexts, and evidence
+  summaries;
 - `gc --dry-run` can explain what would be deleted and why using indexed
   artifact metadata;
 - normal unit tests use temporary SQLite files and require no live model calls.
 
 Short-term slices:
 
-- M39a: schema, migration log, event/taskpack/run projection, `db check`, and
-  `db rebuild`.
-- M39b: read-through query path for `status`, `logs`, `taskpack list`, and
+- M40a: schema, migration log, event/taskpack/run/evidence projection,
+  `db check`, and `db rebuild`.
+- M40b: read-through query path for `status`, `logs`, `taskpack list`, and
   report metadata with file replay fallback.
-- M39c: artifact metadata hashes, token/stat aggregation, and DB-backed smart
+- M40c: artifact metadata hashes, token/stat aggregation, and DB-backed smart
   `gc --dry-run`.
 
 ## Longer-Term Route
@@ -732,7 +785,7 @@ These items should wait until M23-M30 have made the local runtime reliable:
   build systems, and static analyzers, with compact summaries fed to repo and
   role context packages after the M32 MVP is validated.
 - Moving from a rebuildable DB projection to a DB-primary artifact store, if the
-  hybrid M39 path proves reliable and file-backed replay becomes the bottleneck.
+  hybrid M40 path proves reliable and file-backed replay becomes the bottleneck.
 - Policy-governed semantic feedback where implementation evidence can propose
   updates to design authority artifacts without letting ordinary workers edit
   those artifacts directly.
@@ -764,4 +817,5 @@ already captured in milestone plans, events, or test output.
 
 The next recommended step is M38c. It adds global release reference discovery
 and cleanup protection before old globally cached runtime releases can be
-deleted safely.
+deleted safely. After M38c, M39 should establish the runtime SOP evidence
+contract before the database projection work begins in M40.

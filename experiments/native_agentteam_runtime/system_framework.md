@@ -381,6 +381,7 @@ payload
 | `verification_agent` | read-mostly role | Run or design verification and interpret failures. |
 | `patch_integrator` | controlled write role | Merge accepted worktree results and update task state. |
 | `semantic_feedback_agent` | semantic role | Detect design gaps discovered during implementation and propose artifact updates. |
+| `semantic_architecture_agent` | semantic authority role | Resolve L3 semantic architecture questions, draft authority-update proposals, or open a user manual gate when unresolved. |
 | `watchdog` | deterministic plus optional semantic role | Detect stalled sessions and trigger recovery. |
 
 ### Model Profile Principle
@@ -441,12 +442,18 @@ ready task
 worker or verifier reports design gap
   -> validator confirms it is not just local implementation noise
   -> semantic_feedback_agent writes proposal
-  -> roadmap/design authority update task is opened
+  -> if the finding is L3, semantic_architecture_agent takes ownership
+  -> roadmap/design authority update task is opened or a manual gate is opened
   -> authority document changes require separate integration
 ```
 
 This protects architecture authority while still allowing implementation to
 feed back new knowledge.
+
+`semantic_feedback_agent` is an implementation feedback classifier.
+`semantic_architecture_agent` is the role that owns semantic architecture
+maintenance. If that role cannot resolve an L3 question, the runtime pauses and
+waits for user input instead of letting a worker redefine authority artifacts.
 
 ### Failure And Retry
 
