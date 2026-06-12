@@ -275,6 +275,78 @@ def read_projected_artifact_summary(work_root):
     }
 
 
+def read_projected_artifact_retention_plan(work_root, limit=20):
+    check = check_project_projection_db(work_root)
+    if check["check_status"] != "passed":
+        return None
+    db_path = project_projection_db_path(work_root)
+    limit = max(0, int(limit if limit is not None else 20))
+    try:
+        with sqlite3.connect(db_path) as connection:
+            retention_rows = connection.execute(
+                """
+                select retention_policy, count(*), coalesce(sum(size_bytes), 0)
+                from artifacts
+                group by retention_policy
+                order by retention_policy
+                """
+            ).fetchall()
+            candidate_total = connection.execute(
+                """
+                select count(*), coalesce(sum(size_bytes), 0)
+                from artifacts
+                where retention_policy = 'rebuildable'
+                """
+            ).fetchone()
+            candidate_rows = connection.execute(
+                """
+                select artifact_type, run_id, taskpack_id, task_id, attempt_id,
+                       path, size_bytes, sha256, retention_policy
+                from artifacts
+                where retention_policy = 'rebuildable'
+                order by size_bytes desc, path
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    return {
+        "projection_source": "db",
+        "plan_status": "ready",
+        "db_path": str(db_path),
+        "check_status": check["check_status"],
+        "deletion_enabled": False,
+        "candidate_count": candidate_total[0] if candidate_total else 0,
+        "candidate_bytes": candidate_total[1] if candidate_total else 0,
+        "candidate_limit": limit,
+        "retention_policies": {
+            row[0]: row[1]
+            for row in retention_rows
+        },
+        "retention_bytes": {
+            row[0]: row[2]
+            for row in retention_rows
+        },
+        "protected_explanations": _artifact_retention_explanations(),
+        "candidates": [
+            {
+                "artifact_type": row[0],
+                "run_id": row[1],
+                "taskpack_id": row[2],
+                "task_id": row[3],
+                "attempt_id": row[4],
+                "path": row[5],
+                "size_bytes": row[6],
+                "sha256": row[7],
+                "retention_policy": row[8],
+                "reason": "derived context artifact; listed for planning only, not deletion",
+            }
+            for row in candidate_rows
+        ],
+    }
+
+
 def build_project_stats(work_root):
     work_root = Path(work_root).resolve()
     check = check_project_projection_db(work_root)
@@ -768,6 +840,23 @@ def _project_stats_from_database(work_root, check):
         retention_policies=_group_rows_to_count_bytes(retention_rows),
         token_usage=_aggregate_token_usage_from_rows(token_rows),
     )
+
+
+def _artifact_retention_explanations():
+    return [
+        {
+            "retention_policy": "authoritative",
+            "reason": "events, state, reports, patches, and frozen taskpacks are audit records and remain protected",
+        },
+        {
+            "retention_policy": "protected",
+            "reason": "active, nonterminal, or policy-pinned artifacts are not cleanup candidates",
+        },
+        {
+            "retention_policy": "rebuildable",
+            "reason": "derived role/repo context artifacts may become future cleanup candidates; M42 only lists them",
+        },
+    ]
 
 
 def _project_stats_from_projection(projection, *, projection_source, check_status, db_path):

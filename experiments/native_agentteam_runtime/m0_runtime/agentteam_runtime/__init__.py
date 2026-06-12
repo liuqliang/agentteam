@@ -76,6 +76,10 @@ _EXPORTS = {
         ".projection_db",
         "read_projected_artifact_summary",
     ),
+    "read_projected_artifact_retention_plan": (
+        ".projection_db",
+        "read_projected_artifact_retention_plan",
+    ),
     "rebuild_project_projection_db": (
         ".projection_db",
         "rebuild_project_projection_db",

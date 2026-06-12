@@ -795,6 +795,24 @@ Implemented:
 - keeps the command diagnostic only: no automatic rebuild, cleanup, or runtime
   mutation.
 
+### M42: Artifact Retention Planning
+
+Status: implemented.
+
+Goal: show a bounded, explicit retention plan for rebuildable artifacts without
+deleting run artifacts.
+
+Implemented:
+
+- added `agentteam gc --artifacts` and `--artifact-limit`;
+- added a projection reader that lists rebuildable role/repo context artifacts
+  from a fresh `agentteam.db`;
+- returns `deletion_enabled: false` for artifact retention plans, including
+  when `--force` is present;
+- explains authoritative, protected, and rebuildable retention policies;
+- reports an unavailable plan when the projection DB is missing or stale,
+  rather than falling back to unsafe path guesses.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -835,6 +853,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is M42. It should add a conservative retention
-planning view for rebuildable artifacts, using the M40 projection to explain
-candidate context/cache cleanup without deleting run artifacts by default.
+The next recommended step is M43. It should validate retention planning against
+real runs and improve stale-projection guidance before any artifact deletion
+feature is considered.

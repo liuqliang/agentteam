@@ -47,6 +47,7 @@ from .profile import (
 from .projection_db import (
     build_project_stats,
     check_project_projection_db,
+    read_projected_artifact_retention_plan,
     read_projected_artifact_summary,
     read_projected_run_events,
     read_projected_run_metadata,
@@ -165,9 +166,13 @@ _HELP_COMMANDS = [
         "examples": [
             "agentteam gc --project-root <repo>",
             "agentteam gc --project-root <repo> --global-releases",
+            "agentteam gc --project-root <repo> --artifacts --json",
             "agentteam gc --project-root <repo> --force",
         ],
-        "notes": ["Without --force this command reports what it would manage without deleting releases."],
+        "notes": [
+            "Without --force this command reports what it would manage without deleting releases.",
+            "--artifacts lists rebuildable artifact candidates for planning only; artifact deletion is disabled.",
+        ],
     },
     {
         "name": "paths",
@@ -947,6 +952,8 @@ def _add_gc_parser(subcommands):
     parser.add_argument("--keep-releases", type=int, default=1, help="Number of latest releases to retain.")
     parser.add_argument("--stale-runs", action="store_true", help="Also repair stale running run state.")
     parser.add_argument("--global-releases", action="store_true", help="Also scan the shared global runtime release store.")
+    parser.add_argument("--artifacts", action="store_true", help="Also include a read-only artifact retention plan.")
+    parser.add_argument("--artifact-limit", type=int, default=20, help="Maximum rebuildable artifact candidates to list.")
     parser.add_argument("--force", action="store_true", help="Actually delete eligible old releases.")
     parser.add_argument("--json", action="store_true", help="Print cleanup result as JSON instead of human text.")
     parser.set_defaults(handler=_handle_gc)
@@ -2568,6 +2575,12 @@ def _handle_gc(args):
     if args.global_releases:
         global_release_prune = prune_global_releases(work_root, force=args.force)
     artifact_projection = _gc_artifact_projection_summary(work_root)
+    artifact_retention_plan = None
+    if args.artifacts:
+        artifact_retention_plan = _gc_artifact_retention_plan(
+            work_root,
+            limit=args.artifact_limit,
+        )
     summary = {
         "gc_status": gc_status,
         "project": profile.get("project_key") or "unknown",
@@ -2578,11 +2591,36 @@ def _handle_gc(args):
         "global_release_prune": global_release_prune,
         "stale_run_cleanup": stale_cleanup,
         "artifact_projection": artifact_projection,
+        "artifact_retention_plan": artifact_retention_plan,
     }
     if args.json:
         return summary
     _write_gc_text(summary)
     return 0
+
+
+def _gc_artifact_retention_plan(work_root, limit):
+    plan = read_projected_artifact_retention_plan(work_root, limit=limit)
+    if plan is not None:
+        return plan
+    return {
+        "projection_source": "files",
+        "plan_status": "unavailable",
+        "check_status": "failed",
+        "deletion_enabled": False,
+        "candidate_count": 0,
+        "candidate_bytes": 0,
+        "candidate_limit": max(0, int(limit if limit is not None else 20)),
+        "retention_policies": {},
+        "retention_bytes": {},
+        "protected_explanations": [
+            {
+                "retention_policy": "unindexed",
+                "reason": "artifact retention planning requires a fresh projection DB; run agentteam db rebuild first.",
+            }
+        ],
+        "candidates": [],
+    }
 
 
 def _gc_artifact_projection_summary(work_root):
@@ -3049,6 +3087,11 @@ def _write_gc_text(summary):
         lines.append(f"artifact_projection: {artifact_projection.get('projection_source') or 'unknown'}")
         lines.append(f"artifact_count: {artifact_projection.get('total_artifacts', 0)}")
         lines.append(f"artifact_bytes: {artifact_projection.get('total_bytes', 0)}")
+    artifact_plan = summary.get("artifact_retention_plan") or {}
+    if artifact_plan:
+        lines.append(f"artifact_retention_plan: {artifact_plan.get('plan_status') or 'unknown'}")
+        lines.append(f"artifact_candidates: {artifact_plan.get('candidate_count', 0)}")
+        lines.append(f"artifact_deletion_enabled: {str(bool(artifact_plan.get('deletion_enabled'))).lower()}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 

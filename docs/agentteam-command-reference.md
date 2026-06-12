@@ -237,6 +237,8 @@ agentteam gc --force
 agentteam gc --keep-releases 2 --force
 agentteam gc --global-releases --force
 agentteam gc --stale-runs --force
+agentteam gc --artifacts --json
+agentteam gc --artifacts --artifact-limit 50 --json
 ```
 
 Behavior:
@@ -251,6 +253,13 @@ Behavior:
   authoritative versus rebuildable artifacts.
 - Artifact projection output is explanatory in M40c. `agentteam gc` does not
   delete run artifacts or context artifacts yet.
+- With `--artifacts`, includes an `artifact_retention_plan` section. It lists
+  bounded rebuildable artifact candidates such as role/repo context files and
+  reports why authoritative artifacts remain protected.
+- `--artifact-limit` controls how many rebuildable candidate rows are included.
+  It does not change counts.
+- Artifact deletion is disabled in M42: `artifact_retention_plan.deletion_enabled`
+  is always `false`, even when `--force` is present.
 - With `--global-releases`, also scans
   `~/.local/share/agentteam/runtime-releases/<source-key>/<release-id>/`.
   Global releases are protected when any known work root references them through

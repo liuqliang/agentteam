@@ -716,6 +716,58 @@ class TaskpackTests(unittest.TestCase):
             self.assertGreaterEqual(stats["artifacts"]["total_count"], 4)
             self.assertEqual(stats["token_usage"]["total_tokens"], 1500)
 
+    def test_project_artifact_retention_plan_reads_rebuildable_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = _write_completed_operator_run(work_root / "runs" / "retention-run")
+            _write_json(
+                run_dir / "role_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json",
+                {"context_schema_version": "role_context.v1", "notes": ["small"]},
+            )
+            _write_json(
+                run_dir / "repo_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json",
+                {"repo_context_schema_version": "repo_context.v1", "selected_files": ["a.py"]},
+            )
+            _write_json(
+                work_root / "frozen" / "retention-run" / "taskpack.json",
+                {
+                    "taskpack_id": "retention-run",
+                    "goal": "Retention planning fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            rebuild_project_projection_db(work_root)
+
+            plan = projection_db.read_projected_artifact_retention_plan(work_root, limit=1)
+
+            self.assertEqual(plan["projection_source"], "db")
+            self.assertEqual(plan["plan_status"], "ready")
+            self.assertFalse(plan["deletion_enabled"])
+            self.assertEqual(plan["candidate_count"], 2)
+            self.assertEqual(len(plan["candidates"]), 1)
+            self.assertEqual(plan["candidates"][0]["retention_policy"], "rebuildable")
+            self.assertIn(
+                plan["candidates"][0]["artifact_type"],
+                {"role_context", "repo_context"},
+            )
+            self.assertGreaterEqual(plan["retention_policies"]["authoritative"], 1)
+            self.assertGreaterEqual(plan["retention_policies"]["rebuildable"], 2)
+
+    def test_project_artifact_retention_plan_returns_none_without_fresh_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = _write_completed_operator_run(work_root / "runs" / "retention-run")
+            _write_json(
+                run_dir / "repo_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json",
+                {"repo_context_schema_version": "repo_context.v1"},
+            )
+
+            plan = projection_db.read_projected_artifact_retention_plan(work_root)
+
+            self.assertIsNone(plan)
+
     def test_agentteam_cli_db_rebuild_and_check_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1684,6 +1736,101 @@ class TaskpackTests(unittest.TestCase):
             }
             self.assertIn("authoritative", explanation_policies)
             self.assertIn("rebuildable", explanation_policies)
+
+    def test_agentteam_cli_gc_artifacts_json_lists_rebuildable_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "gc-artifact-project")
+            run_dir = _write_completed_operator_run(work_root / "runs" / "retention-run")
+            _write_json(
+                run_dir / "role_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json",
+                {"context_schema_version": "role_context.v1"},
+            )
+            _write_json(
+                run_dir / "repo_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json",
+                {"repo_context_schema_version": "repo_context.v1"},
+            )
+            _write_json(
+                work_root / "frozen" / "retention-run" / "taskpack.json",
+                {
+                    "taskpack_id": "retention-run",
+                    "goal": "Retention planning fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            rebuild_project_projection_db(work_root)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "gc",
+                    "--project-root",
+                    str(repo),
+                    "--artifacts",
+                    "--artifact-limit",
+                    "1",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            plan = summary["artifact_retention_plan"]
+            self.assertEqual(plan["projection_source"], "db")
+            self.assertEqual(plan["plan_status"], "ready")
+            self.assertFalse(plan["deletion_enabled"])
+            self.assertEqual(plan["candidate_count"], 2)
+            self.assertEqual(len(plan["candidates"]), 1)
+            self.assertEqual(plan["candidates"][0]["retention_policy"], "rebuildable")
+
+    def test_agentteam_cli_gc_artifacts_json_reports_unavailable_without_projection_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "gc-artifact-project")
+            run_dir = _write_completed_operator_run(work_root / "runs" / "retention-run")
+            _write_json(
+                run_dir / "repo_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json",
+                {"repo_context_schema_version": "repo_context.v1"},
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "gc",
+                    "--project-root",
+                    str(repo),
+                    "--artifacts",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            plan = summary["artifact_retention_plan"]
+            self.assertEqual(plan["projection_source"], "files")
+            self.assertEqual(plan["plan_status"], "unavailable")
+            self.assertFalse(plan["deletion_enabled"])
+            self.assertEqual(plan["candidate_count"], 0)
 
     def test_agentteam_cli_notify_test_sends_feishu_message_from_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
