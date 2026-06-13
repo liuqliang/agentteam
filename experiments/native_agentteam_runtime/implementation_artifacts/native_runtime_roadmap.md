@@ -865,6 +865,45 @@ Acceptance:
 - the brief never changes task status, evidence status, integration policy,
   merge behavior, resume behavior, or artifact retention behavior.
 
+### M46: Native Runtime Verification Command Inference
+
+Status: implemented in the native-runtime branch.
+
+Goal: ensure AgentTeam self-runs and native-runtime target projects execute a
+real verification command instead of silently accepting an empty unittest
+discovery result.
+
+Implemented:
+
+- project-aware profile initialization now infers the native runtime verification
+  command as explicit module tests instead of generic discovery;
+- legacy profile loading upgrades stale native-runtime verification commands;
+- integration verification injects the native runtime `PYTHONPATH` when running
+  against an integration worktree;
+- full verification now reports `Ran 368 tests ... OK` for the native runtime
+  validation path rather than `Ran 0 tests`.
+
+### M47: Self-Run Validation And Operator Report Tightening
+
+Status: implemented in the native-runtime branch.
+
+Goal: validate M45/M46 with a real AgentTeam run against the AgentTeam runtime
+itself, then only accept a minimal safe fix if the run finds a concrete gap.
+
+Implemented:
+
+- ran AgentTeam against a temporary clone of the native runtime with a bounded
+  audit taskpack;
+- confirmed taskpack authoring, worker result collection, evidence summary,
+  integration verification, Chinese operator brief, and Feishu `run_completed`
+  notification events are coherent;
+- accepted one minimal worker-report fix: `FakeRuntimeAdapter` now emits
+  Chinese `operator_summary` prose for human-facing fields;
+- added a focused regression test for the fake runtime operator summary
+  contract;
+- verified the integrated result with the native runtime two-module suite:
+  `Ran 368 tests ... OK`.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -905,6 +944,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to validate M45 on real completed runs, then choose
-between operator-gated self-improvement workflow hardening and projection-backed
-retention validation before any artifact deletion feature is considered.
+The next recommended step is to choose between operator-gated self-improvement
+workflow hardening and projection-backed retention validation before any
+artifact deletion feature is considered.
