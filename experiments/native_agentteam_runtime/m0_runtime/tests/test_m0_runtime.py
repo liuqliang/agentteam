@@ -1506,6 +1506,46 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertEqual(result["trace_carrier"], [])
         self.assertIn("invalid_evidence_summary: trace_carrier must be a list of objects", result["missing_evidence"])
 
+    def test_fake_runtime_adapter_reports_chinese_operator_summary(self):
+        message = {
+            "payload": {
+                "task_id": "TASK-001",
+                "attempt_id": "TASK-001-ATTEMPT-001",
+                "write_scope": ["generated/"],
+                "required_deliverables": [
+                    "repository_understanding_summary",
+                    "verification_summary",
+                ],
+            }
+        }
+
+        result = FakeRuntimeAdapter().run(message)
+
+        operator_summary = result["output"]["operator_summary"]
+        self.assertEqual(
+            operator_summary["what_changed"],
+            ["Fake runtime 为任务生成了确定性的有界结果。"],
+        )
+        self.assertEqual(
+            operator_summary["verification_summary"],
+            ["fake_runtime: passed"],
+        )
+        self.assertEqual(
+            operator_summary["merge_recommendation"],
+            "人工审阅通过后再合并已接受的补丁。",
+        )
+        self.assertEqual(
+            [item["deliverable"] for item in operator_summary["deliverables"]],
+            [
+                "repository_understanding_summary",
+                "verification_summary",
+            ],
+        )
+        self.assertEqual(
+            operator_summary["deliverables"][0]["summary"],
+            "Fake runtime 已满足 repository_understanding_summary。",
+        )
+
     def test_run_simulation_dispatches_ready_task_and_validates_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)

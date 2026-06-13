@@ -2591,18 +2591,18 @@ def _fake_operator_summary(payload, changed_files):
     deliverables = [
         {
             "deliverable": deliverable,
-            "summary": f"Fake runtime satisfied {deliverable}.",
-            "evidence": changed_files or ["no changed files"],
+            "summary": f"Fake runtime 已满足 {deliverable}。",
+            "evidence": changed_files or ["未生成变更文件"],
         }
         for deliverable in _coerce_text_list(payload.get("required_deliverables"))
     ]
     return {
         "what_changed": [
-            "Fake runtime produced a deterministic bounded result for the task."
+            "Fake runtime 为任务生成了确定性的有界结果。"
         ],
         "verification_summary": ["fake_runtime: passed"],
         "deliverables": deliverables,
-        "merge_recommendation": "Review accepted patch before merging.",
+        "merge_recommendation": "人工审阅通过后再合并已接受的补丁。",
         "next_steps": [],
     }
 
