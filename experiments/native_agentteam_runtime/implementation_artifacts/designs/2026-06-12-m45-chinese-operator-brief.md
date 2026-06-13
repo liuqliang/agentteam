@@ -30,6 +30,13 @@ operator-facing fields. The formatter remains deterministic: it wraps and
 bounds the returned summary, but it does not translate English text after the
 fact. File paths, commands, code symbols, and metric names should stay literal.
 
+M48 extends this prompt-only contract with a narrow scheduler quality gate: when
+a task declares `required_deliverables`, completed worker results with
+operator-facing summary fields that look like human prose must include zh-CN
+text. The gate remains heuristic and structural; it does not translate text,
+judge semantic quality, or affect tasks that do not opt into deliverable
+tracking.
+
 ## Input Contract
 
 The formatter may read only already-produced completion summary and report data:

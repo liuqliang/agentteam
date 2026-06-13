@@ -2600,7 +2600,7 @@ def _fake_operator_summary(payload, changed_files):
         "what_changed": [
             "Fake runtime 为任务生成了确定性的有界结果。"
         ],
-        "verification_summary": ["fake_runtime: passed"],
+        "verification_summary": ["fake_runtime: 已通过"],
         "deliverables": deliverables,
         "merge_recommendation": "人工审阅通过后再合并已接受的补丁。",
         "next_steps": [],
@@ -2675,6 +2675,13 @@ def classify_attempt_outcome(runtime_result, task, diff_audit=None):
                 "retryable": False,
                 "semantic_validation": semantic_validation,
             }
+        if semantic_validation["operator_summary_language_issues"]:
+            return {
+                "validation_status": "rejected",
+                "failure_category": "operator_summary_language",
+                "retryable": False,
+                "semantic_validation": semantic_validation,
+            }
         return {
             "validation_status": "accepted",
             "failure_category": None,
@@ -2715,7 +2722,60 @@ def _semantic_deliverable_validation(runtime_result, task):
         "missing_required_deliverables": [
             deliverable for deliverable in required if deliverable not in delivered
         ],
+        "operator_summary_language_issues": (
+            _operator_summary_language_issues(runtime_result) if required else []
+        ),
     }
+
+
+def _operator_summary_language_issues(runtime_result):
+    output = runtime_result.get("output") if isinstance(runtime_result, dict) else {}
+    if not isinstance(output, dict):
+        return ["operator_summary must be an object"]
+    operator_summary = output.get("operator_summary")
+    if not isinstance(operator_summary, dict):
+        return ["operator_summary must be an object"]
+    issues = []
+    for field in ("what_changed", "measured_result", "verification_summary", "next_steps"):
+        values = _coerce_text_list(operator_summary.get(field))
+        issues.extend(
+            f"operator_summary.{field} must include zh-CN text"
+            for value in values
+            if _looks_like_human_text(value) and not _contains_cjk(value)
+        )
+    merge_recommendation = operator_summary.get("merge_recommendation")
+    if (
+        merge_recommendation
+        and _looks_like_human_text(str(merge_recommendation))
+        and not _contains_cjk(str(merge_recommendation))
+    ):
+        issues.append("operator_summary.merge_recommendation must include zh-CN text")
+    deliverables = operator_summary.get("deliverables") or output.get("deliverables")
+    if isinstance(deliverables, list):
+        for index, item in enumerate(deliverables):
+            if not isinstance(item, dict):
+                continue
+            summary = item.get("summary")
+            if (
+                summary
+                and _looks_like_human_text(str(summary))
+                and not _contains_cjk(str(summary))
+            ):
+                issues.append(
+                    f"operator_summary.deliverables[{index}].summary must include zh-CN text"
+                )
+    return issues
+
+
+def _contains_cjk(value):
+    return any("\u4e00" <= char <= "\u9fff" for char in str(value))
+
+
+def _looks_like_human_text(value):
+    text = str(value).strip()
+    if not text:
+        return False
+    return any(char.isalpha() for char in text)
 
 
 def _delivered_deliverable_names(runtime_result):

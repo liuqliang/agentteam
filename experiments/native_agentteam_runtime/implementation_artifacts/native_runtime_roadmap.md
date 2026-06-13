@@ -904,6 +904,29 @@ Implemented:
 - verified the integrated result with the native runtime two-module suite:
   `Ran 368 tests ... OK`.
 
+### M48: Operator Summary Language Quality Gate
+
+Status: implemented in the native-runtime branch.
+
+Goal: reduce low-quality completion reports by rejecting completed worker
+results that satisfy required deliverables but return English-only
+operator-facing prose.
+
+Implemented:
+
+- extended semantic validation to return
+  `operator_summary_language_issues` for tasks with `required_deliverables`;
+- rejected accepted-scope completed results with failure category
+  `operator_summary_language` when human-facing `operator_summary` text lacks
+  zh-CN content;
+- kept the gate narrow and heuristic: file paths, commands, adapter names, and
+  metric symbols may remain literal, and tasks without deliverable tracking are
+  not affected;
+- updated fake runtime and fake Codex worker fixtures to emit Chinese
+  operator-facing prose;
+- added regression coverage for English-only rejection and Chinese-summary
+  acceptance.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:

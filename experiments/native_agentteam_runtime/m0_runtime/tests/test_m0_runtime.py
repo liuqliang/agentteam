@@ -1528,7 +1528,7 @@ class M0RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(
             operator_summary["verification_summary"],
-            ["fake_runtime: passed"],
+            ["fake_runtime: 已通过"],
         )
         self.assertEqual(
             operator_summary["merge_recommendation"],
@@ -6907,12 +6907,12 @@ class M0RuntimeTests(unittest.TestCase):
                     "deliverables": [
                         {
                             "deliverable": "optimization_candidate_matrix",
-                            "summary": "Compared parser and feature extraction candidates.",
+                            "summary": "已比较 parser 和 feature extraction 候选方案。",
                             "evidence": ["src/pipeline.py"],
                         },
                         {
                             "deliverable": "evidence_paths",
-                            "summary": "Listed concrete source and test files.",
+                            "summary": "已列出具体源码和测试文件。",
                             "evidence": ["tests/test_pipeline.py"],
                         },
                     ]
@@ -6924,6 +6924,46 @@ class M0RuntimeTests(unittest.TestCase):
 
         self.assertEqual(outcome["validation_status"], "accepted")
         self.assertIsNone(outcome["failure_category"])
+
+    def test_attempt_outcome_rejects_completed_result_with_english_operator_summary(self):
+        task = {
+            "task_id": "TASK-001",
+            "write_scope": ["generated/"],
+            "required_deliverables": ["evidence_paths"],
+        }
+        result = {
+            "result_status": "completed",
+            "changed_files": ["generated/result.json"],
+            "output": {
+                "operator_summary": {
+                    "what_changed": ["Changed one generated file."],
+                    "verification_summary": ["Ran focused regression tests."],
+                    "merge_recommendation": "Review accepted patch before merging.",
+                    "deliverables": [
+                        {
+                            "deliverable": "evidence_paths",
+                            "summary": "Listed concrete source and test files.",
+                            "evidence": ["tests/test_pipeline.py"],
+                        }
+                    ],
+                }
+            },
+        }
+
+        outcome = classify_attempt_outcome(result, task)
+
+        self.assertEqual(outcome["validation_status"], "rejected")
+        self.assertEqual(outcome["failure_category"], "operator_summary_language")
+        self.assertFalse(outcome["retryable"])
+        self.assertEqual(
+            outcome["semantic_validation"]["operator_summary_language_issues"],
+            [
+                "operator_summary.what_changed must include zh-CN text",
+                "operator_summary.verification_summary must include zh-CN text",
+                "operator_summary.merge_recommendation must include zh-CN text",
+                "operator_summary.deliverables[0].summary must include zh-CN text",
+            ],
+        )
 
     def test_attempt_outcome_classifies_timeout_as_retryable(self):
         task = {"write_scope": ["generated/"]}
@@ -9287,27 +9327,27 @@ def _append_runtime_result(
             "output": {
                 "test": "m18",
                 "operator_summary": {
-                    "what_changed": ["Simulated worker completed the task."],
-                    "verification_summary": ["simulated_worker: passed"],
+                    "what_changed": ["模拟 worker 已完成任务。"],
+                    "verification_summary": ["simulated_worker: 已通过"],
                     "deliverables": [
                         {
                             "deliverable": "goal_alignment_summary",
-                            "summary": "Simulated worker preserved task alignment.",
+                            "summary": "模拟 worker 已保留任务目标对齐。",
                             "evidence": ["test helper"],
                         },
                         {
                             "deliverable": "implemented_changes_or_no_safe_change_rationale",
-                            "summary": "Simulated worker produced the declared changed files.",
-                            "evidence": changed_files or ["no changed files"],
+                            "summary": "模拟 worker 已生成声明的变更文件。",
+                            "evidence": changed_files or ["未生成变更文件"],
                         },
                         {
                             "deliverable": "verification_summary",
-                            "summary": "Simulated verification passed.",
+                            "summary": "模拟验证已通过。",
                             "evidence": ["test helper"],
                         },
                         {
                             "deliverable": "next_steps",
-                            "summary": "No additional simulated next step.",
+                            "summary": "没有额外的模拟下一步。",
                             "evidence": ["test helper"],
                         },
                     ],
@@ -9426,7 +9466,7 @@ def _write_fake_codex(path, changed_file):
                 "message = json.loads(prompt.rsplit('Mailbox message:', 1)[1].strip())",
                 "required = message['payload'].get('required_deliverables', [])",
                 "deliverables = [",
-                "    {'deliverable': item, 'summary': f'satisfied {item}', 'evidence': ['fake codex']}",
+                "    {'deliverable': item, 'summary': f'已满足 {item}', 'evidence': ['fake codex']}",
                 "    for item in required",
                 "]",
                 "output_path = pathlib.Path(args[args.index('--output-last-message') + 1])",
@@ -9442,8 +9482,8 @@ def _write_fake_codex(path, changed_file):
                 "        'adapter': 'codex',",
                 "        'prompt_contains_contract': 'changed_files' in prompt,",
                 "        'operator_summary': {",
-                "            'what_changed': ['Fake Codex wrote the requested file.'],",
-                "            'verification_summary': ['fake_codex: passed'],",
+                "            'what_changed': ['Fake Codex 已写入请求的文件。'],",
+                "            'verification_summary': ['fake_codex: 已通过'],",
                 "            'deliverables': deliverables,",
                 "        },",
                 "    },",
@@ -9543,7 +9583,7 @@ def _write_fake_codex_planner_and_worker(path):
                 "    message = json.loads(prompt.rsplit('Mailbox message:', 1)[1].strip())",
                 "    required = message['payload'].get('required_deliverables', [])",
                 "    deliverables = [",
-                "        {'deliverable': item, 'summary': f'satisfied {item}', 'evidence': ['fake codex']}",
+                "        {'deliverable': item, 'summary': f'已满足 {item}', 'evidence': ['fake codex']}",
                 "        for item in required",
                 "    ]",
                 "    target = worktree / 'generated' / 'codex_generated_worker.json'",
@@ -9555,8 +9595,8 @@ def _write_fake_codex_planner_and_worker(path):
                 "        'output': {",
                 "            'adapter': 'codex',",
                 "            'operator_summary': {",
-                "                'what_changed': ['Fake Codex worker wrote a generated result.'],",
-                "                'verification_summary': ['fake_codex_worker: passed'],",
+                "                'what_changed': ['Fake Codex worker 已写入生成结果。'],",
+                "                'verification_summary': ['fake_codex_worker: 已通过'],",
                 "                'deliverables': deliverables,",
                 "            },",
                 "        },",
