@@ -1461,12 +1461,48 @@ def _write_taskpack_delete_text(summary):
     sys.stdout.flush()
 
 
+def _projection_output_metadata(payload):
+    if not isinstance(payload, dict):
+        return {}
+    check = payload.get("check") if isinstance(payload.get("check"), dict) else {}
+
+    def value(key):
+        return payload.get(key) or check.get(key)
+
+    metadata = {}
+    for key in (
+        "projection_source",
+        "projection_status",
+        "projection_warning",
+        "next_action",
+        "operator_hint",
+        "check_status",
+    ):
+        item = value(key)
+        if item:
+            metadata[key] = item
+    projection_db_path = (
+        payload.get("projection_db_path")
+        or payload.get("db_path")
+        or check.get("projection_db_path")
+        or check.get("db_path")
+    )
+    if projection_db_path:
+        metadata["projection_db_path"] = projection_db_path
+    return metadata
+
+
+def _projection_check_metadata(work_root):
+    return _projection_output_metadata(check_project_projection_db(work_root))
+
+
 def _frozen_taskpack_list_summary(profile):
     work_root = Path(profile["work_root"]).resolve()
     frozen_root = work_root / "frozen"
     run_root = work_root / "runs"
-    projected = read_projected_taskpacks(work_root)
-    if projected is not None:
+    projected = read_projected_taskpacks(work_root, include_fallback_status=True)
+    projection_metadata = _projection_output_metadata(projected)
+    if projected is not None and projected.get("projection_source") == "db":
         taskpacks = [
             _taskpack_list_item_from_projection(profile, run_root, item)
             for item in projected["taskpacks"]
@@ -1475,10 +1511,11 @@ def _frozen_taskpack_list_summary(profile):
             "project": profile.get("project_key") or "unknown",
             "frozen_root": str(frozen_root),
             "frozen_count": len(taskpacks),
-            "projection_source": "db",
-            "projection_db_path": projected["db_path"],
+            **projection_metadata,
             "taskpacks": taskpacks,
         }
+    if not projection_metadata:
+        projection_metadata = _projection_check_metadata(work_root)
     taskpacks = []
     if frozen_root.exists():
         for frozen_dir in sorted(path for path in frozen_root.iterdir() if path.is_dir()):
@@ -1501,7 +1538,7 @@ def _frozen_taskpack_list_summary(profile):
         "project": profile.get("project_key") or "unknown",
         "frozen_root": str(frozen_root),
         "frozen_count": len(taskpacks),
-        "projection_source": "files",
+        **projection_metadata,
         "taskpacks": taskpacks,
     }
 
@@ -1526,6 +1563,7 @@ def _write_taskpack_list_text(summary):
     lines = [
         f"project: {summary['project']}",
         f"frozen_count: {summary['frozen_count']}",
+        *_projection_text_lines(summary),
     ]
     for item in summary["taskpacks"]:
         details = [
@@ -2758,9 +2796,15 @@ def _handle_report(args):
     run_dir = _watch_run_dir(args, profile)
     if not run_dir.exists():
         raise AgentTeamCliError("run not found", run_dir=str(run_dir))
+    work_root = Path(profile.get("work_root") or run_dir.parent.parent).resolve()
     projected_run = read_projected_run_metadata(
-        profile.get("work_root") or run_dir.parent.parent,
+        work_root,
         run_dir.name,
+    )
+    projection_metadata = (
+        _projection_output_metadata(projected_run)
+        if projected_run is not None
+        else _projection_check_metadata(work_root)
     )
     report = build_run_completion_report(
         run_dir,
@@ -2776,11 +2820,16 @@ def _handle_report(args):
         report = {
             **report,
             "artifact_snapshot": artifact_snapshot,
-            "projection_source": "db" if projected_run is not None else "files",
+            **projection_metadata,
             "projection_run": projected_run["run"] if projected_run is not None else None,
         }
         return report
-    sys.stdout.write(render_run_completion_report(report))
+    rendered = render_run_completion_report(report)
+    sys.stdout.write(rendered)
+    if projection_metadata:
+        if not rendered.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.write("\n".join(_projection_text_lines(projection_metadata)) + "\n")
     sys.stdout.flush()
     return 0
 
@@ -2820,9 +2869,15 @@ def _handle_logs(args):
     run_dir = _selected_run_dir(args, profile, command_name="logs")
     if not run_dir.exists():
         raise AgentTeamCliError("run not found", run_dir=str(run_dir))
-    projected = read_projected_run_events(profile.get("work_root") or run_dir.parent.parent, run_dir.name)
-    projection_source = "db" if projected is not None else "files"
-    events = projected["events"] if projected is not None else _read_jsonl(run_dir / "events.jsonl")
+    work_root = Path(profile.get("work_root") or run_dir.parent.parent).resolve()
+    projected = read_projected_run_events(work_root, run_dir.name, include_fallback_status=True)
+    projection_metadata = _projection_output_metadata(projected)
+    if projected is not None and projected.get("projection_source") == "db":
+        events = projected["events"]
+    else:
+        if not projection_metadata:
+            projection_metadata = _projection_check_metadata(work_root)
+        events = _read_jsonl(run_dir / "events.jsonl")
     line_count = max(int(args.lines or 0), 0)
     selected = events[-line_count:] if line_count else []
     summary = {
@@ -2830,7 +2885,7 @@ def _handle_logs(args):
         "project": profile.get("project_key") or "unknown",
         "latest_run": run_dir.name,
         "run_dir": str(run_dir),
-        "projection_source": projection_source,
+        **projection_metadata,
         "event_count": len(events),
         "returned_count": len(selected),
         "events": selected,
@@ -2925,13 +2980,19 @@ def _handle_gc(args):
 def _gc_artifact_retention_plan(work_root, limit):
     plan = read_projected_artifact_retention_plan(work_root, limit=limit)
     if plan is not None:
-        return plan
+        projection_metadata = _projection_check_metadata(work_root)
+        return {
+            **projection_metadata,
+            **plan,
+            "projection_db_path": plan.get("projection_db_path")
+            or plan.get("db_path")
+            or projection_metadata.get("projection_db_path"),
+        }
+    projection_metadata = _projection_check_metadata(work_root)
     return {
+        **projection_metadata,
         "projection_source": "files",
         "plan_status": "unavailable",
-        "check_status": "failed",
-        "projection_warning": "projection_db_unavailable",
-        "next_action": "run agentteam db rebuild",
         "deletion_enabled": False,
         "candidate_count": 0,
         "candidate_bytes": 0,
@@ -2951,9 +3012,10 @@ def _gc_artifact_retention_plan(work_root, limit):
 def _gc_artifact_projection_summary(work_root):
     projected = read_projected_artifact_summary(work_root)
     if projected is None:
+        projection_metadata = _projection_check_metadata(work_root)
         return {
+            **projection_metadata,
             "projection_source": "files",
-            "check_status": "unavailable",
             "total_artifacts": 0,
             "total_bytes": 0,
             "artifact_types": {},
@@ -2987,6 +3049,7 @@ def _gc_artifact_projection_summary(work_root):
         **(projected.get("retention_bytes") or {}),
     }
     return {
+        **_projection_output_metadata(projected),
         "projection_source": "db",
         "db_path": projected.get("db_path"),
         "check_status": projected.get("check_status"),
@@ -3310,10 +3373,28 @@ def _write_doctor_text(summary):
     sys.stdout.flush()
 
 
+def _projection_text_lines(summary):
+    if not isinstance(summary, dict):
+        return []
+    lines = []
+    if summary.get("projection_source"):
+        lines.append(f"projection_source: {summary['projection_source']}")
+    if summary.get("projection_status"):
+        lines.append(f"projection_status: {summary['projection_status']}")
+    if summary.get("projection_warning"):
+        lines.append(f"projection_warning: {summary['projection_warning']}")
+    if summary.get("next_action"):
+        lines.append(f"next_action: {summary['next_action']}")
+    if summary.get("operator_hint"):
+        lines.append(f"operator_hint: {summary['operator_hint']}")
+    return lines
+
+
 def _write_logs_text(summary):
     lines = [
         f"run: {summary['latest_run']}",
         f"events: {summary['returned_count']}/{summary['event_count']}",
+        *_projection_text_lines(summary),
         f"run_dir: {summary['run_dir']}",
     ]
     lines.extend(_format_log_event(event) for event in summary.get("events") or [])
@@ -3421,11 +3502,29 @@ def _write_gc_text(summary):
     artifact_projection = summary.get("artifact_projection") or {}
     if artifact_projection:
         lines.append(f"artifact_projection: {artifact_projection.get('projection_source') or 'unknown'}")
+        if artifact_projection.get("projection_status"):
+            lines.append(f"artifact_projection_status: {artifact_projection['projection_status']}")
+        if artifact_projection.get("projection_warning"):
+            lines.append(f"artifact_projection_warning: {artifact_projection['projection_warning']}")
+        if artifact_projection.get("next_action"):
+            lines.append(f"artifact_projection_next_action: {artifact_projection['next_action']}")
+        if artifact_projection.get("operator_hint"):
+            lines.append(f"artifact_projection_operator_hint: {artifact_projection['operator_hint']}")
         lines.append(f"artifact_count: {artifact_projection.get('total_artifacts', 0)}")
         lines.append(f"artifact_bytes: {artifact_projection.get('total_bytes', 0)}")
     artifact_plan = summary.get("artifact_retention_plan") or {}
     if artifact_plan:
         lines.append(f"artifact_retention_plan: {artifact_plan.get('plan_status') or 'unknown'}")
+        if artifact_plan.get("projection_source"):
+            lines.append(f"artifact_retention_plan_projection_source: {artifact_plan['projection_source']}")
+        if artifact_plan.get("projection_status"):
+            lines.append(f"artifact_retention_plan_status: {artifact_plan['projection_status']}")
+        if artifact_plan.get("projection_warning"):
+            lines.append(f"artifact_retention_plan_warning: {artifact_plan['projection_warning']}")
+        if artifact_plan.get("next_action"):
+            lines.append(f"artifact_retention_plan_next_action: {artifact_plan['next_action']}")
+        if artifact_plan.get("operator_hint"):
+            lines.append(f"artifact_retention_plan_operator_hint: {artifact_plan['operator_hint']}")
         lines.append(f"artifact_candidates: {artifact_plan.get('candidate_count', 0)}")
         lines.append(f"artifact_deletion_enabled: {str(bool(artifact_plan.get('deletion_enabled'))).lower()}")
     sys.stdout.write("\n".join(lines) + "\n")
@@ -3782,16 +3881,19 @@ def _run_paths_for_frozen_taskpack(frozen_taskpack_dir, run_root):
 def _build_run_status_summary(profile, run_dir):
     run_dir = Path(run_dir).resolve()
     events_path = run_dir / "events.jsonl"
+    work_root = Path(profile.get("work_root") or run_dir.parent.parent).resolve()
     projected_events = read_projected_run_events(
-        profile.get("work_root") or run_dir.parent.parent,
+        work_root,
         run_dir.name,
+        include_fallback_status=True,
     )
-    if projected_events is not None:
+    projection_metadata = _projection_output_metadata(projected_events)
+    if projected_events is not None and projected_events.get("projection_source") == "db":
         snapshot = replay_event_records(projected_events["events"])
-        projection_source = "db"
     else:
+        if not projection_metadata:
+            projection_metadata = _projection_check_metadata(work_root)
         snapshot = replay_events(events_path) if events_path.exists() else {}
-        projection_source = "files"
     state = _read_json_if_exists(run_dir / "state" / "two_phase_scheduler_state.json")
     if not state:
         state = _read_json_if_exists(run_dir / "state" / "scheduler_state.json")
@@ -3839,7 +3941,7 @@ def _build_run_status_summary(profile, run_dir):
         "last_failure": _status_last_failure(snapshot, state),
         "authoring": authoring,
         "run_dir": str(run_dir),
-        "projection_source": projection_source,
+        **projection_metadata,
     }
     return summary
 
@@ -4182,6 +4284,7 @@ def _write_status_text(summary):
         f"overall_status: {summary.get('overall_status') or summary['status']}",
         f"run_status: {summary.get('run_status') or summary['status']}",
         f"liveness: {summary['liveness_status']}",
+        *_projection_text_lines(summary),
         (
             "tasks: "
             f"{summary['tasks']['done']} done, "

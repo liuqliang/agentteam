@@ -412,6 +412,20 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 class TaskpackTests(unittest.TestCase):
+    def assertProjectionFreshMetadata(self, summary):
+        self.assertEqual(summary.get("projection_source"), "db")
+        self.assertEqual(summary.get("projection_status"), "fresh")
+        self.assertTrue(summary.get("projection_db_path"))
+        self.assertNotIn("projection_warning", summary)
+
+    def assertProjectionFallbackMetadata(self, summary, projection_status):
+        self.assertEqual(summary.get("projection_source"), "files")
+        self.assertEqual(summary.get("projection_status"), projection_status)
+        self.assertEqual(summary.get("projection_warning"), "projection_db_unavailable")
+        self.assertEqual(summary.get("next_action"), "run agentteam db rebuild")
+        self.assertEqual(summary.get("operator_hint"), "agentteam db rebuild")
+        self.assertTrue(summary.get("projection_db_path"))
+
     def test_project_projection_db_rebuild_indexes_runs_taskpacks_events_and_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1482,7 +1496,7 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             summary = json.loads(completed.stdout)
-            self.assertEqual(summary["projection_source"], "db")
+            self.assertProjectionFreshMetadata(summary)
             self.assertEqual(
                 summary["projection_run"]["report_path"],
                 str((run_dir / "reports" / "final_report.json").resolve()),
@@ -1533,8 +1547,29 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             summary = json.loads(completed.stdout)
-            self.assertEqual(summary["projection_source"], "files")
+            self.assertProjectionFallbackMetadata(summary, "stale")
             self.assertIsNone(summary["projection_run"])
+
+            text_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "report",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(text_completed.returncode, 0, text_completed.stderr)
+            self.assertIn("projection_source: files", text_completed.stdout)
+            self.assertIn("projection_warning: projection_db_unavailable", text_completed.stdout)
+            self.assertIn("next_action: run agentteam db rebuild", text_completed.stdout)
 
     def test_agentteam_cli_chat_prints_diagnostic_context_as_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2375,13 +2410,36 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             summary = json.loads(completed.stdout)
+            self.assertProjectionFallbackMetadata(summary["artifact_projection"], "missing")
             plan = summary["artifact_retention_plan"]
-            self.assertEqual(plan["projection_source"], "files")
+            self.assertProjectionFallbackMetadata(plan, "missing")
             self.assertEqual(plan["plan_status"], "unavailable")
             self.assertFalse(plan["deletion_enabled"])
             self.assertEqual(plan["candidate_count"], 0)
-            self.assertEqual(plan["projection_warning"], "projection_db_unavailable")
-            self.assertEqual(plan["next_action"], "run agentteam db rebuild")
+
+            text_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "gc",
+                    "--project-root",
+                    str(repo),
+                    "--artifacts",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(text_completed.returncode, 0, text_completed.stderr)
+            self.assertIn("artifact_projection: files", text_completed.stdout)
+            self.assertIn("artifact_projection_warning: projection_db_unavailable", text_completed.stdout)
+            self.assertIn("artifact_projection_next_action: run agentteam db rebuild", text_completed.stdout)
+            self.assertIn("artifact_retention_plan_warning: projection_db_unavailable", text_completed.stdout)
+            self.assertIn("artifact_retention_plan_next_action: run agentteam db rebuild", text_completed.stdout)
 
     def test_agentteam_cli_notify_test_sends_feishu_message_from_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3636,6 +3694,9 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("tasks: 1 done, 0 blocked", status_completed.stdout)
             self.assertIn("inflight: 0", status_completed.stdout)
             self.assertIn("manual_gates: 0", status_completed.stdout)
+            self.assertIn("projection_source: files", status_completed.stdout)
+            self.assertIn("projection_warning: projection_db_unavailable", status_completed.stdout)
+            self.assertIn("next_action: run agentteam db rebuild", status_completed.stdout)
             self.assertIn(str((work_root / "runs" / "cli-status-run").resolve()), status_completed.stdout)
 
     def test_agentteam_cli_status_can_replay_fresh_projection_db_events(self):
@@ -3668,10 +3729,30 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             summary = json.loads(completed.stdout)
-            self.assertEqual(summary["projection_source"], "db")
+            self.assertProjectionFreshMetadata(summary)
             self.assertEqual(summary["latest_run"], "status-db-run")
             self.assertEqual(summary["tasks"]["done"], 1)
             self.assertEqual(summary["tasks"]["blocked"], 0)
+
+            text_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(text_completed.returncode, 0, text_completed.stderr)
+            self.assertIn("projection_source: db", text_completed.stdout)
+            self.assertIn("projection_status: fresh", text_completed.stdout)
 
     def test_agentteam_cli_status_falls_back_when_projection_db_is_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3720,7 +3801,7 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             summary = json.loads(completed.stdout)
-            self.assertEqual(summary["projection_source"], "files")
+            self.assertProjectionFallbackMetadata(summary, "stale")
             self.assertEqual(summary["latest_run"], "status-db-run")
 
     def test_agentteam_cli_logs_tails_latest_run_events(self):
@@ -3753,6 +3834,9 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("run: logs-run", completed.stdout)
+            self.assertIn("projection_source: files", completed.stdout)
+            self.assertIn("projection_warning: projection_db_unavailable", completed.stdout)
+            self.assertIn("next_action: run agentteam db rebuild", completed.stdout)
             self.assertIn("EVT-0001 run_completed", completed.stdout)
 
     def test_agentteam_cli_logs_can_read_fresh_projection_db(self):
@@ -3787,7 +3871,7 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             summary = json.loads(completed.stdout)
-            self.assertEqual(summary["projection_source"], "db")
+            self.assertProjectionFreshMetadata(summary)
             self.assertEqual(summary["event_count"], 1)
             self.assertEqual(summary["events"][0]["event_type"], "run_completed")
 
@@ -3837,7 +3921,7 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             summary = json.loads(completed.stdout)
-            self.assertEqual(summary["projection_source"], "files")
+            self.assertProjectionFallbackMetadata(summary, "stale")
             self.assertEqual(summary["event_count"], 2)
             self.assertEqual(summary["events"][0]["event_type"], "backlog_updated")
 
@@ -3874,7 +3958,7 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             summary = json.loads(completed.stdout)
-            self.assertEqual(summary["projection_source"], "files")
+            self.assertProjectionFallbackMetadata(summary, "corrupt")
             self.assertEqual(summary["event_count"], 1)
 
     def test_agentteam_cli_explain_status_describes_idle_run(self):
@@ -4842,6 +4926,9 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(list_completed.returncode, 0, list_completed.stderr)
             self.assertIn("project: list-project", list_completed.stdout)
             self.assertIn("frozen_count: 2", list_completed.stdout)
+            self.assertIn("projection_source: files", list_completed.stdout)
+            self.assertIn("projection_warning: projection_db_unavailable", list_completed.stdout)
+            self.assertIn("next_action: run agentteam db rebuild", list_completed.stdout)
             self.assertIn("listed-run", list_completed.stdout)
             self.assertIn("run_status=idle", list_completed.stdout)
             self.assertIn("listed-not-run", list_completed.stdout)
@@ -4967,7 +5054,7 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(list_completed.returncode, 0, list_completed.stderr)
             summary = json.loads(list_completed.stdout)
-            self.assertEqual(summary["projection_source"], "db")
+            self.assertProjectionFreshMetadata(summary)
             self.assertEqual(summary["frozen_count"], 1)
             self.assertEqual(summary["taskpacks"][0]["taskpack_id"], "listed-db")
             self.assertEqual(summary["taskpacks"][0]["run_status"], "idle")
@@ -5017,7 +5104,7 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(list_completed.returncode, 0, list_completed.stderr)
             summary = json.loads(list_completed.stdout)
-            self.assertEqual(summary["projection_source"], "files")
+            self.assertProjectionFallbackMetadata(summary, "stale")
             self.assertEqual(summary["frozen_count"], 2)
             self.assertEqual(
                 {item["taskpack_id"] for item in summary["taskpacks"]},
