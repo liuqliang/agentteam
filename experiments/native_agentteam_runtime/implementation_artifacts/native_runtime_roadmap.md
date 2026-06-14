@@ -927,26 +927,32 @@ Implemented:
 - added regression coverage for English-only rejection and Chinese-summary
   acceptance.
 
-### M49: Self-Improvement Workflow Policy
+### M49: AgentTeam-Target Goal-Directed Implementation Policy
 
 Status: designed; implementation pending.
 
-Goal: let AgentTeam improve the AgentTeam runtime through the ordinary taskpack
-workflow while keeping final source-branch merge, commit, push, and release
-activation under operator control.
+Goal: let AgentTeam handle functional or semantic implementation requirements
+when the target repository is the AgentTeam runtime itself, while keeping final
+source-branch merge, commit, push, and release activation under operator
+control.
 
 Decision: do not add a dedicated `agentteam self-improve` command in this
-milestone. Self-improvement is a normal implementation task with stronger
-taskpack, reporting, and review constraints. The operator uses existing commands
-such as `agentteam start`, `agentteam next`, `agentteam report`, and
-`agentteam integrate`.
+milestone. AgentTeam-as-target work is ordinary goal-directed implementation
+with stronger taskpack, reporting, and review constraints. The operator uses
+existing commands such as `agentteam start`, `agentteam next`,
+`agentteam report`, and `agentteam integrate`.
 
 Scope:
 
-- add taskpack author guidance for goals that target the AgentTeam runtime
-  itself;
+- add taskpack author guidance for AgentTeam-as-target functional and semantic
+  requirements;
+- distinguish concrete code requests, goal-directed implementation requests,
+  and open-ended audit/planning requests;
+- require the taskpack author to preserve the original operator requirement
+  while translating it into repo-directed read scopes, write scopes,
+  deliverables, and verification;
 - make no-merge/no-push and operator-review requirements explicit in generated
-  self-improvement taskpacks;
+  AgentTeam-as-target taskpacks;
 - keep workers able to produce patches, evidence summaries, and verification
   results;
 - keep source-branch integration, commit, push, and release activation outside
@@ -954,16 +960,20 @@ Scope:
 - make completion reports and notifications clearly state that review is
   required before source integration;
 - document the policy in
-  `implementation_artifacts/designs/2026-06-14-m49-self-improvement-workflow-policy.md`.
+  `implementation_artifacts/designs/2026-06-14-m49-agentteam-target-goal-directed-implementation-policy.md`.
 
 Acceptance:
 
-- self-improvement goals are represented as ordinary taskpacks, not a special
+- AgentTeam-as-target goals are represented as ordinary taskpacks, not a special
   scheduler mode;
-- generated self-improvement taskpacks do not request automatic source merge or
-  push authority;
-- reports identify self-improvement results as operator-gated and list the next
-  review action;
+- functional or semantic requirements can be translated into repo-directed
+  implementation tasks without requiring the operator to name exact files;
+- open-ended improvement requests are routed to audit/planning or clarification
+  rather than broad source edits;
+- generated AgentTeam-as-target taskpacks do not request automatic source merge
+  or push authority;
+- reports identify AgentTeam-as-target results as operator-gated and list the
+  next review action;
 - tests cover policy behavior without live model calls or network access.
 
 ## Longer-Term Route
@@ -1006,6 +1016,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to implement M49 self-improvement workflow policy
-hardening, then return to projection-backed retention validation before any
-artifact deletion feature is considered.
+The next recommended step is to implement M49 AgentTeam-target goal-directed
+implementation policy hardening, then return to projection-backed retention
+validation before any artifact deletion feature is considered.
