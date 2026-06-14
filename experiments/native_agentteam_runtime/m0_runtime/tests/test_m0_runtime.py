@@ -26,6 +26,7 @@ from agentteam_runtime import (
     answer_manual_gate,
     audit_worktree_diff,
     build_planner_context,
+    build_repo_grounding,
     build_repo_context,
     build_repository_map,
     build_runtime_observability,
@@ -919,6 +920,68 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(second["manifest"]["working_tree_state"], "dirty_or_unversioned")
             self.assertIn("working_tree_dirty", warnings)
             self.assertNotIn("scratch.py", files)
+
+    def test_repo_grounding_detects_languages_project_tools_and_tests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_git_repo(repo)
+            (repo / "pkg").mkdir()
+            (repo / "tests").mkdir()
+            (repo / "src").mkdir()
+            (repo / "pkg" / "module.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+            (repo / "tests" / "test_module.py").write_text("from pkg.module import run\n", encoding="utf-8")
+            (repo / "src" / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+            (repo / "src" / "tool.ts").write_text("export const value = 1;\n", encoding="utf-8")
+            (repo / "pyproject.toml").write_text("[project]\nname = 'fixture'\n", encoding="utf-8")
+            (repo / "package.json").write_text('{"scripts":{"test":"vitest"}}\n', encoding="utf-8")
+            (repo / "Makefile").write_text("test:\n\tpython3 -m unittest discover\n", encoding="utf-8")
+            subprocess.run(
+                [
+                    "git",
+                    "add",
+                    "pkg/module.py",
+                    "tests/test_module.py",
+                    "src/main.cpp",
+                    "src/tool.ts",
+                    "pyproject.toml",
+                    "package.json",
+                    "Makefile",
+                ],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "add mixed project"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            grounding = build_repo_grounding(repo)
+
+            self.assertEqual(grounding["grounding_schema_version"], "repo_grounding.v1")
+            self.assertEqual(grounding["scan_status"], "ok")
+            languages = {item["language"]: item for item in grounding["languages"]}
+            self.assertEqual(languages["python"]["file_count"], 2)
+            self.assertEqual(languages["cpp"]["file_count"], 1)
+            self.assertEqual(languages["typescript"]["file_count"], 1)
+            tools = {item["tool_id"]: item for item in grounding["project_tools"]}
+            self.assertEqual(tools["python-pyproject"]["path"], "pyproject.toml")
+            self.assertEqual(tools["node-package-json"]["path"], "package.json")
+            self.assertEqual(tools["make"]["path"], "Makefile")
+            self.assertIn(
+                {
+                    "path": "tests/test_module.py",
+                    "language": "python",
+                    "test_framework_hint": "python",
+                },
+                grounding["test_entrypoints"],
+            )
+            commands = [item["command"] for item in grounding["candidate_verification_commands"]]
+            self.assertIn(["python3", "-m", "unittest", "discover"], commands)
+            self.assertIn(["npm", "test"], commands)
 
     def test_repo_map_extracts_python_symbol_summaries(self):
         with tempfile.TemporaryDirectory() as tmp:

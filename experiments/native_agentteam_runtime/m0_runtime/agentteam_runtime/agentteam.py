@@ -44,6 +44,7 @@ from .goal_memory import (
     write_goal_memory,
 )
 from .follow_up_queue import build_follow_up_queue_summary, render_follow_up_queue_text
+from .repo_grounding import build_repo_grounding, render_repo_grounding_text
 from .semantic_feedback import (
     list_semantic_feedback_proposals,
     render_semantic_feedback_text,
@@ -175,6 +176,18 @@ _HELP_COMMANDS = [
         ],
         "notes": [
             "Uses a fresh agentteam.db projection when available and falls back to file scanning otherwise.",
+        ],
+    },
+    {
+        "name": "grounding",
+        "summary": "Read the target repository and summarize languages, project tools, tests, and candidate verification commands.",
+        "examples": [
+            "agentteam grounding --project-root <repo>",
+            "agentteam grounding --project-root <repo> --json",
+        ],
+        "notes": [
+            "This command is read-only.",
+            "Candidate verification commands are reported but not executed.",
         ],
     },
     {
@@ -437,6 +450,7 @@ def _build_parser():
     _add_chat_parser(subcommands)
     _add_db_parser(subcommands)
     _add_doctor_parser(subcommands)
+    _add_grounding_parser(subcommands)
     _add_logs_parser(subcommands)
     _add_explain_status_parser(subcommands)
     _add_gc_parser(subcommands)
@@ -1105,6 +1119,16 @@ def _add_doctor_parser(subcommands):
     parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
     parser.add_argument("--json", action="store_true", help="Print doctor checks as JSON instead of human text.")
     parser.set_defaults(handler=_handle_doctor)
+
+
+def _add_grounding_parser(subcommands):
+    parser = subcommands.add_parser(
+        "grounding",
+        help="Summarize repository languages, project tools, tests, and candidate verification commands.",
+    )
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--json", action="store_true", help="Print grounding summary as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_grounding)
 
 
 def _add_logs_parser(subcommands):
@@ -3064,6 +3088,30 @@ def _handle_chat(args):
     if args.json:
         return context
     sys.stdout.write(render_runtime_diagnostic_context(context))
+    sys.stdout.flush()
+    return 0
+
+
+def _handle_grounding(args):
+    project_root = Path(args.project_root or ".").resolve()
+    project = project_root.name
+    profile_warning = None
+    try:
+        profile = load_project_profile(project_root)
+        project = profile.get("project_key") or project
+    except AgentTeamProfileError as exc:
+        profile_warning = {
+            "warning": "profile_unavailable",
+            "message": str(exc),
+        }
+    grounding = build_repo_grounding(project_root)
+    grounding["project"] = project
+    if profile_warning:
+        grounding["scan_status"] = "degraded"
+        grounding.setdefault("warnings", []).append(profile_warning)
+    if args.json:
+        return grounding
+    sys.stdout.write(render_repo_grounding_text(grounding))
     sys.stdout.flush()
     return 0
 

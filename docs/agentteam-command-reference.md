@@ -38,7 +38,7 @@ compact for terminal use.
 
 | Group | Commands | Purpose |
 | --- | --- | --- |
-| Project setup | `init`, `doctor`, `update`, `db`, `stats`, `gc` | Configure, inspect, and maintain the local AgentTeam installation for a project. |
+| Project setup | `init`, `doctor`, `grounding`, `update`, `db`, `stats`, `gc` | Configure, inspect, and maintain the local AgentTeam installation for a project. |
 | Run lifecycle | `start`, `next`, `queue`, `pursue`, `continue`, `stop`, `status`, `explain-status`, `watch`, `logs`, `report`, `paths` | Start work, inspect progress, stop safely, and understand completed runs. |
 | Result integration | `integrate` | Merge verified integration-baseline changes back to the target repository. |
 | Notification | `notify` | Test Feishu delivery or resend completion summaries. |
@@ -118,6 +118,41 @@ Output status:
 - `passed`: no failed checks.
 - `failed`: at least one required check failed.
 - Individual checks may be `passed`, `warning`, `failed`, or `skipped`.
+
+### `agentteam grounding`
+
+Summarizes the target repository before taskpack authoring or follow-up
+planning.
+
+Use it when:
+
+- You want to see which languages, project tools, and test entrypoints the
+  framework can detect.
+- A broad optimization goal needs a lightweight repo-level grounding before
+  decomposition.
+- You want candidate verification commands without executing them.
+
+Examples:
+
+```bash
+agentteam grounding
+agentteam grounding --project-root /path/to/repo
+agentteam grounding --project-root /path/to/repo --json
+```
+
+Behavior:
+
+- Reads tracked files with `git ls-files`, with an `rg --files` fallback for
+  nonstandard repositories.
+- Detects common source languages, project tool files such as `pyproject.toml`,
+  `package.json`, `Makefile`, `CMakeLists.txt`, `Cargo.toml`, `go.mod`, `pom.xml`,
+  `build.gradle`, and `meson.build`.
+- Reports test entrypoint hints from common test file names and `tests/`
+  directories.
+- Reports candidate verification commands such as `python3 -m unittest
+  discover`, `npm test`, `make test`, `cargo test`, or `go test ./...`.
+- Does not run candidate commands, install dependencies, start workers, write
+  taskpacks, or mutate the target repository.
 
 ### `agentteam update`
 

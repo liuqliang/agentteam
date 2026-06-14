@@ -89,6 +89,9 @@ The implementation has already proven these layers:
 24. A gated live-Codex pipeline smoke that exercises one real implementation
     attempt through repo context, role context, patch capture, integration
     queue, batch verification, verified merge, and source-repo verification.
+25. Read-only language-aware repository grounding with detected languages,
+    project tools, test entrypoints, and candidate verification commands for
+    operator inspection before taskpack authoring.
 
 This means the experiment is no longer only a file-format prototype. It is now a
 small local multi-process runtime with a deterministic scheduler, durable
@@ -1238,9 +1241,44 @@ Validation:
 - normal verification runs through `test_taskpack` and `test_m0_runtime` with
   `PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime`.
 
-Next route: continue toward language-aware repository grounding and backend
-adapter hardening. Model adapters beyond Codex should stay behind explicit
+Next route: implement language-aware repository grounding, then continue with
+bounded long-running queue consumption and semantic feedback review flow. Model
+adapters beyond Codex are intentionally postponed until explicit
 credential/configuration work.
+
+### M65: Language-Aware Repository Grounding
+
+Status: implemented in the native-runtime branch.
+
+Goal: let operators and future taskpack authors inspect the target repository's
+language and verification shape without dumping the full repository into model
+context.
+
+Implemented:
+
+- added `repo_grounding.v1` summaries with tracked-file counts, language
+  counts, sample paths, project tool detections, test entrypoint hints, and
+  candidate verification commands;
+- added static detection for common Python, Node, Make, CMake, Rust/Cargo,
+  Go modules, Java/Maven/Gradle, and Meson project markers;
+- added `agentteam grounding` with compact text output and `--json` structured
+  output;
+- grounding is read-only: it does not execute candidate commands, install
+  dependencies, draft taskpacks, start workers, or mutate the target
+  repository;
+- profile loading is best-effort, so the command can still report repository
+  shape when `.agentteam/profile.json` is unavailable.
+
+Validation:
+
+- focused red/green tests cover mixed-language helper detection and CLI JSON
+  output;
+- normal verification runs through `test_taskpack` and `test_m0_runtime` with
+  `PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime`.
+
+Next route: M66 should use completed reports and follow-up queue suggestions to
+support bounded long-running queue consumption. M68 multi-model adapters remain
+out of the current implementation route per the latest operator decision.
 
 ## Longer-Term Route
 
@@ -1248,9 +1286,9 @@ These items should wait until M23-M30 have made the local runtime reliable:
 
 - MCP tool and context compatibility as adapter capabilities, not as the native
   control plane, and initially around Codex runtime sessions.
-- Richer repository analysis using language-aware tools such as compilers, LSP,
-  build systems, and static analyzers, with compact summaries fed to repo and
-  role context packages after the M32 MVP is validated.
+- Richer repository analysis using actual compilers, LSP, build systems, and
+  static analyzers, with compact summaries fed to repo and role context
+  packages after the read-only M65 grounding path proves useful.
 - Moving from a rebuildable DB projection to a DB-primary artifact store, if the
   hybrid M40 path proves reliable and file-backed replay becomes the bottleneck.
 - Policy-governed semantic feedback where implementation evidence can propose
@@ -1282,7 +1320,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is language-aware repository grounding: use build
-systems, test discovery, and static-analysis/LSP-style signals to improve task
-decomposition for large repositories without dumping the whole repo into
-context.
+The next recommended step is bounded long-running queue consumption: use
+completed reports, goal memory, and follow-up queue suggestions to continue
+large objectives across multiple taskpacks while preserving review gates.

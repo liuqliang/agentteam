@@ -8012,6 +8012,60 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["proposals"][0]["proposal_id"], "design-gap-1")
             self.assertEqual(summary["proposals"][0]["proposal_status"], "pending_review")
 
+    def test_agentteam_cli_grounding_reports_repo_summary_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "grounding-project")
+            (repo / "pkg").mkdir()
+            (repo / "tests").mkdir()
+            (repo / "pkg" / "module.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+            (repo / "tests" / "test_module.py").write_text("from pkg.module import run\n", encoding="utf-8")
+            (repo / "pyproject.toml").write_text("[project]\nname = 'grounding'\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "pkg/module.py", "tests/test_module.py", "pyproject.toml"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "add grounding files"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "grounding",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["grounding_schema_version"], "repo_grounding.v1")
+            self.assertEqual(summary["project"], "grounding-project")
+            self.assertEqual(summary["scan_status"], "ok")
+            self.assertEqual(summary["languages"][0]["language"], "python")
+            self.assertEqual(summary["project_tools"][0]["tool_id"], "python-pyproject")
+            self.assertEqual(
+                summary["candidate_verification_commands"][0]["command"],
+                ["python3", "-m", "unittest", "discover"],
+            )
+
     def test_repo_root_agentteam_launcher_invokes_cli_help(self):
         launcher = Path(__file__).resolve().parents[4] / "agentteam"
 
