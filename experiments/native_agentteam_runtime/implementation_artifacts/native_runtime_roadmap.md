@@ -1058,6 +1058,59 @@ Implemented:
   broad or long-running goals into measurable next-step tasks, and avoiding
   safe-but-trivial documentation-only work unless documentation was requested.
 
+### M60: Projection Read-Through Reliability
+
+Status: implemented in the native-runtime branch.
+
+Goal: make projection-backed operator commands prefer a fresh
+`<work_root>/agentteam.db` while falling back clearly and safely to
+authoritative files whenever the DB is missing, stale, corrupt, or unreadable.
+
+Implemented:
+
+- `agentteam.db` remains a rebuildable projection. Frozen taskpacks, run
+  directories, `events.jsonl`, reports, patches, and state snapshots remain the
+  source of truth;
+- projection checks expose normalized read-through metadata:
+  `projection_source`, `projection_status`, `projection_db_path`, optional
+  `projection_warning`, `next_action: run agentteam db rebuild`, and an
+  operator rebuild hint where the JSON surface carries it;
+- fresh projection reads report `projection_source` set to `db` and
+  `projection_status` set to `fresh`;
+- stale, missing, corrupt, or unreadable DB states report `projection_source`
+  set to `files` and `projection_warning` set to
+  `projection_db_unavailable`, then use file replay or file scans instead of
+  returning stale DB rows;
+- `status`, `logs`, `report`, `taskpack list`, `stats`, and artifact retention
+  planning surfaces use consistent projection source/warning/rebuild guidance
+  while preserving live liveness and scheduler reads from files;
+- no automatic DB rebuild was added to read-only commands, so operators can run
+  commands normally and rebuild only when warned.
+
+Validation:
+
+- tests cover fresh, missing, stale, and corrupt projection states;
+- tests compare fresh-DB command output with file-fallback command output for
+  equivalent run/taskpack/event content;
+- tests assert compact text and JSON warning fields for fallback paths;
+- normal verification runs through `test_taskpack` and `test_m0_runtime` with
+  `PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime`.
+
+Explicit M60 non-goals:
+
+- no artifact deletion;
+- no DB-primary authority model;
+- no requirement that operators maintain `agentteam.db` manually for
+  correctness;
+- no merge, push, or release activation as part of AgentTeam-as-target worker
+  implementation.
+
+Remaining route: keep the hybrid file-authoritative model until evidence shows
+file replay is a real bottleneck. A future DB-primary design should require
+separate operator approval, stronger migration/rebuild evidence, and proof that
+the projection layer can preserve auditability better than the current
+file-backed authority.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:

@@ -188,6 +188,19 @@ Important behavior:
   content. It does not mutate files.
 - The projection indexes runs, taskpacks, events, tasks, compact evidence
   summaries, artifact hashes/sizes, and per-run token/stat aggregates.
+- M60 read-through commands use the DB only when `agentteam db check` would
+  report a fresh projection. Fresh reads report `projection_source` set to
+  `db`, `projection_status` set to `fresh`, and `projection_db_path`.
+- If the projection is missing, stale, corrupt, or unreadable, read-through
+  commands fall back to authoritative files and report `projection_source` set
+  to `files`, `projection_warning` set to `projection_db_unavailable`, and
+  `next_action` set to `run agentteam db rebuild`. JSON payloads that expose
+  operator hints may also include `operator_hint: agentteam db rebuild`.
+- Operators can run commands normally, inspect `projection_source`, and run
+  `agentteam db rebuild` only when a fallback warning asks for it. Correctness
+  does not depend on manually maintaining `agentteam.db`.
+- M60 does not delete artifacts, does not make `agentteam.db` authoritative,
+  and does not add automatic rebuilds to read-only operator commands.
 
 ### `agentteam stats`
 
@@ -488,11 +501,14 @@ Text output includes:
 - worker summary
 - run directory
 
-When `<work_root>/agentteam.db` exists and is fresh, status JSON may replay
-events from the projection database. Live process/liveness, worker registry,
-and scheduler state are still read from files so current execution state stays
-accurate. If the projection is missing or stale, status falls back to
-`events.jsonl`.
+When `<work_root>/agentteam.db` exists and is fresh, status output may replay
+events from the projection database and reports `projection_source: db`. Live
+process/liveness, worker registry, and scheduler state are still read from
+files so current execution state stays accurate. If the projection is missing,
+stale, corrupt, or unreadable, status falls back to `events.jsonl` and reports
+`projection_source` set to `files`, `projection_warning` set to
+`projection_db_unavailable`, and `next_action` set to
+`run agentteam db rebuild`.
 
 ### `agentteam explain-status`
 
@@ -556,8 +572,11 @@ Text output shows the run id, returned event count, run directory, and compact
 event lines.
 
 When `<work_root>/agentteam.db` exists and is fresh, logs may read events from
-the projection database. If the projection is missing, stale, or unreadable,
-the command falls back to `events.jsonl`.
+the projection database and reports `projection_source: db`. If the projection
+is missing, stale, corrupt, or unreadable, the command falls back to
+`events.jsonl` and reports `projection_source` set to `files`,
+`projection_warning` set to `projection_db_unavailable`, and `next_action` set
+to `run agentteam db rebuild`.
 
 ### `agentteam report`
 
@@ -587,9 +606,11 @@ Side effects:
 - Does not change the target repository.
 
 When `<work_root>/agentteam.db` exists and is fresh, JSON output includes
-projected run/report metadata such as the indexed `report_path`. Report content
-is still generated from authoritative run files. If the projection is missing
-or stale, JSON output marks the projection source as `files`.
+projected run/report metadata such as the indexed `report_path` and marks the
+projection source as `db`. Report content is still generated from authoritative
+run files. If the projection is missing, stale, corrupt, or unreadable, JSON
+output marks the projection source as `files`, includes the projection warning,
+and suggests `agentteam db rebuild`.
 
 Completion summaries include:
 
@@ -852,10 +873,13 @@ agentteam taskpack list --json
 ```
 
 When `<work_root>/agentteam.db` exists and `agentteam db check` would pass,
-JSON output may read frozen taskpack rows from the projection database. Run
-liveness is still checked from live run files so stale/running state remains
-accurate. If the projection is missing or stale, the command falls back to file
-scanning.
+JSON and text output may read frozen taskpack rows from the projection database
+and reports `projection_source: db`. Run liveness is still checked from live
+run files so stale/running state remains accurate. If the projection is
+missing, stale, corrupt, or unreadable, the command falls back to file scanning
+and reports `projection_source` set to `files`, `projection_warning` set to
+`projection_db_unavailable`, and `next_action` set to
+`run agentteam db rebuild`.
 
 ### `agentteam taskpack delete`
 
