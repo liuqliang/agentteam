@@ -1,3 +1,6 @@
+import json
+
+
 TOKEN_USAGE_FIELDS = [
     "input_tokens",
     "output_tokens",
@@ -38,6 +41,23 @@ def token_usage_from_result(result):
     return None
 
 
+def token_usage_from_jsonl(text):
+    usage = None
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        for candidate in _usage_candidates(event):
+            normalized = normalize_token_usage(candidate)
+            if normalized:
+                usage = normalized
+    return usage
+
+
 def normalize_token_usage(candidate):
     if not isinstance(candidate, dict):
         return None
@@ -49,6 +69,39 @@ def normalize_token_usage(candidate):
     if not any(usage[field] is not None for field in TOKEN_USAGE_FIELDS):
         return None
     return usage
+
+
+def _usage_candidates(value):
+    if not isinstance(value, dict):
+        return []
+    candidates = []
+    for key in [
+        "token_usage",
+        "usage",
+        "total_token_usage",
+        "usage_delta",
+        "tokens",
+    ]:
+        candidate = value.get(key)
+        if isinstance(candidate, dict):
+            candidates.append(candidate)
+    if _looks_like_usage(value):
+        candidates.append(value)
+    for nested in value.values():
+        if isinstance(nested, dict):
+            candidates.extend(_usage_candidates(nested))
+        elif isinstance(nested, list):
+            for item in nested:
+                candidates.extend(_usage_candidates(item))
+    return candidates
+
+
+def _looks_like_usage(value):
+    return any(
+        alias in value
+        for aliases in _FIELD_ALIASES.values()
+        for alias in aliases
+    )
 
 
 def aggregate_token_usage(usages, expected_count=0):

@@ -322,6 +322,7 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("工作摘要:", text)
         self.assertIn("- 状态：completed；任务：1；阻塞：1", text)
         self.assertIn("中文工作汇报:", text)
+        self.assertIn("Token usage: unavailable", text)
         self.assertIn("优化了 IMU 解析和特征提取流程。", text)
         self.assertIn("gesture_recognition/sim_eval.py", text)
         self.assertIn("compileall: passed", text)
@@ -437,7 +438,15 @@ class M0RuntimeTests(unittest.TestCase):
                                 "M65 已完成：新增 agentteam grounding。",
                                 "验证：412 tests OK。",
                             ]
-                        }
+                        },
+                        "token_usage": {
+                            "usage_status": "reported",
+                            "reported_attempt_count": 1,
+                            "unreported_attempt_count": 0,
+                            "input_tokens": 4200,
+                            "output_tokens": 800,
+                            "total_tokens": 5000,
+                        },
                     },
                 },
             },
@@ -449,6 +458,7 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("中文工作汇报:", text)
         self.assertIn("M65 已完成：新增 agentteam grounding。", text)
         self.assertIn("验证：412 tests OK。", text)
+        self.assertIn("Token usage: total=5000 input=4200 output=800 reported=1/1", text)
         self.assertNotIn("0 tasks reported", text)
         self.assertNotIn("No task-level operator report was found", text)
 
@@ -8658,6 +8668,73 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(result["validation_status"], "accepted")
             self.assertTrue((worktree_path / "generated" / "codex_result.json").exists())
 
+    def test_codex_runtime_adapter_collects_token_usage_from_json_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            fake_codex = tmp_path / "fake_codex_usage.py"
+            _init_git_repo(repo)
+            fake_codex.write_text(
+                "\n".join(
+                    [
+                        "import json",
+                        "import pathlib",
+                        "import sys",
+                        "args = sys.argv[1:]",
+                        "sys.stdin.read()",
+                        "output_path = pathlib.Path(args[args.index('--output-last-message') + 1])",
+                        "worktree = pathlib.Path(args[args.index('-C') + 1])",
+                        "target = worktree / 'generated' / 'codex_usage_result.json'",
+                        "target.parent.mkdir(parents=True, exist_ok=True)",
+                        "target.write_text('{}', encoding='utf-8')",
+                        "output_path.parent.mkdir(parents=True, exist_ok=True)",
+                        "output_path.write_text(json.dumps({",
+                        "    'result_status': 'completed',",
+                        "    'changed_files': ['generated/codex_usage_result.json'],",
+                        "    'output': {'adapter': 'codex'},",
+                        "}), encoding='utf-8')",
+                        "print(json.dumps({'type': 'session_started'}))",
+                        "print(json.dumps({",
+                        "    'type': 'turn_completed',",
+                        "    'usage': {",
+                        "        'input_tokens': 1234,",
+                        "        'output_tokens': 321,",
+                        "        'total_tokens': 1555,",
+                        "        'cached_input_tokens': 100,",
+                        "        'reasoning_tokens': 77,",
+                        "    },",
+                        "}))",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            message = {
+                "payload": {
+                    "task_id": "TASK-001",
+                    "attempt_id": "ATTEMPT-001",
+                    "objective": "Collect Codex usage.",
+                    "read_scope": ["."],
+                    "write_scope": ["generated/"],
+                }
+            }
+
+            result = CodexRuntimeAdapter(command=[sys.executable, str(fake_codex)]).run(
+                message,
+                worktree_path=repo,
+            )
+
+            self.assertEqual(result["result_status"], "completed")
+            self.assertEqual(
+                result["token_usage"],
+                {
+                    "input_tokens": 1234,
+                    "output_tokens": 321,
+                    "total_tokens": 1555,
+                    "cached_input_tokens": 100,
+                    "reasoning_tokens": 77,
+                },
+            )
+
     def test_codex_runtime_adapter_converts_sandbox_failure_to_permission_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -8933,6 +9010,7 @@ class M0RuntimeTests(unittest.TestCase):
 
         self.assertIn("-C", command)
         self.assertIn("-s", command)
+        self.assertIn("--json", command)
         self.assertIn("--output-last-message", command)
         self.assertNotIn("-a", command)
         self.assertNotIn("--ask-for-approval", command)

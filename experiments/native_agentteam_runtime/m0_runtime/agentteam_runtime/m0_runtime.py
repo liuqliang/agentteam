@@ -14,6 +14,7 @@ from .repo_map import (
     build_repository_map,
     REPO_CONTEXT_SCHEMA_VERSION,
 )
+from .token_usage import token_usage_from_jsonl
 
 
 class SystemClock:
@@ -311,11 +312,13 @@ class CodexRuntimeAdapter:
                     },
                 }
 
-            return _normalize_runtime_result(
+            normalized = _normalize_runtime_result(
                 result,
                 adapter="codex",
                 stderr=completed.stderr,
+                preserve_token_usage=False,
             )
+            return _attach_codex_token_usage(normalized, completed.stdout)
         finally:
             if temporary_result_dir:
                 temporary_result_dir.cleanup()
@@ -361,6 +364,8 @@ class CodexRuntimeAdapter:
         if self.model:
             command.extend(["-m", self.model])
         command.extend(self.extra_args)
+        if "--json" not in command:
+            command.append("--json")
         command.extend(["--output-last-message", str(result_path), "-"])
         return command
 
@@ -3259,7 +3264,7 @@ def _git_status_entries(worktree_path):
     return entries
 
 
-def _normalize_runtime_result(result, adapter, stderr=""):
+def _normalize_runtime_result(result, adapter, stderr="", preserve_token_usage=True):
     changed_files = result.get("changed_files", [])
     if not isinstance(changed_files, list) or not all(isinstance(path, str) for path in changed_files):
         return {
@@ -3276,11 +3281,18 @@ def _normalize_runtime_result(result, adapter, stderr=""):
         "changed_files": changed_files,
         "output": result.get("output", {}),
     }
-    if isinstance(result.get("token_usage"), dict):
+    if preserve_token_usage and isinstance(result.get("token_usage"), dict):
         normalized["token_usage"] = result["token_usage"]
-    elif isinstance(result.get("usage"), dict):
+    elif preserve_token_usage and isinstance(result.get("usage"), dict):
         normalized["usage"] = result["usage"]
     return normalized
+
+
+def _attach_codex_token_usage(result, stdout):
+    usage = token_usage_from_jsonl(stdout)
+    if usage:
+        result["token_usage"] = usage
+    return result
 
 
 def _event(

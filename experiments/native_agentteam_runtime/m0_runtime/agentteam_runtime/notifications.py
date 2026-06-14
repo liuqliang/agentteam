@@ -7,7 +7,7 @@ import time
 import urllib.request
 
 from .completion_summary import build_completion_summary
-from .token_usage import format_token_usage
+from .token_usage import aggregate_token_usage, format_token_usage
 
 
 DEFAULT_NOTIFICATION_EVENT_TYPES = {
@@ -284,15 +284,13 @@ def _operator_report_text(report):
     if operator_digest:
         lines.append("中文工作汇报:")
         _extend_limited_section_items(lines, operator_digest)
-        if isinstance(report.get("token_usage"), dict):
-            lines.append(format_token_usage(report.get("token_usage")))
+        lines.append(format_token_usage(_notification_token_usage(report, task_reports)))
         return lines
 
     if not task_reports:
         lines.append("工作摘要:")
         lines.append("- 无结构化任务报告；请查看 agentteam report。")
-        if isinstance(report.get("token_usage"), dict):
-            lines.append(format_token_usage(report.get("token_usage")))
+        lines.append(format_token_usage(_notification_token_usage(report, task_reports)))
         return lines
 
     task_count = int(report.get("task_count") or len(task_reports))
@@ -312,8 +310,7 @@ def _operator_report_text(report):
     )
     lines.append("中文工作汇报:")
     _extend_limited_section_items(lines, summary.get("operator_digest"))
-    if isinstance(report.get("token_usage"), dict):
-        lines.append(format_token_usage(report.get("token_usage")))
+    lines.append(format_token_usage(_notification_token_usage(report, task_reports)))
     return lines
 
 
@@ -343,6 +340,21 @@ def _notification_blocked_count(report, task_reports):
         ):
             blocked_count += 1
     return blocked_count
+
+
+def _notification_token_usage(report, task_reports):
+    raw = report.get("token_usage")
+    if isinstance(raw, dict):
+        return raw
+    expected_count = int(report.get("task_count") or len(task_reports) or 0)
+    return aggregate_token_usage(
+        [
+            task.get("token_usage")
+            for task in task_reports
+            if isinstance(task, dict)
+        ],
+        expected_count=expected_count,
+    )
 
 
 def _extend_limited_section_items(lines, values, limit=8):
