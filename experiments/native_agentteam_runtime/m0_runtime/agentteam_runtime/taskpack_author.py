@@ -287,87 +287,155 @@ def _author_prompt(
 ):
     repo_paths = repo_map["paths"]
     verification_profile_json = json.dumps(verification_profile or {}, sort_keys=True)
-    return "\n".join(
-        [
-            "You are the AgentTeam taskpack author.",
-            "",
-            "Author a draft taskpack for this goal:",
-            goal,
-            "",
-            f"Project root, read-only: {project_root}",
-            f"Taskpack directory to write: {taskpack_dir}",
-            f"Author context directory, read/write helpers allowed here: {author_context_dir}",
-            "",
-            "Do not edit the project root. Do not run repository-changing commands.",
-            "Write only these files directly inside the taskpack directory:",
-            *[f"- {name}" for name in REQUIRED_TASKPACK_FILES],
-            "",
-            (
-                "Do not create helper files, subdirectories, symlinks, "
-                "author_context/, or hidden files inside the taskpack directory."
-            ),
-            "If you need scratch notes, write them under the author context directory only.",
-            "",
-            "Repository map context:",
-            f"- manifest: {repo_paths['manifest_path']}",
-            f"- inventory: {repo_paths['inventory_path']}",
-            f"- symbols: {repo_paths['symbols_path']}",
-            "",
-            "Project verification profile:",
-            verification_profile_json,
-            "",
-            "The runtime loader currently reads taskpack.yaml as JSON despite the .yaml suffix.",
-            "Use valid JSON for taskpack.yaml, agent_pool.json, backlog.json, and verification.json.",
-            "",
-            "Minimum required content:",
-            f"- taskpack.taskpack_schema_version: taskpack.v1",
-            f"- taskpack.taskpack_id: {taskpack_id}",
-            "- taskpack.status: draft",
-            f"- taskpack.semantic_contract_version: {TASKPACK_SEMANTIC_CONTRACT_VERSION}",
-            f"- taskpack.project_root: {project_root}",
-            f"- taskpack.goal: {goal}",
-            f"- taskpack.original_goal: {goal}",
-            "- taskpack.goal_kind: one of implementation, optimization, audit",
-            "- taskpack.runtime.default_backend: codex",
-            "- taskpack.files maps agent_pool, backlog, and verification to the JSON filenames above",
-            "- agent_pool contains at least one idle agent with role implementation_worker",
-            "- backlog.items contains at least one ready item with required_role implementation_worker",
-            "- each backlog item must include work_type, for example code_implementation, code_investigation, or audit",
-            "- each backlog item must include goal_alignment explaining how it advances taskpack.original_goal",
-            "- each backlog item must include required_deliverables as a non-empty string array",
-            (
-                "- optimization goals, including optimize/improve/performance/accuracy/比赛/优化/提升, "
-                "must set taskpack.goal_kind to optimization"
-            ),
-            (
-                "- never downgrade an optimization goal into an audit/completeness task; the executable "
-                "task objective or goal_alignment must preserve optimization, performance, metric, "
-                "accuracy, latency, or benchmark intent"
-            ),
-            (
-                "- optimization taskpacks must include at least one ready backlog item with work_type "
-                "code_implementation or code_investigation and non-document write_scope"
-            ),
-            (
-                "- optimization taskpacks must not fall back to only README/docs fixes unless the "
-                "taskpack explicitly proves no safe code-facing work exists"
-            ),
-            (
-                "- optimization required_deliverables must include repository_understanding_summary, "
-                "baseline_or_current_behavior, optimization_candidate_matrix, evidence_paths, "
-                "implemented_changes_or_no_safe_change_rationale, metric_delta_or_no_safe_change_evidence, "
-                "verification_summary, and recommended_next_implementation_tasks"
-            ),
-            "- backlog item read_scope is a non-empty string array",
-            "- backlog item write_scope is a narrow repository-relative string array; never use repository root",
-            "- verification.command is a non-empty string array using an allowed executable such as python3",
-            "- if the project verification profile has correctness.command, use it as verification.command",
-            "- copy any project performance command and metrics into verification.performance",
-            "- README.md briefly summarizes the taskpack goal, scopes, and verification command",
-            "",
-            "When finished, exit successfully. Do not print a long explanation.",
-        ]
+    lines = [
+        "You are the AgentTeam taskpack author.",
+        "",
+        "Author a draft taskpack for this goal:",
+        goal,
+        "",
+        f"Project root, read-only: {project_root}",
+        f"Taskpack directory to write: {taskpack_dir}",
+        f"Author context directory, read/write helpers allowed here: {author_context_dir}",
+        "",
+        "Do not edit the project root. Do not run repository-changing commands.",
+        "Write only these files directly inside the taskpack directory:",
+        *[f"- {name}" for name in REQUIRED_TASKPACK_FILES],
+        "",
+        (
+            "Do not create helper files, subdirectories, symlinks, "
+            "author_context/, or hidden files inside the taskpack directory."
+        ),
+        "If you need scratch notes, write them under the author context directory only.",
+        "",
+        "Repository map context:",
+        f"- manifest: {repo_paths['manifest_path']}",
+        f"- inventory: {repo_paths['inventory_path']}",
+        f"- symbols: {repo_paths['symbols_path']}",
+        "",
+        "Project verification profile:",
+        verification_profile_json,
+        "",
+        "The runtime loader currently reads taskpack.yaml as JSON despite the .yaml suffix.",
+        "Use valid JSON for taskpack.yaml, agent_pool.json, backlog.json, and verification.json.",
+        "",
+        "Minimum required content:",
+        f"- taskpack.taskpack_schema_version: taskpack.v1",
+        f"- taskpack.taskpack_id: {taskpack_id}",
+        "- taskpack.status: draft",
+        f"- taskpack.semantic_contract_version: {TASKPACK_SEMANTIC_CONTRACT_VERSION}",
+        f"- taskpack.project_root: {project_root}",
+        f"- taskpack.goal: {goal}",
+        f"- taskpack.original_goal: {goal}",
+        "- taskpack.goal_kind: one of implementation, optimization, audit",
+        "- taskpack.runtime.default_backend: codex",
+        "- taskpack.files maps agent_pool, backlog, and verification to the JSON filenames above",
+        "- agent_pool contains at least one idle agent with role implementation_worker",
+        "- backlog.items contains at least one ready item with required_role implementation_worker",
+        "- each backlog item must include work_type, for example code_implementation, code_investigation, or audit",
+        "- each backlog item must include goal_alignment explaining how it advances taskpack.original_goal",
+        "- each backlog item must include required_deliverables as a non-empty string array",
+        (
+            "- optimization goals, including optimize/improve/performance/accuracy/比赛/优化/提升, "
+            "must set taskpack.goal_kind to optimization"
+        ),
+        (
+            "- never downgrade an optimization goal into an audit/completeness task; the executable "
+            "task objective or goal_alignment must preserve optimization, performance, metric, "
+            "accuracy, latency, or benchmark intent"
+        ),
+        (
+            "- optimization taskpacks must include at least one ready backlog item with work_type "
+            "code_implementation or code_investigation and non-document write_scope"
+        ),
+        (
+            "- optimization taskpacks must not fall back to only README/docs fixes unless the "
+            "taskpack explicitly proves no safe code-facing work exists"
+        ),
+        (
+            "- optimization required_deliverables must include repository_understanding_summary, "
+            "baseline_or_current_behavior, optimization_candidate_matrix, evidence_paths, "
+            "implemented_changes_or_no_safe_change_rationale, metric_delta_or_no_safe_change_evidence, "
+            "verification_summary, and recommended_next_implementation_tasks"
+        ),
+        "- backlog item read_scope is a non-empty string array",
+        "- backlog item write_scope is a narrow repository-relative string array; never use repository root",
+        "- verification.command is a non-empty string array using an allowed executable such as python3",
+        "- if the project verification profile has correctness.command, use it as verification.command",
+        "- copy any project performance command and metrics into verification.performance",
+        "- README.md briefly summarizes the taskpack goal, scopes, and verification command",
+        "",
+        "When finished, exit successfully. Do not print a long explanation.",
+    ]
+    if _is_agentteam_target_project(project_root):
+        lines.extend(["", *_agentteam_target_policy_prompt()])
+    return "\n".join(lines)
+
+
+def _is_agentteam_target_project(project_root):
+    if not project_root:
+        return False
+    project_root = Path(project_root)
+    return (
+        project_root
+        / "experiments"
+        / "native_agentteam_runtime"
+        / "m0_runtime"
+        / "agentteam_runtime"
+    ).is_dir()
+
+
+def _agentteam_target_policy_prompt():
+    return [
+        "AgentTeam-as-target policy:",
+        "- Treat this as ordinary goal-directed implementation against the AgentTeam repository.",
+        "- If the operator gave a functional or semantic requirement, read the relevant repository context, identify affected modules, and translate it into bounded implementation tasks.",
+        "- If the operator gave a concrete code request, create a narrow direct implementation task.",
+        "- If the operator gave only open-ended improvement requests, create an audit/planning task or block for clarification instead of broad source edits.",
+        "- preserve the original operator requirement in taskpack.original_goal and each backlog item goal_alignment.",
+        "- do not request git merge or git push; source merge, push, and release activation require operator review after the run.",
+        "- include agentteam_target_review_gate in required_deliverables.",
+    ]
+
+
+def _apply_agentteam_target_taskpack_policy(taskpack):
+    policy = taskpack.get("policy")
+    if not isinstance(policy, dict):
+        policy = {}
+    policy["allow_merge"] = False
+    policy["merge_requires_verified_integration"] = True
+    policy["operator_review_required"] = True
+    policy["source_control_restrictions"] = [
+        "no_merge",
+        "no_push",
+        "no_release_activation",
+    ]
+    taskpack["policy"] = policy
+
+
+def _apply_agentteam_target_task_policy(item):
+    _append_text_field(
+        item,
+        "objective",
+        "AgentTeam-as-target review gate: do not merge, push, or activate releases; operator review is required.",
     )
+    _append_text_field(
+        item,
+        "goal_alignment",
+        "AgentTeam-as-target work must preserve the operator requirement while leaving source merge, push, and release activation to operator review.",
+    )
+    deliverables = item.get("required_deliverables")
+    if isinstance(deliverables, list) and "agentteam_target_review_gate" not in deliverables:
+        deliverables.append("agentteam_target_review_gate")
+
+
+def _append_text_field(item, field, addition):
+    value = item.get(field)
+    if not value:
+        item[field] = addition
+        return
+    text = str(value)
+    if addition not in text:
+        item[field] = f"{text} {addition}"
 
 
 def _verify_required_taskpack_files(taskpack_dir):
@@ -418,10 +486,14 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
         else:
             goal_kind = declared_goal_kind or classified_goal_kind
         taskpack["goal_kind"] = goal_kind
+        agentteam_target = _is_agentteam_target_project(taskpack.get("project_root"))
+        if agentteam_target:
+            _apply_agentteam_target_taskpack_policy(taskpack)
         _write_json(taskpack_dir / "taskpack.yaml", taskpack)
     else:
         effective_goal = None
         goal_kind = "implementation"
+        agentteam_target = False
     taskpack_data = taskpack if isinstance(taskpack, dict) else {}
     files = taskpack_data.get("files") if isinstance(taskpack_data.get("files"), dict) else {}
 
@@ -466,6 +538,8 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
                 for deliverable in _default_required_deliverables(effective_goal):
                     if deliverable not in item["required_deliverables"]:
                         item["required_deliverables"].append(deliverable)
+            if agentteam_target:
+                _apply_agentteam_target_task_policy(item)
             if not item.get("backlog_status") and item.get("status"):
                 item["backlog_status"] = item["status"]
             if "blockers" not in item:

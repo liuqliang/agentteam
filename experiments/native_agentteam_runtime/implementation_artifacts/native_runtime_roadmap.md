@@ -929,7 +929,7 @@ Implemented:
 
 ### M49: AgentTeam-Target Goal-Directed Implementation Policy
 
-Status: designed; implementation pending.
+Status: implemented in the native-runtime branch.
 
 Goal: let AgentTeam handle functional or semantic implementation requirements
 when the target repository is the AgentTeam runtime itself, while keeping final
@@ -962,19 +962,22 @@ Scope:
 - document the policy in
   `implementation_artifacts/designs/2026-06-14-m49-agentteam-target-goal-directed-implementation-policy.md`.
 
-Acceptance:
+Implemented:
 
-- AgentTeam-as-target goals are represented as ordinary taskpacks, not a special
-  scheduler mode;
-- functional or semantic requirements can be translated into repo-directed
-  implementation tasks without requiring the operator to name exact files;
-- open-ended improvement requests are routed to audit/planning or clarification
-  rather than broad source edits;
-- generated AgentTeam-as-target taskpacks do not request automatic source merge
-  or push authority;
-- reports identify AgentTeam-as-target results as operator-gated and list the
-  next review action;
-- tests cover policy behavior without live model calls or network access.
+- author prompts detect AgentTeam target repositories and instruct taskpack
+  authors to translate functional or semantic requirements into bounded
+  repo-directed tasks;
+- open-ended improvement requests are explicitly routed to audit/planning or
+  clarification rather than broad source edits;
+- canonicalization adds no-merge/no-push/no-release-activation restrictions and
+  an `agentteam_target_review_gate` deliverable for AgentTeam-as-target
+  taskpacks;
+- scheduler operator reports preserve an
+  `agentteam_target_review_required` signal when the worker delivers that gate;
+- final reports and concise terminal summaries render the operator review
+  requirement;
+- command reference documentation states that AgentTeam-as-target work uses
+  ordinary `start` and `next` commands, not a special `self-improve` command.
 
 ## Longer-Term Route
 
@@ -1016,6 +1019,5 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to implement M49 AgentTeam-target goal-directed
-implementation policy hardening, then return to projection-backed retention
+The next recommended step is to return to projection-backed retention
 validation before any artifact deletion feature is considered.

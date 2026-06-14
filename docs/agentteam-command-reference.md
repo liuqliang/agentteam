@@ -333,6 +333,17 @@ Notes:
 - The follow-up author sees the previous report/context and should produce a new
   taskpack rather than mutating the old one.
 
+### AgentTeam-As-Target Work
+
+AgentTeam can be the target repository for ordinary implementation work. Use the
+same `start` and `next` commands with a functional or semantic goal; there is no
+dedicated `self-improve` command.
+
+When the target repository is AgentTeam itself, generated taskpacks and reports
+must keep source merge, push, and release activation under operator review. The
+worker may produce patches, evidence, and verification results, but the operator
+reviews before integrating those changes into the source branch.
+
 ### `agentteam continue`
 
 Continues an existing frozen taskpack run.

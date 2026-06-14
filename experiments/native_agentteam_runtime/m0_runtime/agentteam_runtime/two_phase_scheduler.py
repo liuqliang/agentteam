@@ -1762,6 +1762,7 @@ def _operator_task_report(step, result):
         "merge_recommendation": _operator_merge_recommendation(result, operator_summary),
         "next_steps": _operator_next_steps(result, operator_summary),
         "token_usage": token_usage_from_result(result),
+        "agentteam_target_review_required": _agentteam_target_review_required(output, operator_summary),
     }
 
 
@@ -1848,6 +1849,21 @@ def _operator_next_steps(result, operator_summary):
     if result.get("integration_verification_status") == "failed":
         return ["Review the failing integration test and update the patch or generated artifacts."]
     return []
+
+
+def _agentteam_target_review_required(output, operator_summary):
+    deliverables = operator_summary.get("deliverables") or output.get("deliverables")
+    if isinstance(deliverables, dict):
+        return bool(deliverables.get("agentteam_target_review_gate"))
+    if isinstance(deliverables, list):
+        for item in deliverables:
+            if isinstance(item, dict):
+                name = item.get("deliverable") or item.get("name") or item.get("id")
+                if name == "agentteam_target_review_gate":
+                    return True
+            elif str(item) == "agentteam_target_review_gate":
+                return True
+    return False
 
 
 def _first_failure_line(text):

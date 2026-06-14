@@ -44,7 +44,7 @@ from agentteam_runtime import (
 from agentteam_runtime.agentteam import _run_runtime_command_with_progress
 from agentteam_runtime.cli import _run_supervised_two_phase_scheduler
 from agentteam_runtime.m0_runtime import apply_patch_to_integration_worktree, run_integration_verification
-from agentteam_runtime.two_phase_scheduler import _runtime_evidence_summary
+from agentteam_runtime.two_phase_scheduler import _operator_task_report, _runtime_evidence_summary
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1545,6 +1545,31 @@ class M0RuntimeTests(unittest.TestCase):
             operator_summary["deliverables"][0]["summary"],
             "Fake runtime 已满足 repository_understanding_summary。",
         )
+
+    def test_operator_task_report_marks_agentteam_target_review_gate(self):
+        report = _operator_task_report(
+            {"task_id": "TASK-AGENTTEAM-001"},
+            {
+                "task_id": "TASK-AGENTTEAM-001",
+                "attempt_id": "TASK-AGENTTEAM-001-ATTEMPT-001",
+                "validation_status": "accepted",
+                "integration_verification_status": "passed",
+                "runtime_output": {
+                    "operator_summary": {
+                        "what_changed": ["已实现 AgentTeam 目标仓库策略。"],
+                        "deliverables": [
+                            {
+                                "deliverable": "agentteam_target_review_gate",
+                                "summary": "已保留 operator 审查门。",
+                                "evidence": ["taskpack.yaml"],
+                            }
+                        ],
+                    }
+                },
+            },
+        )
+
+        self.assertTrue(report["agentteam_target_review_required"])
 
     def test_run_simulation_dispatches_ready_task_and_validates_result(self):
         with tempfile.TemporaryDirectory() as tmp:

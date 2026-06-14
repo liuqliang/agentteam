@@ -167,6 +167,10 @@ def render_run_completion_report(report):
             _extend_bullets(lines, "Missing evidence", task.get("missing_evidence"))
         if task.get("merge_recommendation"):
             lines.append(f"- Merge: {task['merge_recommendation']}")
+        if task.get("agentteam_target_review_required"):
+            lines.append(
+                "- AgentTeam target review: source merge, push, and release activation require operator review."
+            )
         if isinstance(task.get("token_usage"), dict):
             lines.append(f"- {format_token_usage(task.get('token_usage'), label='Tokens')}")
         _extend_bullets(lines, "Next steps", task.get("next_steps"))
@@ -234,6 +238,10 @@ def concise_report_lines(report, max_tasks=3):
         next_steps = _text_items(task.get("next_steps"))
         if next_steps:
             lines.append(f"next: {next_steps[0]}")
+        if task.get("agentteam_target_review_required"):
+            lines.append(
+                "agentteam_target_review: source merge, push, and release activation require operator review"
+            )
     return lines
 
 

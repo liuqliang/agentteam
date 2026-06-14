@@ -53,6 +53,7 @@ from agentteam_runtime.projection_db import (
 )
 from agentteam_runtime.taskpack_author import _command_list
 from agentteam_runtime.taskpack_author import _canonicalize_codex_taskpack_files
+from agentteam_runtime.taskpack_author import _author_prompt
 
 
 def _init_repo(path):
@@ -1383,6 +1384,34 @@ class TaskpackTests(unittest.TestCase):
 
         self.assertIn("中文简报: 本次运行已完成，共 1 个任务，0 个阻塞。", lines)
         self.assertIn("中文简报: 主要变更：Optimized the gesture scoring pipeline.", lines)
+
+    def test_concise_report_lines_include_agentteam_target_review_gate(self):
+        lines = concise_report_lines(
+            {
+                "report_path": "/tmp/final_report.md",
+                "run_status": "completed",
+                "task_count": 1,
+                "blocked_count": 0,
+                "completion_summary": {
+                    "what_changed": ["已实现 AgentTeam 目标仓库策略。"],
+                    "integration": "passed",
+                },
+                "operator_report": {
+                    "task_reports": [
+                        {
+                            "task_id": "TASK-AGENTTEAM-001",
+                            "status": "implementation completed",
+                            "agentteam_target_review_required": True,
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertIn(
+            "agentteam_target_review: source merge, push, and release activation require operator review",
+            lines,
+        )
 
     def test_install_local_replaces_existing_launcher_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6541,6 +6570,38 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("metric_delta_or_no_safe_change_evidence", task["required_deliverables"])
             self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
 
+    def test_codex_taskpack_author_prompt_includes_agentteam_target_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "agentteam"
+            taskpack_dir = tmp_path / "drafts" / "m49-agentteam-target"
+            author_context_dir = tmp_path / "drafts" / ".m49-agentteam-target-author"
+            _init_repo(repo)
+            runtime_pkg = repo / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+            runtime_pkg.mkdir(parents=True)
+            (runtime_pkg / "__init__.py").write_text("# runtime\n", encoding="utf-8")
+
+            prompt = _author_prompt(
+                project_root=repo,
+                goal="Implement M49 policy hardening for AgentTeam-as-target tasks.",
+                taskpack_id="m49-agentteam-target",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                repo_map={
+                    "paths": {
+                        "manifest_path": "manifest.json",
+                        "inventory_path": "inventory.json",
+                        "symbols_path": "symbols.json",
+                    }
+                },
+                verification_profile=None,
+            )
+
+            self.assertIn("AgentTeam-as-target", prompt)
+            self.assertIn("functional or semantic requirement", prompt)
+            self.assertIn("do not request git merge or git push", prompt)
+            self.assertIn("open-ended improvement requests", prompt)
+
     def test_fake_taskpack_author_draft_can_be_frozen(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -6633,6 +6694,65 @@ class TaskpackTests(unittest.TestCase):
             loaded = load_taskpack(result["taskpack_dir"])
             self.assertEqual(loaded["taskpack"]["goal_kind"], "optimization")
             self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
+
+    def test_canonicalize_codex_taskpack_without_project_root_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement a bounded code change.",
+                draft_root=drafts,
+                taskpack_id="missing-project-root",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack.pop("project_root")
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+
+            _canonicalize_codex_taskpack_files(result["taskpack_dir"])
+
+            loaded = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            self.assertEqual(loaded["goal_kind"], "implementation")
+            self.assertNotIn("operator_review_required", loaded.get("policy", {}))
+
+    def test_canonicalize_codex_taskpack_preserves_agentteam_target_operator_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "agentteam"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            runtime_pkg = repo / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+            runtime_pkg.mkdir(parents=True)
+            (runtime_pkg / "__init__.py").write_text("# runtime\n", encoding="utf-8")
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement M49 policy hardening for AgentTeam-as-target tasks.",
+                draft_root=drafts,
+                taskpack_id="m49-agentteam-target",
+                read_scope=["experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/"],
+                write_scope=["experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/"],
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+
+            _canonicalize_codex_taskpack_files(taskpack_dir)
+
+            loaded = load_taskpack(taskpack_dir)
+            taskpack = loaded["taskpack"]
+            task = loaded["backlog"]["items"][0]
+            self.assertFalse(taskpack["policy"]["allow_merge"])
+            self.assertTrue(taskpack["policy"]["operator_review_required"])
+            self.assertEqual(
+                taskpack["policy"]["source_control_restrictions"],
+                ["no_merge", "no_push", "no_release_activation"],
+            )
+            self.assertIn("AgentTeam-as-target", task["goal_alignment"])
+            self.assertIn("agentteam_target_review_gate", task["required_deliverables"])
+            self.assertIn("do not merge", task["objective"])
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
 
     def test_validate_taskpack_rejects_optimization_task_that_loses_optimization_intent(self):
         with tempfile.TemporaryDirectory() as tmp:
