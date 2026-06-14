@@ -7,6 +7,9 @@ from pathlib import Path
 from .token_usage import normalize_token_usage, token_usage_from_state
 
 PROJECTION_SCHEMA_VERSION = "agentteam_projection.v3"
+PROJECTION_WARNING_UNAVAILABLE = "projection_db_unavailable"
+PROJECTION_REBUILD_NEXT_ACTION = "run agentteam db rebuild"
+PROJECTION_REBUILD_HINT = "agentteam db rebuild"
 
 
 def project_projection_db_path(work_root):
@@ -42,19 +45,19 @@ def check_project_projection_db(work_root):
     db_path = project_projection_db_path(work_root)
     expected = _projection_counts(_scan_work_root(work_root))
     if not db_path.exists():
-        return {
+        return _with_projection_contract({
             "check_status": "failed",
             "db_path": str(db_path),
             "schema_version": None,
             "expected": expected,
             "actual": {},
             "mismatches": ["db_missing"],
-        }
+        })
     try:
         actual = _database_counts(db_path)
         schema_version = _database_schema_version(db_path)
     except sqlite3.DatabaseError as exc:
-        return {
+        return _with_projection_contract({
             "check_status": "failed",
             "db_path": str(db_path),
             "schema_version": None,
@@ -62,7 +65,7 @@ def check_project_projection_db(work_root):
             "actual": {},
             "mismatches": ["db_unreadable"],
             "error": str(exc),
-        }
+        })
     mismatch_keys = [
         "runs",
         "taskpacks",
@@ -81,20 +84,92 @@ def check_project_projection_db(work_root):
     ]
     if schema_version != PROJECTION_SCHEMA_VERSION:
         mismatches.append("schema_version")
-    return {
+    return _with_projection_contract({
         "check_status": "failed" if mismatches else "passed",
         "db_path": str(db_path),
         "schema_version": schema_version,
         "expected": expected,
         "actual": actual,
         "mismatches": mismatches,
+    })
+
+
+def _with_projection_contract(status):
+    status = dict(status)
+    projection_status = _projection_status(status)
+    status["projection_status"] = projection_status
+    status["projection_source"] = "db" if projection_status == "fresh" else "files"
+    status["projection_db_path"] = status.get("db_path")
+    if projection_status != "fresh":
+        status["projection_warning"] = PROJECTION_WARNING_UNAVAILABLE
+        status["next_action"] = PROJECTION_REBUILD_NEXT_ACTION
+        status["operator_hint"] = PROJECTION_REBUILD_HINT
+    return status
+
+
+def _projection_status(status):
+    if status.get("check_status") == "passed":
+        return "fresh"
+    mismatches = set(status.get("mismatches") or [])
+    if "db_missing" in mismatches:
+        return "missing"
+    if "db_unreadable" in mismatches:
+        return "corrupt"
+    return "stale"
+
+
+def _projection_reader_db_metadata(check, db_path):
+    db_path = str(db_path)
+    return {
+        "projection_source": "db",
+        "projection_status": check.get("projection_status") or "fresh",
+        "projection_db_path": check.get("projection_db_path") or db_path,
+        "db_path": db_path,
+        "check_status": check.get("check_status"),
+        "check": check,
     }
 
 
-def read_projected_taskpacks(work_root):
+def _projection_reader_fallback_status(check):
+    payload = {
+        "projection_source": "files",
+        "projection_status": check.get("projection_status"),
+        "projection_warning": check.get("projection_warning"),
+        "projection_db_path": check.get("projection_db_path") or check.get("db_path"),
+        "db_path": check.get("db_path") or check.get("projection_db_path"),
+        "check_status": check.get("check_status"),
+        "fallback_required": True,
+        "check": check,
+    }
+    if check.get("next_action"):
+        payload["next_action"] = check["next_action"]
+    if check.get("operator_hint"):
+        payload["operator_hint"] = check["operator_hint"]
+    return payload
+
+
+def _projection_query_failed_status(check, exc):
+    return _with_projection_contract({
+        "check_status": "failed",
+        "db_path": check.get("db_path") or check.get("projection_db_path"),
+        "schema_version": check.get("schema_version"),
+        "expected": check.get("expected", {}),
+        "actual": check.get("actual", {}),
+        "mismatches": ["db_unreadable"],
+        "error": str(exc),
+    })
+
+
+def _projection_reader_fallback(check, include_fallback_status):
+    if include_fallback_status:
+        return _projection_reader_fallback_status(check)
+    return None
+
+
+def read_projected_taskpacks(work_root, *, include_fallback_status=False):
     check = check_project_projection_db(work_root)
     if check["check_status"] != "passed":
-        return None
+        return _projection_reader_fallback(check, include_fallback_status)
     db_path = project_projection_db_path(work_root)
     try:
         with sqlite3.connect(db_path) as connection:
@@ -105,12 +180,13 @@ def read_projected_taskpacks(work_root):
                 order by taskpack_id
                 """
             ).fetchall()
-    except sqlite3.DatabaseError:
-        return None
+    except sqlite3.DatabaseError as exc:
+        return _projection_reader_fallback(
+            _projection_query_failed_status(check, exc),
+            include_fallback_status,
+        )
     return {
-        "projection_source": "db",
-        "db_path": str(db_path),
-        "check": check,
+        **_projection_reader_db_metadata(check, db_path),
         "taskpacks": [
             {
                 "taskpack_id": row[0],
@@ -124,10 +200,10 @@ def read_projected_taskpacks(work_root):
     }
 
 
-def read_projected_run_events(work_root, run_id):
+def read_projected_run_events(work_root, run_id, *, include_fallback_status=False):
     check = check_project_projection_db(work_root)
     if check["check_status"] != "passed":
-        return None
+        return _projection_reader_fallback(check, include_fallback_status)
     db_path = project_projection_db_path(work_root)
     try:
         with sqlite3.connect(db_path) as connection:
@@ -140,8 +216,11 @@ def read_projected_run_events(work_root, run_id):
                 """,
                 (run_id,),
             ).fetchall()
-    except sqlite3.DatabaseError:
-        return None
+    except sqlite3.DatabaseError as exc:
+        return _projection_reader_fallback(
+            _projection_query_failed_status(check, exc),
+            include_fallback_status,
+        )
     events = []
     for row in rows:
         try:
@@ -149,9 +228,7 @@ def read_projected_run_events(work_root, run_id):
         except (TypeError, json.JSONDecodeError):
             continue
     return {
-        "projection_source": "db",
-        "db_path": str(db_path),
-        "check": check,
+        **_projection_reader_db_metadata(check, db_path),
         "events": events,
     }
 

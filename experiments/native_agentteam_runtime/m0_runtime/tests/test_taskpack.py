@@ -519,6 +519,160 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(failed["expected"]["events"], 2)
             self.assertEqual(failed["actual"]["events"], 1)
 
+    def test_project_projection_db_check_reports_readthrough_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = _write_completed_operator_run(work_root / "runs" / "projection-run")
+            taskpack_path = work_root / "frozen" / "projection-run" / "taskpack.json"
+            _write_json(
+                taskpack_path,
+                {
+                    "taskpack_id": "projection-run",
+                    "goal": "Projection freshness fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+
+            missing = check_project_projection_db(work_root)
+            self.assertEqual(missing.get("projection_source"), "files")
+            self.assertEqual(missing.get("projection_status"), "missing")
+            self.assertEqual(missing.get("projection_warning"), "projection_db_unavailable")
+            self.assertEqual(missing.get("next_action"), "run agentteam db rebuild")
+            self.assertEqual(missing.get("operator_hint"), "agentteam db rebuild")
+            self.assertEqual(missing.get("projection_db_path"), missing["db_path"])
+            self.assertIn("db_missing", missing["mismatches"])
+
+            rebuild_project_projection_db(work_root)
+            fresh = check_project_projection_db(work_root)
+            self.assertEqual(fresh.get("projection_source"), "db")
+            self.assertEqual(fresh.get("projection_status"), "fresh")
+            self.assertEqual(fresh.get("projection_db_path"), fresh["db_path"])
+            self.assertNotIn("projection_warning", fresh)
+            self.assertEqual(fresh["mismatches"], [])
+
+            with (run_dir / "events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "event_id": "EVT-0002",
+                            "event_type": "backlog_updated",
+                            "sequence": 2,
+                            "time": "2026-06-12T00:00:01Z",
+                            "payload": {"task_id": "optimize-pipeline"},
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+            stale_event = check_project_projection_db(work_root)
+            self.assertEqual(stale_event.get("projection_source"), "files")
+            self.assertEqual(stale_event.get("projection_status"), "stale")
+            self.assertEqual(stale_event.get("projection_warning"), "projection_db_unavailable")
+            self.assertEqual(stale_event.get("next_action"), "run agentteam db rebuild")
+            self.assertIn("events", stale_event["mismatches"])
+
+            rebuild_project_projection_db(work_root)
+            _write_json(
+                taskpack_path,
+                {
+                    "taskpack_id": "projection-run",
+                    "goal": "Projection freshness fixture changed.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            stale_taskpack = check_project_projection_db(work_root)
+            self.assertEqual(stale_taskpack.get("projection_source"), "files")
+            self.assertEqual(stale_taskpack.get("projection_status"), "stale")
+            self.assertIn("artifact_digest", stale_taskpack["mismatches"])
+
+            rebuild_project_projection_db(work_root)
+            db_path = Path(fresh["db_path"])
+            db_path.write_text("not sqlite", encoding="utf-8")
+            corrupt = check_project_projection_db(work_root)
+            self.assertEqual(corrupt.get("projection_source"), "files")
+            self.assertEqual(corrupt.get("projection_status"), "corrupt")
+            self.assertEqual(corrupt.get("projection_warning"), "projection_db_unavailable")
+            self.assertIn("db_unreadable", corrupt["mismatches"])
+
+    def test_projected_readers_can_report_normalized_fallback_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = _write_completed_operator_run(work_root / "runs" / "projection-run")
+            _write_json(
+                work_root / "frozen" / "projection-run" / "taskpack.json",
+                {
+                    "taskpack_id": "projection-run",
+                    "goal": "Projection reader fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            rebuild_project_projection_db(work_root)
+
+            taskpacks = projection_db.read_projected_taskpacks(work_root)
+            events = projection_db.read_projected_run_events(work_root, "projection-run")
+            self.assertEqual(taskpacks["projection_source"], "db")
+            self.assertEqual(taskpacks.get("projection_status"), "fresh")
+            self.assertEqual(events["projection_source"], "db")
+            self.assertEqual(events.get("projection_status"), "fresh")
+            self.assertEqual([event["event_id"] for event in events["events"]], ["EVT-0001"])
+
+            with (run_dir / "events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "event_id": "EVT-0002",
+                            "event_type": "backlog_updated",
+                            "sequence": 2,
+                            "time": "2026-06-12T00:00:01Z",
+                            "payload": {"task_id": "optimize-pipeline"},
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
+            self.assertIsNone(projection_db.read_projected_taskpacks(work_root))
+            self.assertIsNone(projection_db.read_projected_run_events(work_root, "projection-run"))
+            try:
+                taskpack_fallback = projection_db.read_projected_taskpacks(
+                    work_root,
+                    include_fallback_status=True,
+                )
+                event_fallback = projection_db.read_projected_run_events(
+                    work_root,
+                    "projection-run",
+                    include_fallback_status=True,
+                )
+            except TypeError as exc:
+                self.fail(f"projection readers should expose fallback status: {exc}")
+
+            self.assertEqual(taskpack_fallback["projection_source"], "files")
+            self.assertEqual(taskpack_fallback["projection_status"], "stale")
+            self.assertEqual(taskpack_fallback["projection_warning"], "projection_db_unavailable")
+            self.assertEqual(taskpack_fallback["next_action"], "run agentteam db rebuild")
+            self.assertNotIn("taskpacks", taskpack_fallback)
+            self.assertEqual(event_fallback["projection_source"], "files")
+            self.assertEqual(event_fallback["projection_status"], "stale")
+            self.assertNotIn("events", event_fallback)
+
+            Path(taskpack_fallback["db_path"]).unlink()
+            missing_fallback = projection_db.read_projected_taskpacks(
+                work_root,
+                include_fallback_status=True,
+            )
+            self.assertEqual(missing_fallback["projection_status"], "missing")
+
+            Path(missing_fallback["db_path"]).write_text("not sqlite", encoding="utf-8")
+            corrupt_fallback = projection_db.read_projected_run_events(
+                work_root,
+                "projection-run",
+                include_fallback_status=True,
+            )
+            self.assertEqual(corrupt_fallback["projection_status"], "corrupt")
+            self.assertIn("db_unreadable", corrupt_fallback["check"]["mismatches"])
+
     def test_project_projection_db_rebuild_indexes_artifacts_and_run_stats(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
