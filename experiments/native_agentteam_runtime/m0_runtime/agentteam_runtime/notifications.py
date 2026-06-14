@@ -6,7 +6,7 @@ import os
 import time
 import urllib.request
 
-from .completion_summary import build_completion_summary, extend_completion_summary_lines
+from .completion_summary import build_completion_summary
 from .token_usage import format_token_usage
 
 
@@ -279,46 +279,81 @@ def _event_text(event, run_dir, project):
 
 def _operator_report_text(report):
     task_reports = report.get("task_reports", []) if isinstance(report.get("task_reports"), list) else []
-    summary = build_completion_summary(
-        run_id="unknown",
-        run_status="completed",
-        task_count=report.get("task_count", len(task_reports)),
-        blocked_count=report.get("blocked_count", 0),
-        task_reports=task_reports,
-    )
     lines = []
-    extend_completion_summary_lines(lines, summary)
-    lines.append("Operator report:")
+    operator_digest = _operator_summary_digest(report)
+    if operator_digest:
+        lines.append("中文工作汇报:")
+        _extend_limited_section_items(lines, operator_digest)
+        if isinstance(report.get("token_usage"), dict):
+            lines.append(format_token_usage(report.get("token_usage")))
+        return lines
+
+    if not task_reports:
+        lines.append("工作摘要:")
+        lines.append("- 无结构化任务报告；请查看 agentteam report。")
+        if isinstance(report.get("token_usage"), dict):
+            lines.append(format_token_usage(report.get("token_usage")))
+        return lines
+
+    task_count = int(report.get("task_count") or len(task_reports))
+    blocked_count = _notification_blocked_count(report, task_reports)
+    summary = build_completion_summary(
+        run_id=report.get("run_id") or "unknown",
+        run_status=report.get("run_status") or "completed",
+        task_count=task_count,
+        blocked_count=blocked_count,
+        task_reports=task_reports,
+        integration_baseline=report.get("integration_baseline"),
+    )
+    lines.append("工作摘要:")
+    lines.append(
+        f"- 状态：{report.get('run_status') or 'completed'}；"
+        f"任务：{task_count}；阻塞：{blocked_count}"
+    )
+    lines.append("中文工作汇报:")
+    _extend_limited_section_items(lines, summary.get("operator_digest"))
     if isinstance(report.get("token_usage"), dict):
         lines.append(format_token_usage(report.get("token_usage")))
-    for task in task_reports:
-        if not isinstance(task, dict):
-            continue
-        task_id = task.get("task_id") or "unknown"
-        status = task.get("status") or "unknown"
-        lines.append(f"Task: {task_id}")
-        lines.append(f"Status: {status}")
-        _extend_section(lines, "What changed:", task.get("what_changed"))
-        _extend_section(lines, "Changed files:", task.get("changed_files"))
-        _extend_section(lines, "Verification:", task.get("verification"))
-        integration = task.get("integration")
-        if integration:
-            lines.append(f"Integration: {integration}")
-        merge = task.get("merge_recommendation")
-        if merge:
-            lines.append(f"Merge: {merge}")
-        if isinstance(task.get("token_usage"), dict):
-            lines.append(format_token_usage(task.get("token_usage"), label="Tokens"))
-        _extend_section(lines, "Next steps:", task.get("next_steps"))
     return lines
 
 
-def _extend_section(lines, heading, values):
+def _operator_summary_digest(report):
+    summary = report.get("operator_summary") if isinstance(report.get("operator_summary"), dict) else {}
+    digest = _text_items(summary.get("operator_digest"))
+    if digest:
+        return digest
+    return _text_items(report.get("operator_digest"))
+
+
+def _notification_blocked_count(report, task_reports):
+    if report.get("blocked_count") is not None:
+        return int(report.get("blocked_count") or 0)
+    blocked_count = 0
+    for task in task_reports:
+        if not isinstance(task, dict):
+            continue
+        status = str(task.get("status") or "").lower()
+        integration = str(task.get("integration") or "").lower()
+        if (
+            "blocked" in status
+            or "failed" in status
+            or "blocked" in integration
+            or "failed" in integration
+            or "failure" in integration
+        ):
+            blocked_count += 1
+    return blocked_count
+
+
+def _extend_limited_section_items(lines, values, limit=8):
     items = _text_items(values)
     if not items:
         return
-    lines.append(heading)
-    lines.extend(f"- {item}" for item in items)
+    selected = items[:limit]
+    lines.extend(f"- {item}" for item in selected)
+    omitted_count = len(items) - len(selected)
+    if omitted_count > 0:
+        lines.append(f"- ... {omitted_count} more items in agentteam report")
 
 
 def _text_items(values):

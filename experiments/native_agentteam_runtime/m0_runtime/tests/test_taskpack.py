@@ -2933,9 +2933,13 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(len(payloads), 1)
             message = payloads[0]["content"]["text"]
             self.assertIn("[AgentTeam] run_completed", message)
-            self.assertIn("Completion summary:", message)
+            self.assertIn("工作摘要:", message)
+            self.assertIn("中文工作汇报:", message)
             self.assertIn("AgentTeam notification test for notify-project.", message)
             self.assertIn("If you receive this message, Feishu notification delivery works.", message)
+            self.assertNotIn("Completion summary:", message)
+            self.assertNotIn("中文简报:", message)
+            self.assertNotIn("What changed:", message)
 
     def test_agentteam_cli_notify_run_completed_sends_existing_run_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3011,8 +3015,12 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(len(payloads), 1)
             message = payloads[0]["content"]["text"]
             self.assertIn("[AgentTeam] run_completed", message)
+            self.assertIn("工作摘要:", message)
+            self.assertIn("中文工作汇报:", message)
             self.assertIn("Scanned the repository and implemented one evidence-backed optimization.", message)
             self.assertIn("gesture_recognition/sim_eval.py", message)
+            self.assertNotIn("Completion summary:", message)
+            self.assertNotIn("What changed:", message)
 
     def test_permission_request_notification_includes_approve_and_deny_hints(self):
         message = _permission_request_text(

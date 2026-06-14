@@ -319,20 +319,19 @@ class M0RuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["event_type"], "notification_sent")
         text = calls[0]["payload"]["content"]["text"]
-        self.assertIn("Completion summary:", text)
-        self.assertIn("中文简报:", text)
-        self.assertIn("本次运行已完成，共 1 个任务，1 个阻塞。", text)
-        self.assertIn("主要变更：优化了 IMU 解析和特征提取流程。", text)
-        self.assertIn("What changed:", text)
+        self.assertIn("工作摘要:", text)
+        self.assertIn("- 状态：completed；任务：1；阻塞：1", text)
+        self.assertIn("中文工作汇报:", text)
         self.assertIn("优化了 IMU 解析和特征提取流程。", text)
-        self.assertIn("Changed files:", text)
         self.assertIn("gesture_recognition/sim_eval.py", text)
-        self.assertIn("Verification:", text)
         self.assertIn("compileall: passed", text)
-        self.assertIn("Integration: blocked", text)
-        self.assertIn("Integration recommendation: Do not merge until integration passes.", text)
-        self.assertIn("Next:", text)
+        self.assertIn("合并建议：Do not merge until integration passes.", text)
         self.assertIn("恢复不改变采样语义的优化，或重新导出 C 模型。", text)
+        self.assertNotIn("Completion summary:", text)
+        self.assertNotIn("中文简报:", text)
+        self.assertNotIn("What changed:", text)
+        self.assertNotIn("Changed files:", text)
+        self.assertNotIn("Task: optimize-gesture-evaluation-pipeline", text)
 
     def test_feishu_run_completed_summarizes_multiple_tasks(self):
         from agentteam_runtime.notifications import build_feishu_notification_sink_from_env
@@ -394,12 +393,64 @@ class M0RuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["event_type"], "notification_sent")
         text = calls[0]["payload"]["content"]["text"]
+        self.assertIn("工作摘要:", text)
         self.assertIn("中文工作汇报:", text)
         self.assertIn("做了什么：实现任务 A 的代码路径。；补充任务 B 的验证入口。", text)
         self.assertIn("涉及文件：src/a.py；src/b.py", text)
         self.assertIn("验证结果：unit-a: passed；unit-b: passed", text)
-        self.assertIn("Task: TASK-A", text)
-        self.assertIn("Task: TASK-B", text)
+        self.assertNotIn("Completion summary:", text)
+        self.assertNotIn("What changed:", text)
+        self.assertNotIn("Task: TASK-A", text)
+        self.assertNotIn("Task: TASK-B", text)
+
+    def test_feishu_run_completed_uses_operator_summary_without_zero_task_fallback(self):
+        from agentteam_runtime.notifications import build_feishu_notification_sink_from_env
+
+        calls = []
+
+        def fake_post(url, payload, timeout_seconds):
+            calls.append({"url": url, "payload": payload, "timeout_seconds": timeout_seconds})
+            return {"status_code": 200, "body": {"code": 0, "msg": "success"}}
+
+        sink = build_feishu_notification_sink_from_env(
+            webhook_env="AGENTTEAM_FEISHU_TEST_WEBHOOK",
+            project="agentteam",
+            env={
+                "AGENTTEAM_FEISHU_TEST_WEBHOOK": (
+                    "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token"
+                ),
+            },
+            http_post=fake_post,
+            clock=lambda: 1599360473,
+        )
+        result = sink.notify(
+            {
+                "event_id": "EVT-101",
+                "sequence": 101,
+                "event_type": "run_completed",
+                "correlation_id": "run:milestone",
+                "payload": {
+                    "run_status": "completed",
+                    "operator_report": {
+                        "operator_summary": {
+                            "operator_digest": [
+                                "M65 已完成：新增 agentteam grounding。",
+                                "验证：412 tests OK。",
+                            ]
+                        }
+                    },
+                },
+            },
+            {"run_dir": "/tmp/agentteam-run"},
+        )
+
+        self.assertEqual(result["event_type"], "notification_sent")
+        text = calls[0]["payload"]["content"]["text"]
+        self.assertIn("中文工作汇报:", text)
+        self.assertIn("M65 已完成：新增 agentteam grounding。", text)
+        self.assertIn("验证：412 tests OK。", text)
+        self.assertNotIn("0 tasks reported", text)
+        self.assertNotIn("No task-level operator report was found", text)
 
     def test_two_phase_scheduler_notifies_manual_gate_after_canonical_event(self):
         class RecordingNotificationSink:
