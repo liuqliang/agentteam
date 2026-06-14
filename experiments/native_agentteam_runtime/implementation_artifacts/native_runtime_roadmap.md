@@ -1276,9 +1276,48 @@ Validation:
 - normal verification runs through `test_taskpack` and `test_m0_runtime` with
   `PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime`.
 
-Next route: M66 should use completed reports and follow-up queue suggestions to
-support bounded long-running queue consumption. M68 multi-model adapters remain
-out of the current implementation route per the latest operator decision.
+Next route: continue validating bounded long-running queue consumption on real
+target repositories. M68 multi-model adapters remain out of the current
+implementation route per the latest operator decision.
+
+### M66: Pursue Follow-Up Queue Consumption
+
+Status: implemented in the native-runtime branch.
+
+Goal: make `agentteam pursue` advance long-running goals from the same bounded
+follow-up queue that operators can inspect with `agentteam queue`.
+
+Implemented:
+
+- after each successful non-stopping pursue round, the loop builds a
+  `follow_up_queue.v1` summary from the latest report and current goal memory;
+- the selected queue item is recorded compactly in the pursue round and recap,
+  including queue status, source taskpack id, next goal, next command, item
+  count, and selected item provenance;
+- the selected `next_goal` becomes the raw goal for the next follow-up
+  taskpack, while the existing follow-up prompt still includes previous report
+  context and bounded long-goal memory;
+- review gates, blocked runs, manual gates, permission requests, and failed
+  runs still stop the loop unless the operator explicitly allows review-gate
+  follow-up;
+- when `pursue` stops because `--max-rounds` is reached, the operator next
+  action points to `agentteam queue next --taskpack <latest>` so continuation
+  remains inspectable before another run starts.
+
+Validation:
+
+- focused red/green tests cover queue-summary selection from reports plus goal
+  memory, two-round fake-runtime pursue queue recording, and follow-up prompt
+  propagation;
+- existing pursue review-gate, max-round, compact text, and queue command tests
+  continue to pass;
+- normal verification runs through `test_taskpack` and `test_m0_runtime` with
+  `PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime`.
+
+Remaining route: run more live target-repository loops to evaluate whether the
+queue selection is specific enough for optimization work. If reports still
+produce generic next steps, harden taskpack authoring and report quality before
+adding broader orchestration features.
 
 ## Longer-Term Route
 

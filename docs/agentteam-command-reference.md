@@ -423,6 +423,8 @@ Notes:
 - Queue items are built from structured report `next_steps`,
   `follow_up_recommendation`, and long-goal `goal_memory.follow_up_queue` when
   available.
+- `agentteam pursue` consumes the same queue summary between rounds. The queue
+  command is the read-only way to inspect what the pursue loop would use next.
 - `queue next` prints only the next suggested goal and command. Run the printed
   `agentteam next --from-taskpack ... --goal ...` command when you want to
   launch the next taskpack.
@@ -454,7 +456,13 @@ Notes:
 - `--allow-review-gate-follow-up` lets the loop author another follow-up from
   the previous report, but it still does not merge source changes or bypass
   operator review.
+- Between successful rounds, `pursue` builds the same `follow_up_queue.v1`
+  summary used by `agentteam queue`, records the compact queue selection in the
+  pursue recap, and uses the selected `next_goal` for the next round.
 - `--max-rounds` is a hard budget. The command never runs indefinitely.
+  When the loop stops because the budget is reached, the next action points to
+  `agentteam queue next --taskpack <latest>` so you can inspect the next
+  bounded continuation before launching more work.
 
 #### Review Gate Sequence
 

@@ -7093,6 +7093,7 @@ class TaskpackTests(unittest.TestCase):
             "manual_gate_required",
             "permission_request_required",
             "failed",
+            "follow_up_queue_empty",
             "max_rounds_reached",
         ]:
             summary = {
@@ -7159,6 +7160,44 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn(
             "持续优化原始目标。",
             _pursue_next_goal("持续优化原始目标。", {"completion_summary": {}}),
+        )
+
+    def test_pursue_follow_up_queue_summary_selects_next_goal(self):
+        from agentteam_runtime.agentteam import _pursue_follow_up_queue_summary
+
+        summary = _pursue_follow_up_queue_summary(
+            source_report={
+                "run_id": "first-pass",
+                "report_path": "/tmp/first-pass/reports/final_report.md",
+                "completion_summary": {
+                    "next_steps": ["继续验证最慢模块。"],
+                    "follow_up_recommendation": {
+                        "action": "next",
+                        "next_command": 'agentteam next --from-taskpack first-pass --goal "补充准确率基准。"',
+                    },
+                },
+            },
+            goal_memory={
+                "memory_path": "/tmp/work/pursue/first-pass-goal-memory.json",
+                "follow_up_queue": [
+                    {
+                        "objective": "检查端到端延迟。",
+                        "source_taskpack_id": "first-pass",
+                        "source_report_path": "/tmp/first-pass/reports/final_report.md",
+                    }
+                ],
+            },
+            source_run_dir=Path("/tmp/work/runs/first-pass"),
+            limit=5,
+        )
+
+        self.assertEqual(summary["queue_status"], "ready")
+        self.assertEqual(summary["source_taskpack_id"], "first-pass")
+        self.assertEqual(summary["next_goal"], "继续验证最慢模块。")
+        self.assertIn("agentteam next --from-taskpack first-pass", summary["next_command"])
+        self.assertEqual(
+            [item["objective"] for item in summary["items"]],
+            ["继续验证最慢模块。", "补充准确率基准。", "检查端到端延迟。"],
         )
 
     def test_goal_memory_bounds_round_history_and_prompt_text(self):
@@ -7359,6 +7398,12 @@ class TaskpackTests(unittest.TestCase):
             self.assertLessEqual(len(memory["round_history"]), memory["limits"]["max_round_history"])
             self.assertLessEqual(len(json.dumps(memory, ensure_ascii=False)), memory["limits"]["max_memory_json_chars"])
             self.assertIn("goal_memory_path", summary["runs"][0])
+            self.assertEqual(summary["runs"][0]["follow_up_queue"]["queue_status"], "ready")
+            self.assertEqual(
+                summary["runs"][0]["selected_next_goal"],
+                summary["runs"][0]["follow_up_queue"]["next_goal"],
+            )
+            self.assertIn("agentteam queue next --taskpack pursue-loop-r2", summary["operator_next_action"])
 
             followup_taskpack = json.loads(
                 (work_root / "frozen" / "pursue-loop-r2" / "taskpack.yaml").read_text(encoding="utf-8")
@@ -7368,6 +7413,7 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("completed_rounds: 1", followup_goal)
             self.assertIn("latest_run_ids: pursue-loop", followup_goal)
             self.assertIn("memory_path:", followup_goal)
+            self.assertIn(summary["runs"][0]["selected_next_goal"], followup_goal)
 
     def test_agentteam_cli_pursue_can_continue_when_review_gate_follow_up_is_allowed(self):
         with tempfile.TemporaryDirectory() as tmp:

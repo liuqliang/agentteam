@@ -1799,8 +1799,31 @@ def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
         round_record["goal_memory_path"] = str(goal_memory_path)
         if stop_reason:
             break
+        queue_summary = _pursue_follow_up_queue_summary(
+            source_report=latest_source_report,
+            goal_memory=goal_memory,
+            source_run_dir=source_run_dir,
+        )
+        round_record["follow_up_queue"] = _compact_pursue_queue_summary(queue_summary)
+        if queue_summary.get("next_goal"):
+            round_record["selected_next_goal"] = queue_summary["next_goal"]
+        if queue_summary.get("queue_status") != "ready":
+            stop_reason = "follow_up_queue_empty"
+            goal_memory = build_goal_memory(
+                pursue_id=_pursue_id(args, rounds),
+                original_goal=goal,
+                work_root=work_root,
+                rounds=rounds,
+                source_report=latest_source_report,
+                stop_reason=stop_reason,
+                previous_memory=goal_memory,
+            )
+            goal_memory_path = write_goal_memory(work_root, goal_memory)
+            goal_memory["memory_path"] = str(goal_memory_path)
+            round_record["goal_memory_path"] = str(goal_memory_path)
+            break
         source_report = latest_source_report
-        current_goal = _pursue_next_goal(goal, source_report)
+        current_goal = queue_summary["next_goal"]
     if stop_reason is None:
         stop_reason = "max_rounds_reached"
         if rounds:
@@ -1854,7 +1877,7 @@ def _build_pursue_recap(*, pursue_id, goal, max_rounds, rounds, stop_reason, wor
     latest = rounds[-1] if rounds else {}
     latest_taskpack_id = latest.get("taskpack_id")
     latest_report_path = latest.get("report_path")
-    return {
+    recap = {
         "pursue_id": pursue_id,
         "pursue_status": "stopped",
         "goal": goal,
@@ -1869,6 +1892,11 @@ def _build_pursue_recap(*, pursue_id, goal, max_rounds, rounds, stop_reason, wor
         "runs": rounds,
         "updated_at": _format_utc_timestamp(datetime.now(UTC)),
     }
+    if isinstance(latest.get("follow_up_queue"), dict):
+        recap["latest_follow_up_queue"] = latest["follow_up_queue"]
+    if latest.get("selected_next_goal"):
+        recap["latest_selected_next_goal"] = latest["selected_next_goal"]
+    return recap
 
 
 def _write_pursue_recap(work_root, recap):
@@ -1893,6 +1921,8 @@ def _safe_pursue_artifact_id(value):
 def _pursue_operator_next_action(stop_reason, latest):
     taskpack_id = latest.get("taskpack_id") if isinstance(latest, dict) else None
     run_dir = latest.get("run_dir") if isinstance(latest, dict) else None
+    if stop_reason == "max_rounds_reached" and taskpack_id:
+        return f"agentteam queue next --taskpack {taskpack_id}"
     if taskpack_id:
         return f"agentteam report --taskpack {taskpack_id}"
     if run_dir:
@@ -1947,6 +1977,43 @@ def _pursue_next_goal(original_goal, source_report):
     if next_step:
         return next_step
     return f"Continue pursuing the long-running goal using the previous report: {original_goal}"
+
+
+def _pursue_follow_up_queue_summary(*, source_report, goal_memory=None, source_run_dir=None, limit=5):
+    source_report = source_report if isinstance(source_report, dict) else {}
+    source_run_dir_text = str(source_run_dir) if source_run_dir else source_report.get("run_dir")
+    source_taskpack_id = source_report.get("run_id")
+    if not source_taskpack_id and source_run_dir:
+        source_taskpack_id = Path(source_run_dir).name
+    return build_follow_up_queue_summary(
+        source_report=source_report,
+        goal_memory=goal_memory if isinstance(goal_memory, dict) else {},
+        source_taskpack_id=source_taskpack_id,
+        source_run_dir=source_run_dir_text,
+        limit=limit,
+    )
+
+
+def _compact_pursue_queue_summary(summary):
+    summary = summary if isinstance(summary, dict) else {}
+    compact = {
+        "queue_status": summary.get("queue_status") or "unknown",
+        "source_taskpack_id": summary.get("source_taskpack_id"),
+        "item_count": summary.get("item_count", 0),
+        "next_goal": summary.get("next_goal"),
+        "next_command": summary.get("next_command"),
+    }
+    items = summary.get("items") if isinstance(summary.get("items"), list) else []
+    if items and isinstance(items[0], dict):
+        compact["selected_item"] = {
+            "objective": items[0].get("objective"),
+            "source": items[0].get("source"),
+            "source_taskpack_id": items[0].get("source_taskpack_id"),
+            "source_report_path": items[0].get("source_report_path"),
+        }
+    if summary.get("operator_hint"):
+        compact["operator_hint"] = summary["operator_hint"]
+    return compact
 
 
 def _write_pursue_result_text(result):
