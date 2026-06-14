@@ -36,6 +36,11 @@ from .operator_report import (
     find_pursue_recap_for_run,
     render_run_completion_report,
 )
+from .goal_memory import (
+    build_goal_memory,
+    render_goal_memory_prompt_context,
+    write_goal_memory,
+)
 from .profile import (
     AgentTeamProfileError,
     build_project_profile,
@@ -1590,10 +1595,13 @@ def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
     work_root = Path(args.work_root or profile["work_root"]).resolve()
     current_goal = goal
     source_report = None
+    latest_source_report = None
+    goal_memory = None
+    goal_memory_path = None
     stop_reason = None
     for round_index in range(1, max_rounds + 1):
         if source_report is not None:
-            current_goal = _build_followup_goal(current_goal, source_report)
+            current_goal = _build_followup_goal(current_goal, source_report, goal_memory=goal_memory)
         taskpack_id = _pursue_taskpack_id(args.taskpack_id, round_index)
         submit_args = _submit_args_from_profile(args, project_root, profile)
         submit_args.goal = current_goal
@@ -1606,17 +1614,43 @@ def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
             round_record,
             allow_review_gate_follow_up=bool(args.allow_review_gate_follow_up),
         )
-        if stop_reason:
-            break
         source_run_dir = Path(round_record["run_dir"])
-        source_report = build_run_completion_report(
+        latest_source_report = build_run_completion_report(
             source_run_dir,
             project=profile.get("project_key") or "agentteam",
             write_files=False,
         )
+        goal_memory = build_goal_memory(
+            pursue_id=_pursue_id(args, rounds),
+            original_goal=goal,
+            work_root=work_root,
+            rounds=rounds,
+            source_report=latest_source_report,
+            stop_reason=stop_reason,
+            previous_memory=goal_memory,
+        )
+        goal_memory_path = write_goal_memory(work_root, goal_memory)
+        goal_memory["memory_path"] = str(goal_memory_path)
+        round_record["goal_memory_path"] = str(goal_memory_path)
+        if stop_reason:
+            break
+        source_report = latest_source_report
         current_goal = _pursue_next_goal(goal, source_report)
     if stop_reason is None:
         stop_reason = "max_rounds_reached"
+        if rounds:
+            goal_memory = build_goal_memory(
+                pursue_id=_pursue_id(args, rounds),
+                original_goal=goal,
+                work_root=work_root,
+                rounds=rounds,
+                source_report=latest_source_report,
+                stop_reason=stop_reason,
+                previous_memory=goal_memory,
+            )
+            goal_memory_path = write_goal_memory(work_root, goal_memory)
+            goal_memory["memory_path"] = str(goal_memory_path)
+            rounds[-1]["goal_memory_path"] = str(goal_memory_path)
     pursue_id = _pursue_id(args, rounds)
     recap = _build_pursue_recap(
         pursue_id=pursue_id,
@@ -1625,6 +1659,7 @@ def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
         rounds=rounds,
         stop_reason=stop_reason,
         work_root=work_root,
+        goal_memory_path=goal_memory_path,
     )
     recap_path = _write_pursue_recap(work_root, recap)
     return {
@@ -1637,6 +1672,7 @@ def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
         "runs": rounds,
         "work_root": str(work_root),
         "pursue_recap_path": str(recap_path),
+        "goal_memory_path": str(goal_memory_path) if goal_memory_path else None,
         "operator_next_action": recap.get("operator_next_action"),
     }
 
@@ -1649,7 +1685,7 @@ def _pursue_id(args, rounds):
     return f"pursue-{int(time.time())}"
 
 
-def _build_pursue_recap(*, pursue_id, goal, max_rounds, rounds, stop_reason, work_root):
+def _build_pursue_recap(*, pursue_id, goal, max_rounds, rounds, stop_reason, work_root, goal_memory_path=None):
     latest = rounds[-1] if rounds else {}
     latest_taskpack_id = latest.get("taskpack_id")
     latest_report_path = latest.get("report_path")
@@ -1663,6 +1699,7 @@ def _build_pursue_recap(*, pursue_id, goal, max_rounds, rounds, stop_reason, wor
         "stop_reason": stop_reason,
         "latest_taskpack_id": latest_taskpack_id,
         "latest_report_path": latest_report_path,
+        "goal_memory_path": str(goal_memory_path) if goal_memory_path else None,
         "operator_next_action": _pursue_operator_next_action(stop_reason, latest),
         "runs": rounds,
         "updated_at": _format_utc_timestamp(datetime.now(UTC)),
@@ -1833,7 +1870,7 @@ def _followup_source_run_dir(args, profile, work_root):
     return _latest_run_dir(profile)
 
 
-def _build_followup_goal(requested_goal, source_report):
+def _build_followup_goal(requested_goal, source_report, goal_memory=None):
     source_taskpack_id = source_report.get("run_id") or "unknown"
     report_path = source_report.get("report_path") or "unknown"
     run_dir = source_report.get("run_dir") or "unknown"
@@ -1861,6 +1898,9 @@ def _build_followup_goal(requested_goal, source_report):
     task_lines = _followup_task_summary_lines(source_report)
     if task_lines:
         lines.extend(["", "Previous task summaries:", *task_lines])
+    memory_context = render_goal_memory_prompt_context(goal_memory)
+    if memory_context:
+        lines.extend(["", memory_context])
     return "\n".join(lines)
 
 

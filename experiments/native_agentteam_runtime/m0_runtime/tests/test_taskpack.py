@@ -46,6 +46,7 @@ from agentteam_runtime.diagnostic_chat import (
     build_runtime_diagnostic_context,
     render_runtime_diagnostic_context,
 )
+from agentteam_runtime.goal_memory import build_goal_memory, render_goal_memory_prompt_context
 from agentteam_runtime.notifications import _permission_request_text
 from agentteam_runtime.operator_report import concise_report_lines
 from agentteam_runtime.profile import build_project_profile, write_project_profile
@@ -6488,6 +6489,135 @@ class TaskpackTests(unittest.TestCase):
             "持续优化原始目标。",
             _pursue_next_goal("持续优化原始目标。", {"completion_summary": {}}),
         )
+
+    def test_goal_memory_bounds_round_history_and_prompt_text(self):
+        long_text = "继续验证候选实现并记录基准。" * 40
+        rounds = [
+            {
+                "round": index,
+                "taskpack_id": f"pursue-loop-r{index}",
+                "status": "completed",
+                "run_status": "completed",
+                "blocked_count": index % 2,
+                "report_path": f"/tmp/reports/r{index}.md",
+            }
+            for index in range(1, 8)
+        ]
+
+        memory = build_goal_memory(
+            pursue_id="pursue-loop",
+            original_goal=long_text,
+            work_root="/tmp/agentteam-work",
+            rounds=rounds,
+            source_report={
+                "report_path": "/tmp/reports/r7.md",
+                "completion_summary": {
+                    "what_changed": [long_text],
+                    "next_steps": [long_text],
+                    "evidence_gaps": [long_text],
+                },
+            },
+            stop_reason="blocked",
+            max_round_history=3,
+            max_text_chars=80,
+            max_queue_items=2,
+        )
+        rendered = render_goal_memory_prompt_context(memory)
+
+        self.assertEqual(memory["memory_schema_version"], "goal_memory.v1")
+        self.assertEqual([item["round"] for item in memory["round_history"]], [5, 6, 7])
+        self.assertEqual(memory["latest_run_ids"], ["pursue-loop-r5", "pursue-loop-r6", "pursue-loop-r7"])
+        self.assertLessEqual(len(memory["original_goal"]), 80)
+        self.assertLessEqual(len(memory["current_hypothesis"]), 80)
+        self.assertLessEqual(len(memory["current_next_step"]), 80)
+        self.assertLessEqual(len(memory["blocked_reasons"][0]), 80)
+        self.assertLessEqual(len(memory["follow_up_queue"]), 2)
+        self.assertIn("Long-goal memory:", rendered)
+        self.assertIn("memory_bounds: round_history<=3 text<=80 queue<=2", rendered)
+
+    def test_agentteam_cli_pursue_writes_goal_memory_and_reuses_it_in_followup_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "pursue-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--verification-command-json",
+                    json.dumps(["python3", "-c", "print('ok')"]),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "pursue",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "持续优化这个仓库的准确率和延迟。",
+                    "--taskpack-id",
+                    "pursue-loop",
+                    "--max-rounds",
+                    "2",
+                    "--allow-review-gate-follow-up",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["rounds_completed"], 2)
+            memory_path = Path(summary["goal_memory_path"])
+            self.assertTrue(memory_path.exists())
+            self.assertIn(str(work_root.resolve()), str(memory_path))
+            self.assertEqual(memory_path.parent.name, "pursue")
+            memory = json.loads(memory_path.read_text(encoding="utf-8"))
+            self.assertEqual(memory["memory_schema_version"], "goal_memory.v1")
+            self.assertEqual(memory["pursue_id"], "pursue-loop")
+            self.assertEqual(memory["original_goal"], "持续优化这个仓库的准确率和延迟。")
+            self.assertEqual(memory["rounds_completed"], 2)
+            self.assertEqual(memory["latest_taskpack_id"], "pursue-loop-r2")
+            self.assertEqual(memory["latest_run_ids"], ["pursue-loop", "pursue-loop-r2"])
+            self.assertLessEqual(len(memory["round_history"]), memory["limits"]["max_round_history"])
+            self.assertLessEqual(len(json.dumps(memory, ensure_ascii=False)), memory["limits"]["max_memory_json_chars"])
+            self.assertIn("goal_memory_path", summary["runs"][0])
+
+            followup_taskpack = json.loads(
+                (work_root / "frozen" / "pursue-loop-r2" / "taskpack.yaml").read_text(encoding="utf-8")
+            )
+            followup_goal = followup_taskpack["goal"]
+            self.assertIn("Long-goal memory:", followup_goal)
+            self.assertIn("completed_rounds: 1", followup_goal)
+            self.assertIn("latest_run_ids: pursue-loop", followup_goal)
+            self.assertIn("memory_path:", followup_goal)
 
     def test_agentteam_cli_pursue_can_continue_when_review_gate_follow_up_is_allowed(self):
         with tempfile.TemporaryDirectory() as tmp:
