@@ -927,6 +927,45 @@ Implemented:
 - added regression coverage for English-only rejection and Chinese-summary
   acceptance.
 
+### M49: Self-Improvement Workflow Policy
+
+Status: designed; implementation pending.
+
+Goal: let AgentTeam improve the AgentTeam runtime through the ordinary taskpack
+workflow while keeping final source-branch merge, commit, push, and release
+activation under operator control.
+
+Decision: do not add a dedicated `agentteam self-improve` command in this
+milestone. Self-improvement is a normal implementation task with stronger
+taskpack, reporting, and review constraints. The operator uses existing commands
+such as `agentteam start`, `agentteam next`, `agentteam report`, and
+`agentteam integrate`.
+
+Scope:
+
+- add taskpack author guidance for goals that target the AgentTeam runtime
+  itself;
+- make no-merge/no-push and operator-review requirements explicit in generated
+  self-improvement taskpacks;
+- keep workers able to produce patches, evidence summaries, and verification
+  results;
+- keep source-branch integration, commit, push, and release activation outside
+  worker authority;
+- make completion reports and notifications clearly state that review is
+  required before source integration;
+- document the policy in
+  `implementation_artifacts/designs/2026-06-14-m49-self-improvement-workflow-policy.md`.
+
+Acceptance:
+
+- self-improvement goals are represented as ordinary taskpacks, not a special
+  scheduler mode;
+- generated self-improvement taskpacks do not request automatic source merge or
+  push authority;
+- reports identify self-improvement results as operator-gated and list the next
+  review action;
+- tests cover policy behavior without live model calls or network access.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -967,6 +1006,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to choose between operator-gated self-improvement
-workflow hardening and projection-backed retention validation before any
+The next recommended step is to implement M49 self-improvement workflow policy
+hardening, then return to projection-backed retention validation before any
 artifact deletion feature is considered.
