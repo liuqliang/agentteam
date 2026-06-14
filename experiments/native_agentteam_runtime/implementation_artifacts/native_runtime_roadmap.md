@@ -1146,6 +1146,38 @@ Next route: improve follow-up queue ergonomics so broad goals can continue as
 bounded, review-gated taskpack rounds using the improved reports as durable
 round context.
 
+### M62: Follow-Up Queue Inspection
+
+Status: implemented in the native-runtime branch.
+
+Goal: let operators inspect the next bounded task after a completed run without
+starting another worker or bypassing review gates.
+
+Implemented:
+
+- added a bounded follow-up queue helper that merges structured report
+  `next_steps`, `follow_up_recommendation`, and long-goal
+  `goal_memory.follow_up_queue`;
+- added `agentteam queue show` for read-only queue inspection with text and JSON
+  output;
+- added `agentteam queue next` for read-only next-goal and suggested
+  `agentteam next --from-taskpack ... --goal ...` command output;
+- queue commands resolve by `--taskpack`, `--run-dir`, or the latest run, and
+  reuse existing final reports and goal-memory artifacts;
+- queue commands do not draft taskpacks, start workers, integrate code, push, or
+  mutate run artifacts.
+
+Validation:
+
+- focused red/green tests cover queue helper merging, `queue show --json`, and
+  `queue next` text output;
+- normal verification runs through `test_taskpack` and `test_m0_runtime` with
+  `PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime`.
+
+Next route: continue with guarded artifact retention cleanup and semantic
+feedback proposal artifacts. Both should remain review-gated and must not make
+the projection DB authoritative.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -1186,7 +1218,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to improve follow-up queue ergonomics for
-long-running goals. Artifact deletion and DB-primary work should stay behind a
-separate approval gate because the current file-authoritative projection model
-is sufficient for correctness.
+The next recommended step is guarded artifact retention cleanup: allow deletion
+only for rebuildable artifacts that pass projection validation, while preserving
+authoritative reports, events, patches, taskpacks, and state snapshots.

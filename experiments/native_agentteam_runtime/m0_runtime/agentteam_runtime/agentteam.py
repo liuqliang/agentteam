@@ -39,9 +39,11 @@ from .operator_report import (
 from .completion_summary import compact_text_items
 from .goal_memory import (
     build_goal_memory,
+    goal_memory_path,
     render_goal_memory_prompt_context,
     write_goal_memory,
 )
+from .follow_up_queue import build_follow_up_queue_summary, render_follow_up_queue_text
 from .profile import (
     AgentTeamProfileError,
     build_project_profile,
@@ -115,6 +117,19 @@ _HELP_COMMANDS = [
         "examples": [
             "agentteam next --from-taskpack <id> --goal \"continue optimizing\"",
             "agentteam next --goal \"continue from the latest run\" --json",
+        ],
+    },
+    {
+        "name": "queue",
+        "summary": "Inspect read-only follow-up queue suggestions for a completed run.",
+        "examples": [
+            "agentteam queue show --taskpack <id>",
+            "agentteam queue next --taskpack <id>",
+            "agentteam queue show --run-dir <run> --json",
+        ],
+        "notes": [
+            "Does not draft taskpacks, start workers, merge code, or mutate run artifacts.",
+            "Use the printed agentteam next command when you decide to continue.",
         ],
     },
     {
@@ -384,6 +399,7 @@ def _build_parser():
     _add_init_parser(subcommands)
     _add_start_parser(subcommands)
     _add_next_parser(subcommands)
+    _add_queue_parser(subcommands)
     _add_pursue_parser(subcommands)
     _add_taskpack_new_parser(taskpack_subcommands)
     _add_taskpack_draft_parser(taskpack_subcommands)
@@ -615,6 +631,29 @@ def _add_next_parser(subcommands):
     )
     parser.add_argument("--json", action="store_true", help="Print the full execution result as JSON.")
     parser.set_defaults(handler=_handle_next)
+
+
+def _add_queue_parser(subcommands):
+    parser = subcommands.add_parser(
+        "queue",
+        help="Inspect the suggested follow-up queue for a completed run.",
+    )
+    queue_subcommands = parser.add_subparsers(
+        dest="queue_command",
+        required=True,
+        parser_class=JsonArgumentParser,
+    )
+    for command_name, help_text in [
+        ("show", "Show all bounded follow-up queue items."),
+        ("next", "Show only the next suggested follow-up goal and command."),
+    ]:
+        item_parser = queue_subcommands.add_parser(command_name, help=help_text)
+        item_parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+        item_parser.add_argument("--taskpack", help="Source taskpack/run id. Defaults to the latest run.")
+        item_parser.add_argument("--run-dir", help="Existing source run directory. Overrides --taskpack.")
+        item_parser.add_argument("--limit", type=int, default=5, help="Maximum queue items to show.")
+        item_parser.add_argument("--json", action="store_true", help="Print queue summary as JSON.")
+        item_parser.set_defaults(handler=_handle_queue)
 
 
 def _add_pursue_parser(subcommands):
@@ -1899,6 +1938,68 @@ def _handle_next(args):
         return result
     _write_execution_result_text(result)
     return 0
+
+
+def _handle_queue(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    work_root = Path(profile["work_root"]).resolve()
+    run_dir = _queue_source_run_dir(args, profile, work_root)
+    if not run_dir.exists():
+        raise AgentTeamCliError("source run not found", run_dir=str(run_dir))
+    source_report = build_run_completion_report(
+        run_dir,
+        project=profile.get("project_key") or "agentteam",
+    )
+    goal_memory = _latest_goal_memory_for_run(work_root, run_dir, source_report)
+    summary = build_follow_up_queue_summary(
+        source_report=source_report,
+        goal_memory=goal_memory,
+        source_taskpack_id=run_dir.name,
+        source_run_dir=str(run_dir),
+        limit=args.limit,
+    )
+    if args.json:
+        return summary
+    sys.stdout.write(render_follow_up_queue_text(summary, next_only=args.queue_command == "next"))
+    sys.stdout.flush()
+    return 0
+
+
+def _queue_source_run_dir(args, profile, work_root):
+    if args.run_dir:
+        return Path(args.run_dir).resolve()
+    if args.taskpack:
+        return (work_root / "runs" / args.taskpack).resolve()
+    return _latest_run_dir(profile)
+
+
+def _latest_goal_memory_for_run(work_root, run_dir, source_report):
+    pursue_recap = source_report.get("pursue_recap") if isinstance(source_report, dict) else {}
+    if isinstance(pursue_recap, dict) and pursue_recap.get("goal_memory_path"):
+        memory = _read_json_if_exists(pursue_recap["goal_memory_path"])
+        if memory:
+            return memory
+    memory = _read_json_if_exists(goal_memory_path(work_root, run_dir.name))
+    if memory:
+        return memory
+    pursue_root = Path(work_root) / "pursue"
+    if not pursue_root.exists():
+        return {}
+    candidates = []
+    for path in pursue_root.glob("*-goal-memory.json"):
+        memory = _read_json_if_exists(path)
+        if not isinstance(memory, dict):
+            continue
+        if memory.get("latest_taskpack_id") == run_dir.name or run_dir.name in (memory.get("latest_run_ids") or []):
+            try:
+                modified = path.stat().st_mtime
+            except OSError:
+                modified = 0
+            candidates.append((modified, memory))
+    if not candidates:
+        return {}
+    return sorted(candidates, key=lambda item: item[0])[-1][1]
 
 
 def _followup_source_run_dir(args, profile, work_root):

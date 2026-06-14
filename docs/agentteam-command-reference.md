@@ -39,7 +39,7 @@ compact for terminal use.
 | Group | Commands | Purpose |
 | --- | --- | --- |
 | Project setup | `init`, `doctor`, `update`, `db`, `stats`, `gc` | Configure, inspect, and maintain the local AgentTeam installation for a project. |
-| Run lifecycle | `start`, `next`, `pursue`, `continue`, `stop`, `status`, `explain-status`, `watch`, `logs`, `report`, `paths` | Start work, inspect progress, stop safely, and understand completed runs. |
+| Run lifecycle | `start`, `next`, `queue`, `pursue`, `continue`, `stop`, `status`, `explain-status`, `watch`, `logs`, `report`, `paths` | Start work, inspect progress, stop safely, and understand completed runs. |
 | Result integration | `integrate` | Merge verified integration-baseline changes back to the target repository. |
 | Notification | `notify` | Test Feishu delivery or resend completion summaries. |
 | Operator intervention | `resume`, `answer`, `permissions`, `chat` | Resolve manual gates, permission requests, or discuss a run with diagnostic context. |
@@ -353,6 +353,37 @@ Notes:
 - Completion reports may include a `follow_up_recommendation` with an
   `agentteam next --from-taskpack ... --goal ...` command. Treat it as an
   operator-facing suggestion, not an automatic start.
+
+### `agentteam queue`
+
+Inspects the suggested follow-up queue for a completed run.
+
+Use it when:
+
+- A run or pursue loop completed and you want to see the next bounded task
+  before launching another worker.
+- You want a compact `agentteam next ...` command derived from the latest report
+  and goal memory.
+
+Examples:
+
+```bash
+agentteam queue show --taskpack <taskpack-id>
+agentteam queue show --taskpack <taskpack-id> --json
+agentteam queue next --taskpack <taskpack-id>
+agentteam queue next --run-dir ~/.local/share/agentteam/verisilicon/runs/<taskpack-id>
+```
+
+Notes:
+
+- `queue show` and `queue next` are read-only. They do not draft a taskpack,
+  start workers, merge code, or mutate run artifacts.
+- Queue items are built from structured report `next_steps`,
+  `follow_up_recommendation`, and long-goal `goal_memory.follow_up_queue` when
+  available.
+- `queue next` prints only the next suggested goal and command. Run the printed
+  `agentteam next --from-taskpack ... --goal ...` command when you want to
+  launch the next taskpack.
 
 ### `agentteam pursue`
 

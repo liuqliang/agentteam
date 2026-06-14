@@ -7089,6 +7089,52 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("Long-goal memory:", rendered)
         self.assertIn("memory_bounds: round_history<=3 text<=80 queue<=2", rendered)
 
+    def test_follow_up_queue_summary_merges_report_and_goal_memory(self):
+        from agentteam_runtime.follow_up_queue import build_follow_up_queue_summary
+
+        summary = build_follow_up_queue_summary(
+            source_report={
+                "run_id": "first-pass",
+                "report_path": "/tmp/first-pass/reports/final_report.md",
+                "completion_summary": {
+                    "next_steps": ["继续验证最慢模块。", "补充准确率基准。"],
+                    "follow_up_recommendation": {
+                        "action": "next",
+                        "next_command": 'agentteam next --from-taskpack first-pass --goal "继续验证最慢模块。"',
+                    },
+                },
+            },
+            goal_memory={
+                "follow_up_queue": [
+                    {
+                        "objective": "补充准确率基准。",
+                        "source_taskpack_id": "first-pass",
+                        "source_report_path": "/tmp/first-pass/reports/final_report.md",
+                    },
+                    {
+                        "objective": "检查端到端延迟。",
+                        "source_taskpack_id": "first-pass",
+                        "source_report_path": "/tmp/first-pass/reports/final_report.md",
+                    },
+                ]
+            },
+            source_taskpack_id="first-pass",
+            source_run_dir="/tmp/first-pass",
+            limit=5,
+        )
+
+        self.assertEqual(summary["queue_status"], "ready")
+        self.assertEqual(summary["source_taskpack_id"], "first-pass")
+        self.assertEqual(
+            [item["objective"] for item in summary["items"]],
+            ["继续验证最慢模块。", "补充准确率基准。", "检查端到端延迟。"],
+        )
+        self.assertEqual(summary["next_goal"], "继续验证最慢模块。")
+        self.assertEqual(
+            summary["next_command"],
+            'agentteam next --from-taskpack first-pass --goal "继续验证最慢模块。"',
+        )
+
     def test_agentteam_cli_pursue_writes_goal_memory_and_reuses_it_in_followup_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -7555,6 +7601,166 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("report:", next_completed.stdout)
             self.assertNotIn('"draft"', next_completed.stdout)
             self.assertLessEqual(len([line for line in next_completed.stdout.splitlines() if line.strip()]), 9)
+
+    def test_agentteam_cli_queue_show_reports_followup_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "queue-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            first_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Initial optimization pass.",
+                    "--taskpack-id",
+                    "first-pass",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(first_completed.returncode, 0, first_completed.stderr)
+
+            queue_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "queue",
+                    "show",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "first-pass",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(queue_completed.returncode, 0, queue_completed.stderr)
+            summary = json.loads(queue_completed.stdout)
+            self.assertEqual(summary["queue_status"], "ready")
+            self.assertEqual(summary["source_taskpack_id"], "first-pass")
+            self.assertTrue(summary["items"])
+            self.assertEqual(summary["next_goal"], summary["items"][0]["objective"])
+            self.assertIn("agentteam next --from-taskpack first-pass", summary["next_command"])
+
+    def test_agentteam_cli_queue_next_renders_suggested_next_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "queue-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--one-shot",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            first_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "start",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Initial optimization pass.",
+                    "--taskpack-id",
+                    "first-pass",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(first_completed.returncode, 0, first_completed.stderr)
+
+            queue_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "queue",
+                    "next",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "first-pass",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(queue_completed.returncode, 0, queue_completed.stderr)
+            self.assertIn("queue_status: ready", queue_completed.stdout)
+            self.assertIn("source_taskpack_id: first-pass", queue_completed.stdout)
+            self.assertIn("next_goal:", queue_completed.stdout)
+            self.assertIn("next_command: agentteam next --from-taskpack first-pass", queue_completed.stdout)
+            self.assertNotIn("status: completed", queue_completed.stdout)
 
     def test_repo_root_agentteam_launcher_invokes_cli_help(self):
         launcher = Path(__file__).resolve().parents[4] / "agentteam"
