@@ -65,6 +65,19 @@ class FileMailboxWorker:
         return None
 
     def _result_message(self, message, runtime_result):
+        payload = {
+            "source_message_id": message["message_id"],
+            "task_id": message["payload"]["task_id"],
+            "attempt_id": message["payload"]["attempt_id"],
+            "lease_id": message["payload"]["lease_id"],
+            "result_status": runtime_result["result_status"],
+            "changed_files": runtime_result["changed_files"],
+            "output": runtime_result.get("output", {}),
+        }
+        if isinstance(runtime_result.get("token_usage"), dict):
+            payload["token_usage"] = runtime_result["token_usage"]
+        if isinstance(runtime_result.get("usage"), dict):
+            payload["usage"] = runtime_result["usage"]
         return {
             "message_id": f"RESULT-{message['message_id']}",
             "from_agent": self.agent_id,
@@ -72,15 +85,7 @@ class FileMailboxWorker:
             "message_type": "runtime_result",
             "correlation_id": message["correlation_id"],
             "created_at": self.clock.now(),
-            "payload": {
-                "source_message_id": message["message_id"],
-                "task_id": message["payload"]["task_id"],
-                "attempt_id": message["payload"]["attempt_id"],
-                "lease_id": message["payload"]["lease_id"],
-                "result_status": runtime_result["result_status"],
-                "changed_files": runtime_result["changed_files"],
-                "output": runtime_result.get("output", {}),
-            },
+            "payload": payload,
         }
 
     def _load_agent(self):
@@ -562,6 +567,8 @@ def _runtime_result_from_outbox(outbox_path, source_message_id):
             "result_status": payload.get("result_status", "failed"),
             "changed_files": payload.get("changed_files", []),
             "output": payload.get("output", {}),
+            "usage": payload.get("usage"),
+            "token_usage": payload.get("token_usage"),
         }
     return {
         "result_status": "failed",

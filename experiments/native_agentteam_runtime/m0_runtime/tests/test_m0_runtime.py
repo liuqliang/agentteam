@@ -2207,6 +2207,88 @@ class M0RuntimeTests(unittest.TestCase):
                 ["generated/m0_generated_repo_index.json"],
             )
 
+    def test_file_mailbox_worker_poll_once_writes_token_usage_to_outbox(self):
+        class TokenRuntimeAdapter:
+            def run(self, message, worktree_path=None):
+                return {
+                    "result_status": "completed",
+                    "changed_files": [],
+                    "output": {"summary": "done"},
+                    "token_usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 2,
+                        "total_tokens": 12,
+                        "cached_input_tokens": 4,
+                    },
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            inbox = output_dir / "mailboxes" / "agent-repo-map" / "inbox.jsonl"
+            outbox = output_dir / "mailboxes" / "agent-repo-map" / "outbox.jsonl"
+            message = _mailbox_dispatch_message(
+                message_id="MSG-MAILBOX-TOKENS-001",
+                agent_id="agent-repo-map",
+                write_scope=[],
+            )
+            _append_test_jsonl(inbox, [message])
+
+            worker = FileMailboxWorker(
+                FIXTURES / "sample_agent_pool.json",
+                output_dir,
+                "agent-repo-map",
+                runtime_adapter=TokenRuntimeAdapter(),
+                clock=FixedClock(),
+            )
+            worker.poll_once()
+
+            result_message = _read_first_jsonl(outbox)
+
+            self.assertEqual(
+                result_message["payload"].get("token_usage"),
+                {
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "total_tokens": 12,
+                    "cached_input_tokens": 4,
+                },
+            )
+
+    def test_mailbox_worker_outbox_reader_preserves_token_usage(self):
+        from agentteam_runtime.mailbox_worker import _runtime_result_from_outbox
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outbox = Path(tmp) / "outbox.jsonl"
+            usage = {
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12,
+                "cached_input_tokens": 4,
+            }
+            _append_test_jsonl(
+                outbox,
+                [
+                    {
+                        "message_type": "runtime_result",
+                        "payload": {
+                            "source_message_id": "MSG-MAILBOX-TOKENS-001",
+                            "result_status": "completed",
+                            "changed_files": [],
+                            "output": {"summary": "done"},
+                            "token_usage": usage,
+                        },
+                    }
+                ],
+            )
+
+            result = _runtime_result_from_outbox(
+                outbox,
+                "MSG-MAILBOX-TOKENS-001",
+            )
+
+            self.assertEqual(result.get("token_usage"), usage)
+
     def test_file_mailbox_worker_cli_processes_one_message_in_subprocess(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
