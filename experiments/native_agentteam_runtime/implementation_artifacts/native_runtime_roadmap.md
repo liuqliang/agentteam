@@ -1111,6 +1111,41 @@ separate operator approval, stronger migration/rebuild evidence, and proof that
 the projection layer can preserve auditability better than the current
 file-backed authority.
 
+### M61: Multi-Task Operator Report Aggregation
+
+Status: implemented in the native-runtime branch.
+
+Goal: make completed runs report meaningful Chinese operator summaries when a
+taskpack contains multiple accepted tasks, without requiring the operator to
+read long logs or infer results from per-task details.
+
+Implemented:
+
+- completion summaries now aggregate unique task-level changes, changed files,
+  verification evidence, measured results, merge guidance, and next steps into
+  bounded Chinese `operator_digest` lines;
+- `agentteam report` and concise report lines render aggregate values instead
+  of only the first structured task item;
+- `agentteam start`, `continue`, `next`, and `pursue` completion text use the
+  same bounded aggregate fields in the compact `work_report` and
+  `recommendation` lines;
+- Feishu `run_completed` messages reuse the aggregate digest, so completion
+  notifications summarize all structured task reports while preserving detailed
+  task identifiers below the summary;
+- existing structured report lists and per-task report sections remain
+  authoritative and are not collapsed or deleted.
+
+Validation:
+
+- focused red/green tests cover completion summary aggregation, concise report
+  aggregation, CLI completion text aggregation, and Feishu multi-task messages;
+- normal verification runs through `test_taskpack` and `test_m0_runtime` with
+  `PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime`.
+
+Next route: improve follow-up queue ergonomics so broad goals can continue as
+bounded, review-gated taskpack rounds using the improved reports as durable
+round context.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -1151,6 +1186,7 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to continue the DB/artifact route by validating
-whether read-through projection queries are reliable enough for broader
-operator commands, before considering any real artifact deletion feature.
+The next recommended step is to improve follow-up queue ergonomics for
+long-running goals. Artifact deletion and DB-primary work should stay behind a
+separate approval gate because the current file-authoritative projection model
+is sufficient for correctness.

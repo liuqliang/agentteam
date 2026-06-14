@@ -140,6 +140,18 @@ def _completion_operator_digest(summary):
     return digest
 
 
+def compact_text_items(values, limit=3):
+    items = _text_items(values)
+    if not items:
+        return None
+    selected = items[:limit]
+    text = "；".join(selected)
+    omitted_count = len(items) - len(selected)
+    if omitted_count > 0:
+        text += f"；等 {omitted_count} 项"
+    return text
+
+
 def _follow_up_recommendation(run_id, run_status, blocked_count, integration_baseline, summary):
     next_step = _first_text(summary.get("next_steps"))
     has_integration = bool(integration_baseline.get("branch"))
@@ -248,7 +260,7 @@ def _quote_goal(goal):
 
 
 def _append_digest_item(digest, label, values):
-    text = _first_text(values)
+    text = compact_text_items(values)
     if text:
         digest.append(f"{label}：{text}")
 

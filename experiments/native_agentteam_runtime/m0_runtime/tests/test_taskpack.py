@@ -1325,6 +1325,50 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("中文工作汇报:", lines)
         self.assertIn("- 做了什么：优化了手势评分流水线的数据窗口复制。", lines)
 
+    def test_completion_summary_aggregates_multiple_tasks_in_operator_digest(self):
+        summary = build_completion_summary(
+            run_id="multi-task-run",
+            run_status="completed",
+            task_count=2,
+            blocked_count=0,
+            task_reports=[
+                {
+                    "task_id": "TASK-A",
+                    "status": "implementation completed",
+                    "what_changed": ["实现任务 A 的代码路径。"],
+                    "changed_files": ["src/a.py"],
+                    "verification": ["unit-a: passed"],
+                    "measured_result": ["A 延迟下降 2%。"],
+                    "integration": "passed",
+                    "merge_recommendation": "Review accepted patch A.",
+                    "next_steps": ["继续验证 A。"],
+                },
+                {
+                    "task_id": "TASK-B",
+                    "status": "implementation completed",
+                    "what_changed": ["补充任务 B 的验证入口。"],
+                    "changed_files": ["src/b.py"],
+                    "verification": ["unit-b: passed"],
+                    "measured_result": ["B 报告覆盖两个任务。"],
+                    "integration": "passed",
+                    "merge_recommendation": "Review accepted patch B.",
+                    "next_steps": ["继续验证 B。"],
+                },
+            ],
+        )
+
+        self.assertEqual(
+            summary["operator_digest"],
+            [
+                "做了什么：实现任务 A 的代码路径。；补充任务 B 的验证入口。",
+                "涉及文件：src/a.py；src/b.py",
+                "验证结果：unit-a: passed；unit-b: passed",
+                "实际结果：A 延迟下降 2%。；B 报告覆盖两个任务。",
+                "合并建议：Review accepted patch A.；Review accepted patch B.",
+                "下一步：继续验证 A。；继续验证 B。",
+            ],
+        )
+
     def test_completion_summary_includes_follow_up_recommendation(self):
         summary = build_completion_summary(
             run_id="taskpack-7",
@@ -1501,6 +1545,41 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("integration=passed", output)
         self.assertIn("recommendation: merge=Run `agentteam integrate --taskpack follow-up-run`.", output)
         self.assertIn("next=Run the full competition validation package.", output)
+
+    def test_execution_result_text_aggregates_multiple_task_summary_fields(self):
+        result = {
+            "status": "completed",
+            "taskpack_id": "multi-task-run",
+            "report": {
+                "report_path": "/tmp/multi-task-report.md",
+                "run_status": "completed",
+                "task_count": 2,
+                "blocked_count": 0,
+                "completion_summary": {
+                    "what_changed": ["实现任务 A 的代码路径。", "补充任务 B 的验证入口。"],
+                    "changed_files": ["src/a.py", "src/b.py"],
+                    "verification": ["unit-a: passed", "unit-b: passed"],
+                    "integration": "passed",
+                    "integration_recommendation": "Run `agentteam integrate --taskpack multi-task-run`.",
+                    "next_steps": ["继续验证 A。", "继续验证 B。"],
+                    "evidence_gaps": [],
+                },
+            },
+            "paths": {"run_dir": "/tmp/multi-task-run"},
+        }
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            _write_execution_result_text(result)
+
+        output = stdout.getvalue()
+        self.assertIn(
+            "work_report: changed=实现任务 A 的代码路径。；补充任务 B 的验证入口。",
+            output,
+        )
+        self.assertIn("files=src/a.py；src/b.py", output)
+        self.assertIn("verification=unit-a: passed；unit-b: passed", output)
+        self.assertIn("next=继续验证 A。；继续验证 B。", output)
 
     def test_runtime_diagnostic_context_summarizes_failed_integration(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1962,6 +2041,46 @@ class TaskpackTests(unittest.TestCase):
 
         self.assertIn("中文工作汇报: 做了什么：优化了手势评分流水线的数据窗口复制。", lines)
         self.assertIn("中文工作汇报: 验证结果：unit_tests: passed", lines)
+
+    def test_concise_report_lines_aggregate_multiple_tasks(self):
+        lines = concise_report_lines(
+            {
+                "report_path": "/tmp/final_report.md",
+                "run_status": "completed",
+                "task_count": 2,
+                "blocked_count": 0,
+                "completion_summary": {
+                    "what_changed": ["实现任务 A 的代码路径。", "补充任务 B 的验证入口。"],
+                    "changed_files": ["src/a.py", "src/b.py"],
+                    "verification": ["unit-a: passed", "unit-b: passed"],
+                    "integration": "passed",
+                    "next_steps": ["继续验证 A。", "继续验证 B。"],
+                },
+                "operator_report": {
+                    "task_reports": [
+                        {
+                            "task_id": "TASK-A",
+                            "status": "implementation completed",
+                            "what_changed": ["实现任务 A 的代码路径。"],
+                            "next_steps": ["继续验证 A。"],
+                        },
+                        {
+                            "task_id": "TASK-B",
+                            "status": "implementation completed",
+                            "what_changed": ["补充任务 B 的验证入口。"],
+                            "next_steps": ["继续验证 B。"],
+                        },
+                    ]
+                },
+            }
+        )
+
+        self.assertIn("changed: 实现任务 A 的代码路径。；补充任务 B 的验证入口。", lines)
+        self.assertIn("changed_files: src/a.py；src/b.py", lines)
+        self.assertIn("verification: unit-a: passed；unit-b: passed", lines)
+        self.assertIn("next: 继续验证 A。；继续验证 B。", lines)
+        self.assertIn("task TASK-A: implementation completed", lines)
+        self.assertIn("task TASK-B: implementation completed", lines)
 
     def test_concise_report_lines_include_agentteam_target_review_gate(self):
         lines = concise_report_lines(

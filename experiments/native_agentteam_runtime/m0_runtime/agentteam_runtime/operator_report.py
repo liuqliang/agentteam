@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from .completion_summary import build_completion_summary
+from .completion_summary import build_completion_summary, compact_text_items
 from .two_phase_scheduler import _operator_report_from_state
 from .token_usage import aggregate_token_usage, format_token_usage
 
@@ -244,13 +244,13 @@ def concise_report_lines(report, max_tasks=3):
         lines.append(f"中文简报: {brief_line}")
     for digest_line in _text_items(summary.get("operator_digest"))[:6]:
         lines.append(f"中文工作汇报: {digest_line}")
-    changed = _first_text(summary.get("what_changed"))
+    changed = compact_text_items(summary.get("what_changed"))
     if changed:
         lines.append(f"changed: {changed}")
-    changed_file = _first_text(summary.get("changed_files"))
-    if changed_file:
-        lines.append(f"changed_files: {changed_file}")
-    verification = _first_text(summary.get("verification"))
+    changed_files = compact_text_items(summary.get("changed_files"))
+    if changed_files:
+        lines.append(f"changed_files: {changed_files}")
+    verification = compact_text_items(summary.get("verification"))
     if verification:
         lines.append(f"verification: {verification}")
     if summary.get("integration"):
@@ -284,10 +284,10 @@ def concise_report_lines(report, max_tasks=3):
             command = review_gate.get(key)
             if command:
                 lines.append(f"review_{label}: {command}")
-    next_step = _first_text(summary.get("next_steps"))
+    next_step = compact_text_items(summary.get("next_steps"))
     if next_step:
         lines.append(f"next: {next_step}")
-    evidence_gap = _first_text(summary.get("evidence_gaps"))
+    evidence_gap = compact_text_items(summary.get("evidence_gaps"))
     if evidence_gap:
         lines.append(f"evidence_gap: {evidence_gap}")
     task_reports = (

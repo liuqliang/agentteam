@@ -616,7 +616,9 @@ Completion summaries include:
 
 - `chinese_operator_brief`: compact Chinese scan summary.
 - `operator_digest`: deterministic Chinese work report built only from
-  structured fields.
+  structured fields. Multi-task runs aggregate unique task-level changes,
+  changed files, verification evidence, measured results, merge guidance, and
+  next steps into bounded Chinese lines instead of showing only the first task.
 - `follow_up_recommendation`: suggested `integrate`, `next`, or blocker-review
   action with command text when the structured report supports it.
 - `review_gate`: concise review-gate guidance when accepted changes are waiting
@@ -711,6 +713,8 @@ Use it when:
 
 - A run completed but Feishu did not receive the message.
 - You want to send the report summary without rerunning the task.
+- You want the same bounded Chinese multi-task operator digest that
+  `agentteam report` renders, without reading the full terminal log.
 
 Examples:
 

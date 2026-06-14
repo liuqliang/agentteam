@@ -36,6 +36,7 @@ from .operator_report import (
     find_pursue_recap_for_run,
     render_run_completion_report,
 )
+from .completion_summary import compact_text_items
 from .goal_memory import (
     build_goal_memory,
     render_goal_memory_prompt_context,
@@ -4430,9 +4431,9 @@ def _write_execution_result_text(result):
         work_report = _compact_key_value_line(
             "work_report",
             [
-                ("changed", _first_non_empty_text(completion_summary.get("what_changed"))),
-                ("files", _first_non_empty_text(completion_summary.get("changed_files"))),
-                ("verification", _first_non_empty_text(completion_summary.get("verification"))),
+                ("changed", compact_text_items(completion_summary.get("what_changed"))),
+                ("files", compact_text_items(completion_summary.get("changed_files"))),
+                ("verification", compact_text_items(completion_summary.get("verification"))),
                 ("integration", completion_summary.get("integration")),
             ],
         )
@@ -4442,8 +4443,8 @@ def _write_execution_result_text(result):
             "recommendation",
             [
                 ("merge", completion_summary.get("integration_recommendation")),
-                ("next", _first_non_empty_text(completion_summary.get("next_steps"))),
-                ("evidence_gap", _first_non_empty_text(completion_summary.get("evidence_gaps"))),
+                ("next", compact_text_items(completion_summary.get("next_steps"))),
+                ("evidence_gap", compact_text_items(completion_summary.get("evidence_gaps"))),
             ],
         )
         if recommendation:

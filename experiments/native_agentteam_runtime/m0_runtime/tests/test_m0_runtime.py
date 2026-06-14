@@ -333,6 +333,73 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("Next:", text)
         self.assertIn("恢复不改变采样语义的优化，或重新导出 C 模型。", text)
 
+    def test_feishu_run_completed_summarizes_multiple_tasks(self):
+        from agentteam_runtime.notifications import build_feishu_notification_sink_from_env
+
+        calls = []
+
+        def fake_post(url, payload, timeout_seconds):
+            calls.append({"url": url, "payload": payload, "timeout_seconds": timeout_seconds})
+            return {"status_code": 200, "body": {"code": 0, "msg": "success"}}
+
+        sink = build_feishu_notification_sink_from_env(
+            webhook_env="AGENTTEAM_FEISHU_TEST_WEBHOOK",
+            project="agentteam",
+            env={
+                "AGENTTEAM_FEISHU_TEST_WEBHOOK": (
+                    "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token"
+                ),
+            },
+            http_post=fake_post,
+            clock=lambda: 1599360473,
+        )
+        result = sink.notify(
+            {
+                "event_id": "EVT-100",
+                "sequence": 100,
+                "event_type": "run_completed",
+                "correlation_id": "run:completed",
+                "payload": {
+                    "run_status": "completed",
+                    "operator_report": {
+                        "report_schema_version": "operator_run_report.v1",
+                        "task_count": 2,
+                        "blocked_count": 0,
+                        "task_reports": [
+                            {
+                                "task_id": "TASK-A",
+                                "status": "implementation completed",
+                                "what_changed": ["实现任务 A 的代码路径。"],
+                                "changed_files": ["src/a.py"],
+                                "verification": ["unit-a: passed"],
+                                "integration": "passed",
+                                "next_steps": ["继续验证 A。"],
+                            },
+                            {
+                                "task_id": "TASK-B",
+                                "status": "implementation completed",
+                                "what_changed": ["补充任务 B 的验证入口。"],
+                                "changed_files": ["src/b.py"],
+                                "verification": ["unit-b: passed"],
+                                "integration": "passed",
+                                "next_steps": ["继续验证 B。"],
+                            },
+                        ],
+                    },
+                },
+            },
+            {"run_dir": "/tmp/agentteam-run"},
+        )
+
+        self.assertEqual(result["event_type"], "notification_sent")
+        text = calls[0]["payload"]["content"]["text"]
+        self.assertIn("中文工作汇报:", text)
+        self.assertIn("做了什么：实现任务 A 的代码路径。；补充任务 B 的验证入口。", text)
+        self.assertIn("涉及文件：src/a.py；src/b.py", text)
+        self.assertIn("验证结果：unit-a: passed；unit-b: passed", text)
+        self.assertIn("Task: TASK-A", text)
+        self.assertIn("Task: TASK-B", text)
+
     def test_two_phase_scheduler_notifies_manual_gate_after_canonical_event(self):
         class RecordingNotificationSink:
             def __init__(self):
