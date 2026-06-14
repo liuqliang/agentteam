@@ -6172,6 +6172,169 @@ class TaskpackTests(unittest.TestCase):
                 "integrate",
             )
             self.assertTrue((work_root / "runs" / "pursue-loop").exists())
+            recap_path = Path(summary["pursue_recap_path"])
+            self.assertTrue(recap_path.exists())
+            self.assertIn(str(work_root.resolve()), str(recap_path))
+            recap = json.loads(recap_path.read_text(encoding="utf-8"))
+            self.assertEqual(recap["pursue_id"], "pursue-loop")
+            self.assertEqual(recap["rounds_completed"], 1)
+            self.assertEqual(recap["max_rounds"], 1)
+            self.assertEqual(recap["stop_reason"], "review_gate_required")
+            self.assertEqual(recap["latest_taskpack_id"], "pursue-loop")
+            self.assertEqual(
+                recap["latest_report_path"],
+                summary["runs"][0]["report_path"],
+            )
+            self.assertIn(
+                "agentteam report --taskpack pursue-loop",
+                recap["operator_next_action"],
+            )
+
+    def test_agentteam_cli_status_and_report_surface_latest_pursue_recap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "pursue-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--verification-command-json",
+                    json.dumps(["python3", "-c", "print('ok')"]),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+            pursue_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "pursue",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "持续优化这个仓库的准确率和延迟。",
+                    "--taskpack-id",
+                    "pursue-loop",
+                    "--max-rounds",
+                    "1",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(pursue_completed.returncode, 0, pursue_completed.stderr)
+
+            status_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(status_completed.returncode, 0, status_completed.stderr)
+            self.assertIn("pursue: pursue-loop stopped because review_gate_required", status_completed.stdout)
+            self.assertIn("pursue_rounds: 1/1", status_completed.stdout)
+            self.assertIn("pursue_latest_taskpack: pursue-loop", status_completed.stdout)
+            self.assertIn("pursue_next_action: agentteam report --taskpack pursue-loop", status_completed.stdout)
+
+            report_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "report",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "pursue-loop",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(report_completed.returncode, 0, report_completed.stderr)
+            self.assertIn("## Pursue Recap", report_completed.stdout)
+            self.assertIn("- Stop reason: review_gate_required", report_completed.stdout)
+            self.assertIn("- Latest taskpack: pursue-loop", report_completed.stdout)
+            self.assertIn("- Next action: agentteam report --taskpack pursue-loop", report_completed.stdout)
+
+    def test_pursue_status_text_surfaces_all_operator_stop_reasons(self):
+        base_summary = {
+            "project": "pursue-project",
+            "latest_run": "pursue-loop",
+            "status": "completed",
+            "overall_status": "completed",
+            "run_status": "completed",
+            "liveness_status": "stopped",
+            "tasks": {"done": 1, "blocked": 0},
+            "integration": {"blocked": 0},
+            "evidence": {},
+            "integration_baseline": {},
+            "token_usage": {},
+            "inflight": {"total": 0},
+            "manual_gates": 0,
+            "permission_requests": 0,
+            "workers": {"total": 0, "stopped": 0, "running": 0, "quarantined": 0},
+            "run_dir": "/tmp/agentteam-work/runs/pursue-loop",
+        }
+        for stop_reason in [
+            "review_gate_required",
+            "blocked",
+            "manual_gate_required",
+            "permission_request_required",
+            "failed",
+            "max_rounds_reached",
+        ]:
+            summary = {
+                **base_summary,
+                "pursue_recap": {
+                    "pursue_id": "pursue-loop",
+                    "rounds_completed": 1,
+                    "max_rounds": 2,
+                    "stop_reason": stop_reason,
+                    "latest_taskpack_id": "pursue-loop",
+                    "latest_report_path": "/tmp/agentteam-work/runs/pursue-loop/reports/final_report.md",
+                    "operator_next_action": "agentteam report --taskpack pursue-loop",
+                },
+            }
+            with self.subTest(stop_reason=stop_reason):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    _write_status_text(summary)
+                output = buffer.getvalue()
+                self.assertIn(f"pursue: pursue-loop stopped because {stop_reason}", output)
 
     def test_pursue_stop_reason_blocks_operator_gates(self):
         self.assertEqual(
@@ -6348,7 +6511,9 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("stop_reason: review_gate_required", completed.stdout)
             self.assertIn("latest_taskpack_id: pursue-loop", completed.stdout)
             self.assertIn("latest_report:", completed.stdout)
-            self.assertLessEqual(len([line for line in completed.stdout.splitlines() if line.strip()]), 5)
+            self.assertIn("pursue_recap:", completed.stdout)
+            self.assertIn("operator_next_action: agentteam report --taskpack pursue-loop", completed.stdout)
+            self.assertLessEqual(len([line for line in completed.stdout.splitlines() if line.strip()]), 7)
 
     def test_agentteam_cli_continue_runs_existing_frozen_taskpack_without_draft(self):
         with tempfile.TemporaryDirectory() as tmp:

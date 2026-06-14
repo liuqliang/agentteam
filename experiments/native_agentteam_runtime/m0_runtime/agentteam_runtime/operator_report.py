@@ -63,6 +63,7 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
             task_reports=task_reports,
             integration_baseline=integration_baseline,
         ),
+        "pursue_recap": find_pursue_recap_for_run(run_dir),
         "integration_baseline": integration_baseline,
         "operator_report": operator_report,
         "report_path": str(run_dir / "reports" / "final_report.md"),
@@ -101,6 +102,21 @@ def render_run_completion_report(report):
             f"- {format_token_usage(report.get('token_usage'))}",
         ]
     )
+    pursue_recap = report.get("pursue_recap") if isinstance(report.get("pursue_recap"), dict) else {}
+    if pursue_recap:
+        lines.extend(["", "## Pursue Recap"])
+        lines.append(f"- Pursue: {pursue_recap.get('pursue_id') or 'unknown'}")
+        lines.append(f"- Stop reason: {pursue_recap.get('stop_reason') or 'unknown'}")
+        lines.append(
+            "- Rounds: "
+            f"{pursue_recap.get('rounds_completed', 0)}/{pursue_recap.get('max_rounds', 0)}"
+        )
+        if pursue_recap.get("latest_taskpack_id"):
+            lines.append(f"- Latest taskpack: {pursue_recap['latest_taskpack_id']}")
+        if pursue_recap.get("latest_report_path"):
+            lines.append(f"- Latest report: {pursue_recap['latest_report_path']}")
+        if pursue_recap.get("operator_next_action"):
+            lines.append(f"- Next action: {pursue_recap['operator_next_action']}")
     summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
     if summary:
         lines.extend(["", "## Operator Summary"])
@@ -190,6 +206,21 @@ def concise_report_lines(report, max_tasks=3):
     token_usage = report.get("token_usage")
     if isinstance(token_usage, dict):
         lines.append(format_token_usage(token_usage, label="tokens"))
+    pursue_recap = report.get("pursue_recap") if isinstance(report.get("pursue_recap"), dict) else {}
+    if pursue_recap:
+        lines.append(
+            "pursue: "
+            f"{pursue_recap.get('pursue_id') or 'unknown'} "
+            f"stopped because {pursue_recap.get('stop_reason') or 'unknown'}"
+        )
+        lines.append(
+            "pursue_rounds: "
+            f"{pursue_recap.get('rounds_completed', 0)}/{pursue_recap.get('max_rounds', 0)}"
+        )
+        if pursue_recap.get("latest_taskpack_id"):
+            lines.append(f"pursue_latest_taskpack: {pursue_recap['latest_taskpack_id']}")
+        if pursue_recap.get("operator_next_action"):
+            lines.append(f"pursue_next_action: {pursue_recap['operator_next_action']}")
     summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
     for brief_line in _text_items(summary.get("chinese_operator_brief"))[:3]:
         lines.append(f"中文简报: {brief_line}")
@@ -267,6 +298,45 @@ def _latest_terminal_event(events):
         if event.get("event_type") in TERMINAL_EVENT_TYPES:
             return event
     return None
+
+
+def find_pursue_recap_for_run(run_dir):
+    run_dir = Path(run_dir).resolve()
+    recap_root = _pursue_recap_root_for_run(run_dir)
+    if not recap_root.exists():
+        return {}
+    candidates = []
+    for path in recap_root.glob("*.json"):
+        try:
+            recap = json.loads(path.read_text(encoding="utf-8"))
+            modified = path.stat().st_mtime
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(recap, dict) or not _pursue_recap_mentions_run(recap, run_dir.name):
+            continue
+        recap = dict(recap)
+        recap["recap_path"] = str(path.resolve())
+        candidates.append((modified, path.name, recap))
+    if not candidates:
+        return {}
+    return sorted(candidates, key=lambda item: (item[0], item[1]))[-1][2]
+
+
+def _pursue_recap_root_for_run(run_dir):
+    if run_dir.parent.name == "runs":
+        return run_dir.parent.parent / "pursue"
+    return run_dir.parent / "pursue"
+
+
+def _pursue_recap_mentions_run(recap, run_id):
+    if recap.get("latest_taskpack_id") == run_id:
+        return True
+    runs = recap.get("runs")
+    if isinstance(runs, list):
+        for item in runs:
+            if isinstance(item, dict) and item.get("taskpack_id") == run_id:
+                return True
+    return False
 
 
 def _run_status(payload, state):

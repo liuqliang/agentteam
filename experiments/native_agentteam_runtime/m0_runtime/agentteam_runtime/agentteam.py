@@ -33,6 +33,7 @@ from .operator_control import (
 from .operator_report import (
     build_run_completion_report,
     concise_report_lines,
+    find_pursue_recap_for_run,
     render_run_completion_report,
 )
 from .profile import (
@@ -1616,15 +1617,85 @@ def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
         current_goal = _pursue_next_goal(goal, source_report)
     if stop_reason is None:
         stop_reason = "max_rounds_reached"
+    pursue_id = _pursue_id(args, rounds)
+    recap = _build_pursue_recap(
+        pursue_id=pursue_id,
+        goal=goal,
+        max_rounds=max_rounds,
+        rounds=rounds,
+        stop_reason=stop_reason,
+        work_root=work_root,
+    )
+    recap_path = _write_pursue_recap(work_root, recap)
     return {
         "pursue_status": "stopped",
+        "pursue_id": pursue_id,
         "goal": goal,
         "max_rounds": max_rounds,
         "rounds_completed": len(rounds),
         "stop_reason": stop_reason,
         "runs": rounds,
         "work_root": str(work_root),
+        "pursue_recap_path": str(recap_path),
+        "operator_next_action": recap.get("operator_next_action"),
     }
+
+
+def _pursue_id(args, rounds):
+    if getattr(args, "taskpack_id", None):
+        return args.taskpack_id
+    if rounds and rounds[0].get("taskpack_id"):
+        return rounds[0]["taskpack_id"]
+    return f"pursue-{int(time.time())}"
+
+
+def _build_pursue_recap(*, pursue_id, goal, max_rounds, rounds, stop_reason, work_root):
+    latest = rounds[-1] if rounds else {}
+    latest_taskpack_id = latest.get("taskpack_id")
+    latest_report_path = latest.get("report_path")
+    return {
+        "pursue_id": pursue_id,
+        "pursue_status": "stopped",
+        "goal": goal,
+        "work_root": str(work_root),
+        "rounds_completed": len(rounds),
+        "max_rounds": max_rounds,
+        "stop_reason": stop_reason,
+        "latest_taskpack_id": latest_taskpack_id,
+        "latest_report_path": latest_report_path,
+        "operator_next_action": _pursue_operator_next_action(stop_reason, latest),
+        "runs": rounds,
+        "updated_at": _format_utc_timestamp(datetime.now(UTC)),
+    }
+
+
+def _write_pursue_recap(work_root, recap):
+    pursue_id = recap.get("pursue_id") or "pursue"
+    recap_root = Path(work_root) / "pursue"
+    recap_root.mkdir(parents=True, exist_ok=True)
+    recap_path = recap_root / f"{_safe_pursue_artifact_id(pursue_id)}.json"
+    recap = dict(recap)
+    recap["recap_path"] = str(recap_path.resolve())
+    _write_json(recap_path, recap)
+    return recap_path.resolve()
+
+
+def _safe_pursue_artifact_id(value):
+    safe = "".join(
+        character if character.isalnum() or character in {"-", "_", "."} else "-"
+        for character in str(value)
+    ).strip(".-")
+    return safe or "pursue"
+
+
+def _pursue_operator_next_action(stop_reason, latest):
+    taskpack_id = latest.get("taskpack_id") if isinstance(latest, dict) else None
+    run_dir = latest.get("run_dir") if isinstance(latest, dict) else None
+    if taskpack_id:
+        return f"agentteam report --taskpack {taskpack_id}"
+    if run_dir:
+        return f"agentteam report --run-dir {run_dir}"
+    return "agentteam status"
 
 
 def _pursue_taskpack_id(base_taskpack_id, round_index):
@@ -1687,6 +1758,10 @@ def _write_pursue_result_text(result):
         lines.append(f"latest_taskpack_id: {latest.get('taskpack_id') or 'unknown'}")
         if latest.get("report_path"):
             lines.append(f"latest_report: {latest['report_path']}")
+    if result.get("pursue_recap_path"):
+        lines.append(f"pursue_recap: {result['pursue_recap_path']}")
+    if result.get("operator_next_action"):
+        lines.append(f"operator_next_action: {result['operator_next_action']}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 
@@ -3720,6 +3795,7 @@ def _build_run_status_summary(profile, run_dir):
         "manual_gates": manual_gate_count,
         "permission_requests": permission_request_count,
         "permission_request_details": permission_request_details,
+        "pursue_recap": find_pursue_recap_for_run(run_dir),
         "last_failure": _status_last_failure(snapshot, state),
         "authoring": authoring,
         "run_dir": str(run_dir),
@@ -4029,6 +4105,7 @@ def _write_status_text(summary):
         f"inflight: {summary['inflight']['total']}",
         f"manual_gates: {summary['manual_gates']}",
         f"permission_requests: {summary['permission_requests']}",
+        *_pursue_recap_status_lines(summary.get("pursue_recap")),
     ]
     for request in summary.get("permission_request_details") or []:
         lines.append(
@@ -4076,6 +4153,26 @@ def _write_status_text(summary):
     lines.append(f"run_dir: {summary['run_dir']}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
+
+
+def _pursue_recap_status_lines(recap):
+    if not isinstance(recap, dict) or not recap:
+        return []
+    lines = [
+        (
+            "pursue: "
+            f"{recap.get('pursue_id') or 'unknown'} "
+            f"stopped because {recap.get('stop_reason') or 'unknown'}"
+        ),
+        f"pursue_rounds: {recap.get('rounds_completed', 0)}/{recap.get('max_rounds', 0)}",
+    ]
+    if recap.get("latest_taskpack_id"):
+        lines.append(f"pursue_latest_taskpack: {recap['latest_taskpack_id']}")
+    if recap.get("latest_report_path"):
+        lines.append(f"pursue_latest_report: {recap['latest_report_path']}")
+    if recap.get("operator_next_action"):
+        lines.append(f"pursue_next_action: {recap['operator_next_action']}")
+    return lines
 
 
 def _write_project_status_text(summary):
