@@ -412,6 +412,67 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 class TaskpackTests(unittest.TestCase):
+    def _run_agentteam_json(self, *args):
+        completed = subprocess.run(
+            ["python3", "-m", "agentteam_runtime.agentteam", *args, "--json"],
+            env=_test_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout)
+
+    def _projection_parity_payload(self, command, summary):
+        if command == "status":
+            return {
+                "latest_run": summary["latest_run"],
+                "run_status": summary["run_status"],
+                "overall_status": summary["overall_status"],
+                "tasks": summary["tasks"],
+                "manual_gates": summary["manual_gates"],
+                "permission_requests": summary["permission_requests"],
+            }
+        if command == "logs":
+            return {
+                "latest_run": summary["latest_run"],
+                "event_count": summary["event_count"],
+                "returned_count": summary["returned_count"],
+                "events": [
+                    {
+                        "event_id": event.get("event_id"),
+                        "event_type": event.get("event_type"),
+                        "sequence": event.get("sequence"),
+                        "payload": event.get("payload"),
+                    }
+                    for event in summary["events"]
+                ],
+            }
+        if command == "report":
+            return {
+                "run_id": summary["run_id"],
+                "run_status": summary["run_status"],
+                "task_count": summary["task_count"],
+                "blocked_count": summary["blocked_count"],
+                "token_usage": summary["token_usage"],
+                "task_reports": summary["operator_report"]["task_reports"],
+            }
+        if command == "taskpack_list":
+            return {
+                "frozen_count": summary["frozen_count"],
+                "taskpacks": [
+                    {
+                        "taskpack_id": item["taskpack_id"],
+                        "goal": item.get("goal"),
+                        "run_status": item["run_status"],
+                        "run_dir": item.get("run_dir"),
+                    }
+                    for item in summary["taskpacks"]
+                ],
+            }
+        raise AssertionError(f"unknown projection parity command: {command}")
+
     def assertProjectionFreshMetadata(self, summary):
         self.assertEqual(summary.get("projection_source"), "db")
         self.assertEqual(summary.get("projection_status"), "fresh")
@@ -1570,6 +1631,139 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("projection_source: files", text_completed.stdout)
             self.assertIn("projection_warning: projection_db_unavailable", text_completed.stdout)
             self.assertIn("next_action: run agentteam db rebuild", text_completed.stdout)
+
+    def test_agentteam_cli_projection_readthrough_matches_fresh_db_after_stale_and_corrupt_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "projection-parity-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "projection-parity-project")
+            _write_completed_operator_run(run_dir)
+            _write_json(
+                run_dir / "reports" / "final_report.json",
+                {"run_id": "projection-parity-run"},
+            )
+            _write_json(
+                work_root / "frozen" / "projection-parity-run" / "taskpack.yaml",
+                {
+                    "taskpack_id": "projection-parity-run",
+                    "goal": "Projection parity fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            with (run_dir / "events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "event_id": "EVT-0002",
+                            "event_type": "backlog_updated",
+                            "sequence": 2,
+                            "time": "2026-06-12T00:00:01Z",
+                            "payload": {
+                                "task_id": "optimize-pipeline",
+                                "task_status": "done",
+                            },
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+            rebuild_project_projection_db(work_root)
+
+            expected_fresh = {
+                "status": self._run_agentteam_json("status", "--project-root", str(repo)),
+                "logs": self._run_agentteam_json(
+                    "logs",
+                    "--project-root",
+                    str(repo),
+                    "--lines",
+                    "2",
+                ),
+                "taskpack_list": self._run_agentteam_json(
+                    "taskpack",
+                    "list",
+                    "--project-root",
+                    str(repo),
+                ),
+                "report": self._run_agentteam_json("report", "--project-root", str(repo)),
+            }
+            for summary in expected_fresh.values():
+                self.assertProjectionFreshMetadata(summary)
+            expected = {
+                "status": self._projection_parity_payload(
+                    "status",
+                    expected_fresh["status"],
+                ),
+                "logs": self._projection_parity_payload(
+                    "logs",
+                    expected_fresh["logs"],
+                ),
+                "report": self._projection_parity_payload(
+                    "report",
+                    expected_fresh["report"],
+                ),
+                "taskpack_list": self._projection_parity_payload(
+                    "taskpack_list",
+                    expected_fresh["taskpack_list"],
+                ),
+            }
+
+            _write_json(
+                run_dir / "role_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json",
+                {"context_schema_version": "role_context.v1"},
+            )
+
+            stale = {
+                "status": self._run_agentteam_json("status", "--project-root", str(repo)),
+                "logs": self._run_agentteam_json(
+                    "logs",
+                    "--project-root",
+                    str(repo),
+                    "--lines",
+                    "2",
+                ),
+                "taskpack_list": self._run_agentteam_json(
+                    "taskpack",
+                    "list",
+                    "--project-root",
+                    str(repo),
+                ),
+                "report": self._run_agentteam_json("report", "--project-root", str(repo)),
+            }
+            for command, summary in stale.items():
+                self.assertProjectionFallbackMetadata(summary, "stale")
+                self.assertEqual(
+                    self._projection_parity_payload(command, summary),
+                    expected[command],
+                )
+
+            rebuild_project_projection_db(work_root)
+            (work_root / "agentteam.db").write_text("not sqlite", encoding="utf-8")
+            corrupt = {
+                "status": self._run_agentteam_json("status", "--project-root", str(repo)),
+                "logs": self._run_agentteam_json(
+                    "logs",
+                    "--project-root",
+                    str(repo),
+                    "--lines",
+                    "2",
+                ),
+                "taskpack_list": self._run_agentteam_json(
+                    "taskpack",
+                    "list",
+                    "--project-root",
+                    str(repo),
+                ),
+                "report": self._run_agentteam_json("report", "--project-root", str(repo)),
+            }
+            for command, summary in corrupt.items():
+                self.assertProjectionFallbackMetadata(summary, "corrupt")
+                self.assertEqual(
+                    self._projection_parity_payload(command, summary),
+                    expected[command],
+                )
 
     def test_agentteam_cli_chat_prints_diagnostic_context_as_json(self):
         with tempfile.TemporaryDirectory() as tmp:
