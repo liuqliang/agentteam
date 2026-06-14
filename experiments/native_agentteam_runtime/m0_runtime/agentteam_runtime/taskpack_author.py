@@ -334,6 +334,21 @@ def _author_prompt(
         "- each backlog item must include work_type, for example code_implementation, code_investigation, or audit",
         "- each backlog item must include goal_alignment explaining how it advances taskpack.original_goal",
         "- each backlog item must include required_deliverables as a non-empty string array",
+        "- Preserve the operator's original goal in taskpack.original_goal and in every executable backlog item.",
+        (
+            "- decompose broad or long-running goals into narrow, measurable next-step tasks "
+            "with concrete read_scope, write_scope, evidence, and verification expectations"
+        ),
+        (
+            "- for follow-up goals with previous report, previous taskpack, or goal-memory context, "
+            "tie each executable next-step objective to previous evidence, verification results, "
+            "blockers, or reported next steps"
+        ),
+        (
+            "- avoid safe-but-trivial documentation-only changes unless the operator explicitly asked "
+            "for documentation; otherwise prefer bounded code/test/repository changes or explain why "
+            "no safe in-repo change is justified"
+        ),
         (
             "- optimization goals, including optimize/improve/performance/accuracy/比赛/优化/提升, "
             "must set taskpack.goal_kind to optimization"

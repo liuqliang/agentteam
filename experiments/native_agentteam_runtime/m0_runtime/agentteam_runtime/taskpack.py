@@ -68,6 +68,59 @@ OPTIMIZATION_DECOMPOSITION_MARKERS = [
     "复测",
     "热点",
 ]
+LONG_RUNNING_FOLLOWUP_MARKERS = [
+    "follow-up goal:",
+    "previous taskpack context:",
+    "continue pursuing the long-running goal",
+    "previous report",
+    "source_report_path",
+    "long-goal memory:",
+    "goal_memory_path",
+    "completed_rounds:",
+]
+FOLLOWUP_PREVIOUS_EVIDENCE_MARKERS = [
+    "previous report",
+    "source report",
+    "source_report_path",
+    "previous findings",
+    "previous evidence",
+    "verification results",
+    "blockers",
+    "goal memory",
+    "long-goal memory",
+    "completed_rounds",
+    "latest_run_ids",
+    "evidence",
+    "report",
+]
+FOLLOWUP_MEASURABLE_NEXT_STEP_MARKERS = [
+    "next-step",
+    "next step",
+    "measurable",
+    "implement",
+    "verify",
+    "validate",
+    "test",
+    "measure",
+    "metric",
+    "complete",
+    "fix",
+    "change",
+    "下一步",
+    "实现",
+    "验证",
+    "测量",
+    "指标",
+    "修复",
+]
+DOCUMENTATION_INTENT_MARKERS = [
+    "documentation",
+    "document",
+    "docs",
+    "readme",
+    "文档",
+    "说明",
+]
 
 
 class TaskpackValidationError(ValueError):
@@ -153,7 +206,7 @@ def draft_taskpack_files(
             {
                 "task_id": task_id,
                 "milestone_id": "TASKPACK-M0",
-                "objective": goal,
+                "objective": _default_task_objective(goal, goal_kind),
                 "work_type": _default_work_type(goal_kind),
                 "goal_alignment": _default_goal_alignment(goal),
                 "required_deliverables": _default_required_deliverables(goal),
@@ -292,6 +345,12 @@ def validate_taskpack(taskpack_dir):
     seen_task_ids = set()
     dependency_graph = {}
     has_optimization_code_item = False
+    is_long_running_followup = (
+        semantic_contract_enabled
+        and goal_kind == "implementation"
+        and _is_long_running_followup_goal(effective_goal)
+    )
+    has_followup_quality_item = False
     for item in items:
         if not isinstance(item, dict):
             errors.append("backlog.items entries must be objects")
@@ -332,6 +391,21 @@ def validate_taskpack(taskpack_dir):
             if missing:
                 errors.append(
                     f"{task_id_label} optimization required_deliverables missing: {', '.join(missing)}"
+                )
+        elif semantic_contract_enabled and is_long_running_followup and _is_followup_code_item(item):
+            has_followup_quality_item = True
+            if not _followup_objective_uses_previous_evidence(item):
+                errors.append(f"{task_id_label} long-running follow-up task must tie objective to previous evidence")
+            if not _followup_objective_has_measurable_next_step(item):
+                errors.append(
+                    f"{task_id_label} long-running follow-up task must define "
+                    "a measurable next-step implementation objective"
+                )
+            missing = _missing_followup_deliverables(deliverables)
+            if missing:
+                errors.append(
+                    f"{task_id_label} long-running follow-up required_deliverables missing: "
+                    f"{', '.join(missing)}"
                 )
         if not _is_non_empty_string(required_role):
             errors.append(f"{task_id_label} required_role must be a non-empty string")
@@ -389,6 +463,16 @@ def validate_taskpack(taskpack_dir):
         errors.append(
             "optimization taskpack requires at least one ready code-facing backlog item "
             "with work_type code_implementation or code_investigation and non-document write_scope"
+        )
+    if (
+        semantic_contract_enabled
+        and is_long_running_followup
+        and not _goal_requests_documentation(effective_goal)
+        and not has_followup_quality_item
+    ):
+        errors.append(
+            "long-running follow-up taskpack requires at least one ready code-facing backlog item "
+            "unless the operator asked for documentation"
         )
 
     if not isinstance(verification, dict):
@@ -462,6 +546,14 @@ def _profile_command_or_default(command, default, field_name):
 
 
 def _default_goal_alignment(goal):
+    if classify_goal_kind(goal) == "implementation" and _is_long_running_followup_goal(goal):
+        return (
+            "This long-running follow-up task must preserve taskpack.original_goal, "
+            "use the previous report, verification results, blockers, or goal-memory "
+            "evidence, and select a measurable next-step implementation objective "
+            "instead of generic safe-but-trivial work for: "
+            f"{goal}"
+        )
     if classify_goal_kind(goal) == "optimization":
         return (
             "This optimization task must preserve the original goal, establish "
@@ -514,6 +606,15 @@ def _default_required_deliverables(goal):
             "verification_summary",
             "recommended_next_implementation_tasks",
         ]
+    if _is_long_running_followup_goal(goal):
+        return [
+            "repository_understanding_summary",
+            "previous_evidence_summary",
+            "evidence_paths",
+            "implemented_changes_or_no_safe_change_rationale",
+            "verification_summary",
+            "recommended_next_implementation_tasks",
+        ]
     if goal_kind == "audit":
         return [
             "repository_understanding_summary",
@@ -529,6 +630,15 @@ def _default_required_deliverables(goal):
         "verification_summary",
         "next_steps",
     ]
+
+
+def _default_task_objective(goal, goal_kind):
+    if goal_kind == "implementation" and _is_long_running_followup_goal(goal):
+        return (
+            "Implement the next measurable follow-up step using previous report "
+            f"evidence and verification context for: {goal}"
+        )
+    return goal
 
 
 def _is_optimization_code_item(item):
@@ -573,6 +683,48 @@ def _missing_optimization_deliverables(deliverables):
         for deliverable in _default_required_deliverables("optimization")
         if deliverable not in present
     ]
+
+
+def _is_long_running_followup_goal(goal):
+    text = str(goal or "").lower()
+    return any(marker in text for marker in LONG_RUNNING_FOLLOWUP_MARKERS)
+
+
+def _is_followup_code_item(item):
+    if item.get("backlog_status") not in {None, "ready", "in_progress"}:
+        return False
+    if item.get("work_type") not in OPTIMIZATION_CODE_WORK_TYPES:
+        return False
+    write_scope = item.get("write_scope")
+    if not isinstance(write_scope, list) or not write_scope:
+        return False
+    return not _write_scope_is_document_only(write_scope)
+
+
+def _followup_objective_uses_previous_evidence(item):
+    text = str(item.get("objective") or "").lower()
+    return any(marker in text for marker in FOLLOWUP_PREVIOUS_EVIDENCE_MARKERS)
+
+
+def _followup_objective_has_measurable_next_step(item):
+    text = str(item.get("objective") or "").lower()
+    return any(marker in text for marker in FOLLOWUP_MEASURABLE_NEXT_STEP_MARKERS)
+
+
+def _missing_followup_deliverables(deliverables):
+    if not isinstance(deliverables, list):
+        return _default_required_deliverables("Follow-up goal: previous report")
+    present = set(deliverables)
+    return [
+        deliverable
+        for deliverable in _default_required_deliverables("Follow-up goal: previous report")
+        if deliverable not in present
+    ]
+
+
+def _goal_requests_documentation(goal):
+    text = str(goal or "").lower()
+    return any(marker in text for marker in DOCUMENTATION_INTENT_MARKERS)
 
 
 def _write_scope_is_document_only(write_scope):

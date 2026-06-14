@@ -7487,6 +7487,35 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("do not request git merge or git push", prompt)
             self.assertIn("open-ended improvement requests", prompt)
 
+    def test_codex_taskpack_author_prompt_hardens_decomposition_quality(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "m59-quality"
+            author_context_dir = tmp_path / "drafts" / ".m59-quality-author"
+            _init_repo(repo)
+
+            prompt = _author_prompt(
+                project_root=repo,
+                goal="Keep pursuing the operator goal across several bounded implementation rounds.",
+                taskpack_id="m59-quality",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                repo_map={
+                    "paths": {
+                        "manifest_path": "manifest.json",
+                        "inventory_path": "inventory.json",
+                        "symbols_path": "symbols.json",
+                    }
+                },
+                verification_profile=None,
+            )
+
+            self.assertIn("Preserve the operator's original goal", prompt)
+            self.assertIn("decompose broad or long-running goals into narrow, measurable next-step tasks", prompt)
+            self.assertIn("tie each executable next-step objective to previous evidence", prompt)
+            self.assertIn("avoid safe-but-trivial documentation-only changes unless the operator explicitly asked for documentation", prompt)
+
     def test_fake_taskpack_author_draft_can_be_frozen(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -7687,6 +7716,41 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn(
                 "optimization task must include baseline/profile/candidate/metric decomposition intent",
+                str(raised.exception),
+            )
+
+    def test_validate_taskpack_rejects_generic_long_running_followup_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal=(
+                    "Follow-up goal:\n"
+                    "Continue the original implementation.\n\n"
+                    "Previous taskpack context:\n"
+                    "- source_taskpack_id: first-pass\n"
+                    "- source_report_path: /tmp/work/runs/first-pass/reports/final_report.md\n\n"
+                    "Instructions for the new taskpack:\n"
+                    "- Use the previous findings, verification results, blockers, and next steps as context."
+                ),
+                draft_root=drafts,
+                taskpack_id="generic-followup",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["objective"] = "Make a small safe cleanup."
+            backlog["items"][0]["goal_alignment"] = "This is a low-risk follow-up task."
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn(
+                "long-running follow-up task must define a measurable next-step implementation objective",
                 str(raised.exception),
             )
 

@@ -1034,6 +1034,30 @@ Implemented:
   per-round taskpack/report/run paths;
 - text output stays compact for terminal use.
 
+### M56-M59: Pursue Control Loop Hardening
+
+Status: implemented in the native-runtime branch.
+
+Goal: keep bounded pursue follow-ups goal-directed and review-gated while
+making the next implementation task measurable from prior evidence.
+
+Implemented:
+
+- pursue recap artifacts now preserve the loop id, round budget, stop reason,
+  latest taskpack/report paths, and compact operator next action for status and
+  report surfaces;
+- review-gate follow-up handling keeps merge, push, and release activation with
+  the operator while still allowing explicitly requested next taskpack rounds;
+- long-goal memory captures bounded round history, latest run ids, current
+  hypothesis, next step, blockers, and a compact prompt context for later
+  follow-up authoring;
+- taskpack validation rejects generic long-running implementation follow-up
+  tasks that do not tie a measurable next-step objective to previous report,
+  verification, blocker, or goal-memory evidence;
+- taskpack author prompts now require preserving the operator goal, decomposing
+  broad or long-running goals into measurable next-step tasks, and avoiding
+  safe-but-trivial documentation-only work unless documentation was requested.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
