@@ -370,6 +370,30 @@ Notes:
   operator review.
 - `--max-rounds` is a hard budget. The command never runs indefinitely.
 
+#### Review Gate Sequence
+
+When `agentteam pursue` stops with `review_gate_required`, treat the source
+branch as unchanged until you explicitly accept the result. Use this sequence:
+
+```bash
+agentteam report --taskpack <taskpack-id>
+agentteam paths --taskpack <taskpack-id>
+git -C <integration-baseline-worktree> diff --stat <base-head>..<baseline-head>
+agentteam integrate --taskpack <taskpack-id>
+agentteam next --from-taskpack <taskpack-id> --goal "<accepted follow-up goal>"
+```
+
+The first three commands are read-only inspection steps: review the final report,
+locate the integration baseline, and inspect the diff without merging into the
+target branch. Run `agentteam integrate` only after accepting the report and
+diff. After integration, use `agentteam next` or `agentteam pursue` only if more
+work is still desired. Older run artifacts that do not include `base_sha` may
+show a fallback diff command using `<baseline-head>..HEAD`.
+
+For AgentTeam-as-target work, the review gate is mandatory: workers may prepare
+patches, reports, evidence, and integration baselines, but source merge, push,
+and release activation remain operator decisions.
+
 ### AgentTeam-As-Target Work
 
 AgentTeam can be the target repository for ordinary implementation work. Use the
@@ -574,6 +598,10 @@ Completion summaries include:
   structured fields.
 - `follow_up_recommendation`: suggested `integrate`, `next`, or blocker-review
   action with command text when the structured report supports it.
+- `review_gate`: concise review-gate guidance when accepted changes are waiting
+  in an integration baseline. It includes the integration branch, baseline head,
+  integration worktree, read-only report/paths/diff commands, and the explicit
+  `agentteam integrate` acceptance command.
 
 ### `agentteam paths`
 
@@ -583,6 +611,8 @@ Use it when:
 
 - You need to locate `work_root`, drafts, frozen taskpacks, runs, artifacts, or
   the integration baseline worktree.
+- You want the read-only report, paths, and diff commands for a run waiting at
+  the review gate before deciding whether to integrate.
 
 Examples:
 
@@ -591,6 +621,13 @@ agentteam paths
 agentteam paths --taskpack <taskpack-id>
 agentteam paths --json
 ```
+
+Text output includes `review_report`, `review_paths`, and `review_diff` when an
+integration baseline exists. These are inspection commands only. It also prints
+`review_integrate` as the explicit acceptance command; do not run it until the
+report and diff have been reviewed. JSON output keeps the same split in
+`read_only_review_commands` and `accept_command`, while `review_commands`
+contains the complete command set for compact clients.
 
 ## Result Integration
 

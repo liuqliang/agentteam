@@ -3815,6 +3815,8 @@ def _build_paths_summary(args, profile, run_dir):
         project_root = None
     state = _paths_run_state(run_dir)
     final_report = run_dir / "reports" / "final_report.md"
+    integration_baseline = _paths_integration_baseline(run_dir, state)
+    review_commands = _review_commands_for_run(run_dir.name, integration_baseline)
     return {
         "project": profile.get("project_key") or "unknown",
         "project_root": str(project_root) if project_root else None,
@@ -3831,7 +3833,14 @@ def _build_paths_summary(args, profile, run_dir):
         "artifact_snapshot_root": str((work_root / "artifacts" / "runs" / run_dir.name).resolve()),
         "final_report": str(final_report.resolve()),
         "final_report_exists": final_report.exists(),
-        "integration_baseline": _paths_integration_baseline(run_dir, state),
+        "integration_baseline": integration_baseline,
+        "review_commands": review_commands,
+        "read_only_review_commands": {
+            key: review_commands[key]
+            for key in ["report", "paths", "diff"]
+            if key in review_commands
+        },
+        "accept_command": review_commands.get("integrate"),
     }
 
 
@@ -3857,12 +3866,27 @@ def _paths_integration_baseline(run_dir, state):
         "branch": branch,
         "worktree_path": worktree_path,
         "worktree_exists": Path(worktree_path).exists() if worktree_path else False,
+        "base_sha": _paths_integration_base_sha(state),
         "head_sha": baseline.get("integration_baseline_head_sha"),
     }
 
 
+def _paths_integration_base_sha(state):
+    steps = state.get("steps") if isinstance(state, dict) else []
+    if not isinstance(steps, list):
+        return None
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        result = step.get("result")
+        if isinstance(result, dict) and result.get("integration_base_sha"):
+            return result["integration_base_sha"]
+    return None
+
+
 def _write_paths_text(summary):
     baseline = summary.get("integration_baseline") or {}
+    review_commands = summary.get("review_commands") or {}
     lines = [
         f"project: {summary['project']}",
         f"project_root: {summary.get('project_root') or 'unknown'}",
@@ -3873,10 +3897,36 @@ def _write_paths_text(summary):
         f"final_report: {summary['final_report']}",
         f"integration_baseline_branch: {baseline.get('branch') or 'none'}",
         f"integration_baseline_worktree: {baseline.get('worktree_path') or 'none'}",
+        f"integration_baseline_base: {baseline.get('base_sha') or 'unknown'}",
         f"integration_baseline_head: {baseline.get('head_sha') or 'unknown'}",
     ]
+    if review_commands:
+        for key in ["report", "paths", "diff", "integrate"]:
+            command = review_commands.get(key)
+            if command:
+                lines.append(f"review_{key}: {command}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
+
+
+def _review_commands_for_run(run_id, baseline):
+    if not isinstance(baseline, dict) or not baseline.get("branch"):
+        return {}
+    worktree_path = baseline.get("worktree_path")
+    head_sha = baseline.get("head_sha")
+    base_sha = baseline.get("base_sha")
+    commands = {
+        "report": f"agentteam report --taskpack {run_id}",
+        "paths": f"agentteam paths --taskpack {run_id}",
+        "integrate": f"agentteam integrate --taskpack {run_id}",
+    }
+    if worktree_path and base_sha and head_sha:
+        commands["diff"] = f"git -C {worktree_path} diff --stat {base_sha}..{head_sha}"
+    elif worktree_path and head_sha:
+        commands["diff"] = f"git -C {worktree_path} diff --stat {head_sha}..HEAD"
+    elif worktree_path:
+        commands["diff"] = f"git -C {worktree_path} status --short"
+    return commands
 
 
 def _integrate_run_baseline(project_root, profile, run_dir, rebase=False):

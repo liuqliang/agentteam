@@ -83,6 +83,11 @@ def build_completion_summary(
         integration_baseline,
         summary,
     )
+    summary["review_gate"] = _review_gate_guidance(
+        run_id,
+        integration_baseline,
+        summary["follow_up_recommendation"],
+    )
     summary["operator_digest"] = _completion_operator_digest(summary)
     summary["chinese_operator_brief"] = build_chinese_operator_brief(
         run_id=run_id,
@@ -110,6 +115,7 @@ def extend_completion_summary_lines(lines, summary):
     if summary.get("integration_recommendation"):
         lines.append(f"Integration recommendation: {summary['integration_recommendation']}")
     _extend_follow_up_recommendation(lines, summary.get("follow_up_recommendation"))
+    _extend_review_gate(lines, summary.get("review_gate"))
     _extend_section(lines, "Next:", summary.get("next_steps"))
     _extend_section(lines, "Evidence gaps:", summary.get("evidence_gaps"))
     evidence_status_counts = summary.get("evidence_status_counts")
@@ -175,6 +181,64 @@ def _extend_follow_up_recommendation(lines, recommendation):
     lines.append("Follow-up recommendation:")
     for key in ["action", "reason", "integrate_command", "next_command", "report_command"]:
         value = recommendation.get(key)
+        if value:
+            lines.append(f"- {key}: {value}")
+
+
+def _review_gate_guidance(run_id, integration_baseline, recommendation):
+    if not isinstance(recommendation, dict):
+        return {}
+    if recommendation.get("action") not in {"integrate", "integrate_then_next"}:
+        return {}
+    if not isinstance(integration_baseline, dict):
+        return {}
+    branch = integration_baseline.get("branch")
+    if not branch:
+        return {}
+    worktree = integration_baseline.get("worktree_path")
+    base_sha = integration_baseline.get("base_sha")
+    baseline_head = integration_baseline.get("head_sha")
+    gate = {
+        "status": "review_gate_required",
+        "integration_branch": branch,
+        "base_head": base_sha or "unknown",
+        "baseline_head": baseline_head or "unknown",
+        "integration_worktree": worktree or "unknown",
+        "report_command": f"agentteam report --taskpack {run_id}",
+        "paths_command": f"agentteam paths --taskpack {run_id}",
+        "integrate_command": recommendation.get("integrate_command")
+        or f"agentteam integrate --taskpack {run_id}",
+        "operator_note": (
+            "Review report, paths, and diff before integrating; source merge, "
+            "push, and release activation remain operator decisions."
+        ),
+    }
+    if worktree and base_sha and baseline_head:
+        gate["diff_command"] = f"git -C {worktree} diff --stat {base_sha}..{baseline_head}"
+    elif worktree and baseline_head:
+        gate["diff_command"] = f"git -C {worktree} diff --stat {baseline_head}..HEAD"
+    elif worktree:
+        gate["diff_command"] = f"git -C {worktree} status --short"
+    return gate
+
+
+def _extend_review_gate(lines, gate):
+    if not isinstance(gate, dict) or not gate:
+        return
+    lines.append("Review gate:")
+    for key in [
+        "status",
+        "integration_branch",
+        "base_head",
+        "baseline_head",
+        "integration_worktree",
+        "report_command",
+        "paths_command",
+        "diff_command",
+        "integrate_command",
+        "operator_note",
+    ]:
+        value = gate.get(key)
         if value:
             lines.append(f"- {key}: {value}")
 

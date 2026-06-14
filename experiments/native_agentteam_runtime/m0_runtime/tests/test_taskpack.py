@@ -1128,6 +1128,60 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("Follow-up recommendation:", lines)
         self.assertIn("- action: integrate_then_next", lines)
 
+    def test_completion_summary_includes_review_gate_guidance_for_integrate_action(self):
+        summary = build_completion_summary(
+            run_id="taskpack-7",
+            run_status="completed",
+            task_count=1,
+            blocked_count=0,
+            task_reports=[
+                {
+                    "task_id": "optimize-pipeline",
+                    "status": "implementation completed",
+                    "what_changed": ["优化了手势评分流水线。"],
+                    "changed_files": ["gesture_recognition/sim_eval.py"],
+                    "verification": ["unit_tests: passed"],
+                    "integration": "passed",
+                    "merge_recommendation": "Review accepted patch before merging.",
+                }
+            ],
+            integration_baseline={
+                "branch": "agentteam/run/taskpack-7/integration",
+                "worktree_path": "/tmp/taskpack-7/integration-baseline",
+                "base_sha": "base123",
+                "head_sha": "abc123",
+            },
+        )
+
+        self.assertEqual(summary["follow_up_recommendation"]["action"], "integrate")
+        self.assertEqual(
+            summary["review_gate"],
+            {
+                "status": "review_gate_required",
+                "integration_branch": "agentteam/run/taskpack-7/integration",
+                "base_head": "base123",
+                "baseline_head": "abc123",
+                "integration_worktree": "/tmp/taskpack-7/integration-baseline",
+                "report_command": "agentteam report --taskpack taskpack-7",
+                "paths_command": "agentteam paths --taskpack taskpack-7",
+                "diff_command": "git -C /tmp/taskpack-7/integration-baseline diff --stat base123..abc123",
+                "integrate_command": "agentteam integrate --taskpack taskpack-7",
+                "operator_note": (
+                    "Review report, paths, and diff before integrating; source merge, "
+                    "push, and release activation remain operator decisions."
+                ),
+            },
+        )
+        lines = []
+        extend_completion_summary_lines(lines, summary)
+        self.assertIn("Review gate:", lines)
+        self.assertIn("- status: review_gate_required", lines)
+        self.assertIn("- report_command: agentteam report --taskpack taskpack-7", lines)
+        self.assertIn(
+            "- diff_command: git -C /tmp/taskpack-7/integration-baseline diff --stat base123..abc123",
+            lines,
+        )
+
     def test_run_status_summary_reports_evidence_counts_from_steps(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1432,6 +1486,11 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("中文简报:", completed.stdout)
             self.assertIn("本次运行已完成，共 1 个任务，0 个阻塞。", completed.stdout)
             self.assertIn("Integration recommendation: Review the final report, then run `agentteam integrate --taskpack taskpack-7` from a clean target repository if these changes should land.", completed.stdout)
+            self.assertIn("Review gate:", completed.stdout)
+            self.assertIn("report_command: agentteam report --taskpack taskpack-7", completed.stdout)
+            self.assertIn("paths_command: agentteam paths --taskpack taskpack-7", completed.stdout)
+            self.assertIn("diff_command: git -C ", completed.stdout)
+            self.assertIn("integrate_command: agentteam integrate --taskpack taskpack-7", completed.stdout)
             self.assertIn("Scanned the repository", completed.stdout)
             self.assertIn("gesture_recognition/sim_eval.py", completed.stdout)
             report_path = run_dir / "reports" / "final_report.md"
@@ -1444,6 +1503,14 @@ class TaskpackTests(unittest.TestCase):
                 ["Scanned the repository and implemented one evidence-backed optimization."],
             )
             self.assertEqual(report_json["completion_summary"]["integration"], "passed")
+            self.assertEqual(
+                report_json["completion_summary"]["review_gate"]["status"],
+                "review_gate_required",
+            )
+            self.assertEqual(
+                report_json["completion_summary"]["review_gate"]["integrate_command"],
+                "agentteam integrate --taskpack taskpack-7",
+            )
             self.assertEqual(
                 report_json["completion_summary"]["next_steps"],
                 ["Run the full competition validation package."],
@@ -2649,6 +2716,45 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("latest_run: paths-run\n", text_completed.stdout)
             self.assertIn("integration_baseline_branch: agentteam/run/paths-run/integration\n", text_completed.stdout)
             self.assertIn(str(baseline_worktree.resolve()), text_completed.stdout)
+            diff_base = (
+                summary["integration_baseline"].get("base_sha")
+                or summary["integration_baseline"]["head_sha"]
+            )
+            diff_head = (
+                summary["integration_baseline"]["head_sha"]
+                if summary["integration_baseline"].get("base_sha")
+                else "HEAD"
+            )
+            expected_review_diff = (
+                f"git -C {baseline_worktree.resolve()} diff --stat {diff_base}..{diff_head}"
+            )
+            self.assertEqual(
+                summary["review_commands"],
+                {
+                    "report": "agentteam report --taskpack paths-run",
+                    "paths": "agentteam paths --taskpack paths-run",
+                    "diff": expected_review_diff,
+                    "integrate": "agentteam integrate --taskpack paths-run",
+                },
+            )
+            self.assertEqual(
+                summary["read_only_review_commands"],
+                {
+                    "report": "agentteam report --taskpack paths-run",
+                    "paths": "agentteam paths --taskpack paths-run",
+                    "diff": expected_review_diff,
+                },
+            )
+            self.assertEqual(
+                summary["accept_command"],
+                "agentteam integrate --taskpack paths-run",
+            )
+            self.assertIn("review_report: agentteam report --taskpack paths-run\n", text_completed.stdout)
+            self.assertIn(
+                f"review_diff: {expected_review_diff}\n",
+                text_completed.stdout,
+            )
+            self.assertIn("review_integrate: agentteam integrate --taskpack paths-run\n", text_completed.stdout)
             self.assertEqual(cwd_completed.returncode, 0, cwd_completed.stderr)
             cwd_summary = json.loads(cwd_completed.stdout)
             self.assertEqual(cwd_summary["project_root"], str(repo.resolve()))

@@ -140,6 +140,24 @@ def render_run_completion_report(report):
             )
         if summary.get("integration_recommendation"):
             lines.append(f"- Integration recommendation: {summary['integration_recommendation']}")
+        review_gate = summary.get("review_gate")
+        if isinstance(review_gate, dict) and review_gate:
+            lines.append("- Review gate:")
+            for key in [
+                "status",
+                "integration_branch",
+                "base_head",
+                "baseline_head",
+                "integration_worktree",
+                "report_command",
+                "paths_command",
+                "diff_command",
+                "integrate_command",
+                "operator_note",
+            ]:
+                value = review_gate.get(key)
+                if value:
+                    lines.append(f"  - {key}: {value}")
         _extend_summary_item(lines, "Next", summary.get("next_steps"))
         _extend_summary_item(lines, "Evidence gaps", summary.get("evidence_gaps"))
 
@@ -254,6 +272,18 @@ def concise_report_lines(report, max_tasks=3):
         command = follow_up.get("next_command") or follow_up.get("integrate_command") or follow_up.get("report_command")
         if command:
             lines.append(f"follow_up_command: {command}")
+    review_gate = summary.get("review_gate")
+    if isinstance(review_gate, dict) and review_gate:
+        lines.append(f"review_gate: {review_gate.get('status') or 'review_gate_required'}")
+        for label, key in [
+            ("report", "report_command"),
+            ("paths", "paths_command"),
+            ("diff", "diff_command"),
+            ("integrate", "integrate_command"),
+        ]:
+            command = review_gate.get(key)
+            if command:
+                lines.append(f"review_{label}: {command}")
     next_step = _first_text(summary.get("next_steps"))
     if next_step:
         lines.append(f"next: {next_step}")
@@ -370,8 +400,22 @@ def _integration_baseline_summary(run_dir, state):
         "branch": branch,
         "worktree_path": worktree_path,
         "worktree_exists": Path(worktree_path).exists() if worktree_path else False,
+        "base_sha": _integration_base_sha_from_state(state),
         "head_sha": baseline.get("integration_baseline_head_sha"),
     }
+
+
+def _integration_base_sha_from_state(state):
+    steps = state.get("steps") if isinstance(state, dict) else []
+    if not isinstance(steps, list):
+        return None
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        result = step.get("result")
+        if isinstance(result, dict) and result.get("integration_base_sha"):
+            return result["integration_base_sha"]
+    return None
 
 
 def _extend_summary_item(lines, heading, values):
