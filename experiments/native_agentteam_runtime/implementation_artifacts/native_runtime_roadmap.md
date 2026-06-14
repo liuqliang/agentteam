@@ -1010,7 +1010,7 @@ Implemented:
 - Feishu permission request messages now include both approve and deny commands
   using the normal `agentteam permissions ...` CLI form.
 
-### M60: Bounded Long-Running Pursue Loop
+### M55: Bounded Long-Running Pursue Loop
 
 Status: implemented in the native-runtime branch.
 

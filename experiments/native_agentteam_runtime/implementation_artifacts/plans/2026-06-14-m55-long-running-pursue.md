@@ -1,4 +1,4 @@
-# M60 Long-Running Pursue Implementation Plan
+# M55 Long-Running Pursue Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
@@ -67,7 +67,7 @@
   Assert non-JSON pursue output includes status, completed rounds, stop reason, latest taskpack id, and latest report path.
 
 - [x] **Step 2: Implement text renderer and docs**
-  Add `_write_pursue_result_text`, command reference section, and M60 roadmap entry.
+  Add `_write_pursue_result_text`, command reference section, and M55 roadmap entry.
 
 ### Final Verification
 
