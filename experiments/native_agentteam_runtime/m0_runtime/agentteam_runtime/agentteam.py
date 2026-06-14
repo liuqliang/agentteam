@@ -111,6 +111,18 @@ _HELP_COMMANDS = [
         ],
     },
     {
+        "name": "pursue",
+        "summary": "Run a bounded long-goal loop across start and follow-up taskpacks.",
+        "examples": [
+            "agentteam pursue --goal \"持续优化准确率和延迟\" --max-rounds 3",
+            "agentteam pursue --goal \"持续优化准确率和延迟\" --max-rounds 3 --json",
+        ],
+        "notes": [
+            "Stops at manual gates, permission requests, blockers, review gates, or budget limits.",
+            "Does not merge source changes or bypass operator review.",
+        ],
+    },
+    {
         "name": "status",
         "summary": "Show the latest run state, including liveness and workers.",
         "examples": ["agentteam status --project-root <repo>"],
@@ -365,6 +377,7 @@ def _build_parser():
     _add_init_parser(subcommands)
     _add_start_parser(subcommands)
     _add_next_parser(subcommands)
+    _add_pursue_parser(subcommands)
     _add_taskpack_new_parser(taskpack_subcommands)
     _add_taskpack_draft_parser(taskpack_subcommands)
     _add_taskpack_validate_parser(taskpack_subcommands)
@@ -595,6 +608,68 @@ def _add_next_parser(subcommands):
     )
     parser.add_argument("--json", action="store_true", help="Print the full execution result as JSON.")
     parser.set_defaults(handler=_handle_next)
+
+
+def _add_pursue_parser(subcommands):
+    parser = subcommands.add_parser(
+        "pursue",
+        help="Run a bounded long-goal loop across start and follow-up taskpacks.",
+    )
+    parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--goal", help="Long-running goal. Prompted when omitted.")
+    parser.add_argument("--taskpack-id", help="Optional safe id for the first taskpack.")
+    parser.add_argument("--work-root", help="Override the profile work root for this pursue run.")
+    parser.add_argument("--max-rounds", type=int, default=3, help="Maximum taskpack rounds to run.")
+    review_gate = parser.add_mutually_exclusive_group()
+    review_gate.add_argument(
+        "--stop-on-review-gate",
+        action="store_true",
+        default=True,
+        help="Stop when a run produces an integration/source review gate. This is the default.",
+    )
+    review_gate.add_argument(
+        "--allow-review-gate-follow-up",
+        action="store_true",
+        help="Allow follow-up authoring even when the previous run has an integration review gate.",
+    )
+    parser.add_argument(
+        "--author-runtime",
+        choices=["fake", "codex"],
+        help="Override the profile taskpack author runtime.",
+    )
+    parser.add_argument(
+        "--runtime",
+        choices=["auto", "fake", "codex"],
+        help="Override the profile execution runtime.",
+    )
+    parser.add_argument(
+        "--codex-timeout-seconds",
+        type=int,
+        default=600,
+        help="Timeout for Codex taskpack authoring.",
+    )
+    parser.add_argument(
+        "--one-shot",
+        action="store_true",
+        default=None,
+        help="Use the one-shot scheduler path for each round.",
+    )
+    parser.add_argument("--max-inflight", type=int, help="Override maximum daemon inflight attempts.")
+    parser.add_argument("--max-attempts", type=int, help="Override maximum attempts per task.")
+    parser.add_argument(
+        "--commit-verified-integration",
+        action="store_true",
+        default=None,
+        help="Commit integration worktree changes after verification passes for each round.",
+    )
+    _add_notification_args(parser, notification_project_default=None)
+    parser.add_argument(
+        "--codex-command",
+        nargs=argparse.REMAINDER,
+        help="Optional Codex command prefix. Must appear last.",
+    )
+    parser.add_argument("--json", action="store_true", help="Print the full pursue result as JSON.")
+    parser.set_defaults(handler=_handle_pursue)
 
 
 def _add_taskpack_new_parser(subcommands):
@@ -1484,6 +1559,134 @@ def _write_init_text(summary):
         f"init_status: {summary.get('status') or 'unknown'}",
         f"profile_path: {summary.get('profile_path') or 'unknown'}",
     ]
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _handle_pursue(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    goal = args.goal or _prompt_text("Long-running goal", required=True)
+    max_rounds = int(args.max_rounds or 0)
+    if max_rounds < 1:
+        raise AgentTeamCliError("max rounds must be at least 1", max_rounds=max_rounds)
+
+    result = _run_pursue_loop(
+        args,
+        project_root=project_root,
+        profile=profile,
+        goal=goal,
+        max_rounds=max_rounds,
+    )
+    if args.json:
+        return result
+    _write_pursue_result_text(result)
+    return 0
+
+
+def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
+    rounds = []
+    work_root = Path(args.work_root or profile["work_root"]).resolve()
+    current_goal = goal
+    source_report = None
+    stop_reason = None
+    for round_index in range(1, max_rounds + 1):
+        if source_report is not None:
+            current_goal = _build_followup_goal(current_goal, source_report)
+        taskpack_id = _pursue_taskpack_id(args.taskpack_id, round_index)
+        submit_args = _submit_args_from_profile(args, project_root, profile)
+        submit_args.goal = current_goal
+        submit_args.taskpack_id = taskpack_id
+        submit_args.progress = not bool(args.json)
+        run_result = _handle_submit(submit_args)
+        round_record = _pursue_round_record(round_index, run_result, work_root)
+        rounds.append(round_record)
+        stop_reason = _pursue_stop_reason(
+            round_record,
+            allow_review_gate_follow_up=bool(args.allow_review_gate_follow_up),
+        )
+        if stop_reason:
+            break
+        source_run_dir = Path(round_record["run_dir"])
+        source_report = build_run_completion_report(
+            source_run_dir,
+            project=profile.get("project_key") or "agentteam",
+            write_files=False,
+        )
+        current_goal = _pursue_next_goal(goal, source_report)
+    if stop_reason is None:
+        stop_reason = "max_rounds_reached"
+    return {
+        "pursue_status": "stopped",
+        "goal": goal,
+        "max_rounds": max_rounds,
+        "rounds_completed": len(rounds),
+        "stop_reason": stop_reason,
+        "runs": rounds,
+        "work_root": str(work_root),
+    }
+
+
+def _pursue_taskpack_id(base_taskpack_id, round_index):
+    if not base_taskpack_id:
+        return None
+    if round_index == 1:
+        return base_taskpack_id
+    return f"{base_taskpack_id}-r{round_index}"
+
+
+def _pursue_round_record(round_index, run_result, work_root):
+    taskpack_id = run_result.get("taskpack_id") or "unknown"
+    report = run_result.get("report") if isinstance(run_result.get("report"), dict) else {}
+    run_dir = Path(work_root) / "runs" / taskpack_id
+    return {
+        "round": round_index,
+        "taskpack_id": taskpack_id,
+        "status": run_result.get("status") or "unknown",
+        "run_status": report.get("run_status"),
+        "blocked_count": report.get("blocked_count", 0),
+        "report_path": report.get("report_path"),
+        "run_dir": str(run_dir.resolve()),
+        "follow_up_recommendation": (
+            report.get("completion_summary", {}).get("follow_up_recommendation")
+            if isinstance(report.get("completion_summary"), dict)
+            else None
+        ),
+    }
+
+
+def _pursue_stop_reason(round_record, *, allow_review_gate_follow_up=False):
+    status = round_record.get("status")
+    if status in {"manual_gate_required", "permission_request_required", "blocked", "failed"}:
+        return status
+    if int(round_record.get("blocked_count") or 0) > 0:
+        return "blocked"
+    recommendation = round_record.get("follow_up_recommendation")
+    action = recommendation.get("action") if isinstance(recommendation, dict) else None
+    if action in {"integrate", "integrate_then_next"} and not allow_review_gate_follow_up:
+        return "review_gate_required"
+    return None
+
+
+def _pursue_next_goal(original_goal, source_report):
+    summary = source_report.get("completion_summary") if isinstance(source_report, dict) else {}
+    next_step = _first_non_empty_text(summary.get("next_steps") if isinstance(summary, dict) else None)
+    if next_step:
+        return next_step
+    return f"Continue pursuing the long-running goal using the previous report: {original_goal}"
+
+
+def _write_pursue_result_text(result):
+    latest = result.get("runs", [])[-1] if result.get("runs") else {}
+    lines = [
+        f"pursue_status: {result.get('pursue_status') or 'unknown'}",
+        f"rounds_completed: {result.get('rounds_completed', 0)}/{result.get('max_rounds', 0)}",
+        f"stop_reason: {result.get('stop_reason') or 'unknown'}",
+    ]
+    if latest:
+        lines.append(f"latest_taskpack_id: {latest.get('taskpack_id') or 'unknown'}")
+        if latest.get("report_path"):
+            lines.append(f"latest_report: {latest['report_path']}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 

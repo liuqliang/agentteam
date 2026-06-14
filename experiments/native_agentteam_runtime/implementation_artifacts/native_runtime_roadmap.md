@@ -1010,6 +1010,30 @@ Implemented:
 - Feishu permission request messages now include both approve and deny commands
   using the normal `agentteam permissions ...` CLI form.
 
+### M60: Bounded Long-Running Pursue Loop
+
+Status: implemented in the native-runtime branch.
+
+Goal: let an operator give a long-running goal and have AgentTeam execute
+bounded taskpack rounds without creating a new scheduler or bypassing review
+authority.
+
+Implemented:
+
+- added `agentteam pursue` as a thin loop over existing taskpack authoring,
+  runtime execution, reports, and follow-up context;
+- each round remains a normal frozen taskpack and run under the project work
+  root, with ordinary report and artifact generation;
+- `--max-rounds` sets a hard round budget so pursue cannot run indefinitely;
+- the default stop policy halts at manual gates, permission requests, blocked
+  reports, failed statuses, and integration/source review gates;
+- `--allow-review-gate-follow-up` allows another follow-up taskpack to be
+  authored from the previous report while still leaving merge/release authority
+  with the operator;
+- JSON output records `pursue_status`, `rounds_completed`, `stop_reason`, and
+  per-round taskpack/report/run paths;
+- text output stays compact for terminal use.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:

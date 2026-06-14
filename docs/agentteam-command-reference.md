@@ -28,6 +28,7 @@ agentteam status
 agentteam report
 agentteam integrate --taskpack <taskpack-id>
 agentteam next --from-taskpack <taskpack-id> --goal "continue with the next optimization"
+agentteam pursue --goal "long-running optimization goal" --max-rounds 3
 ```
 
 Use `--json` when another program needs structured output. Text output is kept
@@ -38,7 +39,7 @@ compact for terminal use.
 | Group | Commands | Purpose |
 | --- | --- | --- |
 | Project setup | `init`, `doctor`, `update`, `db`, `stats`, `gc` | Configure, inspect, and maintain the local AgentTeam installation for a project. |
-| Run lifecycle | `start`, `next`, `continue`, `stop`, `status`, `explain-status`, `watch`, `logs`, `report`, `paths` | Start work, inspect progress, stop safely, and understand completed runs. |
+| Run lifecycle | `start`, `next`, `pursue`, `continue`, `stop`, `status`, `explain-status`, `watch`, `logs`, `report`, `paths` | Start work, inspect progress, stop safely, and understand completed runs. |
 | Result integration | `integrate` | Merge verified integration-baseline changes back to the target repository. |
 | Notification | `notify` | Test Feishu delivery or resend completion summaries. |
 | Operator intervention | `resume`, `answer`, `permissions`, `chat` | Resolve manual gates, permission requests, or discuss a run with diagnostic context. |
@@ -339,6 +340,35 @@ Notes:
 - Completion reports may include a `follow_up_recommendation` with an
   `agentteam next --from-taskpack ... --goal ...` command. Treat it as an
   operator-facing suggestion, not an automatic start.
+
+### `agentteam pursue`
+
+Runs a bounded long-goal loop across ordinary taskpacks.
+
+Use it when:
+
+- You want AgentTeam to keep working through `start` and follow-up rounds within
+  an explicit budget.
+- You want the runtime to stop automatically at operator gates instead of asking
+  you to launch each safe round manually.
+
+Examples:
+
+```bash
+agentteam pursue --goal "持续优化这个比赛仓库的准确率和延迟" --max-rounds 3
+agentteam pursue --goal "持续优化这个比赛仓库的准确率和延迟" --max-rounds 3 --json
+agentteam pursue --goal "continue optimization" --max-rounds 2 --allow-review-gate-follow-up
+```
+
+Notes:
+
+- Each round is still a normal taskpack/run with normal reports and artifacts.
+- The default stop policy halts at manual gates, permission requests, blockers,
+  failed runs, and integration/source review gates.
+- `--allow-review-gate-follow-up` lets the loop author another follow-up from
+  the previous report, but it still does not merge source changes or bypass
+  operator review.
+- `--max-rounds` is a hard budget. The command never runs indefinitely.
 
 ### AgentTeam-As-Target Work
 

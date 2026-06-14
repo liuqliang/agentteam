@@ -30,6 +30,8 @@ from agentteam_runtime.agentteam import (
     _handle_taskpack_new,
     _handle_run,
     _run_paths_for_frozen_taskpack,
+    _pursue_next_goal,
+    _pursue_stop_reason,
     _set_taskpack_runtime_backend,
     _submit_args_from_profile,
     _stop_authoring,
@@ -6078,12 +6080,275 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("stop", help_completed.stdout)
         self.assertIn("taskpack", help_completed.stdout)
         self.assertIn("update", help_completed.stdout)
+        self.assertIn("pursue", help_completed.stdout)
         self.assertIn("agentteam help <command>", help_completed.stdout)
         self.assertEqual(stop_completed.returncode, 0, stop_completed.stderr)
         self.assertIn("agentteam stop", stop_completed.stdout)
         self.assertIn("Stop or clean up an existing run", stop_completed.stdout)
         self.assertIn("agentteam stop --project-root <repo>", stop_completed.stdout)
         self.assertIn("--stale", stop_completed.stdout)
+
+    def test_agentteam_cli_pursue_help_lists_budget_and_gate_options(self):
+        completed = subprocess.run(
+            ["python3", "-m", "agentteam_runtime.agentteam", "pursue", "--help"],
+            env=_test_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--max-rounds", completed.stdout)
+        self.assertIn("--stop-on-review-gate", completed.stdout)
+        self.assertIn("--allow-review-gate-follow-up", completed.stdout)
+
+    def test_agentteam_cli_pursue_runs_one_fake_round_and_stops_on_review_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "pursue-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--verification-command-json",
+                    json.dumps(["python3", "-c", "print('ok')"]),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "pursue",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "持续优化这个仓库的准确率和延迟。",
+                    "--taskpack-id",
+                    "pursue-loop",
+                    "--max-rounds",
+                    "1",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["pursue_status"], "stopped")
+            self.assertEqual(summary["stop_reason"], "review_gate_required")
+            self.assertEqual(summary["rounds_completed"], 1)
+            self.assertEqual(summary["runs"][0]["round"], 1)
+            self.assertEqual(summary["runs"][0]["taskpack_id"], "pursue-loop")
+            self.assertEqual(summary["runs"][0]["status"], "completed")
+            self.assertEqual(
+                summary["runs"][0]["follow_up_recommendation"]["action"],
+                "integrate",
+            )
+            self.assertTrue((work_root / "runs" / "pursue-loop").exists())
+
+    def test_pursue_stop_reason_blocks_operator_gates(self):
+        self.assertEqual(
+            _pursue_stop_reason({"status": "manual_gate_required"}),
+            "manual_gate_required",
+        )
+        self.assertEqual(
+            _pursue_stop_reason({"status": "permission_request_required"}),
+            "permission_request_required",
+        )
+        self.assertEqual(
+            _pursue_stop_reason({"status": "completed", "blocked_count": 1}),
+            "blocked",
+        )
+        self.assertEqual(
+            _pursue_stop_reason(
+                {
+                    "status": "completed",
+                    "blocked_count": 0,
+                    "follow_up_recommendation": {"action": "integrate"},
+                }
+            ),
+            "review_gate_required",
+        )
+        self.assertIsNone(
+            _pursue_stop_reason(
+                {
+                    "status": "completed",
+                    "blocked_count": 0,
+                    "follow_up_recommendation": {"action": "integrate_then_next"},
+                },
+                allow_review_gate_follow_up=True,
+            )
+        )
+
+    def test_pursue_next_goal_uses_report_next_step(self):
+        self.assertEqual(
+            _pursue_next_goal(
+                "持续优化原始目标。",
+                {"completion_summary": {"next_steps": ["继续验证最慢模块。"]}},
+            ),
+            "继续验证最慢模块。",
+        )
+        self.assertIn(
+            "持续优化原始目标。",
+            _pursue_next_goal("持续优化原始目标。", {"completion_summary": {}}),
+        )
+
+    def test_agentteam_cli_pursue_can_continue_when_review_gate_follow_up_is_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "pursue-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--verification-command-json",
+                    json.dumps(["python3", "-c", "print('ok')"]),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "pursue",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "持续优化这个仓库的准确率和延迟。",
+                    "--taskpack-id",
+                    "pursue-loop",
+                    "--max-rounds",
+                    "2",
+                    "--allow-review-gate-follow-up",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["stop_reason"], "max_rounds_reached")
+            self.assertEqual(summary["rounds_completed"], 2)
+            self.assertEqual(
+                [item["taskpack_id"] for item in summary["runs"]],
+                ["pursue-loop", "pursue-loop-r2"],
+            )
+            self.assertTrue((work_root / "runs" / "pursue-loop-r2").exists())
+
+    def test_agentteam_cli_pursue_text_output_is_compact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "pursue-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--verification-command-json",
+                    json.dumps(["python3", "-c", "print('ok')"]),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "pursue",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "持续优化这个仓库的准确率和延迟。",
+                    "--taskpack-id",
+                    "pursue-loop",
+                    "--max-rounds",
+                    "1",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("pursue_status: stopped", completed.stdout)
+            self.assertIn("rounds_completed: 1/1", completed.stdout)
+            self.assertIn("stop_reason: review_gate_required", completed.stdout)
+            self.assertIn("latest_taskpack_id: pursue-loop", completed.stdout)
+            self.assertIn("latest_report:", completed.stdout)
+            self.assertLessEqual(len([line for line in completed.stdout.splitlines() if line.strip()]), 5)
 
     def test_agentteam_cli_continue_runs_existing_frozen_taskpack_without_draft(self):
         with tempfile.TemporaryDirectory() as tmp:
