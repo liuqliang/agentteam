@@ -44,6 +44,11 @@ from .goal_memory import (
     write_goal_memory,
 )
 from .follow_up_queue import build_follow_up_queue_summary, render_follow_up_queue_text
+from .semantic_feedback import (
+    list_semantic_feedback_proposals,
+    render_semantic_feedback_text,
+    write_semantic_feedback_proposal,
+)
 from .profile import (
     AgentTeamProfileError,
     build_project_profile,
@@ -130,6 +135,18 @@ _HELP_COMMANDS = [
         "notes": [
             "Does not draft taskpacks, start workers, merge code, or mutate run artifacts.",
             "Use the printed agentteam next command when you decide to continue.",
+        ],
+    },
+    {
+        "name": "feedback",
+        "summary": "Create or list semantic feedback proposals for design-authority review.",
+        "examples": [
+            "agentteam feedback propose --taskpack <id> --proposal-id design-gap-1 --target-artifact design/system.md --summary \"...\" --rationale \"...\"",
+            "agentteam feedback list --json",
+        ],
+        "notes": [
+            "Proposal artifacts are written under <work_root>/semantic_feedback/.",
+            "This command does not edit design authority documents.",
         ],
     },
     {
@@ -403,6 +420,7 @@ def _build_parser():
     _add_next_parser(subcommands)
     _add_queue_parser(subcommands)
     _add_pursue_parser(subcommands)
+    _add_feedback_parser(subcommands)
     _add_taskpack_new_parser(taskpack_subcommands)
     _add_taskpack_draft_parser(taskpack_subcommands)
     _add_taskpack_validate_parser(taskpack_subcommands)
@@ -718,6 +736,44 @@ def _add_pursue_parser(subcommands):
     )
     parser.add_argument("--json", action="store_true", help="Print the full pursue result as JSON.")
     parser.set_defaults(handler=_handle_pursue)
+
+
+def _add_feedback_parser(subcommands):
+    parser = subcommands.add_parser(
+        "feedback",
+        help="Create or inspect semantic feedback proposal artifacts.",
+    )
+    feedback_subcommands = parser.add_subparsers(
+        dest="feedback_command",
+        required=True,
+        parser_class=JsonArgumentParser,
+    )
+    propose = feedback_subcommands.add_parser(
+        "propose",
+        help="Write a semantic feedback proposal from an implementation run.",
+    )
+    propose.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    propose.add_argument("--taskpack", help="Source taskpack/run id. Defaults to latest run.")
+    propose.add_argument("--run-dir", help="Existing source run directory. Overrides --taskpack.")
+    propose.add_argument("--proposal-id", required=True, help="Stable proposal artifact id.")
+    propose.add_argument(
+        "--target-artifact",
+        action="append",
+        required=True,
+        help="Semantic authority artifact path to review. Repeat for multiple targets.",
+    )
+    propose.add_argument("--summary", required=True, help="Short natural-language proposal summary.")
+    propose.add_argument("--rationale", required=True, help="Evidence-backed reason for the proposal.")
+    propose.add_argument("--json", action="store_true", help="Print proposal as JSON.")
+    propose.set_defaults(handler=_handle_feedback)
+
+    list_parser = feedback_subcommands.add_parser(
+        "list",
+        help="List semantic feedback proposals for the project.",
+    )
+    list_parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    list_parser.add_argument("--json", action="store_true", help="Print proposal list as JSON.")
+    list_parser.set_defaults(handler=_handle_feedback)
 
 
 def _add_taskpack_new_parser(subcommands):
@@ -2007,6 +2063,54 @@ def _latest_goal_memory_for_run(work_root, run_dir, source_report):
     if not candidates:
         return {}
     return sorted(candidates, key=lambda item: item[0])[-1][1]
+
+
+def _handle_feedback(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    work_root = Path(profile["work_root"]).resolve()
+    if args.feedback_command == "propose":
+        run_dir = _queue_source_run_dir(args, profile, work_root)
+        if not run_dir.exists():
+            raise AgentTeamCliError("source run not found", run_dir=str(run_dir))
+        source_report = build_run_completion_report(
+            run_dir,
+            project=profile.get("project_key") or "agentteam",
+        )
+        proposal = write_semantic_feedback_proposal(
+            work_root=work_root,
+            proposal_id=args.proposal_id,
+            source_report=source_report,
+            target_artifacts=args.target_artifact,
+            summary=args.summary,
+            rationale=args.rationale,
+        )
+        if args.json:
+            return proposal
+        _write_feedback_proposal_text(proposal)
+        return 0
+    if args.feedback_command == "list":
+        summary = list_semantic_feedback_proposals(work_root)
+        if args.json:
+            return summary
+        sys.stdout.write(render_semantic_feedback_text(summary))
+        sys.stdout.flush()
+        return 0
+    raise AgentTeamCliError("unknown feedback command", command=args.feedback_command)
+
+
+def _write_feedback_proposal_text(proposal):
+    lines = [
+        f"proposal_status: {proposal.get('proposal_status') or 'unknown'}",
+        f"proposal_id: {proposal.get('proposal_id') or 'unknown'}",
+        f"source_taskpack_id: {proposal.get('source_taskpack_id') or 'unknown'}",
+        f"proposal_path: {proposal.get('proposal_path') or 'unknown'}",
+    ]
+    if proposal.get("summary"):
+        lines.append(f"summary: {proposal['summary']}")
+    lines.append("authority_boundary: proposal_only")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
 
 
 def _followup_source_run_dir(args, profile, work_root):

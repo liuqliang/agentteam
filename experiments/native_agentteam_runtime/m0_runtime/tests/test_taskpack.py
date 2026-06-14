@@ -7242,6 +7242,39 @@ class TaskpackTests(unittest.TestCase):
             'agentteam next --from-taskpack first-pass --goal "继续验证最慢模块。"',
         )
 
+    def test_semantic_feedback_proposal_helper_writes_review_artifact(self):
+        from agentteam_runtime.semantic_feedback import write_semantic_feedback_proposal
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp) / "work"
+            proposal = write_semantic_feedback_proposal(
+                work_root=work_root,
+                proposal_id="design-gap-1",
+                source_report={
+                    "run_id": "first-pass",
+                    "run_dir": "/tmp/work/runs/first-pass",
+                    "report_path": "/tmp/work/runs/first-pass/reports/final_report.md",
+                },
+                target_artifacts=["design/system.md"],
+                summary="实现证据显示系统边界需要补充。",
+                rationale="worker 在实现阶段发现设计文档没有说明 review gate 的归属。",
+                created_by="test",
+                created_at="2026-06-14T00:00:00Z",
+            )
+
+            proposal_path = Path(proposal["proposal_path"])
+            self.assertTrue(proposal_path.exists())
+            payload = json.loads(proposal_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["proposal_schema_version"], "semantic_feedback_proposal.v1")
+            self.assertEqual(payload["proposal_status"], "pending_review")
+            self.assertEqual(payload["proposal_id"], "design-gap-1")
+            self.assertEqual(payload["source_taskpack_id"], "first-pass")
+            self.assertEqual(payload["source_report_path"], "/tmp/work/runs/first-pass/reports/final_report.md")
+            self.assertEqual(payload["target_artifacts"], ["design/system.md"])
+            self.assertEqual(payload["summary"], "实现证据显示系统边界需要补充。")
+            self.assertEqual(payload["rationale"], "worker 在实现阶段发现设计文档没有说明 review gate 的归属。")
+            self.assertIn("does not mutate", payload["authority_boundary"])
+
     def test_agentteam_cli_pursue_writes_goal_memory_and_reuses_it_in_followup_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -7868,6 +7901,116 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("next_goal:", queue_completed.stdout)
             self.assertIn("next_command: agentteam next --from-taskpack first-pass", queue_completed.stdout)
             self.assertNotIn("status: completed", queue_completed.stdout)
+
+    def test_agentteam_cli_feedback_propose_writes_pending_review_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "feedback-project")
+            run_dir = _write_completed_operator_run(work_root / "runs" / "first-pass")
+            report_path = run_dir / "reports" / "final_report.md"
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "feedback",
+                    "propose",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "first-pass",
+                    "--proposal-id",
+                    "design-gap-1",
+                    "--target-artifact",
+                    "design/system.md",
+                    "--summary",
+                    "实现证据显示系统边界需要补充。",
+                    "--rationale",
+                    "worker 在实现阶段发现设计文档没有说明 review gate 的归属。",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["proposal_status"], "pending_review")
+            self.assertEqual(summary["source_taskpack_id"], "first-pass")
+            proposal_path = Path(summary["proposal_path"])
+            self.assertTrue(proposal_path.exists())
+            self.assertIn(str(work_root / "semantic_feedback"), str(proposal_path))
+            payload = json.loads(proposal_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["target_artifacts"], ["design/system.md"])
+            self.assertTrue(report_path.exists())
+
+    def test_agentteam_cli_feedback_list_reports_pending_proposals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "feedback-project")
+            _write_completed_operator_run(work_root / "runs" / "first-pass")
+            propose_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "feedback",
+                    "propose",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "first-pass",
+                    "--proposal-id",
+                    "design-gap-1",
+                    "--target-artifact",
+                    "design/system.md",
+                    "--summary",
+                    "实现证据显示系统边界需要补充。",
+                    "--rationale",
+                    "worker 在实现阶段发现设计文档没有说明 review gate 的归属。",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(propose_completed.returncode, 0, propose_completed.stderr)
+
+            list_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "feedback",
+                    "list",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(list_completed.returncode, 0, list_completed.stderr)
+            summary = json.loads(list_completed.stdout)
+            self.assertEqual(summary["proposal_count"], 1)
+            self.assertEqual(summary["proposals"][0]["proposal_id"], "design-gap-1")
+            self.assertEqual(summary["proposals"][0]["proposal_status"], "pending_review")
 
     def test_repo_root_agentteam_launcher_invokes_cli_help(self):
         launcher = Path(__file__).resolve().parents[4] / "agentteam"

@@ -1212,6 +1212,36 @@ Next route: add semantic feedback proposal artifacts so implementation evidence
 can request architecture/document updates without giving ordinary workers direct
 authority over semantic design documents.
 
+### M64: Semantic Feedback Proposals
+
+Status: implemented in the native-runtime branch.
+
+Goal: let implementation evidence request semantic architecture or design
+updates through bounded review artifacts, while preserving authority boundaries.
+
+Implemented:
+
+- added semantic feedback proposal artifacts under
+  `<work_root>/semantic_feedback/`;
+- added `agentteam feedback propose` to create a `pending_review` proposal from
+  a source run/report, target authority artifacts, summary, and rationale;
+- added `agentteam feedback list` to inspect proposal artifacts;
+- proposal payloads include source taskpack/report paths, target artifacts,
+  summary, rationale, created metadata, and an explicit authority boundary;
+- feedback commands do not modify design authority documents, roadmap files,
+  source code, taskpacks, reports, or run evidence.
+
+Validation:
+
+- focused red/green tests cover helper proposal writing, CLI proposal creation,
+  and proposal listing;
+- normal verification runs through `test_taskpack` and `test_m0_runtime` with
+  `PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime`.
+
+Next route: continue toward language-aware repository grounding and backend
+adapter hardening. Model adapters beyond Codex should stay behind explicit
+credential/configuration work.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -1252,6 +1282,7 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is semantic feedback proposals: implementation runs
-should be able to write bounded proposal artifacts for semantic authority review
-without mutating design authority documents directly.
+The next recommended step is language-aware repository grounding: use build
+systems, test discovery, and static-analysis/LSP-style signals to improve task
+decomposition for large repositories without dumping the whole repo into
+context.

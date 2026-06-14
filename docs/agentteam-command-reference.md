@@ -42,6 +42,7 @@ compact for terminal use.
 | Run lifecycle | `start`, `next`, `queue`, `pursue`, `continue`, `stop`, `status`, `explain-status`, `watch`, `logs`, `report`, `paths` | Start work, inspect progress, stop safely, and understand completed runs. |
 | Result integration | `integrate` | Merge verified integration-baseline changes back to the target repository. |
 | Notification | `notify` | Test Feishu delivery or resend completion summaries. |
+| Semantic feedback | `feedback` | Record implementation evidence as review-gated semantic feedback proposals. |
 | Operator intervention | `resume`, `answer`, `permissions`, `chat` | Resolve manual gates, permission requests, or discuss a run with diagnostic context. |
 | Taskpack management | `taskpack` | Draft, validate, freeze, list, and delete taskpacks. |
 | Low-level runtime | `submit`, `run` | Lower-level commands used by scripts or advanced debugging. |
@@ -454,6 +455,38 @@ When the target repository is AgentTeam itself, generated taskpacks and reports
 must keep source merge, push, and release activation under operator review. The
 worker may produce patches, evidence, and verification results, but the operator
 reviews before integrating those changes into the source branch.
+
+### `agentteam feedback`
+
+Creates or lists semantic feedback proposal artifacts.
+
+Use it when:
+
+- Implementation evidence shows that a semantic architecture, design, or SOP
+  document may need clarification.
+- You want to record the evidence without letting an implementation worker edit
+  authority documents directly.
+
+Examples:
+
+```bash
+agentteam feedback propose --taskpack <taskpack-id> \
+  --proposal-id design-gap-1 \
+  --target-artifact design/system.md \
+  --summary "实现证据显示系统边界需要补充" \
+  --rationale "worker 在实现阶段发现 review gate 归属不清"
+agentteam feedback list
+agentteam feedback list --json
+```
+
+Notes:
+
+- Proposals are written under `<work_root>/semantic_feedback/`.
+- Proposal status starts as `pending_review`.
+- Proposal artifacts include source taskpack/report paths, target artifacts,
+  summary, rationale, and an explicit authority boundary.
+- The command does not modify design authority documents, roadmap files,
+  source code, taskpacks, or run reports.
 
 ### `agentteam continue`
 
