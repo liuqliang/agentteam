@@ -45,6 +45,29 @@ OPTIMIZATION_INTENT_MARKERS = [
     "延迟",
     "耗时",
 ]
+OPTIMIZATION_DECOMPOSITION_MARKERS = [
+    "baseline",
+    "current behavior",
+    "profile",
+    "profiling",
+    "candidate",
+    "matrix",
+    "benchmark",
+    "metric",
+    "measure",
+    "measurement",
+    "measured",
+    "hotspot",
+    "基线",
+    "当前行为",
+    "画像",
+    "候选",
+    "矩阵",
+    "指标",
+    "测量",
+    "复测",
+    "热点",
+]
 
 
 class TaskpackValidationError(ValueError):
@@ -300,6 +323,11 @@ def validate_taskpack(taskpack_dir):
             has_optimization_code_item = True
             if not _optimization_item_preserves_goal_intent(item):
                 errors.append(f"{task_id_label} optimization task must preserve optimization intent")
+            if not _optimization_item_preserves_decomposition_intent(item):
+                errors.append(
+                    f"{task_id_label} optimization task must include "
+                    "baseline/profile/candidate/metric decomposition intent"
+                )
             missing = _missing_optimization_deliverables(deliverables)
             if missing:
                 errors.append(
@@ -434,6 +462,14 @@ def _profile_command_or_default(command, default, field_name):
 
 
 def _default_goal_alignment(goal):
+    if classify_goal_kind(goal) == "optimization":
+        return (
+            "This optimization task must preserve the original goal, establish "
+            "baseline or current behavior, identify optimization candidates and "
+            "metrics, then either implement an evidence-backed repository change "
+            "or explain why no safe in-repo change is justified for: "
+            f"{goal}"
+        )
     return (
         "This task must preserve the original goal and either implement an "
         "evidence-backed repository change or explain why no safe in-repo "
@@ -515,6 +551,17 @@ def _optimization_item_preserves_goal_intent(item):
         ]
     ).lower()
     return any(marker in text for marker in OPTIMIZATION_INTENT_MARKERS)
+
+
+def _optimization_item_preserves_decomposition_intent(item):
+    text = " ".join(
+        str(value or "")
+        for value in [
+            item.get("objective"),
+            item.get("goal_alignment"),
+        ]
+    ).lower()
+    return any(marker in text for marker in OPTIMIZATION_DECOMPOSITION_MARKERS)
 
 
 def _missing_optimization_deliverables(deliverables):

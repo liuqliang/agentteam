@@ -1571,6 +1571,25 @@ class M0RuntimeTests(unittest.TestCase):
 
         self.assertTrue(report["agentteam_target_review_required"])
 
+    def test_operator_task_report_preserves_measured_result(self):
+        report = _operator_task_report(
+            {"task_id": "TASK-OPT-001"},
+            {
+                "task_id": "TASK-OPT-001",
+                "attempt_id": "TASK-OPT-001-ATTEMPT-001",
+                "validation_status": "accepted",
+                "integration_verification_status": "passed",
+                "runtime_output": {
+                    "operator_summary": {
+                        "what_changed": ["优化了算法窗口复制路径。"],
+                        "measured_result": ["窗口复制阶段耗时下降 2%。"],
+                    }
+                },
+            },
+        )
+
+        self.assertEqual(report["measured_result"], ["窗口复制阶段耗时下降 2%。"])
+
     def test_run_simulation_dispatches_ready_task_and_validates_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)

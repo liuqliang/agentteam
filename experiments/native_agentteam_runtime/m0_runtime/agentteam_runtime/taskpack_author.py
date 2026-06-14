@@ -348,6 +348,11 @@ def _author_prompt(
             "code_implementation or code_investigation and non-document write_scope"
         ),
         (
+            "- optimization code-facing tasks must explicitly mention baseline/current behavior, "
+            "profiling, candidate matrix, metrics, measurements, or hotspots in objective or "
+            "goal_alignment"
+        ),
+        (
             "- optimization taskpacks must not fall back to only README/docs fixes unless the "
             "taskpack explicitly proves no safe code-facing work exists"
         ),

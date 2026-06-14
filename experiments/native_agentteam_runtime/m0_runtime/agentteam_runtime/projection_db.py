@@ -309,14 +309,28 @@ def read_projected_artifact_retention_plan(work_root, limit=20):
                 """,
                 (limit,),
             ).fetchall()
+            validation_rows = connection.execute(
+                """
+                select artifact_type, run_id, taskpack_id, task_id, attempt_id,
+                       path, size_bytes, sha256, retention_policy
+                from artifacts
+                where retention_policy = 'rebuildable'
+                order by size_bytes desc, path
+                """
+            ).fetchall()
     except sqlite3.DatabaseError:
         return None
+    validation = _validate_retention_candidate_rows(validation_rows)
     return {
         "projection_source": "db",
         "plan_status": "ready",
         "db_path": str(db_path),
         "check_status": check["check_status"],
         "deletion_enabled": False,
+        "validation_status": validation["validation_status"],
+        "validated_candidate_count": validation["validated_candidate_count"],
+        "invalid_candidate_count": validation["invalid_candidate_count"],
+        "invalid_candidates": validation["invalid_candidates"],
         "candidate_count": candidate_total[0] if candidate_total else 0,
         "candidate_bytes": candidate_total[1] if candidate_total else 0,
         "candidate_limit": limit,
@@ -341,9 +355,53 @@ def read_projected_artifact_retention_plan(work_root, limit=20):
                 "sha256": row[7],
                 "retention_policy": row[8],
                 "reason": "derived context artifact; listed for planning only, not deletion",
+                "validation": _retention_candidate_validation(row),
             }
             for row in candidate_rows
         ],
+    }
+
+
+def _validate_retention_candidate_rows(rows):
+    validations = [_retention_candidate_validation(row) for row in rows]
+    invalid = [item for item in validations if item["status"] != "passed"]
+    return {
+        "validation_status": "failed" if invalid else "passed",
+        "validated_candidate_count": len(validations),
+        "invalid_candidate_count": len(invalid),
+        "invalid_candidates": invalid,
+    }
+
+
+def _retention_candidate_validation(row):
+    path = Path(row[5])
+    expected_size = row[6]
+    expected_sha256 = row[7]
+    exists = path.is_file()
+    actual_size = None
+    actual_sha256 = None
+    if exists:
+        payload = path.read_bytes()
+        actual_size = len(payload)
+        actual_sha256 = hashlib.sha256(payload).hexdigest()
+    size_matches = exists and actual_size == expected_size
+    sha256_matches = exists and actual_sha256 == expected_sha256
+    status = "passed" if exists and size_matches and sha256_matches else "failed"
+    return {
+        "status": status,
+        "artifact_type": row[0],
+        "run_id": row[1],
+        "taskpack_id": row[2],
+        "task_id": row[3],
+        "attempt_id": row[4],
+        "path": row[5],
+        "exists": exists,
+        "size_matches": size_matches,
+        "sha256_matches": sha256_matches,
+        "expected_size_bytes": expected_size,
+        "actual_size_bytes": actual_size,
+        "expected_sha256": expected_sha256,
+        "actual_sha256": actual_sha256,
     }
 
 

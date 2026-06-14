@@ -30,6 +30,14 @@ def build_completion_summary(
         for task in task_reports
         for item in _text_items(task.get("verification"))
     )
+    measured_results = _unique_limited(
+        item
+        for task in task_reports
+        for item in (
+            _text_items(task.get("measured_result"))
+            + _text_items(task.get("measured_results"))
+        )
+    )
     next_steps = _unique_limited(
         item
         for task in task_reports
@@ -55,6 +63,7 @@ def build_completion_summary(
         "what_changed": what_changed,
         "changed_files": changed_files,
         "verification": verification,
+        "measured_results": measured_results,
         "integration": integration,
         "evidence_status_counts": evidence_status_counts,
         "integration_recommendation": _integration_recommendation(
@@ -67,6 +76,14 @@ def build_completion_summary(
         "merge_recommendations": merge_recommendations,
         "evidence_gaps": evidence_gaps,
     }
+    summary["follow_up_recommendation"] = _follow_up_recommendation(
+        run_id,
+        run_status,
+        blocked_count,
+        integration_baseline,
+        summary,
+    )
+    summary["operator_digest"] = _completion_operator_digest(summary)
     summary["chinese_operator_brief"] = build_chinese_operator_brief(
         run_id=run_id,
         run_status=run_status,
@@ -84,6 +101,7 @@ def extend_completion_summary_lines(lines, summary):
     if summary.get("status_line"):
         lines.append(f"Status: {summary['status_line']}")
     _extend_section(lines, "中文简报:", summary.get("chinese_operator_brief"))
+    _extend_section(lines, "中文工作汇报:", summary.get("operator_digest"))
     _extend_section(lines, "What changed:", summary.get("what_changed"))
     _extend_section(lines, "Changed files:", summary.get("changed_files"))
     _extend_section(lines, "Verification:", summary.get("verification"))
@@ -91,6 +109,7 @@ def extend_completion_summary_lines(lines, summary):
         lines.append(f"Integration: {summary['integration']}")
     if summary.get("integration_recommendation"):
         lines.append(f"Integration recommendation: {summary['integration_recommendation']}")
+    _extend_follow_up_recommendation(lines, summary.get("follow_up_recommendation"))
     _extend_section(lines, "Next:", summary.get("next_steps"))
     _extend_section(lines, "Evidence gaps:", summary.get("evidence_gaps"))
     evidence_status_counts = summary.get("evidence_status_counts")
@@ -100,6 +119,74 @@ def extend_completion_summary_lines(lines, summary):
             count = evidence_status_counts.get(status, 0)
             if count:
                 lines.append(f"- {status}: {count}")
+
+
+def _completion_operator_digest(summary):
+    digest = []
+    _append_digest_item(digest, "做了什么", summary.get("what_changed"))
+    _append_digest_item(digest, "涉及文件", summary.get("changed_files"))
+    _append_digest_item(digest, "验证结果", summary.get("verification"))
+    _append_digest_item(digest, "实际结果", summary.get("measured_results"))
+    merge = summary.get("merge_recommendations") or summary.get("integration_recommendation")
+    _append_digest_item(digest, "合并建议", merge)
+    _append_digest_item(digest, "下一步", summary.get("next_steps"))
+    _append_digest_item(digest, "证据缺口", summary.get("evidence_gaps"))
+    return digest
+
+
+def _follow_up_recommendation(run_id, run_status, blocked_count, integration_baseline, summary):
+    next_step = _first_text(summary.get("next_steps"))
+    has_integration = bool(integration_baseline.get("branch"))
+    if blocked_count:
+        return {
+            "action": "review_blocker",
+            "reason": "A blocked or failed task needs operator review before follow-up work.",
+            "report_command": f"agentteam report --taskpack {run_id}",
+        }
+    if has_integration and next_step:
+        return {
+            "action": "integrate_then_next",
+            "reason": "Accepted changes have an integration baseline and the worker recommended a next step.",
+            "integrate_command": f"agentteam integrate --taskpack {run_id}",
+            "next_command": f'agentteam next --from-taskpack {run_id} --goal "{_quote_goal(next_step)}"',
+        }
+    if has_integration:
+        return {
+            "action": "integrate",
+            "reason": "Accepted changes have an integration baseline ready for operator review.",
+            "integrate_command": f"agentteam integrate --taskpack {run_id}",
+        }
+    if next_step and run_status in {"completed", "idle"}:
+        return {
+            "action": "next",
+            "reason": "The run completed with a recommended next implementation step.",
+            "next_command": f'agentteam next --from-taskpack {run_id} --goal "{_quote_goal(next_step)}"',
+        }
+    return {
+        "action": "review_report",
+        "reason": "No safe automatic follow-up was inferred from the structured report.",
+        "report_command": f"agentteam report --taskpack {run_id}",
+    }
+
+
+def _extend_follow_up_recommendation(lines, recommendation):
+    if not isinstance(recommendation, dict) or not recommendation:
+        return
+    lines.append("Follow-up recommendation:")
+    for key in ["action", "reason", "integrate_command", "next_command", "report_command"]:
+        value = recommendation.get(key)
+        if value:
+            lines.append(f"- {key}: {value}")
+
+
+def _quote_goal(goal):
+    return str(goal).replace('"', '\\"')
+
+
+def _append_digest_item(digest, label, values):
+    text = _first_text(values)
+    if text:
+        digest.append(f"{label}：{text}")
 
 
 def _completion_evidence_gaps(what_changed, changed_files, verification, integration):
@@ -187,6 +274,11 @@ def _text_items(values):
     if isinstance(values, tuple):
         return [str(item) for item in values if item is not None and str(item)]
     return [str(values)] if str(values) else []
+
+
+def _first_text(values):
+    items = _text_items(values)
+    return items[0] if items else None
 
 
 def _unique_limited(values, limit=5):

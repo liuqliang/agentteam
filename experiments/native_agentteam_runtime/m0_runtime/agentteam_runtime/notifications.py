@@ -221,9 +221,11 @@ def _permission_request_text(event, run_dir, project):
     task_id = payload.get("task_id", "unknown")
     capability = payload.get("requested_capability") or "runtime_permission"
     reason = payload.get("reason")
-    command = (
-        "python3 -m agentteam_runtime.agentteam permissions approve "
-        f"--run-dir {run_dir} --request-id {request_id}"
+    approve_command = (
+        f"agentteam permissions approve --run-dir {run_dir} --request-id {request_id}"
+    )
+    deny_command = (
+        f"agentteam permissions deny --run-dir {run_dir} --request-id {request_id}"
     )
     lines = [
         "[AgentTeam] permission request required",
@@ -237,7 +239,8 @@ def _permission_request_text(event, run_dir, project):
     lines.extend(
         [
             f"Run dir: {run_dir}",
-            f"Approve: {command}",
+            f"Approve: {approve_command}",
+            f"Deny: {deny_command}",
         ]
     )
     return "\n".join(lines)

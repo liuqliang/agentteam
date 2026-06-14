@@ -193,6 +193,8 @@ def concise_report_lines(report, max_tasks=3):
     summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
     for brief_line in _text_items(summary.get("chinese_operator_brief"))[:3]:
         lines.append(f"中文简报: {brief_line}")
+    for digest_line in _text_items(summary.get("operator_digest"))[:6]:
+        lines.append(f"中文工作汇报: {digest_line}")
     changed = _first_text(summary.get("what_changed"))
     if changed:
         lines.append(f"changed: {changed}")
@@ -215,6 +217,12 @@ def concise_report_lines(report, max_tasks=3):
             lines.append(f"evidence_status: {', '.join(nonzero)}")
     if summary.get("integration_recommendation"):
         lines.append(f"integration_recommendation: {summary['integration_recommendation']}")
+    follow_up = summary.get("follow_up_recommendation")
+    if isinstance(follow_up, dict) and follow_up.get("action"):
+        lines.append(f"follow_up: {follow_up['action']}")
+        command = follow_up.get("next_command") or follow_up.get("integrate_command") or follow_up.get("report_command")
+        if command:
+            lines.append(f"follow_up_command: {command}")
     next_step = _first_text(summary.get("next_steps"))
     if next_step:
         lines.append(f"next: {next_step}")

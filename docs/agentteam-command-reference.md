@@ -262,6 +262,10 @@ Behavior:
   It does not change counts.
 - Artifact deletion is disabled in M42: `artifact_retention_plan.deletion_enabled`
   is always `false`, even when `--force` is present.
+- Retention plans validate rebuildable candidate files against the projection
+  row before any deletion feature exists. JSON includes `validation_status`,
+  `validated_candidate_count`, `invalid_candidate_count`, and per-candidate
+  size/hash validation details.
 - If the projection DB is missing or stale, the artifact retention plan reports
   `projection_warning: projection_db_unavailable` and
   `next_action: run agentteam db rebuild`.
@@ -332,6 +336,9 @@ Notes:
 - If `--from-taskpack` and `--from-run-dir` are omitted, it uses the latest run.
 - The follow-up author sees the previous report/context and should produce a new
   taskpack rather than mutating the old one.
+- Completion reports may include a `follow_up_recommendation` with an
+  `agentteam next --from-taskpack ... --goal ...` command. Treat it as an
+  operator-facing suggestion, not an automatic start.
 
 ### AgentTeam-As-Target Work
 
@@ -422,6 +429,8 @@ Text output includes:
 - integration baseline branch/head
 - token usage when available
 - inflight/manual gate/permission request counts
+- waiting permission request details, including request id, capability, reason,
+  and `agentteam permissions approve/deny` commands when applicable
 - worker summary
 - run directory
 
@@ -505,6 +514,9 @@ Use it when:
 - A run completed or became blocked and you need to know what changed.
 - You need the natural-language work summary, verification status, integration
   status, merge recommendation, token usage, and next steps.
+- You want a Chinese operator-facing digest that says what changed, which files
+  changed, what was verified, measured results if reported, merge guidance, and
+  suggested follow-up.
 
 Examples:
 
@@ -524,6 +536,14 @@ When `<work_root>/agentteam.db` exists and is fresh, JSON output includes
 projected run/report metadata such as the indexed `report_path`. Report content
 is still generated from authoritative run files. If the projection is missing
 or stale, JSON output marks the projection source as `files`.
+
+Completion summaries include:
+
+- `chinese_operator_brief`: compact Chinese scan summary.
+- `operator_digest`: deterministic Chinese work report built only from
+  structured fields.
+- `follow_up_recommendation`: suggested `integrate`, `next`, or blocker-review
+  action with command text when the structured report supports it.
 
 ### `agentteam paths`
 

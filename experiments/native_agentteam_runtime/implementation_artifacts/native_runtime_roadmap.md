@@ -979,6 +979,37 @@ Implemented:
 - command reference documentation states that AgentTeam-as-target work uses
   ordinary `start` and `next` commands, not a special `self-improve` command.
 
+### M50-M54: Runtime Usability Loop
+
+Status: implemented in the native-runtime branch.
+
+Goal: close the next operator usability loop after M49 without changing the
+native control-plane authority model.
+
+Implemented:
+
+- retention dry-runs now validate rebuildable artifact candidates against the
+  fresh projection DB rows using existence, size, and sha256 checks;
+- artifact deletion remains disabled, and stale or missing projection states
+  still require `agentteam db rebuild` before retention planning is trusted;
+- completion summaries now include a deterministic Chinese `operator_digest`
+  built only from structured task report fields;
+- task reports preserve structured `measured_result` values so reported metric
+  deltas can appear in summaries without inference from logs;
+- optimization taskpack validation now rejects generic code-facing optimization
+  tasks that do not express baseline/profile/candidate/metric decomposition
+  intent;
+- the taskpack author prompt now explicitly asks optimization task authors to
+  include baseline/current behavior, profiling, candidate matrix, metrics,
+  measurements, or hotspots in task objective/alignment;
+- completion summaries now include `follow_up_recommendation` with suggested
+  `integrate`, `next`, or blocker-review commands derived from structured
+  report state;
+- `agentteam status` and `agentteam explain-status` expose waiting permission
+  request details and ready-to-run approve/deny commands;
+- Feishu permission request messages now include both approve and deny commands
+  using the normal `agentteam permissions ...` CLI form.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -1019,5 +1050,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is to return to projection-backed retention
-validation before any artifact deletion feature is considered.
+The next recommended step is to continue the DB/artifact route by validating
+whether read-through projection queries are reliable enough for broader
+operator commands, before considering any real artifact deletion feature.

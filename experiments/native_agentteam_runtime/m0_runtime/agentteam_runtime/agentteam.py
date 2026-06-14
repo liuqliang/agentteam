@@ -2540,6 +2540,7 @@ def _handle_explain_status(args):
         "active_phase": status_summary.get("active_phase"),
         "explanation": explanation,
         "next_action": _status_next_action(status_summary),
+        "permission_request_details": status_summary.get("permission_request_details") or [],
         "run_dir": status_summary["run_dir"],
     }
     if args.json:
@@ -3024,6 +3025,17 @@ def _write_explain_status_text(summary):
         f"Next action: {summary['next_action']}",
         f"run_dir: {summary['run_dir']}",
     ]
+    for request in summary.get("permission_request_details") or []:
+        lines.append(
+            "permission_request: "
+            f"{request.get('request_id') or 'unknown'} "
+            f"task={request.get('task_id') or 'unknown'} "
+            f"capability={request.get('requested_capability') or 'runtime_permission'}"
+        )
+        if request.get("approve_command"):
+            lines.append(f"approve: {request['approve_command']}")
+        if request.get("deny_command"):
+            lines.append(f"deny: {request['deny_command']}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 
@@ -3473,6 +3485,7 @@ def _build_run_status_summary(profile, run_dir):
     integration_counts = _status_integration_counts(snapshot)
     manual_gate_count = _waiting_manual_gate_count(snapshot)
     permission_request_count = _waiting_permission_request_count(snapshot)
+    permission_request_details = _waiting_permission_request_details(snapshot, run_dir)
     authoring = _build_project_authoring_summary(profile)
     run_status = _status_run_state(snapshot, state)
     overall_status = _overall_run_status(
@@ -3503,6 +3516,7 @@ def _build_run_status_summary(profile, run_dir):
         "token_usage": token_usage_from_state(state),
         "manual_gates": manual_gate_count,
         "permission_requests": permission_request_count,
+        "permission_request_details": permission_request_details,
         "last_failure": _status_last_failure(snapshot, state),
         "authoring": authoring,
         "run_dir": str(run_dir),
@@ -3813,6 +3827,19 @@ def _write_status_text(summary):
         f"manual_gates: {summary['manual_gates']}",
         f"permission_requests: {summary['permission_requests']}",
     ]
+    for request in summary.get("permission_request_details") or []:
+        lines.append(
+            "permission_request: "
+            f"{request.get('request_id') or 'unknown'} "
+            f"task={request.get('task_id') or 'unknown'} "
+            f"capability={request.get('requested_capability') or 'runtime_permission'}"
+        )
+        if request.get("reason"):
+            lines.append(f"reason: {request['reason']}")
+        if request.get("approve_command"):
+            lines.append(f"approve: {request['approve_command']}")
+        if request.get("deny_command"):
+            lines.append(f"deny: {request['deny_command']}")
     if summary.get("active_phase"):
         lines.append(f"active_phase: {summary['active_phase']}")
     active_authoring = summary.get("active_authoring")
@@ -4071,6 +4098,38 @@ def _waiting_permission_request_count(snapshot):
         for request in requests.values()
         if isinstance(request, dict) and request.get("request_status") == "waiting"
     )
+
+
+def _waiting_permission_request_details(snapshot, run_dir):
+    requests = snapshot.get("permission_requests") if isinstance(snapshot, dict) else None
+    if not isinstance(requests, dict):
+        return []
+    run_dir = Path(run_dir).resolve()
+    details = []
+    for request_id, request in sorted(requests.items()):
+        if not isinstance(request, dict) or request.get("request_status") != "waiting":
+            continue
+        request_id = request.get("request_id") or request_id
+        details.append(
+            {
+                "request_id": request_id,
+                "task_id": request.get("task_id"),
+                "attempt_id": request.get("attempt_id"),
+                "requested_capability": request.get("requested_capability"),
+                "request_type": request.get("request_type"),
+                "reason": request.get("reason"),
+                "scope": request.get("scope"),
+                "sandbox": request.get("sandbox"),
+                "command": request.get("command"),
+                "approve_command": (
+                    f"agentteam permissions approve --run-dir {run_dir} --request-id {request_id}"
+                ),
+                "deny_command": (
+                    f"agentteam permissions deny --run-dir {run_dir} --request-id {request_id}"
+                ),
+            }
+        )
+    return details
 
 
 def _status_worker_counts(worker_registry):

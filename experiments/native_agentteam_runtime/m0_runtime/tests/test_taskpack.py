@@ -44,6 +44,7 @@ from agentteam_runtime.diagnostic_chat import (
     build_runtime_diagnostic_context,
     render_runtime_diagnostic_context,
 )
+from agentteam_runtime.notifications import _permission_request_text
 from agentteam_runtime.operator_report import concise_report_lines
 from agentteam_runtime.profile import build_project_profile, write_project_profile
 import agentteam_runtime.projection_db as projection_db
@@ -759,6 +760,39 @@ class TaskpackTests(unittest.TestCase):
             self.assertGreaterEqual(plan["retention_policies"]["authoritative"], 1)
             self.assertGreaterEqual(plan["retention_policies"]["rebuildable"], 2)
 
+    def test_projected_artifact_retention_plan_validates_candidate_hashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = _write_completed_operator_run(work_root / "runs" / "retention-run")
+            _write_json(
+                run_dir / "role_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json",
+                {"context_schema_version": "role_context.v1", "notes": ["small"]},
+            )
+            _write_json(
+                run_dir / "repo_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json",
+                {"repo_context_schema_version": "repo_context.v1", "selected_files": ["a.py"]},
+            )
+            _write_json(
+                work_root / "frozen" / "retention-run" / "taskpack.json",
+                {
+                    "taskpack_id": "retention-run",
+                    "goal": "Retention planning fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            rebuild_project_projection_db(work_root)
+
+            plan = projection_db.read_projected_artifact_retention_plan(work_root, limit=1)
+
+            self.assertEqual(plan["validation_status"], "passed")
+            self.assertEqual(plan["validated_candidate_count"], 2)
+            self.assertEqual(plan["invalid_candidate_count"], 0)
+            self.assertEqual(plan["invalid_candidates"], [])
+            self.assertEqual(plan["candidates"][0]["validation"]["status"], "passed")
+            self.assertTrue(plan["candidates"][0]["validation"]["sha256_matches"])
+            self.assertTrue(plan["candidates"][0]["validation"]["size_matches"])
+
     def test_project_artifact_retention_plan_returns_none_without_fresh_projection(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1020,6 +1054,77 @@ class TaskpackTests(unittest.TestCase):
         )
         self.assertIn("中文简报:", lines)
         self.assertIn("- 本次运行已完成，共 1 个任务，0 个阻塞。", lines)
+
+    def test_completion_summary_includes_chinese_operator_digest(self):
+        summary = build_completion_summary(
+            run_id="taskpack-7",
+            run_status="completed",
+            task_count=1,
+            blocked_count=0,
+            task_reports=[
+                {
+                    "task_id": "optimize-pipeline",
+                    "status": "implementation completed",
+                    "what_changed": ["优化了手势评分流水线的数据窗口复制。"],
+                    "changed_files": ["gesture_recognition/sim_eval.py"],
+                    "verification": ["unit_tests: passed"],
+                    "measured_result": ["算法窗口复制阶段耗时下降 2%。"],
+                    "integration": "passed",
+                    "merge_recommendation": "Review accepted patch before merging.",
+                    "next_steps": ["在比赛 QEMU 环境复测端到端延迟。"],
+                }
+            ],
+            integration_baseline={"branch": "agentteam/run/taskpack-7/integration"},
+        )
+
+        self.assertEqual(
+            summary["operator_digest"],
+            [
+                "做了什么：优化了手势评分流水线的数据窗口复制。",
+                "涉及文件：gesture_recognition/sim_eval.py",
+                "验证结果：unit_tests: passed",
+                "实际结果：算法窗口复制阶段耗时下降 2%。",
+                "合并建议：Review accepted patch before merging.",
+                "下一步：在比赛 QEMU 环境复测端到端延迟。",
+            ],
+        )
+        lines = []
+        extend_completion_summary_lines(lines, summary)
+        self.assertIn("中文工作汇报:", lines)
+        self.assertIn("- 做了什么：优化了手势评分流水线的数据窗口复制。", lines)
+
+    def test_completion_summary_includes_follow_up_recommendation(self):
+        summary = build_completion_summary(
+            run_id="taskpack-7",
+            run_status="completed",
+            task_count=1,
+            blocked_count=0,
+            task_reports=[
+                {
+                    "task_id": "optimize-pipeline",
+                    "status": "implementation completed",
+                    "what_changed": ["优化了手势评分流水线。"],
+                    "changed_files": ["gesture_recognition/sim_eval.py"],
+                    "verification": ["unit_tests: passed"],
+                    "integration": "passed",
+                    "merge_recommendation": "Review accepted patch before merging.",
+                    "next_steps": ["在比赛 QEMU 环境复测端到端延迟。"],
+                }
+            ],
+            integration_baseline={"branch": "agentteam/run/taskpack-7/integration"},
+        )
+
+        recommendation = summary["follow_up_recommendation"]
+        self.assertEqual(recommendation["action"], "integrate_then_next")
+        self.assertEqual(recommendation["integrate_command"], "agentteam integrate --taskpack taskpack-7")
+        self.assertEqual(
+            recommendation["next_command"],
+            'agentteam next --from-taskpack taskpack-7 --goal "在比赛 QEMU 环境复测端到端延迟。"',
+        )
+        lines = []
+        extend_completion_summary_lines(lines, summary)
+        self.assertIn("Follow-up recommendation:", lines)
+        self.assertIn("- action: integrate_then_next", lines)
 
     def test_run_status_summary_reports_evidence_counts_from_steps(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1384,6 +1489,26 @@ class TaskpackTests(unittest.TestCase):
 
         self.assertIn("中文简报: 本次运行已完成，共 1 个任务，0 个阻塞。", lines)
         self.assertIn("中文简报: 主要变更：Optimized the gesture scoring pipeline.", lines)
+
+    def test_concise_report_lines_include_chinese_operator_digest(self):
+        lines = concise_report_lines(
+            {
+                "report_path": "/tmp/final_report.md",
+                "run_status": "completed",
+                "task_count": 1,
+                "blocked_count": 0,
+                "completion_summary": {
+                    "operator_digest": [
+                        "做了什么：优化了手势评分流水线的数据窗口复制。",
+                        "验证结果：unit_tests: passed",
+                    ],
+                },
+                "operator_report": {"task_reports": []},
+            }
+        )
+
+        self.assertIn("中文工作汇报: 做了什么：优化了手势评分流水线的数据窗口复制。", lines)
+        self.assertIn("中文工作汇报: 验证结果：unit_tests: passed", lines)
 
     def test_concise_report_lines_include_agentteam_target_review_gate(self):
         lines = concise_report_lines(
@@ -2186,6 +2311,31 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("[AgentTeam] run_completed", message)
             self.assertIn("Scanned the repository and implemented one evidence-backed optimization.", message)
             self.assertIn("gesture_recognition/sim_eval.py", message)
+
+    def test_permission_request_notification_includes_approve_and_deny_hints(self):
+        message = _permission_request_text(
+            {
+                "payload": {
+                    "task_id": "optimize-pipeline",
+                    "request_id": "PERM-001",
+                    "requested_capability": "sandbox_escalation",
+                    "reason": "network is restricted",
+                }
+            },
+            "/tmp/agentteam-run",
+            "notify-project",
+        )
+
+        self.assertIn("[AgentTeam] permission request required", message)
+        self.assertIn("Capability: sandbox_escalation", message)
+        self.assertIn(
+            "Approve: agentteam permissions approve --run-dir /tmp/agentteam-run --request-id PERM-001",
+            message,
+        )
+        self.assertIn(
+            "Deny: agentteam permissions deny --run-dir /tmp/agentteam-run --request-id PERM-001",
+            message,
+        )
 
     def test_agentteam_cli_notify_test_requires_configured_feishu_webhook(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3683,6 +3833,75 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("run_status: idle", status_completed.stdout)
             self.assertIn("active_phase: authoring", status_completed.stdout)
             self.assertIn("active_authoring: follow-up", status_completed.stdout)
+
+    def test_status_includes_permission_request_hints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "permission-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "permission-project")
+            _write_jsonl(
+                run_dir / "events.jsonl",
+                [
+                    {
+                        "event_id": "EVT-0001",
+                        "event_type": "permission_request_required",
+                        "sequence": 1,
+                        "time": "2026-06-14T00:00:00Z",
+                        "task_id": "optimize-pipeline",
+                        "attempt_id": "ATTEMPT-001",
+                        "lease_id": "LEASE-001",
+                        "payload": {
+                            "task_id": "optimize-pipeline",
+                            "attempt_id": "ATTEMPT-001",
+                            "lease_id": "LEASE-001",
+                            "request_id": "PERM-001",
+                            "request_type": "sandbox_permission",
+                            "request_status": "waiting",
+                            "requested_capability": "sandbox_escalation",
+                            "reason": "network is restricted",
+                            "scope": "next_attempt",
+                            "sandbox": "workspace-write",
+                            "command": ["codex", "exec"],
+                        },
+                    }
+                ],
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("overall_status: permission_required", completed.stdout)
+            self.assertIn("permission_requests: 1", completed.stdout)
+            self.assertIn(
+                "permission_request: PERM-001 task=optimize-pipeline capability=sandbox_escalation",
+                completed.stdout,
+            )
+            self.assertIn("reason: network is restricted", completed.stdout)
+            self.assertIn(
+                f"approve: agentteam permissions approve --run-dir {run_dir.resolve()} --request-id PERM-001",
+                completed.stdout,
+            )
+            self.assertIn(
+                f"deny: agentteam permissions deny --run-dir {run_dir.resolve()} --request-id PERM-001",
+                completed.stdout,
+            )
 
     def test_agentteam_cli_status_reports_running_stale_liveness(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6777,6 +6996,33 @@ class TaskpackTests(unittest.TestCase):
                 validate_taskpack(result["taskpack_dir"])
 
             self.assertIn("optimization task must preserve optimization intent", str(raised.exception))
+
+    def test_validate_taskpack_rejects_optimization_without_decomposition_intent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Optimize existing competition repository latency.",
+                draft_root=drafts,
+                taskpack_id="generic-optimization",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["objective"] = "Optimize the code."
+            backlog["items"][0]["goal_alignment"] = "This task improves latency."
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn(
+                "optimization task must include baseline/profile/candidate/metric decomposition intent",
+                str(raised.exception),
+            )
 
     def test_taskpack_author_uses_unique_implicit_id_when_default_exists(self):
         with tempfile.TemporaryDirectory() as tmp:

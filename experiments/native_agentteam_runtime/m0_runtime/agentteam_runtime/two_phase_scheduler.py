@@ -1754,6 +1754,7 @@ def _operator_task_report(step, result):
         "what_changed": _operator_what_changed(output, operator_summary),
         "changed_files": _operator_changed_files(result),
         "verification": _operator_verification(output, operator_summary),
+        "measured_result": _operator_measured_result(output, operator_summary),
         "integration": _operator_integration_summary(result),
         "evidence_level": result.get("evidence_level"),
         "evidence_status": result.get("evidence_status"),
@@ -1817,6 +1818,14 @@ def _operator_verification(output, operator_summary):
             status = str(item)
         lines.append(f"{name}: {status}")
     return lines
+
+
+def _operator_measured_result(output, operator_summary):
+    for key in ["measured_result", "measured_results", "metric_delta"]:
+        values = _coerce_text_list(operator_summary.get(key))
+        if values:
+            return values
+    return _coerce_text_list(output.get("measured_result") or output.get("metric_delta"))
 
 
 def _operator_integration_summary(result):
