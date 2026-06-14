@@ -1178,6 +1178,40 @@ Next route: continue with guarded artifact retention cleanup and semantic
 feedback proposal artifacts. Both should remain review-gated and must not make
 the projection DB authoritative.
 
+### M63: Guarded Artifact Cleanup
+
+Status: implemented in the native-runtime branch.
+
+Goal: let operators reclaim space from rebuildable derived artifacts without
+weakening the audit trail.
+
+Implemented:
+
+- added `agentteam gc --artifacts --delete-artifacts --force` as the only path
+  that deletes run artifacts;
+- deletion requires a fresh projection DB and a ready artifact retention plan;
+- deletion is blocked if any rebuildable candidate validation fails;
+- deletion is limited to listed candidates whose retention policy is
+  `rebuildable` and whose size/hash validation status is `passed`;
+- authoritative artifacts remain protected: event logs, reports, state
+  snapshots, patches, frozen taskpacks, and integration evidence are not
+  deletion candidates;
+- deletion results report deleted paths/count/bytes and set the next action to
+  `run agentteam db rebuild`.
+
+Validation:
+
+- focused red/green tests cover successful deletion of validated rebuildable
+  repo/role context files while preserving authoritative artifacts;
+- focused red/green tests cover validation-failure blocking when a candidate
+  changes after projection rebuild;
+- normal verification runs through `test_taskpack` and `test_m0_runtime` with
+  `PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime`.
+
+Next route: add semantic feedback proposal artifacts so implementation evidence
+can request architecture/document updates without giving ordinary workers direct
+authority over semantic design documents.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -1218,6 +1252,6 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is guarded artifact retention cleanup: allow deletion
-only for rebuildable artifacts that pass projection validation, while preserving
-authoritative reports, events, patches, taskpacks, and state snapshots.
+The next recommended step is semantic feedback proposals: implementation runs
+should be able to write bounded proposal artifacts for semantic authority review
+without mutating design authority documents directly.

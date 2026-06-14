@@ -2754,6 +2754,113 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("artifact_retention_plan_warning: projection_db_unavailable", text_completed.stdout)
             self.assertIn("artifact_retention_plan_next_action: run agentteam db rebuild", text_completed.stdout)
 
+    def test_agentteam_cli_gc_delete_artifacts_deletes_only_validated_rebuildable_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "gc-artifact-project")
+            run_dir = _write_completed_operator_run(work_root / "runs" / "retention-run")
+            report_path = run_dir / "reports" / "final_report.json"
+            event_path = run_dir / "events.jsonl"
+            repo_context = run_dir / "repo_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json"
+            role_context = run_dir / "role_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json"
+            taskpack_path = work_root / "frozen" / "retention-run" / "taskpack.json"
+            _write_json(report_path, {"run_id": "retention-run"})
+            _write_json(repo_context, {"repo_context_schema_version": "repo_context.v1"})
+            _write_json(role_context, {"context_schema_version": "role_context.v1"})
+            _write_json(
+                taskpack_path,
+                {
+                    "taskpack_id": "retention-run",
+                    "goal": "Retention delete fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            rebuild_project_projection_db(work_root)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "gc",
+                    "--project-root",
+                    str(repo),
+                    "--artifacts",
+                    "--delete-artifacts",
+                    "--artifact-limit",
+                    "10",
+                    "--force",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            deletion = summary["artifact_retention_plan"]["artifact_deletion"]
+            self.assertEqual(deletion["deletion_status"], "completed")
+            self.assertEqual(deletion["deleted_count"], 2)
+            self.assertFalse(repo_context.exists())
+            self.assertFalse(role_context.exists())
+            self.assertTrue(report_path.exists())
+            self.assertTrue(event_path.exists())
+            self.assertTrue(taskpack_path.exists())
+            self.assertEqual(summary["artifact_retention_plan"]["next_action"], "run agentteam db rebuild")
+
+    def test_agentteam_cli_gc_delete_artifacts_blocks_when_candidate_validation_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "gc-artifact-project")
+            run_dir = _write_completed_operator_run(work_root / "runs" / "retention-run")
+            repo_context = run_dir / "repo_contexts" / "optimize-pipeline-ATTEMPT-001-implementation.json"
+            _write_json(repo_context, {"repo_context_schema_version": "repo_context.v1"})
+            _write_json(
+                work_root / "frozen" / "retention-run" / "taskpack.json",
+                {
+                    "taskpack_id": "retention-run",
+                    "goal": "Retention delete fixture.",
+                    "validation": {"status": "accepted"},
+                },
+            )
+            rebuild_project_projection_db(work_root)
+            _write_json(repo_context, {"repo_context_schema_version": "repo_context.v1", "changed": True})
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "gc",
+                    "--project-root",
+                    str(repo),
+                    "--artifacts",
+                    "--delete-artifacts",
+                    "--force",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            error = json.loads(completed.stdout or completed.stderr)
+            self.assertEqual(error["error"], "artifact deletion blocked")
+            self.assertEqual(error["artifact_deletion_status"], "blocked")
+            self.assertTrue(repo_context.exists())
+
     def test_agentteam_cli_notify_test_sends_feishu_message_from_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

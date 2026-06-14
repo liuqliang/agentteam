@@ -202,11 +202,13 @@ _HELP_COMMANDS = [
             "agentteam gc --project-root <repo>",
             "agentteam gc --project-root <repo> --global-releases",
             "agentteam gc --project-root <repo> --artifacts --json",
+            "agentteam gc --project-root <repo> --artifacts --delete-artifacts --force --json",
             "agentteam gc --project-root <repo> --force",
         ],
         "notes": [
             "Without --force this command reports what it would manage without deleting releases.",
-            "--artifacts lists rebuildable artifact candidates for planning only; artifact deletion is disabled.",
+            "--delete-artifacts requires --artifacts --force and deletes only validated rebuildable candidates.",
+            "Authoritative reports, events, patches, taskpacks, and state snapshots remain protected.",
         ],
     },
     {
@@ -1075,6 +1077,11 @@ def _add_gc_parser(subcommands):
     parser.add_argument("--stale-runs", action="store_true", help="Also repair stale running run state.")
     parser.add_argument("--global-releases", action="store_true", help="Also scan the shared global runtime release store.")
     parser.add_argument("--artifacts", action="store_true", help="Also include a read-only artifact retention plan.")
+    parser.add_argument(
+        "--delete-artifacts",
+        action="store_true",
+        help="With --artifacts --force, delete validated rebuildable artifact candidates.",
+    )
     parser.add_argument("--artifact-limit", type=int, default=20, help="Maximum rebuildable artifact candidates to list.")
     parser.add_argument("--force", action="store_true", help="Actually delete eligible old releases.")
     parser.add_argument("--json", action="store_true", help="Print cleanup result as JSON instead of human text.")
@@ -3028,6 +3035,10 @@ def _handle_gc(args):
     project_root = Path(args.project_root or ".").resolve()
     profile = load_project_profile(project_root)
     work_root = Path(profile["work_root"]).resolve()
+    if args.delete_artifacts and not args.artifacts:
+        raise AgentTeamCliError("--delete-artifacts requires --artifacts", missing_argument="--artifacts")
+    if args.delete_artifacts and not args.force:
+        raise AgentTeamCliError("--delete-artifacts requires --force", missing_argument="--force")
     current_update_status = update_status(profile)
     if args.force:
         release_prune = prune_releases(work_root, keep_latest=args.keep_releases)
@@ -3060,6 +3071,7 @@ def _handle_gc(args):
         artifact_retention_plan = _gc_artifact_retention_plan(
             work_root,
             limit=args.artifact_limit,
+            delete_artifacts=args.delete_artifacts,
         )
     summary = {
         "gc_status": gc_status,
@@ -3079,18 +3091,31 @@ def _handle_gc(args):
     return 0
 
 
-def _gc_artifact_retention_plan(work_root, limit):
+def _gc_artifact_retention_plan(work_root, limit, delete_artifacts=False):
     plan = read_projected_artifact_retention_plan(work_root, limit=limit)
     if plan is not None:
         projection_metadata = _projection_check_metadata(work_root)
-        return {
+        result = {
             **projection_metadata,
             **plan,
             "projection_db_path": plan.get("projection_db_path")
             or plan.get("db_path")
             or projection_metadata.get("projection_db_path"),
         }
+        if delete_artifacts:
+            result["artifact_deletion"] = _delete_rebuildable_artifact_candidates(result)
+            result["deletion_enabled"] = True
+            result["next_action"] = "run agentteam db rebuild"
+            result["operator_hint"] = "Rebuild the projection DB after artifact deletion."
+        return result
     projection_metadata = _projection_check_metadata(work_root)
+    if delete_artifacts:
+        raise AgentTeamCliError(
+            "artifact deletion blocked",
+            artifact_deletion_status="blocked",
+            reason="fresh projection DB is required",
+            next_action="run agentteam db rebuild",
+        )
     return {
         **projection_metadata,
         "projection_source": "files",
@@ -3108,6 +3133,65 @@ def _gc_artifact_retention_plan(work_root, limit):
             }
         ],
         "candidates": [],
+    }
+
+
+def _delete_rebuildable_artifact_candidates(plan):
+    if plan.get("plan_status") != "ready":
+        raise AgentTeamCliError(
+            "artifact deletion blocked",
+            artifact_deletion_status="blocked",
+            reason="retention plan is not ready",
+        )
+    if plan.get("validation_status") != "passed":
+        raise AgentTeamCliError(
+            "artifact deletion blocked",
+            artifact_deletion_status="blocked",
+            reason="candidate validation failed",
+            invalid_candidate_count=plan.get("invalid_candidate_count", 0),
+            invalid_candidates=plan.get("invalid_candidates", []),
+        )
+    candidates = plan.get("candidates") if isinstance(plan.get("candidates"), list) else []
+    blocked = [
+        candidate
+        for candidate in candidates
+        if not isinstance(candidate, dict)
+        or candidate.get("retention_policy") != "rebuildable"
+        or not isinstance(candidate.get("validation"), dict)
+        or candidate["validation"].get("status") != "passed"
+    ]
+    if blocked:
+        raise AgentTeamCliError(
+            "artifact deletion blocked",
+            artifact_deletion_status="blocked",
+            reason="candidate list contains non-rebuildable or unvalidated artifacts",
+            blocked_candidate_count=len(blocked),
+        )
+    deleted = []
+    skipped = []
+    for candidate in candidates:
+        path = Path(candidate["path"])
+        if not path.is_file():
+            skipped.append({"path": str(path), "reason": "missing"})
+            continue
+        size_bytes = path.stat().st_size
+        path.unlink()
+        deleted.append(
+            {
+                "path": str(path),
+                "artifact_type": candidate.get("artifact_type"),
+                "run_id": candidate.get("run_id"),
+                "size_bytes": size_bytes,
+            }
+        )
+    return {
+        "deletion_status": "completed",
+        "deleted_count": len(deleted),
+        "deleted_bytes": sum(item["size_bytes"] for item in deleted),
+        "deleted": deleted,
+        "skipped_count": len(skipped),
+        "skipped": skipped,
+        "post_delete_next_action": "run agentteam db rebuild",
     }
 
 
@@ -3629,6 +3713,11 @@ def _write_gc_text(summary):
             lines.append(f"artifact_retention_plan_operator_hint: {artifact_plan['operator_hint']}")
         lines.append(f"artifact_candidates: {artifact_plan.get('candidate_count', 0)}")
         lines.append(f"artifact_deletion_enabled: {str(bool(artifact_plan.get('deletion_enabled'))).lower()}")
+        deletion = artifact_plan.get("artifact_deletion") if isinstance(artifact_plan.get("artifact_deletion"), dict) else {}
+        if deletion:
+            lines.append(f"artifact_deletion: {deletion.get('deletion_status') or 'unknown'}")
+            lines.append(f"artifact_deleted_count: {deletion.get('deleted_count', 0)}")
+            lines.append(f"artifact_deleted_bytes: {deletion.get('deleted_bytes', 0)}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 

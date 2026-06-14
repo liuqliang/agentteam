@@ -255,6 +255,7 @@ agentteam gc --global-releases --force
 agentteam gc --stale-runs --force
 agentteam gc --artifacts --json
 agentteam gc --artifacts --artifact-limit 50 --json
+agentteam gc --artifacts --delete-artifacts --force --json
 ```
 
 Behavior:
@@ -267,19 +268,24 @@ Behavior:
   `artifact_projection` summary: artifact count, bytes, artifact types,
   retention policy counts, token usage rows, and explanations for
   authoritative versus rebuildable artifacts.
-- Artifact projection output is explanatory in M40c. `agentteam gc` does not
-  delete run artifacts or context artifacts yet.
 - With `--artifacts`, includes an `artifact_retention_plan` section. It lists
   bounded rebuildable artifact candidates such as role/repo context files and
   reports why authoritative artifacts remain protected.
 - `--artifact-limit` controls how many rebuildable candidate rows are included.
-  It does not change counts.
-- Artifact deletion is disabled in M42: `artifact_retention_plan.deletion_enabled`
-  is always `false`, even when `--force` is present.
+  It does not change counts, and it bounds which rebuildable candidates can be
+  deleted in one guarded cleanup command.
+- `--delete-artifacts` requires both `--artifacts` and `--force`. It deletes
+  only listed candidates whose retention policy is `rebuildable` and whose
+  size/hash validation status is `passed`.
+- Authoritative artifacts are protected and are never deletion candidates:
+  `events.jsonl`, reports, state snapshots, patches, frozen taskpacks, and
+  integration evidence stay on disk.
 - Retention plans validate rebuildable candidate files against the projection
-  row before any deletion feature exists. JSON includes `validation_status`,
-  `validated_candidate_count`, `invalid_candidate_count`, and per-candidate
-  size/hash validation details.
+  row before deletion. JSON includes `validation_status`,
+  `validated_candidate_count`, `invalid_candidate_count`, per-candidate
+  size/hash validation details, and `artifact_deletion` when deletion runs.
+- After deleting rebuildable artifacts, run `agentteam db rebuild`; the existing
+  projection still describes files that were intentionally removed.
 - If the projection DB is missing or stale, the artifact retention plan reports
   `projection_warning: projection_db_unavailable` and
   `next_action: run agentteam db rebuild`.
