@@ -489,6 +489,84 @@ class M0RuntimeTests(unittest.TestCase):
             "completed: 1 task reported, 1 blocked task",
         )
 
+    def test_run_completion_report_surfaces_worker_heartbeat_diagnostics(self):
+        from agentteam_runtime.operator_report import (
+            build_run_completion_report,
+            concise_report_lines,
+            render_run_completion_report,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "RUN-WORKER-DIAGNOSTICS"
+            (run_dir / "state").mkdir(parents=True)
+            event = {
+                "event_type": "run_completed",
+                "payload": {
+                    "run_status": "completed",
+                    "operator_report": {
+                        "report_schema_version": "operator_run_report.v1",
+                        "task_count": 0,
+                        "blocked_count": 0,
+                        "task_reports": [],
+                    },
+                },
+            }
+            registry = {
+                "registry_status": "running",
+                "worker_count": 1,
+                "pool_diagnostic_status": "attention",
+                "diagnostic_worker_counts": {"processing_stale": 1},
+                "workers": [
+                    {
+                        "worker_agent_id": "agent-implementation-worker-1",
+                        "worker_status": "running",
+                        "worker_diagnostic_state": "processing_stale",
+                        "last_activity": "processing",
+                        "last_poll_status": "processing",
+                        "heartbeat_age_seconds": 181,
+                        "heartbeat_stale_after_seconds": 120,
+                        "heartbeat_task_id": "TASK-001",
+                        "heartbeat_path": str(
+                            run_dir
+                            / "state"
+                            / "workers"
+                            / "agent-implementation-worker-1.heartbeat.json"
+                        ),
+                    }
+                ],
+            }
+            (run_dir / "events.jsonl").write_text(
+                json.dumps(event, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / "state" / "worker_process_registry.json").write_text(
+                json.dumps(registry, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            report = build_run_completion_report(run_dir, project="agentteam", write_files=False)
+
+        markdown = render_run_completion_report(report)
+        concise = "\n".join(concise_report_lines(report))
+
+        self.assertEqual(
+            report["worker_diagnostics"]["pool_diagnostic_status"],
+            "attention",
+        )
+        self.assertEqual(
+            report["worker_diagnostics"]["workers"][0]["worker_diagnostic_state"],
+            "processing_stale",
+        )
+        self.assertIn("## Worker Diagnostics", markdown)
+        self.assertIn("agent-implementation-worker-1", markdown)
+        self.assertIn("diagnostic=processing_stale", markdown)
+        self.assertIn("heartbeat_age_seconds=181", markdown)
+        self.assertIn("worker_diagnostics: pool=attention", concise)
+        self.assertIn(
+            "worker agent-implementation-worker-1: diagnostic=processing_stale",
+            concise,
+        )
+
     def test_feishu_run_completed_summarizes_multiple_tasks(self):
         from agentteam_runtime.notifications import build_feishu_notification_sink_from_env
 
@@ -4383,6 +4461,171 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(worker["last_activity"], "idle")
             self.assertEqual(worker["last_poll_status"], "idle")
             self.assertEqual(worker["heartbeat_path"], str(heartbeat_path))
+            self.assertEqual(worker["worker_diagnostic_state"], "idle")
+            self.assertEqual(health["pool_diagnostic_status"], "healthy")
+
+    def test_file_mailbox_worker_pool_health_classifies_missing_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            pool = FileMailboxWorkerPoolSupervisor(
+                agent_pool_path,
+                output_dir,
+                heartbeat_stale_seconds=10,
+            )
+            worker = FileMailboxWorkerProcessSupervisor(
+                agent_pool_path,
+                output_dir,
+                "agent-repo-map",
+            )
+            worker.attach_existing_process(os.getpid())
+            pool.workers = [worker]
+
+            health = pool.health_check()
+
+            self.assertEqual(health["pool_status"], "running")
+            self.assertEqual(health["pool_diagnostic_status"], "attention")
+            self.assertEqual(health["diagnostic_worker_counts"]["no_heartbeat"], 1)
+            self.assertEqual(
+                health["workers"][0]["worker_diagnostic_state"],
+                "no_heartbeat",
+            )
+
+    def test_file_mailbox_worker_pool_health_classifies_normal_heartbeat_states(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            heartbeat_path = (
+                output_dir / "state" / "workers" / "agent-repo-map.heartbeat.json"
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            pool = FileMailboxWorkerPoolSupervisor(
+                agent_pool_path,
+                output_dir,
+                heartbeat_stale_seconds=10,
+            )
+            worker = FileMailboxWorkerProcessSupervisor(
+                agent_pool_path,
+                output_dir,
+                "agent-repo-map",
+            )
+            worker.attach_existing_process(os.getpid())
+            pool.workers = [worker]
+
+            for activity in ["idle", "processing", "processed"]:
+                heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+                heartbeat_path.write_text(
+                    json.dumps(
+                        {
+                            "activity": activity,
+                            "poll_status": activity,
+                            "updated_at": "2026-06-15T00:00:00Z",
+                            "worker_agent_id": "agent-repo-map",
+                            "worker_pid": os.getpid(),
+                        },
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
+                now = time.time()
+                os.utime(heartbeat_path, (now, now))
+
+                health = pool.health_check()
+
+                self.assertEqual(
+                    health["workers"][0]["worker_diagnostic_state"],
+                    activity,
+                )
+                self.assertEqual(health["pool_diagnostic_status"], "healthy")
+
+    def test_file_mailbox_worker_pool_health_classifies_processing_stale_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            heartbeat_path = (
+                output_dir / "state" / "workers" / "agent-repo-map.heartbeat.json"
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+            heartbeat_path.write_text(
+                json.dumps(
+                    {
+                        "activity": "processing",
+                        "poll_status": "processing",
+                        "updated_at": "2026-06-15T00:00:00Z",
+                        "worker_agent_id": "agent-repo-map",
+                        "worker_pid": os.getpid(),
+                        "task_id": "TASK-001",
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            old_mtime = time.time() - 30
+            os.utime(heartbeat_path, (old_mtime, old_mtime))
+            pool = FileMailboxWorkerPoolSupervisor(
+                agent_pool_path,
+                output_dir,
+                heartbeat_stale_seconds=10,
+            )
+            worker = FileMailboxWorkerProcessSupervisor(
+                agent_pool_path,
+                output_dir,
+                "agent-repo-map",
+            )
+            worker.attach_existing_process(os.getpid())
+            pool.workers = [worker]
+
+            health = pool.health_check()
+            registry = json.loads(
+                Path(health["process_registry_path"]).read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(health["pool_status"], "running")
+            self.assertEqual(health["pool_diagnostic_status"], "attention")
+            self.assertEqual(
+                health["workers"][0]["worker_diagnostic_state"],
+                "processing_stale",
+            )
+            self.assertTrue(health["workers"][0]["heartbeat_is_stale"])
+            self.assertGreaterEqual(health["workers"][0]["heartbeat_age_seconds"], 10)
+            self.assertEqual(
+                registry["workers"][0]["worker_diagnostic_state"],
+                "processing_stale",
+            )
+            self.assertEqual(registry["diagnostic_worker_counts"]["processing_stale"], 1)
+
+    def test_file_mailbox_worker_pool_health_classifies_exited_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            pool = FileMailboxWorkerPoolSupervisor(
+                agent_pool_path,
+                output_dir,
+                heartbeat_stale_seconds=10,
+            )
+            worker = FileMailboxWorkerProcessSupervisor(
+                agent_pool_path,
+                output_dir,
+                "agent-repo-map",
+                command=[sys.executable, "-c", "import sys; sys.exit(0)"],
+            )
+            worker.start()
+            worker.process.wait(timeout=5)
+            pool.workers = [worker]
+
+            health = pool.health_check()
+
+            self.assertEqual(health["pool_status"], "degraded")
+            self.assertEqual(health["pool_diagnostic_status"], "attention")
+            self.assertEqual(health["workers"][0]["worker_status"], "exited")
+            self.assertEqual(health["workers"][0]["worker_diagnostic_state"], "exited")
 
     def test_status_last_worker_includes_heartbeat_activity(self):
         from agentteam_runtime.agentteam import _status_last_worker

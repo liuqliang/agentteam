@@ -47,6 +47,7 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         task_reports,
     )
     integration_baseline = _integration_baseline_summary(run_dir, state)
+    worker_diagnostics = _worker_diagnostics_for_run(run_dir)
     run_status = _run_status(payload, state)
     scheduler_status = _scheduler_status(payload, state)
     run_outcome = _run_outcome(run_status, blocked_count)
@@ -73,6 +74,7 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         ),
         "pursue_recap": find_pursue_recap_for_run(run_dir),
         "integration_baseline": integration_baseline,
+        "worker_diagnostics": worker_diagnostics,
         "operator_report": operator_report,
         "report_path": str(run_dir / "reports" / "final_report.md"),
         "report_json_path": str(run_dir / "reports" / "final_report.json"),
@@ -170,6 +172,8 @@ def render_run_completion_report(report):
                     lines.append(f"  - {key}: {value}")
         _extend_summary_item(lines, "Next", summary.get("next_steps"))
         _extend_summary_item(lines, "Evidence gaps", summary.get("evidence_gaps"))
+
+    _extend_worker_diagnostic_lines(lines, report.get("worker_diagnostics"))
 
     task_reports = (
         report.get("operator_report", {}).get("task_reports", [])
@@ -301,6 +305,32 @@ def concise_report_lines(report, max_tasks=3):
     evidence_gap = compact_text_items(summary.get("evidence_gaps"))
     if evidence_gap:
         lines.append(f"evidence_gap: {evidence_gap}")
+    worker_diagnostics = report.get("worker_diagnostics")
+    if isinstance(worker_diagnostics, dict) and worker_diagnostics:
+        pool_status = worker_diagnostics.get("pool_diagnostic_status") or "unknown"
+        count_text = _diagnostic_counts_text(
+            worker_diagnostics.get("diagnostic_worker_counts")
+        )
+        line = f"worker_diagnostics: pool={pool_status}"
+        if count_text:
+            line += f" states={count_text}"
+        lines.append(line)
+        workers = worker_diagnostics.get("workers")
+        if isinstance(workers, list):
+            for worker in workers[:max_tasks]:
+                if not isinstance(worker, dict):
+                    continue
+                worker_id = (
+                    worker.get("worker_agent_id")
+                    or worker.get("worker_id")
+                    or "unknown-worker"
+                )
+                diagnostic_state = worker.get("worker_diagnostic_state") or "unknown"
+                worker_status = worker.get("worker_status") or "unknown"
+                lines.append(
+                    f"worker {worker_id}: diagnostic={diagnostic_state} "
+                    f"status={worker_status}"
+                )
     task_reports = (
         report.get("operator_report", {}).get("task_reports", [])
         if isinstance(report.get("operator_report"), dict)
@@ -360,6 +390,103 @@ def _concise_pursue_round_recap_lines(latest_round_recap):
     if latest_round_recap.get("recommended_next_step"):
         lines.append(f"pursue_next_step: {latest_round_recap['recommended_next_step']}")
     return lines
+
+
+def _extend_worker_diagnostic_lines(lines, worker_diagnostics):
+    if not isinstance(worker_diagnostics, dict) or not worker_diagnostics:
+        return
+    lines.extend(["", "## Worker Diagnostics"])
+    pool_status = worker_diagnostics.get("pool_diagnostic_status") or "unknown"
+    registry_status = worker_diagnostics.get("registry_status") or "unknown"
+    lines.append(f"- Pool diagnostic: {pool_status}")
+    lines.append(f"- Registry status: {registry_status}")
+    count_text = _diagnostic_counts_text(
+        worker_diagnostics.get("diagnostic_worker_counts")
+    )
+    if count_text:
+        lines.append(f"- Diagnostic states: {count_text}")
+    if worker_diagnostics.get("registry_path"):
+        lines.append(f"- Registry path: {worker_diagnostics['registry_path']}")
+    workers = worker_diagnostics.get("workers")
+    if not isinstance(workers, list) or not workers:
+        lines.append("- Workers: none")
+        return
+    for worker in workers:
+        if not isinstance(worker, dict):
+            continue
+        worker_id = worker.get("worker_agent_id") or worker.get("worker_id") or "unknown-worker"
+        details = [
+            f"diagnostic={worker.get('worker_diagnostic_state') or 'unknown'}",
+            f"status={worker.get('worker_status') or 'unknown'}",
+        ]
+        if worker.get("last_activity"):
+            details.append(f"activity={worker['last_activity']}")
+        if worker.get("last_poll_status"):
+            details.append(f"poll={worker['last_poll_status']}")
+        if worker.get("heartbeat_age_seconds") is not None:
+            details.append(f"heartbeat_age_seconds={worker['heartbeat_age_seconds']}")
+        if worker.get("heartbeat_stale_after_seconds") is not None:
+            details.append(
+                f"stale_after_seconds={worker['heartbeat_stale_after_seconds']}"
+            )
+        if worker.get("heartbeat_task_id"):
+            details.append(f"task={worker['heartbeat_task_id']}")
+        if worker.get("heartbeat_result_status"):
+            details.append(f"result={worker['heartbeat_result_status']}")
+        if worker.get("heartbeat_path"):
+            details.append(f"heartbeat_path={worker['heartbeat_path']}")
+        lines.append(f"- {worker_id}: {' '.join(details)}")
+
+
+def _worker_diagnostics_for_run(run_dir):
+    for path in [
+        run_dir / "state" / "worker_process_registry.json",
+        run_dir / "state" / "worker_registry.json",
+    ]:
+        registry = _read_json_if_exists(path)
+        if not isinstance(registry, dict) or not registry:
+            continue
+        workers = registry.get("workers")
+        if not isinstance(workers, list):
+            workers = []
+        return {
+            "registry_path": str(path),
+            "registry_status": registry.get("registry_status"),
+            "pool_diagnostic_status": registry.get("pool_diagnostic_status"),
+            "diagnostic_worker_counts": (
+                registry.get("diagnostic_worker_counts")
+                if isinstance(registry.get("diagnostic_worker_counts"), dict)
+                else {}
+            ),
+            "worker_count": registry.get("worker_count", len(workers)),
+            "workers": [worker for worker in workers if isinstance(worker, dict)],
+        }
+    return {}
+
+
+def _diagnostic_counts_text(counts):
+    if not isinstance(counts, dict):
+        return ""
+    states = [
+        "idle",
+        "processing",
+        "processed",
+        "processing_stale",
+        "no_heartbeat",
+        "exited",
+    ]
+    parts = [
+        f"{state}={counts.get(state, 0)}"
+        for state in states
+        if counts.get(state, 0)
+    ]
+    extra_states = sorted(
+        state
+        for state, count in counts.items()
+        if state not in states and count
+    )
+    parts.extend(f"{state}={counts[state]}" for state in extra_states)
+    return ", ".join(parts)
 
 
 def _evidence_path_texts(values):

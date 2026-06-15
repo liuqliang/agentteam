@@ -1,7 +1,24 @@
 import json
+import time
 from pathlib import Path
 
 from .mailbox_worker import FileMailboxWorkerProcessSupervisor
+
+
+WORKER_HEARTBEAT_STALE_SECONDS = 120
+WORKER_DIAGNOSTIC_STATES = [
+    "idle",
+    "processing",
+    "processed",
+    "processing_stale",
+    "no_heartbeat",
+    "exited",
+]
+WORKER_DIAGNOSTIC_ATTENTION_STATES = {
+    "processing_stale",
+    "no_heartbeat",
+    "exited",
+}
 
 
 class FileMailboxWorkerPoolSupervisor:
@@ -13,6 +30,7 @@ class FileMailboxWorkerPoolSupervisor:
         env=None,
         poll_interval_seconds=0.05,
         max_restart_count=None,
+        heartbeat_stale_seconds=WORKER_HEARTBEAT_STALE_SECONDS,
     ):
         self.agent_pool_path = Path(agent_pool_path)
         self.output_dir = Path(output_dir)
@@ -20,6 +38,7 @@ class FileMailboxWorkerPoolSupervisor:
         self.env = env
         self.poll_interval_seconds = poll_interval_seconds
         self.max_restart_count = max_restart_count
+        self.heartbeat_stale_seconds = heartbeat_stale_seconds
         self.process_registry_path = self.output_dir / "state" / "worker_process_registry.json"
         self.workers = []
         self.restart_counts = {}
@@ -33,8 +52,10 @@ class FileMailboxWorkerPoolSupervisor:
             self._worker_for_agent(agent)
             for agent in agents
         ]
+        for worker in self.workers:
+            worker.start()
         starts = [
-            self._with_restart_count(worker.start())
+            self._worker_health(worker)
             for worker in self.workers
         ]
         summary = self._summary("running", starts)
@@ -77,7 +98,12 @@ class FileMailboxWorkerPoolSupervisor:
 
     def stop(self):
         stops = [
-            self._with_restart_count(worker.stop())
+            self._with_restart_count(
+                self._worker_with_heartbeat_diagnostics(
+                    worker.stop(),
+                    self._latest_worker_heartbeat(worker.agent_id),
+                )
+            )
             for worker in self.workers
         ]
         summary = self._summary("stopped", stops)
@@ -173,7 +199,14 @@ class FileMailboxWorkerPoolSupervisor:
     def _worker_health(self, worker):
         health = worker.health()
         heartbeat = self._latest_worker_heartbeat(worker.agent_id)
+        health = self._worker_with_heartbeat_diagnostics(health, heartbeat)
+        if health.get("worker_agent_id") in self.quarantined_agents:
+            health = self._quarantine_health(worker, health)
+        return self._with_restart_count(health)
+
+    def _worker_with_heartbeat_diagnostics(self, health, heartbeat):
         if heartbeat:
+            heartbeat_age_seconds = _heartbeat_age_seconds(heartbeat)
             health = {
                 **health,
                 "last_activity": heartbeat.get("activity"),
@@ -186,10 +219,19 @@ class FileMailboxWorkerPoolSupervisor:
                 "heartbeat_message_id": heartbeat.get("source_message_id"),
                 "heartbeat_result_status": heartbeat.get("result_status"),
                 "heartbeat_changed_file_count": heartbeat.get("changed_file_count"),
+                "heartbeat_age_seconds": heartbeat_age_seconds,
             }
-        if health.get("worker_agent_id") in self.quarantined_agents:
-            health = self._quarantine_health(worker, health)
-        return self._with_restart_count(health)
+        diagnostic_state = _worker_diagnostic_state(
+            health.get("worker_status"),
+            heartbeat,
+            self.heartbeat_stale_seconds,
+        )
+        return {
+            **health,
+            "worker_diagnostic_state": diagnostic_state,
+            "heartbeat_is_stale": diagnostic_state == "processing_stale",
+            "heartbeat_stale_after_seconds": self.heartbeat_stale_seconds,
+        }
 
     def _latest_worker_heartbeat(self, agent_id):
         candidates = []
@@ -203,6 +245,7 @@ class FileMailboxWorkerPoolSupervisor:
                 continue
             payload = dict(payload)
             payload["heartbeat_path"] = str(path)
+            payload["heartbeat_mtime"] = modified
             candidates.append((modified, str(path), payload))
         if not candidates:
             return {}
@@ -279,8 +322,11 @@ class FileMailboxWorkerPoolSupervisor:
         return "degraded"
 
     def _summary(self, status, workers):
+        diagnostic_counts = _diagnostic_worker_counts(workers)
         return {
             "pool_status": status,
+            "pool_diagnostic_status": _pool_diagnostic_status(diagnostic_counts),
+            "diagnostic_worker_counts": diagnostic_counts,
             "worker_count": len(workers),
             "max_restart_count": self.max_restart_count,
             "process_registry_path": str(self.process_registry_path),
@@ -293,6 +339,8 @@ class FileMailboxWorkerPoolSupervisor:
             json.dumps(
                 {
                     "registry_status": summary["pool_status"],
+                    "pool_diagnostic_status": summary["pool_diagnostic_status"],
+                    "diagnostic_worker_counts": summary["diagnostic_worker_counts"],
                     "worker_count": summary["worker_count"],
                     "workers": summary["workers"],
                 },
@@ -305,6 +353,55 @@ class FileMailboxWorkerPoolSupervisor:
         if not self.process_registry_path.exists():
             return {}
         return json.loads(self.process_registry_path.read_text(encoding="utf-8"))
+
+
+def _worker_diagnostic_state(worker_status, heartbeat, stale_seconds):
+    if worker_status == "exited":
+        return "exited"
+    if not heartbeat:
+        return "no_heartbeat"
+    activity = heartbeat.get("activity") or heartbeat.get("poll_status")
+    heartbeat_age_seconds = _heartbeat_age_seconds(heartbeat)
+    if (
+        activity == "processing"
+        and heartbeat_age_seconds is not None
+        and heartbeat_age_seconds >= stale_seconds
+    ):
+        return "processing_stale"
+    if activity in {"idle", "processing", "processed"}:
+        return activity
+    return "no_heartbeat"
+
+
+def _heartbeat_age_seconds(heartbeat):
+    try:
+        heartbeat_mtime = float(heartbeat.get("heartbeat_mtime"))
+    except (TypeError, ValueError):
+        return None
+    return max(0, int(time.time() - heartbeat_mtime))
+
+
+def _diagnostic_worker_counts(workers):
+    counts = {state: 0 for state in WORKER_DIAGNOSTIC_STATES}
+    for worker in workers:
+        if not isinstance(worker, dict):
+            continue
+        state = worker.get("worker_diagnostic_state") or "no_heartbeat"
+        if state not in counts:
+            counts[state] = 0
+        counts[state] += 1
+    return counts
+
+
+def _pool_diagnostic_status(diagnostic_counts):
+    if not any(diagnostic_counts.values()):
+        return "not_started"
+    if any(
+        diagnostic_counts.get(state, 0)
+        for state in WORKER_DIAGNOSTIC_ATTENTION_STATES
+    ):
+        return "attention"
+    return "healthy"
 
 
 def _worker_agents(agent_pool_path):
