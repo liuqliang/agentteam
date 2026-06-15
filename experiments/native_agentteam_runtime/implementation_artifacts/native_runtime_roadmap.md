@@ -1329,8 +1329,12 @@ DB-primary storage, and direct semantic authority edits out of this route.
 M67 follow-up status: `next_goal` specificity, Chinese next-step rationale,
 `agentteam queue next` selected-item provenance/readiness, and taskpack-author
 route-template guidance for roadmap-derived follow-ups are implemented with
-focused runtime tests. The remaining post-M66 route is bounded live dogfood
-calibration.
+focused runtime tests. A bounded live authoring calibration is recorded in
+`implementation_artifacts/reports/2026-06-15-m67-dogfood-calibration.md`: the
+prompt contained the route-template guidance, but Codex authoring timed out
+before writing taskpack files. The next route is to harden taskpack authoring
+with a direct artifact-production mode and better timeout diagnostics before
+broader dogfood loops.
 
 ## Longer-Term Route
 

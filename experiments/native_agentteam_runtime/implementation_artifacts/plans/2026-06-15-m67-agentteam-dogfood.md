@@ -141,7 +141,7 @@ above lists the focused tests that should accompany later runtime changes.
 2. Add Chinese "why this next step" rationale to report and Feishu summaries. Done.
 3. Expose queue selection provenance and readiness in `agentteam queue next`. Done.
 4. Add taskpack-author route-template guidance for roadmap-derived follow-ups. Done.
-5. Run a bounded dogfood calibration pack after the quality tasks land.
+5. Run a bounded dogfood calibration pack after the quality tasks land. Done with timeout finding.
 
 Status update: `queue next` now exposes the selected queue item's source kind,
 source taskpack, source report, readiness status, blockers, and suggested
@@ -153,6 +153,13 @@ follow-up template that asks for concrete previous evidence, evidence paths,
 non-goals, success metrics or an explicit no-metric-delta rationale,
 verification summary, recommended next tasks, and source merge/push/release
 review gates.
+
+Calibration update: `implementation_artifacts/reports/2026-06-15-m67-dogfood-calibration.md`
+records a bounded Codex authoring run. The prompt contained the route-template
+guidance, the target repository stayed clean, and no workers or integration
+ran, but the author process timed out after 300 seconds with zero taskpack
+files written. The next implementation route is author-direct mode and timeout
+diagnostics before broader dogfood loops.
 
 Do not start M68 multi-model adapters, DB-primary storage, or direct semantic
 authority edits as part of this route.
