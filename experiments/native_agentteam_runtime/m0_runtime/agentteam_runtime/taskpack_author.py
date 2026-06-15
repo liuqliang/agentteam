@@ -368,7 +368,8 @@ def _author_prompt(
         *_roadmap_followup_template_prompt(),
         "",
         (
-            "- optimization goals, including optimize/improve/performance/accuracy/比赛/优化/提升, "
+            "- optimization goals, including optimize/optimization/performance/accuracy/"
+            "latency/benchmark/metric/比赛/优化/性能/准确率/延迟, "
             "must set taskpack.goal_kind to optimization"
         ),
         (

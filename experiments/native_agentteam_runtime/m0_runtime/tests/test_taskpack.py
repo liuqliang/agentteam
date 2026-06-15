@@ -9454,6 +9454,91 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(taskpack["taskpack_id"], "codex-wrapped-taskpack")
             self.assertNotIn("taskpack", taskpack)
 
+    def test_classify_goal_kind_treats_generic_improve_as_implementation(self):
+        self.assertEqual(
+            taskpack_module.classify_goal_kind("Improve repo grounding with deterministic structure signals."),
+            "implementation",
+        )
+        self.assertEqual(
+            taskpack_module.classify_goal_kind("改进任务包语义补全流程。"),
+            "implementation",
+        )
+        self.assertEqual(
+            taskpack_module.classify_goal_kind("Improve parser latency with a benchmarked optimization."),
+            "optimization",
+        )
+
+    def test_canonicalize_codex_taskpack_preserves_declared_implementation_for_generic_improve_goal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "codex-generic-improve"
+            _init_repo(repo)
+            taskpack_dir.mkdir(parents=True)
+            goal = "Improve repo grounding with deterministic structure signals."
+            (taskpack_dir / "taskpack.yaml").write_text(
+                json.dumps(
+                    {
+                        "taskpack_schema_version": "taskpack.v1",
+                        "taskpack_id": "codex-generic-improve",
+                        "status": "draft",
+                        "semantic_contract_version": "task_semantics.v1",
+                        "project_root": str(repo),
+                        "goal": goal,
+                        "original_goal": goal,
+                        "goal_kind": "implementation",
+                        "runtime": {"default_backend": "codex"},
+                        "files": {
+                            "agent_pool": "agent_pool.json",
+                            "backlog": "backlog.json",
+                            "verification": "verification.json",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "agent_pool.json").write_text(
+                json.dumps(
+                    {
+                        "agents": [
+                            {
+                                "agent_id": "implementation-worker-1",
+                                "role": "implementation_worker",
+                                "status": "idle",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "backlog.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "generic-improve-001",
+                                "title": "Implement deterministic grounding signals.",
+                                "status": "ready",
+                                "required_role": "implementation_worker",
+                                "read_scope": ["README.md"],
+                                "write_scope": ["src/grounding.py"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "verification.json").write_text(
+                json.dumps({"command": ["python3", "-m", "unittest", "discover"]}),
+                encoding="utf-8",
+            )
+
+            _canonicalize_codex_taskpack_files(taskpack_dir)
+
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
+            taskpack = json.loads((taskpack_dir / "taskpack.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(taskpack["goal_kind"], "implementation")
+
     def test_codex_taskpack_author_canonicalizes_optimization_contract_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

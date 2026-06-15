@@ -22,7 +22,6 @@ OPTIMIZATION_CODE_WORK_TYPES = {"code_implementation", "code_investigation"}
 OPTIMIZATION_INTENT_MARKERS = [
     "optimize",
     "optimization",
-    "improve",
     "performance",
     "accuracy",
     "latency",
@@ -34,8 +33,6 @@ OPTIMIZATION_INTENT_MARKERS = [
     "baseline",
     "speed",
     "优化",
-    "改进",
-    "提升",
     "性能",
     "准确率",
     "精度",
