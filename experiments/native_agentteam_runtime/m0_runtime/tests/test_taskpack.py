@@ -7291,6 +7291,77 @@ class TaskpackTests(unittest.TestCase):
             'agentteam next --from-taskpack first-pass --goal "继续验证最慢模块。"',
         )
 
+    def test_follow_up_queue_summary_skips_generic_next_step_for_concrete_recommendation(self):
+        from agentteam_runtime.follow_up_queue import build_follow_up_queue_summary
+
+        summary = build_follow_up_queue_summary(
+            source_report={
+                "run_id": "first-pass",
+                "report_path": "/tmp/first-pass/reports/final_report.md",
+                "completion_summary": {
+                    "next_steps": ["继续优化"],
+                    "changed_files": ["agentteam_runtime/follow_up_queue.py"],
+                    "verification": ["python3 -m unittest test_taskpack.FollowUpQueueSpecificity passed"],
+                    "measured_results": ["generic next_steps no longer selected verbatim"],
+                    "follow_up_recommendation": {
+                        "action": "next",
+                        "next_command": (
+                            'agentteam next --from-taskpack first-pass --goal '
+                            '"补充 follow_up_queue next_goal 具体化回归测试。"'
+                        ),
+                    },
+                },
+            },
+            source_taskpack_id="first-pass",
+            source_run_dir="/tmp/first-pass",
+            limit=5,
+        )
+
+        self.assertEqual(summary["queue_status"], "ready")
+        self.assertEqual(
+            [item["objective"] for item in summary["items"]],
+            ["补充 follow_up_queue next_goal 具体化回归测试。"],
+        )
+        self.assertEqual(summary["next_goal"], "补充 follow_up_queue next_goal 具体化回归测试。")
+        self.assertEqual(
+            summary["next_command"],
+            'agentteam next --from-taskpack first-pass --goal "补充 follow_up_queue next_goal 具体化回归测试。"',
+        )
+
+    def test_follow_up_queue_summary_enriches_generic_next_step_with_report_evidence(self):
+        from agentteam_runtime.follow_up_queue import build_follow_up_queue_summary
+
+        summary = build_follow_up_queue_summary(
+            source_report={
+                "run_id": "first-pass",
+                "report_path": "/tmp/first-pass/reports/final_report.md",
+                "completion_summary": {
+                    "next_steps": ["继续优化"],
+                    "changed_files": ["agentteam_runtime/follow_up_queue.py"],
+                    "verification": ["python3 -m unittest test_taskpack.FollowUpQueueSpecificity passed"],
+                    "measured_results": ["generic next_steps no longer selected verbatim"],
+                },
+            },
+            source_taskpack_id="first-pass",
+            source_run_dir="/tmp/first-pass",
+            limit=5,
+        )
+
+        self.assertEqual(summary["queue_status"], "ready")
+        self.assertNotEqual(summary["next_goal"], "继续优化")
+        self.assertIn("继续优化", summary["next_goal"])
+        self.assertIn("基于上一轮证据", summary["next_goal"])
+        self.assertIn("changed_files=agentteam_runtime/follow_up_queue.py", summary["next_goal"])
+        self.assertIn(
+            "verification=python3 -m unittest test_taskpack.FollowUpQueueSpecificity passed",
+            summary["next_goal"],
+        )
+        self.assertIn(
+            "measured_result=generic next_steps no longer selected verbatim",
+            summary["next_goal"],
+        )
+        self.assertIn(summary["next_goal"], summary["next_command"])
+
     def test_semantic_feedback_proposal_helper_writes_review_artifact(self):
         from agentteam_runtime.semantic_feedback import write_semantic_feedback_proposal
 

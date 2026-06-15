@@ -1,6 +1,21 @@
 FOLLOW_UP_QUEUE_SCHEMA_VERSION = "follow_up_queue.v1"
 DEFAULT_QUEUE_LIMIT = 5
 DEFAULT_TEXT_LIMIT = 480
+GENERIC_NEXT_STEP_TEXTS = {
+    "continue optimization",
+    "continue optimizing",
+    "continue improving",
+    "continue validation",
+    "continue validating",
+    "keep optimizing",
+    "持续优化",
+    "继续处理",
+    "继续优化",
+    "继续完善",
+    "继续推进",
+    "继续改进",
+    "继续验证",
+}
 
 
 def build_follow_up_queue_summary(
@@ -77,24 +92,44 @@ def render_follow_up_queue_text(summary, *, next_only=False):
 
 
 def _queue_items_from_report(source_report, *, source_taskpack_id, source_report_path, text_limit):
-    summary = source_report.get("completion_summary") if isinstance(source_report.get("completion_summary"), dict) else {}
+    raw_summary = source_report.get("completion_summary")
+    summary = raw_summary if isinstance(raw_summary, dict) else {}
     items = []
+    recommendation = summary.get("follow_up_recommendation")
+    recommendation_objective = None
+    if isinstance(recommendation, dict) and recommendation.get("next_command"):
+        recommendation_objective = _goal_from_next_command(recommendation.get("next_command"))
+    concrete_recommendation_exists = bool(
+        recommendation_objective and not _is_generic_next_step(recommendation_objective)
+    )
     for objective in _text_items(summary.get("next_steps")):
+        objective = _specific_next_step_objective(
+            objective,
+            summary,
+            concrete_fallback_exists=concrete_recommendation_exists,
+            text_limit=text_limit,
+        )
+        if not objective:
+            continue
         items.append(
             {
-                "objective": _bounded_text(objective, text_limit),
+                "objective": objective,
                 "source": "report.next_steps",
                 "source_taskpack_id": source_taskpack_id,
                 "source_report_path": source_report_path,
             }
         )
-    recommendation = summary.get("follow_up_recommendation")
     if isinstance(recommendation, dict) and recommendation.get("next_command"):
-        objective = _goal_from_next_command(recommendation.get("next_command"))
+        objective = _specific_next_step_objective(
+            recommendation_objective,
+            summary,
+            concrete_fallback_exists=False,
+            text_limit=text_limit,
+        )
         if objective:
             items.append(
                 {
-                    "objective": _bounded_text(objective, text_limit),
+                    "objective": objective,
                     "source": "report.follow_up_recommendation",
                     "source_taskpack_id": source_taskpack_id,
                     "source_report_path": source_report_path,
@@ -163,6 +198,53 @@ def _goal_from_next_command(command):
 
 def _quote(value):
     return str(value).replace('"', '\\"')
+
+
+def _specific_next_step_objective(value, summary, *, concrete_fallback_exists, text_limit):
+    objective = str(value or "").strip()
+    if not objective:
+        return None
+    if not _is_generic_next_step(objective):
+        return _bounded_text(objective, text_limit)
+    if concrete_fallback_exists:
+        return None
+    evidence = _report_evidence_anchor(summary)
+    if not evidence:
+        return None
+    return _bounded_text(f"{objective}（基于上一轮证据：{evidence}）", text_limit)
+
+
+def _is_generic_next_step(value):
+    text = _normalized_next_step_text(value)
+    return text in GENERIC_NEXT_STEP_TEXTS
+
+
+def _normalized_next_step_text(value):
+    text = " ".join(str(value or "").strip().lower().split())
+    return text.strip(" \t\r\n。.!！,，;；:：")
+
+
+def _report_evidence_anchor(summary):
+    summary = summary if isinstance(summary, dict) else {}
+    fragments = []
+    changed_files = _text_items(summary.get("changed_files"))
+    if changed_files:
+        fragments.append(f"changed_files={'；'.join(changed_files[:2])}")
+    verification = _text_items(summary.get("verification"))
+    if verification:
+        fragments.append(f"verification={verification[0]}")
+    measured_results = _text_items(summary.get("measured_results")) + _text_items(
+        summary.get("measured_result")
+    )
+    if measured_results:
+        fragments.append(f"measured_result={measured_results[0]}")
+    what_changed = _text_items(summary.get("what_changed"))
+    if what_changed:
+        fragments.append(f"what_changed={what_changed[0]}")
+    evidence_gaps = _text_items(summary.get("evidence_gaps"))
+    if evidence_gaps:
+        fragments.append(f"evidence_gap={evidence_gaps[0]}")
+    return "；".join(fragments[:3])
 
 
 def _bounded_text(value, limit):
