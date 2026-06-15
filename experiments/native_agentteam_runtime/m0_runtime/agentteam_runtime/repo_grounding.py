@@ -5,6 +5,7 @@ from pathlib import Path
 
 REPO_GROUNDING_SCHEMA_VERSION = "repo_grounding.v1"
 REPO_STRUCTURE_SCHEMA_VERSION = "repo_structure.v1"
+DEFAULT_TOP_LEVEL_ENTRY_LIMIT = 12
 
 LANGUAGE_BY_SUFFIX = {
     ".py": "python",
@@ -48,7 +49,12 @@ SKIP_PATH_PARTS = {
 }
 
 
-def build_repo_grounding(project_root, max_files=5000, sample_limit=5):
+def build_repo_grounding(
+    project_root,
+    max_files=5000,
+    sample_limit=5,
+    top_level_entry_limit=DEFAULT_TOP_LEVEL_ENTRY_LIMIT,
+):
     project_root = Path(project_root).resolve()
     warnings = []
     relative_paths = _repo_files(project_root, warnings, max_files=max_files)
@@ -69,7 +75,10 @@ def build_repo_grounding(project_root, max_files=5000, sample_limit=5):
         project_tools,
         test_entrypoints,
     )
-    repository_structure = _repository_structure(relative_paths)
+    repository_structure = _repository_structure(
+        relative_paths,
+        top_level_entry_limit=top_level_entry_limit,
+    )
     return {
         "grounding_schema_version": REPO_GROUNDING_SCHEMA_VERSION,
         "project_root": str(project_root),
@@ -120,6 +129,15 @@ def render_repo_grounding_text(grounding):
             for item in top_level_entries
         )
     )
+    budget = structure.get("top_level_entry_budget") or {}
+    if budget:
+        lines.append(
+            "repository_structure_budget: "
+            f"top_level_total={budget.get('total_entry_count', 0)}; "
+            f"top_level_included={budget.get('included_count', 0)}; "
+            f"top_level_omitted={budget.get('omitted_count', 0)}; "
+            f"max_entries={budget.get('max_entries', 0)}"
+        )
     if grounding.get("warnings"):
         lines.append(f"warnings: {len(grounding['warnings'])}")
     return "\n".join(lines) + "\n"
@@ -273,7 +291,7 @@ def _append_command(commands, command, *, reason):
     commands.append({"command": command, "reason": reason})
 
 
-def _repository_structure(relative_paths):
+def _repository_structure(relative_paths, *, top_level_entry_limit):
     entries = [
         {
             "path": path,
@@ -282,12 +300,21 @@ def _repository_structure(relative_paths):
         }
         for path in sorted(relative_paths)
     ]
+    top_level_entries = _top_level_entries(entries)
+    max_entries = max(0, int(top_level_entry_limit or 0))
+    bounded_top_level_entries = top_level_entries[:max_entries]
     return {
         "structure_schema_version": REPO_STRUCTURE_SCHEMA_VERSION,
         "tracked_file_count": len(entries),
         "category_counts": _count_summary(entries, "category"),
         "language_counts": _count_summary(entries, "language"),
-        "top_level_entries": _top_level_entries(entries),
+        "top_level_entry_budget": {
+            "max_entries": max_entries,
+            "total_entry_count": len(top_level_entries),
+            "included_count": len(bounded_top_level_entries),
+            "omitted_count": max(0, len(top_level_entries) - len(bounded_top_level_entries)),
+        },
+        "top_level_entries": bounded_top_level_entries,
     }
 
 

@@ -8768,6 +8768,33 @@ class TaskpackTests(unittest.TestCase):
                 task["write_scope"],
             )
             self.assertEqual(loaded["verification"]["command"], ["python3", "-m", "unittest", "discover"])
+            context_refs = taskpack["context_refs"]
+            self.assertEqual(context_refs["repo_grounding_schema_version"], "repo_grounding.v1")
+            self.assertEqual(context_refs["repo_structure_schema_version"], "repo_structure.v1")
+            grounding_languages = json.loads(context_refs["repo_grounding_languages"])
+            self.assertIn(
+                {"language": "python", "file_count": 7},
+                [
+                    {
+                        "language": item["language"],
+                        "file_count": item["file_count"],
+                    }
+                    for item in grounding_languages
+                ],
+            )
+            candidate_commands = json.loads(context_refs["repo_grounding_candidate_verification_commands"])
+            self.assertIn(
+                ["python3", "-m", "unittest", "discover"],
+                [item["command"] for item in candidate_commands],
+            )
+            repo_structure_budget = json.loads(context_refs["repo_structure_budget"])
+            self.assertEqual(repo_structure_budget["omitted_count"], 0)
+            self.assertGreaterEqual(repo_structure_budget["included_count"], 3)
+            top_level_entries = json.loads(context_refs["repo_structure_top_level_entries"])
+            self.assertIn(
+                "experiments/",
+                [entry["path"] for entry in top_level_entries],
+            )
             self.assertEqual(
                 taskpack["policy"]["source_control_restrictions"],
                 ["no_merge", "no_push", "no_release_activation"],
@@ -10741,6 +10768,48 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(_arg_value(args, "--backlog"), str(Path(frozen["frozen_taskpack_dir"]) / "backlog.json"))
             self.assertTrue((run_root / "auto-roadmap-executable").exists())
+
+    def test_auto_materialize_semantic_taskpack_uses_grounding_candidate_verification_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            materialized_root = tmp_path / "materialized"
+            _init_repo(repo)
+
+            skeleton = draft_deterministic_taskpack_skeleton(
+                project_root=repo,
+                goal="Use deterministic grounding to produce an executable follow-up taskpack.",
+                draft_root=drafts,
+                taskpack_id="candidate-verification-skeleton",
+                context_refs={
+                    "selected_next_goal": "Implement the bounded parser task.",
+                    "read_scope": "src/parser.py\ntests/test_parser.py",
+                    "write_scope": "src/parser.py\ntests/test_parser.py",
+                    "repo_grounding_candidate_verification_commands": json.dumps(
+                        [
+                            {
+                                "command": ["python3", "-m", "pytest", "tests/test_parser.py"],
+                                "reason": "detected focused python test entrypoint",
+                            }
+                        ]
+                    ),
+                },
+                verification_command=["python3", "-m", "unittest", "discover"],
+            )
+
+            materialized = taskpack_module.auto_materialize_semantic_taskpack(
+                skeleton["taskpack_dir"],
+                output_root=materialized_root,
+                taskpack_id="candidate-verification-executable",
+            )
+
+            loaded = load_taskpack(materialized["taskpack_dir"])
+            self.assertEqual(
+                loaded["verification"]["command"],
+                ["python3", "-m", "pytest", "tests/test_parser.py"],
+            )
+            self.assertEqual(validate_taskpack(materialized["taskpack_dir"])["status"], "accepted")
 
     def test_taskpack_materialize_handler_freezes_semantic_completion_file(self):
         with tempfile.TemporaryDirectory() as tmp:

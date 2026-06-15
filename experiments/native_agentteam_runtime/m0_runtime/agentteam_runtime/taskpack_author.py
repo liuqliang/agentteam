@@ -169,6 +169,16 @@ def _deterministic_author_context_refs(
         for item in structure.get("top_level_entries", [])
         if isinstance(item, dict) and item.get("path")
     ]
+    structure_budget = (
+        structure.get("top_level_entry_budget")
+        if isinstance(structure.get("top_level_entry_budget"), dict)
+        else {
+            "max_entries": len(structure.get("top_level_entries") or []),
+            "total_entry_count": len(structure.get("top_level_entries") or []),
+            "included_count": len(structure.get("top_level_entries") or []),
+            "omitted_count": 0,
+        }
+    )
     selected_next_goal = (
         "Use repo_grounding.v1 and repo_structure.v1 deterministic signals to "
         f"implement the bounded next step: {goal}"
@@ -182,6 +192,60 @@ def _deterministic_author_context_refs(
         "repo_map_symbols_path": paths.get("symbols_path") or "not provided",
         "repo_grounding_schema_version": grounding.get("grounding_schema_version") or "repo_grounding.v1",
         "repo_structure_schema_version": structure.get("structure_schema_version") or "repo_structure.v1",
+        "repo_grounding_languages": _deterministic_context_json(
+            [
+                {
+                    "language": item.get("language"),
+                    "file_count": item.get("file_count"),
+                    "sample_files": item.get("sample_files") or [],
+                }
+                for item in (grounding.get("languages") or [])[:8]
+                if isinstance(item, dict) and item.get("language")
+            ]
+        ),
+        "repo_grounding_project_tools": _deterministic_context_json(
+            [
+                {
+                    "tool_id": item.get("tool_id"),
+                    "tool_type": item.get("tool_type"),
+                    "path": item.get("path"),
+                    "candidate_commands": item.get("candidate_commands") or [],
+                }
+                for item in (grounding.get("project_tools") or [])[:8]
+                if isinstance(item, dict) and item.get("tool_id")
+            ]
+        ),
+        "repo_grounding_test_entrypoints": _deterministic_context_json(
+            [
+                {
+                    "path": item.get("path"),
+                    "language": item.get("language"),
+                    "test_framework_hint": item.get("test_framework_hint"),
+                }
+                for item in (grounding.get("test_entrypoints") or [])[:12]
+                if isinstance(item, dict) and item.get("path")
+            ]
+        ),
+        "repo_grounding_candidate_verification_commands": _deterministic_context_json(
+            [
+                {
+                    "command": item.get("command"),
+                    "reason": item.get("reason") or "deterministic repo grounding",
+                }
+                for item in (grounding.get("candidate_verification_commands") or [])[:8]
+                if isinstance(item, dict) and item.get("command")
+            ]
+        ),
+        "repo_structure_category_counts": _deterministic_context_json(
+            (structure.get("category_counts") or [])[:8]
+        ),
+        "repo_structure_language_counts": _deterministic_context_json(
+            (structure.get("language_counts") or [])[:8]
+        ),
+        "repo_structure_top_level_entries": _deterministic_context_json(
+            structure.get("top_level_entries") or []
+        ),
+        "repo_structure_budget": _deterministic_context_json(structure_budget),
         "repo_grounding_summary": "; ".join(
             [
                 f"scan_status={grounding.get('scan_status') or 'unknown'}",
@@ -194,7 +258,7 @@ def _deterministic_author_context_refs(
             [
                 f"repo_map_scan_status={manifest.get('scan_status') or 'unknown'}",
                 f"top_level_entries={','.join(top_level_entries[:12])}",
-                f"top_level_omitted={max(0, len(top_level_entries) - 12)}",
+                f"top_level_omitted={structure_budget.get('omitted_count', 0)}",
             ]
         ),
         "read_scope": "\n".join(read_scope),
@@ -205,6 +269,10 @@ def _deterministic_author_context_refs(
         ),
         "non_goals": "natural-language report formatting; DB-primary storage; model adapters; merge; push; release activation",
     }
+
+
+def _deterministic_context_json(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def _deterministic_author_verification_command(grounding, verification_profile):

@@ -1161,6 +1161,42 @@ class M0RuntimeTests(unittest.TestCase):
                 ],
             )
 
+    def test_repo_grounding_budgets_top_level_structure_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_git_repo(repo)
+            for name in ["alpha", "beta", "gamma", "delta"]:
+                package_dir = repo / name
+                package_dir.mkdir()
+                (package_dir / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add top level packages"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            grounding = build_repo_grounding(repo, top_level_entry_limit=3)
+
+            structure = grounding["repository_structure"]
+            self.assertEqual(
+                structure["top_level_entry_budget"],
+                {
+                    "max_entries": 3,
+                    "total_entry_count": 5,
+                    "included_count": 3,
+                    "omitted_count": 2,
+                },
+            )
+            self.assertEqual(
+                [entry["path"] for entry in structure["top_level_entries"]],
+                ["README.md", "alpha/", "beta/"],
+            )
+            self.assertEqual(structure["tracked_file_count"], 5)
+
     def test_repo_map_extracts_python_symbol_summaries(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

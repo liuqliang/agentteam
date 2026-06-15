@@ -1457,6 +1457,9 @@ def _semantic_verification_command_from_context(context_refs, verification):
         ["verification_command", "verification_plan_command", "correctness_command"],
     )
     if not value:
+        candidate = _semantic_candidate_verification_command_from_context(context_refs)
+        if candidate:
+            return candidate
         return list(default)
     if value.startswith("["):
         command = _parse_semantic_ref_list(value, "context_refs.verification_command")
@@ -1468,6 +1471,55 @@ def _semantic_verification_command_from_context(context_refs, verification):
     if not command or not all(isinstance(part, str) and part for part in command):
         raise TaskpackValidationError("context_refs.verification_command must be a non-empty string array")
     return command
+
+
+def _semantic_candidate_verification_command_from_context(context_refs):
+    value = _semantic_context_text(
+        context_refs,
+        [
+            "repo_grounding_candidate_verification_commands",
+            "candidate_verification_commands",
+            "repo_candidate_verification_commands",
+        ],
+    )
+    if not value:
+        return None
+    field_name = "context_refs.repo_grounding_candidate_verification_commands"
+    candidates = _parse_semantic_candidate_verification_commands(value, field_name)
+    for candidate in candidates:
+        command = candidate.get("command") if isinstance(candidate, dict) else candidate
+        command = _semantic_candidate_command_list(command, field_name)
+        if command:
+            return command
+    raise TaskpackValidationError(f"{field_name} must contain at least one non-empty command")
+
+
+def _parse_semantic_candidate_verification_commands(value, field_name):
+    text = str(value or "").strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise TaskpackValidationError(f"{field_name} must be a JSON array") from exc
+        if not isinstance(decoded, list):
+            raise TaskpackValidationError(f"{field_name} must be a JSON array")
+        return decoded
+    return _parse_semantic_ref_list(text, field_name)
+
+
+def _semantic_candidate_command_list(command, field_name):
+    if isinstance(command, list) and all(isinstance(part, str) and part for part in command):
+        return list(command)
+    if isinstance(command, str) and command.strip():
+        try:
+            parsed = shlex.split(command)
+        except ValueError as exc:
+            raise TaskpackValidationError(f"{field_name} command must be shell-splittable") from exc
+        if parsed and all(isinstance(part, str) and part for part in parsed):
+            return parsed
+    return None
 
 
 def _semantic_required_deliverables(goal, context_refs, agentteam_target):
