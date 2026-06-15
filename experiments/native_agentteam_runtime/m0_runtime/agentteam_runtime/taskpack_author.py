@@ -108,13 +108,17 @@ def _draft_with_deterministic_author(
         grounding,
         verification_profile,
     )
-    read_scope, write_scope = _deterministic_author_scopes(repo_map, goal)
+    read_scope, write_scope, scope_diagnostic = _deterministic_author_scopes(
+        repo_map,
+        goal,
+    )
     context_refs = _deterministic_author_context_refs(
         goal=goal,
         repo_map=repo_map,
         grounding=grounding,
         read_scope=read_scope,
         write_scope=write_scope,
+        scope_diagnostic=scope_diagnostic,
         verification_command=verification_command,
     )
 
@@ -149,6 +153,7 @@ def _deterministic_author_context_refs(
     grounding,
     read_scope,
     write_scope,
+    scope_diagnostic,
     verification_command,
 ):
     manifest = repo_map.get("manifest") if isinstance(repo_map.get("manifest"), dict) else {}
@@ -246,6 +251,7 @@ def _deterministic_author_context_refs(
             structure.get("top_level_entries") or []
         ),
         "repo_structure_budget": _deterministic_context_json(structure_budget),
+        "deterministic_scope_diagnostic": _deterministic_context_json(scope_diagnostic),
         "repo_grounding_summary": "; ".join(
             [
                 f"scan_status={grounding.get('scan_status') or 'unknown'}",
@@ -290,10 +296,11 @@ def _deterministic_author_verification_command(grounding, verification_profile):
     return ["python3", "-m", "unittest", "discover"]
 
 
-def _deterministic_author_scopes(repo_map, goal, max_source_files=6, max_test_files=4):
+def _deterministic_author_scopes(repo_map, goal, max_source_files=8, max_test_files=4):
     inventory = repo_map.get("inventory") if isinstance(repo_map.get("inventory"), dict) else {}
     files = inventory.get("files") if isinstance(inventory.get("files"), list) else []
     goal_tokens = _deterministic_goal_tokens(goal)
+    diagnostic_matches = []
     ranked = []
     for entry in files:
         if not isinstance(entry, dict):
@@ -304,9 +311,10 @@ def _deterministic_author_scopes(repo_map, goal, max_source_files=6, max_test_fi
         category = entry.get("category") or "unknown"
         if category not in {"source", "test"}:
             continue
-        score = _deterministic_path_score(path, goal_tokens)
+        score, matched_tokens = _deterministic_path_score(path, goal_tokens)
         if score <= 0:
             continue
+        diagnostic_matches.extend(matched_tokens)
         ranked.append((score, category, path))
 
     ranked.sort(key=lambda item: (-item[0], _deterministic_category_order(item[1]), item[2]))
@@ -329,7 +337,12 @@ def _deterministic_author_scopes(repo_map, goal, max_source_files=6, max_test_fi
     if not write_scope:
         write_scope = [".agentteam/generated/"]
     read_scope = _dedupe_paths(write_scope)
-    return read_scope, write_scope
+    diagnostic = _deterministic_scope_diagnostic(
+        goal_tokens=goal_tokens,
+        matched_goal_tokens=diagnostic_matches,
+        write_scope=write_scope,
+    )
+    return read_scope, write_scope, diagnostic
 
 
 def _deterministic_goal_tokens(goal):
@@ -349,6 +362,18 @@ def _deterministic_goal_tokens(goal):
         tokens.add("author")
     if "semantic" in tokens or "materialization" in tokens:
         tokens.update({"semantic", "materialize", "materialization"})
+    if "status" in tokens or "state" in tokens or "liveness" in tokens:
+        tokens.update({"status", "scheduler", "report"})
+    if "report" in tokens or "summary" in tokens:
+        tokens.update({"report", "summary", "completion", "operator"})
+    if "notification" in tokens or "notify" in tokens or "feishu" in tokens:
+        tokens.update({"notification", "notify", "feishu"})
+    if "worker" in tokens or "heartbeat" in tokens or "checkpoint" in tokens or "outbox" in tokens:
+        tokens.update({"worker", "heartbeat", "mailbox", "pool"})
+    if "token" in tokens or "usage" in tokens:
+        tokens.update({"token", "usage"})
+    if "scope" in tokens or "diagnostic" in tokens or "diagnostics" in tokens:
+        tokens.update({"scope", "diagnostic", "author", "taskpack"})
     return tokens
 
 
@@ -358,14 +383,100 @@ def _deterministic_path_score(path, goal_tokens):
         for token in re.split(r"[^a-z0-9]+", path.lower())
         if len(token) >= 3
     }
-    score = len(path_tokens & goal_tokens)
+    matched_tokens = sorted((path_tokens - _DETERMINISTIC_SCOPE_STOP_TOKENS) & goal_tokens)
+    score = len(matched_tokens)
     lowered = path.lower()
     for marker in ("taskpack", "author", "grounding", "repo_map", "semantic"):
         if marker in lowered and marker.replace("_", "") in goal_tokens:
             score += 2
+            matched_tokens.append(marker.replace("_", ""))
         elif marker in lowered and marker in goal_tokens:
             score += 2
-    return score
+            matched_tokens.append(marker)
+    for rule in _DETERMINISTIC_SCOPE_RULES:
+        if not (goal_tokens & rule["triggers"]):
+            continue
+        if any(marker in lowered for marker in rule["path_markers"]):
+            score += rule["weight"]
+            matched_tokens.extend(sorted(goal_tokens & rule["triggers"]))
+    return score, sorted(set(matched_tokens))
+
+
+_DETERMINISTIC_SCOPE_STOP_TOKENS = {
+    "agentteam",
+    "code",
+    "experiments",
+    "implementation",
+    "m0",
+    "native",
+    "python",
+    "repo",
+    "runtime",
+    "test",
+    "tests",
+}
+
+
+_DETERMINISTIC_SCOPE_RULES = [
+    {
+        "triggers": {"scheduler", "status", "state", "liveness", "inflight", "lease"},
+        "path_markers": ("two_phase_scheduler", "scheduler", "agentteam.py", "cli.py"),
+        "expected_module": "two_phase_scheduler.py",
+        "weight": 5,
+    },
+    {
+        "triggers": {"report", "summary", "completion", "operator"},
+        "path_markers": ("operator_report", "completion_summary", "operator_brief"),
+        "expected_module": "operator_report.py",
+        "weight": 5,
+    },
+    {
+        "triggers": {"notification", "notify", "feishu"},
+        "path_markers": ("notifications",),
+        "expected_module": "notifications.py",
+        "weight": 5,
+    },
+    {
+        "triggers": {"worker", "heartbeat", "checkpoint", "outbox", "mailbox", "pool"},
+        "path_markers": ("mailbox_worker", "worker_pool"),
+        "expected_module": "mailbox_worker.py",
+        "weight": 5,
+    },
+    {
+        "triggers": {"token", "usage"},
+        "path_markers": ("token_usage",),
+        "expected_module": "token_usage.py",
+        "weight": 5,
+    },
+    {
+        "triggers": {"scope", "diagnostic", "author", "taskpack"},
+        "path_markers": ("taskpack_author", "taskpack.py"),
+        "expected_module": "taskpack_author.py",
+        "weight": 5,
+    },
+]
+
+
+def _deterministic_scope_diagnostic(*, goal_tokens, matched_goal_tokens, write_scope):
+    expected_modules = []
+    missing_expected_modules = []
+    for rule in _DETERMINISTIC_SCOPE_RULES:
+        if not (goal_tokens & rule["triggers"]):
+            continue
+        expected_module = rule["expected_module"]
+        expected_modules.append(expected_module)
+        if not any(expected_module in path for path in write_scope):
+            missing_expected_modules.append(expected_module)
+    confidence = "high" if not missing_expected_modules and write_scope != [".agentteam/generated/"] else "low"
+    return {
+        "diagnostic_schema_version": "deterministic_scope_diagnostic.v1",
+        "confidence": confidence,
+        "authoring_needs_review": confidence == "low",
+        "matched_goal_tokens": sorted(set(matched_goal_tokens)),
+        "expected_modules": sorted(set(expected_modules)),
+        "missing_expected_modules": sorted(set(missing_expected_modules)),
+        "selected_write_scope_count": len(write_scope),
+    }
 
 
 def _deterministic_category_order(category):

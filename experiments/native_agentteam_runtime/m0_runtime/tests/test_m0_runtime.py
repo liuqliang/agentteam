@@ -483,6 +483,7 @@ class M0RuntimeTests(unittest.TestCase):
             report = build_run_completion_report(run_dir, project="agentteam", write_files=False)
 
         self.assertEqual(report["blocked_count"], 1)
+        self.assertEqual(report["run_outcome"], "completed_with_review_required")
         self.assertEqual(
             report["completion_summary"]["status_line"],
             "completed: 1 task reported, 1 blocked task",
@@ -2580,6 +2581,62 @@ class M0RuntimeTests(unittest.TestCase):
                 },
             )
 
+    def test_file_mailbox_worker_poll_once_writes_activity_heartbeat(self):
+        class InspectHeartbeatRuntimeAdapter:
+            def __init__(self, heartbeat_path):
+                self.heartbeat_path = heartbeat_path
+                self.processing_heartbeat = None
+
+            def run(self, message, worktree_path=None):
+                del message, worktree_path
+                self.processing_heartbeat = json.loads(
+                    self.heartbeat_path.read_text(encoding="utf-8")
+                )
+                return {
+                    "result_status": "completed",
+                    "changed_files": ["generated/m0_generated_repo_index.json"],
+                    "output": {"summary": "done"},
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            inbox = output_dir / "mailboxes" / "agent-repo-map" / "inbox.jsonl"
+            heartbeat_path = (
+                output_dir / "state" / "workers" / "agent-repo-map.heartbeat.json"
+            )
+            message = _mailbox_dispatch_message(
+                message_id="MSG-MAILBOX-HEARTBEAT-001",
+                agent_id="agent-repo-map",
+                write_scope=["generated/"],
+            )
+            _append_test_jsonl(inbox, [message])
+            runtime_adapter = InspectHeartbeatRuntimeAdapter(heartbeat_path)
+
+            worker = FileMailboxWorker(
+                FIXTURES / "sample_agent_pool.json",
+                output_dir,
+                "agent-repo-map",
+                runtime_adapter=runtime_adapter,
+                clock=FixedClock(),
+            )
+            summary = worker.poll_once()
+
+            final_heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(summary["poll_status"], "processed")
+            self.assertEqual(
+                runtime_adapter.processing_heartbeat["activity"],
+                "processing",
+            )
+            self.assertEqual(
+                runtime_adapter.processing_heartbeat["source_message_id"],
+                "MSG-MAILBOX-HEARTBEAT-001",
+            )
+            self.assertEqual(final_heartbeat["activity"], "processed")
+            self.assertEqual(final_heartbeat["result_status"], "completed")
+            self.assertEqual(final_heartbeat["changed_file_count"], 1)
+
     def test_mailbox_worker_outbox_reader_preserves_token_usage(self):
         from agentteam_runtime.mailbox_worker import _runtime_result_from_outbox
 
@@ -4239,6 +4296,80 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue(
                 all(worker["worker_status"] == "stopped" for worker in stop["workers"])
             )
+
+    def test_file_mailbox_worker_pool_health_includes_worker_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+            pool = FileMailboxWorkerPoolSupervisor(
+                agent_pool_path,
+                output_dir,
+                env=env,
+                poll_interval_seconds=0.01,
+            )
+
+            pool.start()
+            heartbeat_path = (
+                output_dir / "state" / "workers" / "agent-repo-map.heartbeat.json"
+            )
+            deadline = time.monotonic() + 2
+            try:
+                while not heartbeat_path.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                health = pool.health_check()
+            finally:
+                pool.stop()
+
+            self.assertTrue(heartbeat_path.exists())
+            worker = health["workers"][0]
+            self.assertEqual(worker["worker_status"], "running")
+            self.assertEqual(worker["last_activity"], "idle")
+            self.assertEqual(worker["last_poll_status"], "idle")
+            self.assertEqual(worker["heartbeat_path"], str(heartbeat_path))
+
+    def test_status_last_worker_includes_heartbeat_activity(self):
+        from agentteam_runtime.agentteam import _status_last_worker
+
+        line = _status_last_worker(
+            {
+                "workers": [
+                    {
+                        "worker_agent_id": "agent-implementation-worker-1",
+                        "worker_status": "running",
+                        "last_activity": "processing",
+                        "last_poll_status": "processing",
+                        "heartbeat_task_id": "TASK-001",
+                        "heartbeat_result_status": "completed",
+                    }
+                ]
+            }
+        )
+
+        self.assertIn("agent-implementation-worker-1 running", line)
+        self.assertIn("activity=processing", line)
+        self.assertIn("poll=processing", line)
+        self.assertIn("task=TASK-001", line)
+        self.assertIn("result=completed", line)
+
+    def test_status_run_outcome_marks_completed_run_with_blockers_for_review(self):
+        from agentteam_runtime.agentteam import _status_run_outcome
+
+        self.assertEqual(
+            _status_run_outcome("completed", {"done": 0, "blocked": 1}),
+            "completed_with_review_required",
+        )
+        self.assertEqual(
+            _status_run_outcome("running", {"done": 0, "blocked": 1}),
+            "review_required",
+        )
+        self.assertEqual(
+            _status_run_outcome("completed", {"done": 1, "blocked": 0}),
+            "completed",
+        )
 
     def test_file_mailbox_worker_pool_supervisor_uses_role_runtime_profile(self):
         with tempfile.TemporaryDirectory() as tmp:

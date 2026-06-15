@@ -172,9 +172,51 @@ class FileMailboxWorkerPoolSupervisor:
 
     def _worker_health(self, worker):
         health = worker.health()
+        heartbeat = self._latest_worker_heartbeat(worker.agent_id)
+        if heartbeat:
+            health = {
+                **health,
+                "last_activity": heartbeat.get("activity"),
+                "last_poll_status": heartbeat.get("poll_status"),
+                "last_heartbeat_at": heartbeat.get("updated_at"),
+                "last_heartbeat_pid": heartbeat.get("worker_pid"),
+                "heartbeat_path": heartbeat.get("heartbeat_path"),
+                "heartbeat_task_id": heartbeat.get("task_id"),
+                "heartbeat_attempt_id": heartbeat.get("attempt_id"),
+                "heartbeat_message_id": heartbeat.get("source_message_id"),
+                "heartbeat_result_status": heartbeat.get("result_status"),
+                "heartbeat_changed_file_count": heartbeat.get("changed_file_count"),
+            }
         if health.get("worker_agent_id") in self.quarantined_agents:
             health = self._quarantine_health(worker, health)
         return self._with_restart_count(health)
+
+    def _latest_worker_heartbeat(self, agent_id):
+        candidates = []
+        for path in self._heartbeat_paths(agent_id):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                modified = path.stat().st_mtime
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            payload = dict(payload)
+            payload["heartbeat_path"] = str(path)
+            candidates.append((modified, str(path), payload))
+        if not candidates:
+            return {}
+        return sorted(candidates, key=lambda item: (item[0], item[1]))[-1][2]
+
+    def _heartbeat_paths(self, agent_id):
+        filename = f"{agent_id}.heartbeat.json"
+        paths = [self.output_dir / "state" / "workers" / filename]
+        steps_dir = self.output_dir / "steps"
+        if steps_dir.exists():
+            paths.extend(
+                sorted(steps_dir.glob(f"*/state/workers/{filename}"))
+            )
+        return paths
 
     def _restart_worker_if_allowed(self, worker):
         previous_worker = worker.health()

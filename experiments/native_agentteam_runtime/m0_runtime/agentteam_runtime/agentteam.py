@@ -4225,6 +4225,15 @@ def _overall_run_status(run_status, liveness_status, manual_gate_count, permissi
     return run_status or "unknown"
 
 
+def _status_run_outcome(run_status, task_counts):
+    blocked_count = task_counts.get("blocked", 0) if isinstance(task_counts, dict) else 0
+    if blocked_count and run_status in {"completed", "idle", "stopped"}:
+        return "completed_with_review_required"
+    if blocked_count:
+        return "review_required"
+    return run_status or "unknown"
+
+
 def _active_phase_for_status(overall_status):
     phase_by_status = {
         "authoring": "authoring",
@@ -4414,12 +4423,14 @@ def _build_run_status_summary(profile, run_dir):
         permission_request_count,
         authoring,
     )
+    run_outcome = _status_run_outcome(run_status, task_counts)
     summary = {
         "project": profile.get("project_key") or "unknown",
         "latest_run": run_dir.name,
         "status": run_status,
         "overall_status": overall_status,
         "run_status": run_status,
+        "run_outcome": run_outcome,
         "active_phase": _active_phase_for_status(overall_status),
         "active_authoring": _active_authoring_record(authoring),
         "liveness_status": liveness["liveness_status"],
@@ -4782,6 +4793,7 @@ def _write_status_text(summary):
         f"latest_run: {summary['latest_run']}",
         f"overall_status: {summary.get('overall_status') or summary['status']}",
         f"run_status: {summary.get('run_status') or summary['status']}",
+        f"run_outcome: {summary.get('run_outcome') or summary.get('run_status') or summary['status']}",
         f"liveness: {summary['liveness_status']}",
         *_projection_text_lines(summary),
         (
@@ -5152,6 +5164,14 @@ def _status_last_worker(worker_registry):
     worker_id = worker.get("worker_agent_id") or worker.get("worker_id") or "unknown-worker"
     worker_status = worker.get("worker_status") or "unknown"
     details = [f"{worker_id} {worker_status}"]
+    if worker.get("last_activity"):
+        details.append(f"activity={worker['last_activity']}")
+    if worker.get("last_poll_status"):
+        details.append(f"poll={worker['last_poll_status']}")
+    if worker.get("heartbeat_task_id"):
+        details.append(f"task={worker['heartbeat_task_id']}")
+    if worker.get("heartbeat_result_status"):
+        details.append(f"result={worker['heartbeat_result_status']}")
     if worker.get("exit_code") is not None:
         details.append(f"exit_code={worker['exit_code']}")
     if worker.get("stopped_by"):

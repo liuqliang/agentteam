@@ -47,6 +47,9 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         task_reports,
     )
     integration_baseline = _integration_baseline_summary(run_dir, state)
+    run_status = _run_status(payload, state)
+    scheduler_status = _scheduler_status(payload, state)
+    run_outcome = _run_outcome(run_status, blocked_count)
 
     report = {
         "report_status": "ready",
@@ -54,14 +57,15 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         "run_id": run_dir.name,
         "run_dir": str(run_dir),
         "terminal_event_type": terminal_event.get("event_type") if terminal_event else None,
-        "run_status": _run_status(payload, state),
-        "scheduler_status": _scheduler_status(payload, state),
+        "run_status": run_status,
+        "run_outcome": run_outcome,
+        "scheduler_status": scheduler_status,
         "task_count": operator_report.get("task_count", 0),
         "blocked_count": blocked_count,
         "token_usage": token_usage,
         "completion_summary": build_completion_summary(
             run_id=run_dir.name,
-            run_status=_run_status(payload, state),
+            run_status=run_status,
             task_count=operator_report.get("task_count", 0),
             blocked_count=blocked_count,
             task_reports=task_reports,
@@ -85,6 +89,7 @@ def render_run_completion_report(report):
         f"Project: {report.get('project') or 'unknown'}",
         f"Run: {report.get('run_id') or 'unknown'}",
         f"Status: {report.get('run_status') or 'unknown'}",
+        f"Outcome: {report.get('run_outcome') or report.get('run_status') or 'unknown'}",
         f"Scheduler: {report.get('scheduler_status') or 'unknown'}",
         f"Run dir: {report.get('run_dir') or 'unknown'}",
     ]
@@ -344,6 +349,14 @@ def _task_needs_operator_review(task):
         or "timed out" in status
         or integration.startswith("failed")
     )
+
+
+def _run_outcome(run_status, blocked_count):
+    if blocked_count and run_status in {"completed", "idle", "stopped"}:
+        return "completed_with_review_required"
+    if blocked_count:
+        return "review_required"
+    return run_status or "unknown"
 
 
 def _latest_terminal_event(events):

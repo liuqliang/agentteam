@@ -8800,6 +8800,88 @@ class TaskpackTests(unittest.TestCase):
                 ["no_merge", "no_push", "no_release_activation"],
             )
 
+    def test_deterministic_taskpack_author_prefers_domain_scope_and_records_diagnostic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "agentteam"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            runtime_pkg = repo / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+            tests_dir = repo / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "tests"
+            runtime_pkg.mkdir(parents=True)
+            tests_dir.mkdir(parents=True)
+            for name in [
+                "__init__.py",
+                "artifact_lint.py",
+                "artifact_repo.py",
+                "completion_summary.py",
+                "mailbox_worker.py",
+                "notifications.py",
+                "operator_report.py",
+                "taskpack.py",
+                "taskpack_author.py",
+                "token_usage.py",
+                "two_phase_scheduler.py",
+                "worker_pool.py",
+            ]:
+                (runtime_pkg / name).write_text(
+                    f"def {name.replace('.', '_')}():\n    return True\n",
+                    encoding="utf-8",
+                )
+            (tests_dir / "test_m0_runtime.py").write_text("def test_runtime():\n    assert True\n", encoding="utf-8")
+            (tests_dir / "test_taskpack.py").write_text("def test_taskpack():\n    assert True\n", encoding="utf-8")
+            (repo / "pyproject.toml").write_text("[project]\nname = 'agentteam-fixture'\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add runtime files"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            result = draft_taskpack_from_goal(
+                project_root=repo,
+                goal=(
+                    "Improve scheduler status report worker heartbeat token usage "
+                    "and deterministic scope grounding diagnostics."
+                ),
+                draft_root=drafts,
+                author_runtime="deterministic",
+                taskpack_id="deterministic-scope-quality",
+            )
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            task = loaded["backlog"]["items"][0]
+            context_refs = loaded["taskpack"]["context_refs"]
+            diagnostic = json.loads(context_refs["deterministic_scope_diagnostic"])
+
+            self.assertIn(
+                "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
+                task["write_scope"],
+            )
+            self.assertIn(
+                "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/operator_report.py",
+                task["write_scope"],
+            )
+            self.assertIn(
+                "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/mailbox_worker.py",
+                task["write_scope"],
+            )
+            self.assertIn(
+                "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/token_usage.py",
+                task["write_scope"],
+            )
+            self.assertNotIn(
+                "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/artifact_repo.py",
+                task["write_scope"],
+            )
+            self.assertEqual(diagnostic["confidence"], "high")
+            self.assertFalse(diagnostic["authoring_needs_review"])
+            self.assertEqual(diagnostic["missing_expected_modules"], [])
+            self.assertIn("scheduler", diagnostic["matched_goal_tokens"])
+            self.assertIn("heartbeat", diagnostic["matched_goal_tokens"])
+
     def test_agentteam_cli_taskpack_draft_supports_deterministic_author_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

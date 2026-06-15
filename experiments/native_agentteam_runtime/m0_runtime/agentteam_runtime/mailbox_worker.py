@@ -27,19 +27,40 @@ class FileMailboxWorker:
         self.agent = self._load_agent()
         self.inbox_path = self.output_dir / self.agent["inbox_path"]
         self.outbox_path = self.output_dir / self.agent["outbox_path"]
+        self.heartbeat_path = (
+            self.output_dir / "state" / "workers" / f"{self.agent_id}.heartbeat.json"
+        )
 
     def poll_once(self, message_id=None, worktree_path=None):
         message = self._next_dispatch(message_id=message_id)
         if not message:
+            self._write_heartbeat(
+                activity="idle",
+                poll_status="idle",
+                reason="no_dispatch_message",
+            )
             return {
                 "poll_status": "idle",
                 "reason": "no_dispatch_message",
             }
         if worktree_path is None:
             worktree_path = message.get("payload", {}).get("worktree_path")
+        self._write_heartbeat(
+            activity="processing",
+            poll_status="processing",
+            message=message,
+            worktree_path=worktree_path,
+        )
         runtime_result = self.runtime_adapter.run(message, worktree_path=worktree_path)
         result_message = self._result_message(message, runtime_result)
         _append_jsonl(self.outbox_path, [result_message])
+        self._write_heartbeat(
+            activity="processed",
+            poll_status="processed",
+            message=message,
+            runtime_result=runtime_result,
+            worktree_path=worktree_path,
+        )
         return {
             "poll_status": "processed",
             "source_message_id": message["message_id"],
@@ -47,6 +68,48 @@ class FileMailboxWorker:
             "changed_files": runtime_result["changed_files"],
             "outbox_path": str(self.outbox_path),
         }
+
+    def _write_heartbeat(
+        self,
+        *,
+        activity,
+        poll_status,
+        reason=None,
+        message=None,
+        runtime_result=None,
+        worktree_path=None,
+    ):
+        payload = {
+            "heartbeat_schema_version": "worker_heartbeat.v1",
+            "worker_agent_id": self.agent_id,
+            "worker_pid": os.getpid(),
+            "updated_at": self.clock.now(),
+            "activity": activity,
+            "poll_status": poll_status,
+            "reason": reason,
+            "worktree_path": str(worktree_path) if worktree_path else None,
+        }
+        if message:
+            message_payload = message.get("payload", {})
+            payload.update(
+                {
+                    "source_message_id": message.get("message_id"),
+                    "task_id": message_payload.get("task_id"),
+                    "attempt_id": message_payload.get("attempt_id"),
+                    "lease_id": message_payload.get("lease_id"),
+                }
+            )
+        if isinstance(runtime_result, dict):
+            changed_files = runtime_result.get("changed_files", [])
+            payload.update(
+                {
+                    "result_status": runtime_result.get("result_status"),
+                    "changed_file_count": (
+                        len(changed_files) if isinstance(changed_files, list) else 0
+                    ),
+                }
+            )
+        _write_json_best_effort(self.heartbeat_path, payload)
 
     def _next_dispatch(self, message_id=None):
         answered = {
@@ -119,6 +182,18 @@ class FileMailboxWorker:
                     **summary,
                     "mailbox_output_dir": str(output_dir),
                 }
+        worker = cls(
+            agent_pool_path,
+            root_output_dir,
+            agent_id,
+            runtime_adapter=runtime_adapter,
+            clock=clock,
+        )
+        worker._write_heartbeat(
+            activity="idle",
+            poll_status="idle",
+            reason="no_dispatch_message",
+        )
         return {
             "poll_status": "idle",
             "reason": "no_dispatch_message",
@@ -683,6 +758,15 @@ def _append_jsonl(path, records):
         for record in records:
             stream.write(json.dumps(record, sort_keys=True))
             stream.write("\n")
+
+
+def _write_json_best_effort(path, payload):
+    try:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    except OSError:
+        return
 
 
 def _read_jsonl_if_exists(path):
