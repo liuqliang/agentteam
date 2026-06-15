@@ -709,25 +709,34 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
 
     verification_path = taskpack_dir / files.get("verification", "verification.json")
     verification = _read_json(verification_path)
+    verification_unwrapped = False
+    if isinstance(verification, dict):
+        unwrapped = _unwrap_nested_named_object(verification, "verification")
+        verification_unwrapped = unwrapped != verification
+        verification = unwrapped
     if isinstance(verification, dict):
         command = verification.get("command")
         project_root = taskpack_data.get("project_root")
         canonical_command = _canonical_verification_command(command, project_root)
-        if canonical_command != command:
+        if canonical_command != command or verification_unwrapped:
             verification["command"] = canonical_command
             _write_json(verification_path, verification)
 
 
 def _unwrap_nested_taskpack_object(taskpack):
-    nested = taskpack.get("taskpack")
+    return _unwrap_nested_named_object(taskpack, "taskpack")
+
+
+def _unwrap_nested_named_object(value, key):
+    nested = value.get(key)
     if not isinstance(nested, dict):
-        return taskpack
+        return value
     unwrapped = dict(nested)
-    for key, value in taskpack.items():
-        if key == "taskpack":
+    for outer_key, outer_value in value.items():
+        if outer_key == key:
             continue
-        if key not in unwrapped:
-            unwrapped[key] = value
+        if outer_key not in unwrapped:
+            unwrapped[outer_key] = outer_value
     return unwrapped
 
 

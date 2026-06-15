@@ -9539,6 +9539,84 @@ class TaskpackTests(unittest.TestCase):
             taskpack = json.loads((taskpack_dir / "taskpack.yaml").read_text(encoding="utf-8"))
             self.assertEqual(taskpack["goal_kind"], "implementation")
 
+    def test_codex_taskpack_author_unwraps_nested_verification_object(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "codex-wrapped-verification"
+            _init_repo(repo)
+            taskpack_dir.mkdir(parents=True)
+            (taskpack_dir / "taskpack.yaml").write_text(
+                json.dumps(
+                    {
+                        "taskpack_schema_version": "taskpack.v1",
+                        "taskpack_id": "codex-wrapped-verification",
+                        "status": "draft",
+                        "semantic_contract_version": "task_semantics.v1",
+                        "project_root": str(repo),
+                        "goal": "Implement a bounded runtime feature.",
+                        "original_goal": "Implement a bounded runtime feature.",
+                        "goal_kind": "implementation",
+                        "runtime": {"default_backend": "codex"},
+                        "files": {
+                            "agent_pool": "agent_pool.json",
+                            "backlog": "backlog.json",
+                            "verification": "verification.json",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "agent_pool.json").write_text(
+                json.dumps(
+                    {
+                        "agents": [
+                            {
+                                "agent_id": "implementation-worker-1",
+                                "role": "implementation_worker",
+                                "status": "idle",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "backlog.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "wrapped-verification-001",
+                                "title": "Implement bounded runtime feature.",
+                                "status": "ready",
+                                "required_role": "implementation_worker",
+                                "read_scope": ["README.md"],
+                                "write_scope": ["src/runtime.py"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "verification.json").write_text(
+                json.dumps(
+                    {
+                        "verification": {
+                            "command": ["python3", "-m", "unittest", "discover"],
+                            "expected_evidence": ["exit code"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            _canonicalize_codex_taskpack_files(taskpack_dir)
+
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
+            verification = json.loads((taskpack_dir / "verification.json").read_text(encoding="utf-8"))
+            self.assertEqual(verification["command"], ["python3", "-m", "unittest", "discover"])
+            self.assertNotIn("verification", verification)
+
     def test_codex_taskpack_author_canonicalizes_optimization_contract_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
