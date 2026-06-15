@@ -2637,6 +2637,59 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(final_heartbeat["result_status"], "completed")
             self.assertEqual(final_heartbeat["changed_file_count"], 1)
 
+    def test_file_mailbox_worker_throttles_idle_heartbeat_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            heartbeat_path = (
+                output_dir / "state" / "workers" / "agent-repo-map.heartbeat.json"
+            )
+            worker = FileMailboxWorker(
+                FIXTURES / "sample_agent_pool.json",
+                output_dir,
+                "agent-repo-map",
+                runtime_adapter=FakeRuntimeAdapter(),
+                clock=FixedClock(),
+            )
+
+            worker.poll_once()
+            first_heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+            worker.poll_once()
+            second_heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+            old_mtime = time.time() - 30
+            os.utime(heartbeat_path, (old_mtime, old_mtime))
+            worker.poll_once()
+            third_heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(first_heartbeat, second_heartbeat)
+            self.assertEqual(third_heartbeat["activity"], "idle")
+            self.assertNotEqual(third_heartbeat["updated_at"], first_heartbeat["updated_at"])
+
+    def test_heartbeat_json_writer_uses_atomic_replace(self):
+        from unittest import mock
+
+        from agentteam_runtime.mailbox_worker import _write_json_best_effort
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent.heartbeat.json"
+            calls = []
+            original_replace = os.replace
+
+            def tracking_replace(source, target):
+                calls.append((Path(source), Path(target)))
+                original_replace(source, target)
+
+            with mock.patch(
+                "agentteam_runtime.mailbox_worker.os.replace",
+                side_effect=tracking_replace,
+            ):
+                _write_json_best_effort(path, {"activity": "idle"})
+
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"activity": "idle"})
+            self.assertEqual(calls[0][1], path)
+            self.assertNotEqual(calls[0][0], path)
+            self.assertFalse(calls[0][0].exists())
+
     def test_mailbox_worker_outbox_reader_preserves_token_usage(self):
         from agentteam_runtime.mailbox_worker import _runtime_result_from_outbox
 

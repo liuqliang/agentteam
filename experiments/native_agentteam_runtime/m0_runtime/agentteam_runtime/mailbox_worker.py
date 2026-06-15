@@ -10,6 +10,9 @@ from pathlib import Path
 from .m0_runtime import CodexRuntimeAdapter, FakeRuntimeAdapter, SystemClock
 
 
+IDLE_HEARTBEAT_MIN_INTERVAL_SECONDS = 15
+
+
 class FileMailboxWorker:
     def __init__(
         self,
@@ -79,6 +82,8 @@ class FileMailboxWorker:
         runtime_result=None,
         worktree_path=None,
     ):
+        if activity == "idle" and not self._should_write_idle_heartbeat():
+            return
         payload = {
             "heartbeat_schema_version": "worker_heartbeat.v1",
             "worker_agent_id": self.agent_id,
@@ -110,6 +115,13 @@ class FileMailboxWorker:
                 }
             )
         _write_json_best_effort(self.heartbeat_path, payload)
+
+    def _should_write_idle_heartbeat(self):
+        try:
+            modified_at = self.heartbeat_path.stat().st_mtime
+        except OSError:
+            return True
+        return (time.time() - modified_at) >= IDLE_HEARTBEAT_MIN_INTERVAL_SECONDS
 
     def _next_dispatch(self, message_id=None):
         answered = {
@@ -761,11 +773,21 @@ def _append_jsonl(path, records):
 
 
 def _write_json_best_effort(path, payload):
+    tmp_path = None
     try:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp_path = path.with_name(
+            f".{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp"
+        )
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(tmp_path, path)
     except OSError:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
         return
 
 
