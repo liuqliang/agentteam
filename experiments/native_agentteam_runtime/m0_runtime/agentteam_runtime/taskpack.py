@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -136,6 +137,18 @@ DOCUMENTATION_INTENT_MARKERS = [
     "文档",
     "说明",
 ]
+ROADMAP_FOLLOWUP_REQUIRED_DELIVERABLES = [
+    "repository_understanding_summary",
+    "previous_evidence_summary",
+    "roadmap_followup_route_template",
+    "evidence_paths",
+    "non_goals",
+    "success_metrics_or_no_metric_delta",
+    "implemented_changes_or_no_safe_change_rationale",
+    "verification_summary",
+    "recommended_next_implementation_tasks",
+]
+AGENTTEAM_TARGET_REVIEW_GATE_DELIVERABLE = "agentteam_target_review_gate"
 
 
 class TaskpackValidationError(ValueError):
@@ -268,10 +281,9 @@ def draft_deterministic_taskpack_skeleton(
     verification_profile=None,
     codex_timeout_seconds=1800,
 ):
-    if classify_goal_kind(goal) == "optimization" or _is_long_running_followup_goal(goal):
+    if classify_goal_kind(goal) == "optimization":
         raise TaskpackValidationError(
-            "deterministic taskpack skeleton requires semantic authoring for "
-            "optimization or long-running follow-up goals"
+            "deterministic taskpack skeleton requires semantic authoring for optimization goals"
         )
     result = draft_taskpack_files(
         project_root=project_root,
@@ -470,6 +482,87 @@ def materialize_semantic_taskpack(
     }
 
 
+def derive_semantic_task_from_skeleton(skeleton_taskpack_dir):
+    skeleton_taskpack_dir = Path(skeleton_taskpack_dir).resolve()
+    loaded = load_taskpack(skeleton_taskpack_dir)
+    _require_semantic_skeleton(loaded)
+    return _derive_semantic_task_from_loaded_skeleton(loaded)
+
+
+def auto_materialize_semantic_taskpack(
+    skeleton_taskpack_dir,
+    output_root,
+    taskpack_id=None,
+):
+    skeleton_taskpack_dir = Path(skeleton_taskpack_dir).resolve()
+    semantic_task = derive_semantic_task_from_skeleton(skeleton_taskpack_dir)
+    materialized = materialize_semantic_taskpack(
+        skeleton_taskpack_dir,
+        output_root=output_root,
+        semantic_task=semantic_task,
+        taskpack_id=taskpack_id,
+    )
+    taskpack_dir = Path(materialized["taskpack_dir"])
+    loaded = load_taskpack(taskpack_dir)
+    taskpack = loaded["taskpack"]
+    backlog = loaded["backlog"]
+    verification = loaded["verification"]
+
+    taskpack["semantic_completion"] = {
+        "completion_schema_version": "taskpack_semantic_completion.v1",
+        "authority": "automatic_deterministic",
+        "operator_semantic_json_required": False,
+        "source": "deterministic_skeleton_context_refs",
+        "semantic_task_fields": sorted(semantic_task),
+    }
+    if _is_agentteam_target_project(taskpack.get("project_root")):
+        policy = taskpack.get("policy") if isinstance(taskpack.get("policy"), dict) else {}
+        policy["allow_merge"] = False
+        policy["operator_review_required"] = True
+        policy["merge_requires_verified_integration"] = True
+        policy["source_control_restrictions"] = [
+            "no_merge",
+            "no_push",
+            "no_release_activation",
+        ]
+        taskpack["policy"] = policy
+
+    items = backlog.get("items") if isinstance(backlog, dict) else []
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        materialization = items[0].get("semantic_materialization")
+        if not isinstance(materialization, dict):
+            materialization = {}
+        materialization["completion_authority"] = "automatic_deterministic"
+        materialization["operator_semantic_json_required"] = False
+        items[0]["semantic_materialization"] = materialization
+
+    files = taskpack.get("files") if isinstance(taskpack.get("files"), dict) else {}
+    backlog_path = _resolve_companion_artifact_path(
+        taskpack_dir,
+        files.get("backlog", "backlog.json"),
+        "files.backlog",
+    )
+    _write_json(taskpack_dir / "taskpack.yaml", taskpack)
+    _write_json(backlog_path, backlog)
+    (taskpack_dir / "README.md").write_text(_render_readme(taskpack, backlog, verification), encoding="utf-8")
+    validation = validate_taskpack(taskpack_dir)
+    materialized["validation"] = validation
+    materialized["semantic_task"] = semantic_task
+    return materialized
+
+
+def materialize_deterministic_taskpack_skeleton(
+    skeleton_taskpack_dir,
+    output_root,
+    taskpack_id=None,
+):
+    return auto_materialize_semantic_taskpack(
+        skeleton_taskpack_dir,
+        output_root=output_root,
+        taskpack_id=taskpack_id,
+    )
+
+
 def load_taskpack(taskpack_dir):
     taskpack_dir = Path(taskpack_dir).resolve()
     taskpack = _read_json(taskpack_dir / "taskpack.yaml")
@@ -577,6 +670,7 @@ def validate_taskpack(taskpack_dir):
         and goal_kind == "implementation"
         and _is_long_running_followup_goal(effective_goal)
     )
+    semantic_authoring_required = bool(taskpack.get("semantic_authoring_required"))
     has_followup_quality_item = False
     for item in items:
         if not isinstance(item, dict):
@@ -699,6 +793,7 @@ def validate_taskpack(taskpack_dir):
     if (
         semantic_contract_enabled
         and is_long_running_followup
+        and not semantic_authoring_required
         and not _goal_requests_documentation(effective_goal)
         and not has_followup_quality_item
     ):
@@ -874,6 +969,8 @@ def _default_task_objective(goal, goal_kind):
 
 
 def _is_optimization_code_item(item):
+    if _item_requires_semantic_authoring(item):
+        return False
     if item.get("backlog_status") not in {None, "ready", "in_progress"}:
         return False
     if item.get("work_type") not in OPTIMIZATION_CODE_WORK_TYPES:
@@ -923,6 +1020,8 @@ def _is_long_running_followup_goal(goal):
 
 
 def _is_followup_code_item(item):
+    if _item_requires_semantic_authoring(item):
+        return False
     if item.get("backlog_status") not in {None, "ready", "in_progress"}:
         return False
     if item.get("work_type") not in OPTIMIZATION_CODE_WORK_TYPES:
@@ -931,6 +1030,14 @@ def _is_followup_code_item(item):
     if not isinstance(write_scope, list) or not write_scope:
         return False
     return not _write_scope_is_document_only(write_scope)
+
+
+def _item_requires_semantic_authoring(item):
+    if not isinstance(item, dict):
+        return False
+    blockers = item.get("blockers")
+    has_semantic_blocker = isinstance(blockers, list) and "semantic_authoring_required" in blockers
+    return bool(item.get("semantic_authoring_required") or has_semantic_blocker)
 
 
 def _followup_objective_uses_previous_evidence(item):
@@ -1236,6 +1343,239 @@ def _require_semantic_skeleton(loaded):
         raise TaskpackValidationError("semantic skeleton backlog must contain at least one task")
     if not any(isinstance(item, dict) and item.get("semantic_authoring_required") for item in items):
         raise TaskpackValidationError("semantic skeleton must contain a semantic_authoring_required backlog item")
+
+
+def _derive_semantic_task_from_loaded_skeleton(loaded):
+    taskpack = loaded["taskpack"]
+    backlog = loaded["backlog"]
+    verification = loaded["verification"]
+    items = backlog.get("items") if isinstance(backlog, dict) else []
+    item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
+    context_refs = _semantic_context_refs(taskpack, item)
+    goal = taskpack.get("original_goal") or taskpack.get("goal") or item.get("objective") or "Complete taskpack goal."
+    project_root = taskpack.get("project_root")
+    agentteam_target = _is_agentteam_target_project(project_root)
+    read_scope = _semantic_scope_from_context(
+        context_refs,
+        ["read_scope", "read_scopes", "read_scope_refinement"],
+        item.get("read_scope") or ["."],
+        "read_scope",
+    )
+    write_scope = _semantic_scope_from_context(
+        context_refs,
+        ["write_scope", "write_scopes", "write_scope_refinement"],
+        item.get("write_scope") or [".agentteam/generated/"],
+        "write_scope",
+    )
+    work_type = _semantic_context_text(context_refs, ["work_type"]) or _default_work_type(
+        taskpack.get("goal_kind") or classify_goal_kind(goal)
+    )
+    if work_type == "audit" and write_scope and not _write_scope_is_document_only(write_scope):
+        work_type = "code_implementation"
+    required_deliverables = _semantic_required_deliverables(goal, context_refs, agentteam_target)
+    evidence_paths = _semantic_evidence_paths(context_refs)
+    return {
+        "objective": _semantic_objective(goal, context_refs),
+        "goal_alignment": _semantic_goal_alignment(goal, context_refs, agentteam_target),
+        "read_scope": read_scope,
+        "write_scope": write_scope,
+        "work_type": work_type,
+        "required_deliverables": required_deliverables,
+        "required_role": item.get("required_role") or DEFAULT_WORKER_ROLE,
+        "backlog_status": item.get("backlog_status") or "ready",
+        "risk_target": item.get("risk_target") or "L1",
+        "depends_on": item.get("depends_on") if isinstance(item.get("depends_on"), list) else [],
+        "evidence_paths": evidence_paths,
+        "verification_command": _semantic_verification_command_from_context(context_refs, verification),
+    }
+
+
+def _semantic_context_refs(taskpack, item):
+    refs = {}
+    for source in [taskpack.get("context_refs"), item.get("context_refs")]:
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            if not isinstance(key, str) or value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                refs[key] = text
+    return refs
+
+
+def _semantic_context_text(context_refs, keys):
+    normalized = {
+        str(key).lower(): str(value).strip()
+        for key, value in (context_refs or {}).items()
+        if isinstance(key, str) and str(value).strip()
+    }
+    for key in keys:
+        value = normalized.get(str(key).lower())
+        if value:
+            return value
+    return None
+
+
+def _semantic_scope_from_context(context_refs, keys, default, field_name):
+    value = _semantic_context_text(context_refs, keys)
+    if value:
+        items = _parse_semantic_ref_list(value, f"context_refs.{keys[0]}")
+        if items:
+            return items
+    items = _string_list(default, [], field_name)
+    return items or (["."] if field_name == "read_scope" else [".agentteam/generated/"])
+
+
+def _parse_semantic_ref_list(value, field_name):
+    text = str(value or "").strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise TaskpackValidationError(f"{field_name} must be a JSON string array or delimited string") from exc
+        if not isinstance(decoded, list) or not all(isinstance(item, str) and item.strip() for item in decoded):
+            raise TaskpackValidationError(f"{field_name} must be a string array")
+        return [item.strip() for item in decoded]
+
+    values = []
+    for part in re.split(r"[\n,;]+", text):
+        item = part.strip()
+        if item.startswith("- "):
+            item = item[2:].strip()
+        if item:
+            values.append(item)
+    return values
+
+
+def _semantic_verification_command_from_context(context_refs, verification):
+    default = _validate_taskpack_verification_command(verification)
+    value = _semantic_context_text(
+        context_refs,
+        ["verification_command", "verification_plan_command", "correctness_command"],
+    )
+    if not value:
+        return list(default)
+    if value.startswith("["):
+        command = _parse_semantic_ref_list(value, "context_refs.verification_command")
+    else:
+        try:
+            command = shlex.split(value)
+        except ValueError as exc:
+            raise TaskpackValidationError("context_refs.verification_command must be shell-splittable") from exc
+    if not command or not all(isinstance(part, str) and part for part in command):
+        raise TaskpackValidationError("context_refs.verification_command must be a non-empty string array")
+    return command
+
+
+def _semantic_required_deliverables(goal, context_refs, agentteam_target):
+    explicit = _semantic_context_text(context_refs, ["required_deliverables", "deliverables"])
+    if explicit:
+        deliverables = _parse_semantic_ref_list(explicit, "context_refs.required_deliverables")
+    elif _is_roadmap_followup_context(goal, context_refs):
+        deliverables = list(ROADMAP_FOLLOWUP_REQUIRED_DELIVERABLES)
+    else:
+        deliverables = list(_default_required_deliverables(goal))
+    if agentteam_target and AGENTTEAM_TARGET_REVIEW_GATE_DELIVERABLE not in deliverables:
+        deliverables.append(AGENTTEAM_TARGET_REVIEW_GATE_DELIVERABLE)
+    return deliverables
+
+
+def _semantic_evidence_paths(context_refs):
+    evidence_paths = []
+    seen = set()
+    for key, value in (context_refs or {}).items():
+        lowered = str(key).lower()
+        if not (
+            lowered.endswith("_path")
+            or lowered.endswith("_paths")
+            or lowered in {"source_report", "previous_report", "repo_context"}
+        ):
+            continue
+        for path in _parse_semantic_ref_list(value, f"context_refs.{key}"):
+            if path.lower() in {"not provided", "none", "n/a", "null"}:
+                continue
+            if path not in seen:
+                seen.add(path)
+                evidence_paths.append(path)
+    return evidence_paths
+
+
+def _semantic_objective(goal, context_refs):
+    source_report_path = _semantic_context_text(context_refs, ["source_report_path"]) or "not provided"
+    selected_next_goal = _semantic_context_text(
+        context_refs,
+        ["selected_next_goal", "queue_selected_next_goal", "next_goal"],
+    )
+    if selected_next_goal:
+        return (
+            "Implement and verify the measurable queue-selected next_goal from "
+            f"source_report_path {source_report_path}: {selected_next_goal}"
+        )
+    return (
+        "Implement and verify the measurable next step from "
+        f"source_report_path {source_report_path} for taskpack.original_goal: {goal}"
+    )
+
+
+def _semantic_goal_alignment(goal, context_refs, agentteam_target):
+    source_report_path = _semantic_context_text(context_refs, ["source_report_path"]) or "not provided"
+    selected_next_goal = _semantic_context_text(
+        context_refs,
+        ["selected_next_goal", "queue_selected_next_goal", "next_goal"],
+    ) or "not provided"
+    non_goals = _semantic_context_text(context_refs, ["non_goals", "non-goals"]) or (
+        "merge, push, and release activation" if agentteam_target else "unbounded repository changes"
+    )
+    alignment = (
+        "Advances taskpack.original_goal by automatically completing deterministic "
+        "semantic slots from context_refs without operator-written semantic JSON. "
+        f"Previous evidence: source_report_path={source_report_path}; "
+        f"queue-selected next_goal={selected_next_goal}. "
+        f"Non-goals: {non_goals}. Original goal: {goal}"
+    )
+    if agentteam_target:
+        alignment = (
+            f"{alignment} AgentTeam-as-target review gate: do not merge, push, "
+            "or activate releases; operator review is required."
+        )
+    return alignment
+
+
+def _is_roadmap_followup_context(goal, context_refs):
+    text = " ".join(
+        [str(goal or "")]
+        + [
+            f"{key} {value}"
+            for key, value in (context_refs or {}).items()
+            if isinstance(key, str)
+        ]
+    ).lower()
+    markers = [
+        "source_report_path",
+        "previous report",
+        "previous taskpack",
+        "goal_memory_path",
+        "selected_next_goal",
+        "next_goal",
+        "queue-selected next_goal",
+        "roadmap",
+    ]
+    return _is_long_running_followup_goal(goal) or any(marker in text for marker in markers)
+
+
+def _is_agentteam_target_project(project_root):
+    if not project_root:
+        return False
+    return (
+        Path(project_root)
+        / "experiments"
+        / "native_agentteam_runtime"
+        / "m0_runtime"
+        / "agentteam_runtime"
+    ).is_dir()
 
 
 def _validate_semantic_task_materialization(semantic_task):

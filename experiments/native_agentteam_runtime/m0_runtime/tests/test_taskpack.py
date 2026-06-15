@@ -10539,6 +10539,95 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(_arg_value(args, "--backlog"), str(Path(frozen["frozen_taskpack_dir"]) / "backlog.json"))
             self.assertTrue((run_root / "semantic-executable").exists())
 
+    def test_auto_materialize_semantic_taskpack_completes_roadmap_skeleton_without_operator_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            materialized_root = tmp_path / "materialized"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            (repo / "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime").mkdir(parents=True)
+
+            skeleton = draft_deterministic_taskpack_skeleton(
+                project_root=repo,
+                goal=(
+                    "Follow-up goal:\n"
+                    "Continue the roadmap-derived implementation route.\n\n"
+                    "Previous taskpack context:\n"
+                    "- source_report_path: /tmp/work/runs/previous/reports/final_report.md\n\n"
+                    "Instructions for the new taskpack:\n"
+                    "- Use the queue-selected next_goal to produce an executable taskpack."
+                ),
+                draft_root=drafts,
+                taskpack_id="auto-roadmap-skeleton",
+                context_refs={
+                    "source_report_path": "/tmp/work/runs/previous/reports/final_report.md",
+                    "repo_context_path": "/tmp/work/repo_contexts/implementation_worker.json",
+                    "repo_map_manifest_path": "/tmp/work/state/repo_map/manifest.json",
+                    "selected_next_goal": "Implement automatic semantic completion authoring path.",
+                    "read_scope": "\n".join(
+                        [
+                            "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
+                            "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+                        ]
+                    ),
+                    "write_scope": "\n".join(
+                        [
+                            "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
+                            "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+                        ]
+                    ),
+                    "non_goals": "merge, push, release activation",
+                },
+            )
+
+            materialized = taskpack_module.auto_materialize_semantic_taskpack(
+                skeleton["taskpack_dir"],
+                output_root=materialized_root,
+                taskpack_id="auto-roadmap-executable",
+            )
+
+            taskpack_dir = Path(materialized["taskpack_dir"])
+            loaded = load_taskpack(taskpack_dir)
+            taskpack = loaded["taskpack"]
+            item = loaded["backlog"]["items"][0]
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
+            self.assertFalse(taskpack.get("semantic_authoring_required"))
+            self.assertEqual(taskpack["authoring_mode"], "semantic_materialized")
+            self.assertEqual(taskpack["semantic_completion"]["authority"], "automatic_deterministic")
+            self.assertIs(taskpack["semantic_completion"]["operator_semantic_json_required"], False)
+            self.assertIn("source_report_path", item["objective"])
+            self.assertIn("queue-selected next_goal", item["objective"])
+            self.assertEqual(
+                item["read_scope"],
+                [
+                    "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
+                    "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+                ],
+            )
+            self.assertEqual(
+                item["write_scope"],
+                [
+                    "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
+                    "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+                ],
+            )
+            self.assertIn("roadmap_followup_route_template", item["required_deliverables"])
+            self.assertIn("agentteam_target_review_gate", item["required_deliverables"])
+            self.assertIn(
+                "/tmp/work/runs/previous/reports/final_report.md",
+                item["semantic_materialization"]["evidence_paths"],
+            )
+            self.assertEqual(item["blockers"], [])
+
+            frozen = freeze_taskpack(taskpack_dir, frozen_root)
+            args = build_taskpack_runtime_args(frozen["frozen_taskpack_dir"], run_root=run_root)
+
+            self.assertEqual(_arg_value(args, "--backlog"), str(Path(frozen["frozen_taskpack_dir"]) / "backlog.json"))
+            self.assertTrue((run_root / "auto-roadmap-executable").exists())
+
     def test_taskpack_materialize_handler_freezes_semantic_completion_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
