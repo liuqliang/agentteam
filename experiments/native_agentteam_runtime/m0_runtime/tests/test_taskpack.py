@@ -7374,6 +7374,54 @@ class TaskpackTests(unittest.TestCase):
         )
         self.assertIn(summary["next_goal"], summary["next_command"])
 
+    def test_follow_up_queue_next_text_includes_selected_provenance_and_readiness(self):
+        from agentteam_runtime.follow_up_queue import (
+            build_follow_up_queue_summary,
+            render_follow_up_queue_text,
+        )
+
+        summary = build_follow_up_queue_summary(
+            source_report={
+                "run_id": "first-pass",
+                "report_path": "/tmp/first-pass/reports/final_report.md",
+                "completion_summary": {
+                    "next_steps": ["在比赛 QEMU 环境复测端到端延迟。"],
+                    "verification": ["python3 -m unittest test_taskpack.FollowUpQueue passed"],
+                    "evidence_gaps": ["QEMU timing still pending."],
+                },
+            },
+            source_taskpack_id="first-pass",
+            source_run_dir="/tmp/first-pass",
+            limit=5,
+        )
+
+        self.assertIn("selected_item", summary)
+        selected_item = summary["selected_item"]
+        self.assertEqual(selected_item["source"], "report.next_steps")
+        self.assertEqual(selected_item["source_taskpack_id"], "first-pass")
+        self.assertEqual(
+            selected_item["source_report_path"],
+            "/tmp/first-pass/reports/final_report.md",
+        )
+        self.assertEqual(selected_item["readiness"], "review_needed")
+        self.assertEqual(selected_item["blockers"], ["QEMU timing still pending."])
+        self.assertEqual(
+            selected_item["suggested_verification"],
+            "python3 -m unittest test_taskpack.FollowUpQueue passed",
+        )
+
+        text = render_follow_up_queue_text(summary, next_only=True)
+
+        self.assertIn("selected_source: report.next_steps", text)
+        self.assertIn("selected_source_taskpack_id: first-pass", text)
+        self.assertIn("selected_source_report: /tmp/first-pass/reports/final_report.md", text)
+        self.assertIn("selected_readiness: review_needed", text)
+        self.assertIn("selected_blockers: QEMU timing still pending.", text)
+        self.assertIn(
+            "selected_verification: python3 -m unittest test_taskpack.FollowUpQueue passed",
+            text,
+        )
+
     def test_semantic_feedback_proposal_helper_writes_review_artifact(self):
         from agentteam_runtime.semantic_feedback import write_semantic_feedback_proposal
 

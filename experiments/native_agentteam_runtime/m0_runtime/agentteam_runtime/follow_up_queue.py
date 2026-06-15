@@ -57,6 +57,7 @@ def build_follow_up_queue_summary(
         "goal_memory_path": goal_memory.get("memory_path"),
         "item_count": len(items),
         "items": items,
+        "selected_item": next_item,
         "next_goal": next_goal,
         "next_command": _next_command(source_taskpack_id, next_goal),
     }
@@ -79,13 +80,17 @@ def render_follow_up_queue_text(summary, *, next_only=False):
         lines.append(f"next_goal: {summary['next_goal']}")
     if summary.get("next_command"):
         lines.append(f"next_command: {summary['next_command']}")
+    _append_selected_item_lines(lines, summary.get("selected_item"))
     if not next_only:
         for index, item in enumerate(summary.get("items") or [], start=1):
             if not isinstance(item, dict):
                 continue
             source = item.get("source") or "unknown"
             objective = item.get("objective") or "unknown"
-            lines.append(f"queue_item_{index}: source={source}; goal={objective}")
+            readiness = item.get("readiness") or "unknown"
+            lines.append(
+                f"queue_item_{index}: source={source}; readiness={readiness}; goal={objective}"
+            )
     if summary.get("operator_hint"):
         lines.append(f"operator_hint: {summary['operator_hint']}")
     return "\n".join(lines) + "\n"
@@ -117,6 +122,7 @@ def _queue_items_from_report(source_report, *, source_taskpack_id, source_report
                 "source": "report.next_steps",
                 "source_taskpack_id": source_taskpack_id,
                 "source_report_path": source_report_path,
+                **_report_item_readiness(summary),
             }
         )
     if isinstance(recommendation, dict) and recommendation.get("next_command"):
@@ -134,6 +140,7 @@ def _queue_items_from_report(source_report, *, source_taskpack_id, source_report
                     "source_taskpack_id": source_taskpack_id,
                     "source_report_path": source_report_path,
                     "source_command": recommendation.get("next_command"),
+                    **_report_item_readiness(summary),
                 }
             )
     return items
@@ -156,9 +163,57 @@ def _queue_items_from_goal_memory(
                 "source": "goal_memory.follow_up_queue",
                 "source_taskpack_id": item.get("source_taskpack_id") or fallback_source_taskpack_id,
                 "source_report_path": item.get("source_report_path") or fallback_source_report_path,
+                **_goal_memory_item_readiness(item),
             }
         )
     return items
+
+
+def _append_selected_item_lines(lines, item):
+    if not isinstance(item, dict):
+        return
+    if item.get("source"):
+        lines.append(f"selected_source: {item['source']}")
+    if item.get("source_taskpack_id"):
+        lines.append(f"selected_source_taskpack_id: {item['source_taskpack_id']}")
+    if item.get("source_report_path"):
+        lines.append(f"selected_source_report: {item['source_report_path']}")
+    if item.get("source_command"):
+        lines.append(f"selected_source_command: {item['source_command']}")
+    if item.get("readiness"):
+        lines.append(f"selected_readiness: {item['readiness']}")
+    blockers = _text_items(item.get("blockers"))
+    if blockers:
+        lines.append(f"selected_blockers: {'；'.join(blockers)}")
+    if item.get("suggested_verification"):
+        lines.append(f"selected_verification: {item['suggested_verification']}")
+
+
+def _report_item_readiness(summary):
+    blockers = _text_items(summary.get("evidence_gaps"))
+    verification = _text_items(summary.get("verification"))
+    metadata = {
+        "readiness": "review_needed" if blockers else "ready",
+        "blockers": blockers[:3],
+    }
+    if verification:
+        metadata["suggested_verification"] = verification[0]
+    return metadata
+
+
+def _goal_memory_item_readiness(item):
+    blockers = _text_items(item.get("blockers")) or _text_items(item.get("blocked_reasons"))
+    verification = _text_items(item.get("suggested_verification")) or _text_items(
+        item.get("verification")
+    )
+    readiness = item.get("readiness") or ("review_needed" if blockers else "ready")
+    metadata = {
+        "readiness": str(readiness).strip() or "ready",
+        "blockers": blockers[:3],
+    }
+    if verification:
+        metadata["suggested_verification"] = verification[0]
+    return metadata
 
 
 def _dedupe_items(items, limit):

@@ -425,9 +425,14 @@ Notes:
   available.
 - `agentteam pursue` consumes the same queue summary between rounds. The queue
   command is the read-only way to inspect what the pursue loop would use next.
-- `queue next` prints only the next suggested goal and command. Run the printed
+- `queue next` prints the next suggested goal and command plus the selected
+  item's provenance and readiness: source kind, source taskpack, source report,
+  `selected_readiness`, evidence blockers when present, and the structured
+  verification line that should guide the next task. Run the printed
   `agentteam next --from-taskpack ... --goal ...` command when you want to
   launch the next taskpack.
+- JSON output includes the same selected item as `selected_item`; it is derived
+  from existing report or goal-memory fields and does not mutate the run.
 
 ### `agentteam pursue`
 

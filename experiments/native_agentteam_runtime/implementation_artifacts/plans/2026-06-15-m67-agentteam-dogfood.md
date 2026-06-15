@@ -137,11 +137,16 @@ above lists the focused tests that should accompany later runtime changes.
 
 ## recommended_next_implementation_tasks
 
-1. Harden `next_goal` specificity for reports and queue summaries.
-2. Add Chinese "why this next step" rationale to report and Feishu summaries.
-3. Expose queue selection provenance and readiness in `agentteam queue next`.
+1. Harden `next_goal` specificity for reports and queue summaries. Done.
+2. Add Chinese "why this next step" rationale to report and Feishu summaries. Done.
+3. Expose queue selection provenance and readiness in `agentteam queue next`. Done.
 4. Add taskpack-author route-template guidance for roadmap-derived follow-ups.
 5. Run a bounded dogfood calibration pack after the quality tasks land.
+
+Status update: `queue next` now exposes the selected queue item's source kind,
+source taskpack, source report, readiness status, blockers, and suggested
+verification in both text and JSON output. Readiness is derived from structured
+evidence gaps and does not start work or mutate artifacts.
 
 Do not start M68 multi-model adapters, DB-primary storage, or direct semantic
 authority edits as part of this route.
