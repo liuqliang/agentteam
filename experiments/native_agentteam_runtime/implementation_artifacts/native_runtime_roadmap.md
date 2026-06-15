@@ -1319,6 +1319,13 @@ queue selection is specific enough for optimization work. If reports still
 produce generic next steps, harden taskpack authoring and report quality before
 adding broader orchestration features.
 
+Post-M66 route note: `implementation_artifacts/plans/2026-06-15-m67-agentteam-dogfood.md`
+maps the roadmap and command-reference evidence into pursue-ready follow-up
+tasks for taskpack authors. Prioritize `next_goal` specificity, Chinese
+next-step rationale, queue provenance/readiness, and roadmap-derived taskpack
+author guidance before broader live calibration. Keep M68 multi-model adapters,
+DB-primary storage, and direct semantic authority edits out of this route.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -1359,6 +1366,8 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is bounded long-running queue consumption: use
-completed reports, goal memory, and follow-up queue suggestions to continue
-large objectives across multiple taskpacks while preserving review gates.
+The next recommended step is the post-M66 dogfood route: make queued
+`next_goal` values specific, explain why the Chinese report/Feishu next action
+is recommended, and expose queue provenance so taskpack authors can continue
+large objectives across multiple bounded taskpacks while preserving review
+gates.
