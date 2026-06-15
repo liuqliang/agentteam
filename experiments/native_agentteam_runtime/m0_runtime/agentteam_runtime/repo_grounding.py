@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 REPO_GROUNDING_SCHEMA_VERSION = "repo_grounding.v1"
+REPO_STRUCTURE_SCHEMA_VERSION = "repo_structure.v1"
 
 LANGUAGE_BY_SUFFIX = {
     ".py": "python",
@@ -21,6 +22,15 @@ LANGUAGE_BY_SUFFIX = {
     ".go": "go",
     ".rs": "rust",
     ".sh": "shell",
+}
+
+CATEGORY_SORT_ORDER = {
+    "source": 0,
+    "test": 1,
+    "docs": 2,
+    "config": 3,
+    "build": 4,
+    "unknown": 5,
 }
 
 SKIP_PATH_PARTS = {
@@ -59,6 +69,7 @@ def build_repo_grounding(project_root, max_files=5000, sample_limit=5):
         project_tools,
         test_entrypoints,
     )
+    repository_structure = _repository_structure(relative_paths)
     return {
         "grounding_schema_version": REPO_GROUNDING_SCHEMA_VERSION,
         "project_root": str(project_root),
@@ -78,6 +89,7 @@ def build_repo_grounding(project_root, max_files=5000, sample_limit=5):
         "project_tools": project_tools,
         "test_entrypoints": test_entrypoints,
         "candidate_verification_commands": candidate_verification_commands,
+        "repository_structure": repository_structure,
         "warnings": warnings,
     }
 
@@ -100,6 +112,14 @@ def render_repo_grounding_text(grounding):
             " ".join(item["command"]) for item in commands
         ),
     ]
+    structure = grounding.get("repository_structure") or {}
+    top_level_entries = structure.get("top_level_entries") or []
+    lines.append(
+        "repository_structure: " + _join_or_none(
+            f"{item['path']}:{item['entry_type']}[{item['file_count']}]"
+            for item in top_level_entries
+        )
+    )
     if grounding.get("warnings"):
         lines.append(f"warnings: {len(grounding['warnings'])}")
     return "\n".join(lines) + "\n"
@@ -253,8 +273,110 @@ def _append_command(commands, command, *, reason):
     commands.append({"command": command, "reason": reason})
 
 
+def _repository_structure(relative_paths):
+    entries = [
+        {
+            "path": path,
+            "language": _language_for_path(path),
+            "category": _category_for_path(path),
+        }
+        for path in sorted(relative_paths)
+    ]
+    return {
+        "structure_schema_version": REPO_STRUCTURE_SCHEMA_VERSION,
+        "tracked_file_count": len(entries),
+        "category_counts": _count_summary(entries, "category"),
+        "language_counts": _count_summary(entries, "language"),
+        "top_level_entries": _top_level_entries(entries),
+    }
+
+
+def _top_level_entries(entries):
+    groups = {}
+    for entry in entries:
+        path_parts = Path(entry["path"]).parts
+        if not path_parts:
+            continue
+        if len(path_parts) == 1:
+            top_level_path = path_parts[0]
+            entry_type = "file"
+        else:
+            top_level_path = f"{path_parts[0]}/"
+            entry_type = "directory"
+        group = groups.setdefault(
+            top_level_path,
+            {
+                "path": top_level_path,
+                "entry_type": entry_type,
+                "files": [],
+            },
+        )
+        group["files"].append(entry)
+
+    return [
+        {
+            "path": group["path"],
+            "entry_type": group["entry_type"],
+            "file_count": len(group["files"]),
+            "category_counts": _count_summary(group["files"], "category"),
+            "language_counts": _count_summary(group["files"], "language"),
+        }
+        for group in sorted(groups.values(), key=lambda item: item["path"])
+    ]
+
+
+def _count_summary(entries, field):
+    counts = Counter(entry.get(field) or "unknown" for entry in entries)
+    return [
+        {field: value, "file_count": counts[value]}
+        for value in sorted(
+            counts,
+            key=lambda value: (
+                -counts[value],
+                _count_sort_order(field, value),
+                value,
+            ),
+        )
+    ]
+
+
+def _count_sort_order(field, value):
+    if field == "category":
+        return CATEGORY_SORT_ORDER.get(value, len(CATEGORY_SORT_ORDER))
+    return 0
+
+
 def _language_for_path(path):
     return LANGUAGE_BY_SUFFIX.get(Path(path).suffix.lower(), "unknown")
+
+
+def _category_for_path(path):
+    path_obj = Path(path)
+    path_parts = set(path_obj.parts)
+    name = path_obj.name.lower()
+    suffix = path_obj.suffix.lower()
+    language = _language_for_path(path)
+    if "tests" in path_parts or name.startswith("test_") or name.endswith("_test.py"):
+        return "test"
+    if name == "makefile" or suffix in {".mk"}:
+        return "build"
+    if suffix in {".md", ".rst", ".txt"} or "docs" in path_parts:
+        return "docs"
+    if suffix in {".json", ".toml", ".yaml", ".yml", ".ini", ".cfg"}:
+        return "config"
+    if language in {
+        "python",
+        "javascript",
+        "typescript",
+        "c",
+        "cpp",
+        "java",
+        "go",
+        "rust",
+        "shell",
+    }:
+        return "source"
+    return "unknown"
 
 
 def _is_ignored_path(path):

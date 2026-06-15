@@ -4,6 +4,7 @@ import json
 import posixpath
 import re
 import subprocess
+from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 
@@ -11,8 +12,17 @@ from pathlib import Path
 REPO_MAP_SCHEMA_VERSION = "repo_map.v1"
 REPO_INVENTORY_SCHEMA_VERSION = "repo_inventory.v1"
 REPO_CONTEXT_SCHEMA_VERSION = "repo_context.v1"
+REPO_STRUCTURE_SCHEMA_VERSION = "repo_structure.v1"
 REPO_SYMBOLS_SCHEMA_VERSION = "repo_symbols.v1"
 SYMBOL_EXTRACTION_VERSION = "python_ast_js_ts_regex.v1"
+CATEGORY_SORT_ORDER = {
+    "source": 0,
+    "test": 1,
+    "docs": 2,
+    "config": 3,
+    "build": 4,
+    "unknown": 5,
+}
 
 JAVASCRIPT_IMPORT_RE = re.compile(
     r"^\s*import(?:\s+type)?(?:\s+[^'\";]+?\s+from\s+)?[\"']([^\"']+)[\"']"
@@ -214,6 +224,10 @@ def build_repo_context(
             for score, reasons, entry in selected
         ],
         "candidate_tests": candidate_tests,
+        "repository_structure": _repository_structure(
+            repo_map["inventory"]["files"],
+            task,
+        ),
         "omitted_file_count": max(0, len(ranked) - len(selected)),
         "warnings": repo_map["manifest"]["warnings"],
     }
@@ -336,6 +350,99 @@ def _candidate_tests(inventory_files, symbol_by_path, selected, task):
         }
         for score, entry, reasons in candidates
     ]
+
+
+def _repository_structure(inventory_files, task=None):
+    entries = sorted(inventory_files, key=lambda entry: entry["path"])
+    structure = {
+        "structure_schema_version": REPO_STRUCTURE_SCHEMA_VERSION,
+        "tracked_file_count": len(entries),
+        "category_counts": _count_summary(entries, "category"),
+        "language_counts": _count_summary(entries, "language"),
+        "top_level_entries": _top_level_entries(entries),
+    }
+    if task is not None:
+        structure["task_scope_summaries"] = _task_scope_summaries(entries, task)
+    return structure
+
+
+def _top_level_entries(inventory_files):
+    groups = {}
+    for entry in inventory_files:
+        path_parts = Path(entry["path"]).parts
+        if not path_parts:
+            continue
+        if len(path_parts) == 1:
+            top_level_path = path_parts[0]
+            entry_type = "file"
+        else:
+            top_level_path = f"{path_parts[0]}/"
+            entry_type = "directory"
+        group = groups.setdefault(
+            top_level_path,
+            {
+                "path": top_level_path,
+                "entry_type": entry_type,
+                "files": [],
+            },
+        )
+        group["files"].append(entry)
+
+    return [
+        {
+            "path": group["path"],
+            "entry_type": group["entry_type"],
+            "file_count": len(group["files"]),
+            "category_counts": _count_summary(group["files"], "category"),
+            "language_counts": _count_summary(group["files"], "language"),
+        }
+        for group in sorted(groups.values(), key=lambda item: item["path"])
+    ]
+
+
+def _task_scope_summaries(inventory_files, task, sample_limit=5):
+    summaries = []
+    for scope_type, task_key in (("read", "read_scope"), ("write", "write_scope")):
+        for scope in _string_list(task.get(task_key)):
+            matched = [
+                entry
+                for entry in inventory_files
+                if _path_in_scopes(entry["path"], [scope])
+            ]
+            summaries.append(
+                {
+                    "scope_type": scope_type,
+                    "scope": _normalize_scope(scope) or ".",
+                    "matched_file_count": len(matched),
+                    "sample_paths": [
+                        entry["path"] for entry in matched[:sample_limit]
+                    ],
+                    "category_counts": _count_summary(matched, "category"),
+                    "language_counts": _count_summary(matched, "language"),
+                }
+            )
+    return summaries
+
+
+def _count_summary(inventory_files, field):
+    counts = Counter(entry.get(field) or "unknown" for entry in inventory_files)
+    return [
+        {field: value, "file_count": counts[value]}
+        for value in sorted(
+            counts,
+            key=lambda value: (
+                -counts[value],
+                _count_sort_order(field, value),
+                value,
+            ),
+        )
+    ]
+
+
+def _count_sort_order(field, value):
+    if field == "category":
+        return CATEGORY_SORT_ORDER.get(value, len(CATEGORY_SORT_ORDER))
+    return 0
 
 
 def _selected_import_targets(selected):

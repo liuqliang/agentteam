@@ -1090,6 +1090,76 @@ class M0RuntimeTests(unittest.TestCase):
             commands = [item["command"] for item in grounding["candidate_verification_commands"]]
             self.assertIn(["python3", "-m", "unittest", "discover"], commands)
             self.assertIn(["npm", "test"], commands)
+            structure = grounding["repository_structure"]
+            self.assertEqual(structure["structure_schema_version"], "repo_structure.v1")
+            self.assertEqual(structure["tracked_file_count"], 8)
+            self.assertEqual(
+                structure["category_counts"],
+                [
+                    {"category": "source", "file_count": 3},
+                    {"category": "config", "file_count": 2},
+                    {"category": "test", "file_count": 1},
+                    {"category": "docs", "file_count": 1},
+                    {"category": "build", "file_count": 1},
+                ],
+            )
+            self.assertEqual(
+                structure["top_level_entries"],
+                [
+                    {
+                        "path": "Makefile",
+                        "entry_type": "file",
+                        "file_count": 1,
+                        "category_counts": [{"category": "build", "file_count": 1}],
+                        "language_counts": [{"language": "unknown", "file_count": 1}],
+                    },
+                    {
+                        "path": "README.md",
+                        "entry_type": "file",
+                        "file_count": 1,
+                        "category_counts": [{"category": "docs", "file_count": 1}],
+                        "language_counts": [{"language": "unknown", "file_count": 1}],
+                    },
+                    {
+                        "path": "package.json",
+                        "entry_type": "file",
+                        "file_count": 1,
+                        "category_counts": [{"category": "config", "file_count": 1}],
+                        "language_counts": [{"language": "unknown", "file_count": 1}],
+                    },
+                    {
+                        "path": "pkg/",
+                        "entry_type": "directory",
+                        "file_count": 1,
+                        "category_counts": [{"category": "source", "file_count": 1}],
+                        "language_counts": [{"language": "python", "file_count": 1}],
+                    },
+                    {
+                        "path": "pyproject.toml",
+                        "entry_type": "file",
+                        "file_count": 1,
+                        "category_counts": [{"category": "config", "file_count": 1}],
+                        "language_counts": [{"language": "unknown", "file_count": 1}],
+                    },
+                    {
+                        "path": "src/",
+                        "entry_type": "directory",
+                        "file_count": 2,
+                        "category_counts": [{"category": "source", "file_count": 2}],
+                        "language_counts": [
+                            {"language": "cpp", "file_count": 1},
+                            {"language": "typescript", "file_count": 1},
+                        ],
+                    },
+                    {
+                        "path": "tests/",
+                        "entry_type": "directory",
+                        "file_count": 1,
+                        "category_counts": [{"category": "test", "file_count": 1}],
+                        "language_counts": [{"language": "python", "file_count": 1}],
+                    },
+                ],
+            )
 
     def test_repo_map_extracts_python_symbol_summaries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1276,6 +1346,71 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertNotIn(
                 "docs/guide.md",
                 [entry["path"] for entry in context["selected_files"]],
+            )
+            structure = context["repository_structure"]
+            self.assertEqual(structure["structure_schema_version"], "repo_structure.v1")
+            self.assertEqual(structure["tracked_file_count"], 5)
+            self.assertEqual(
+                structure["category_counts"],
+                [
+                    {"category": "source", "file_count": 2},
+                    {"category": "docs", "file_count": 2},
+                    {"category": "test", "file_count": 1},
+                ],
+            )
+            self.assertEqual(
+                structure["top_level_entries"],
+                [
+                    {
+                        "path": "README.md",
+                        "entry_type": "file",
+                        "file_count": 1,
+                        "category_counts": [{"category": "docs", "file_count": 1}],
+                        "language_counts": [{"language": "markdown", "file_count": 1}],
+                    },
+                    {
+                        "path": "docs/",
+                        "entry_type": "directory",
+                        "file_count": 1,
+                        "category_counts": [{"category": "docs", "file_count": 1}],
+                        "language_counts": [{"language": "markdown", "file_count": 1}],
+                    },
+                    {
+                        "path": "pkg/",
+                        "entry_type": "directory",
+                        "file_count": 2,
+                        "category_counts": [{"category": "source", "file_count": 2}],
+                        "language_counts": [{"language": "python", "file_count": 2}],
+                    },
+                    {
+                        "path": "tests/",
+                        "entry_type": "directory",
+                        "file_count": 1,
+                        "category_counts": [{"category": "test", "file_count": 1}],
+                        "language_counts": [{"language": "python", "file_count": 1}],
+                    },
+                ],
+            )
+            self.assertEqual(
+                structure["task_scope_summaries"],
+                [
+                    {
+                        "scope_type": "read",
+                        "scope": "pkg/",
+                        "matched_file_count": 2,
+                        "sample_paths": ["pkg/helper.py", "pkg/module.py"],
+                        "category_counts": [{"category": "source", "file_count": 2}],
+                        "language_counts": [{"language": "python", "file_count": 2}],
+                    },
+                    {
+                        "scope_type": "write",
+                        "scope": "pkg/module.py",
+                        "matched_file_count": 1,
+                        "sample_paths": ["pkg/module.py"],
+                        "category_counts": [{"category": "source", "file_count": 1}],
+                        "language_counts": [{"language": "python", "file_count": 1}],
+                    },
+                ],
             )
 
     def test_repo_context_reports_candidate_tests_for_selected_sources(self):
