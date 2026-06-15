@@ -150,7 +150,13 @@ def _draft_with_codex(
 
     _raise_if_target_repo_modified(project_root, repo_status_before)
     if completed.returncode == -9:
-        raise TaskpackValidationError("codex taskpack author timed out")
+        raise TaskpackValidationError(
+            _codex_author_failure_message(
+                "codex taskpack author timed out",
+                result_path=result_path,
+                state_path=state_path,
+            )
+        )
     if completed.returncode != 0:
         raise TaskpackValidationError(f"codex taskpack author failed with exit code {completed.returncode}")
 
@@ -237,6 +243,7 @@ def _run_codex_author_command(
                 returncode = -9 if timed_out else process.returncode
                 status = "timed_out" if timed_out else ("completed" if returncode == 0 else "failed")
                 completed = subprocess.CompletedProcess(command, returncode, stdout, stderr)
+                diagnostic = _codex_author_diagnostic(taskpack_dir, stdout, stderr)
                 _write_json(
                     result_path,
                     {
@@ -245,6 +252,7 @@ def _run_codex_author_command(
                         "timeout_seconds": timeout_seconds,
                         "stdout": stdout,
                         "stderr": stderr,
+                        "diagnostic": diagnostic,
                     },
                 )
                 final_state = {
@@ -253,6 +261,7 @@ def _run_codex_author_command(
                     "exit_code": returncode,
                     "stdout_bytes": len(stdout.encode("utf-8")),
                     "stderr_bytes": len(stderr.encode("utf-8")),
+                    "diagnostic": diagnostic,
                     "finished_at": _utc_now(),
                 }
                 _write_author_state(state_path, final_state, started_monotonic, progress_callback)
@@ -296,6 +305,8 @@ def _author_prompt(
         f"Project root, read-only: {project_root}",
         f"Taskpack directory to write: {taskpack_dir}",
         f"Author context directory, read/write helpers allowed here: {author_context_dir}",
+        "",
+        *_direct_artifact_protocol_prompt(),
         "",
         "Do not edit the project root. Do not run repository-changing commands.",
         "Write only these files directly inside the taskpack directory:",
@@ -411,6 +422,26 @@ def _is_agentteam_target_project(project_root):
     ).is_dir()
 
 
+def _direct_artifact_protocol_prompt():
+    return [
+        "Direct artifact-production protocol:",
+        "- This is a file-authoring job, not a planning, research, or design session.",
+        (
+            "- Do not read skill docs, create specs or plans, invoke workflow checklists, "
+            "or run broad source exploration before writing the draft."
+        ),
+        (
+            "- First write the five required taskpack files before optional exploration "
+            "or refinement."
+        ),
+        (
+            "- If context is incomplete, write a conservative valid taskpack with a "
+            "bounded audit or implementation item instead of spending the budget on "
+            "open-ended analysis."
+        ),
+    ]
+
+
 def _agentteam_target_policy_prompt():
     return [
         "AgentTeam-as-target policy:",
@@ -422,6 +453,66 @@ def _agentteam_target_policy_prompt():
         "- do not request git merge or git push; source merge, push, and release activation require operator review after the run.",
         "- include agentteam_target_review_gate in required_deliverables.",
     ]
+
+
+def _codex_author_diagnostic(taskpack_dir, stdout, stderr):
+    taskpack_dir = Path(taskpack_dir)
+    written_required_files = [
+        name
+        for name in REQUIRED_TASKPACK_FILES
+        if (taskpack_dir / name).is_file()
+    ]
+    missing_required_files = [
+        name for name in REQUIRED_TASKPACK_FILES if name not in set(written_required_files)
+    ]
+    stdout_bytes = len(str(stdout or "").encode("utf-8"))
+    stderr_bytes = len(str(stderr or "").encode("utf-8"))
+    if stdout_bytes == 0 and stderr_bytes == 0:
+        largest_stream = "none"
+    elif stderr_bytes >= stdout_bytes:
+        largest_stream = "stderr"
+    else:
+        largest_stream = "stdout"
+    return {
+        "required_file_count": len(REQUIRED_TASKPACK_FILES),
+        "written_required_file_count": len(written_required_files),
+        "written_required_files": written_required_files,
+        "missing_required_files": missing_required_files,
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
+        "largest_stream": largest_stream,
+        "next_action": (
+            "rerun with author-direct constraints or inspect author_result/state "
+            "before widening dogfood"
+        ),
+    }
+
+
+def _codex_author_failure_message(prefix, *, result_path, state_path):
+    try:
+        result = _read_json(result_path)
+    except Exception:
+        result = {}
+    diagnostic = result.get("diagnostic") if isinstance(result, dict) else {}
+    if not isinstance(diagnostic, dict):
+        diagnostic = {}
+    written = diagnostic.get("written_required_file_count")
+    required = diagnostic.get("required_file_count")
+    missing = diagnostic.get("missing_required_files")
+    largest_stream = diagnostic.get("largest_stream")
+    next_action = diagnostic.get("next_action")
+    details = [prefix]
+    if written is not None and required is not None:
+        details.append(f"required_files_written={written}/{required}")
+    if missing:
+        details.append(f"missing={','.join(str(item) for item in missing)}")
+    if largest_stream:
+        details.append(f"largest_stream={largest_stream}")
+    if next_action:
+        details.append(f"next_action={next_action}")
+    details.append(f"result_path={result_path}")
+    details.append(f"state_path={state_path}")
+    return "; ".join(details)
 
 
 def _roadmap_followup_template_prompt():

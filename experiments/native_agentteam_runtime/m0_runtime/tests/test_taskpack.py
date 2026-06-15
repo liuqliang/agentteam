@@ -55,9 +55,11 @@ from agentteam_runtime.projection_db import (
     check_project_projection_db,
     rebuild_project_projection_db,
 )
+from agentteam_runtime.taskpack_author import REQUIRED_TASKPACK_FILES
 from agentteam_runtime.taskpack_author import _command_list
 from agentteam_runtime.taskpack_author import _canonicalize_codex_taskpack_files
 from agentteam_runtime.taskpack_author import _author_prompt
+from agentteam_runtime.taskpack_author import _run_codex_author_command
 
 
 def _init_repo(path):
@@ -8808,6 +8810,79 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("success_metrics_or_no_metric_delta", prompt)
             self.assertIn("roadmap_followup_route_template", prompt)
             self.assertIn("source merge, push, and release activation remain operator review gates", prompt)
+
+    def test_codex_taskpack_author_prompt_uses_direct_artifact_protocol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "direct-author"
+            author_context_dir = tmp_path / "drafts" / ".direct-author-author"
+            _init_repo(repo)
+
+            prompt = _author_prompt(
+                project_root=repo,
+                goal="Draft a bounded follow-up taskpack.",
+                taskpack_id="direct-author",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                repo_map={
+                    "paths": {
+                        "manifest_path": "manifest.json",
+                        "inventory_path": "inventory.json",
+                        "symbols_path": "symbols.json",
+                    }
+                },
+                verification_profile=None,
+            )
+
+            self.assertIn("Direct artifact-production protocol:", prompt)
+            self.assertIn("Do not read skill docs", prompt)
+            self.assertIn("write the five required taskpack files before optional exploration", prompt)
+
+    def test_codex_taskpack_author_timeout_result_includes_file_diagnostic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            draft_root = tmp_path / "drafts"
+            taskpack_dir = draft_root / "timeout-author"
+            author_context_dir = draft_root / ".timeout-author-author"
+            taskpack_dir.mkdir(parents=True)
+            author_context_dir.mkdir(parents=True)
+            result_path = author_context_dir / "author_result.json"
+            state_path = author_context_dir / "author_state.json"
+            prompt_path = author_context_dir / "author_prompt.md"
+            prompt_path.write_text("prompt", encoding="utf-8")
+
+            completed = _run_codex_author_command(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys,time; "
+                        "sys.stderr.write('author noise\\n' * 3); "
+                        "sys.stderr.flush(); "
+                        "time.sleep(5)"
+                    ),
+                ],
+                draft_root=draft_root,
+                prompt="",
+                timeout_seconds=0.2,
+                state_path=state_path,
+                result_path=result_path,
+                taskpack_id="timeout-author",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                prompt_path=prompt_path,
+            )
+
+            self.assertEqual(completed.returncode, -9)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertIn("diagnostic", result)
+            diagnostic = result["diagnostic"]
+            self.assertEqual(diagnostic["required_file_count"], len(REQUIRED_TASKPACK_FILES))
+            self.assertEqual(diagnostic["written_required_file_count"], 0)
+            self.assertEqual(set(diagnostic["missing_required_files"]), set(REQUIRED_TASKPACK_FILES))
+            self.assertEqual(diagnostic["largest_stream"], "stderr")
+            self.assertIn("author-direct", diagnostic["next_action"])
 
     def test_fake_taskpack_author_draft_can_be_frozen(self):
         with tempfile.TemporaryDirectory() as tmp:

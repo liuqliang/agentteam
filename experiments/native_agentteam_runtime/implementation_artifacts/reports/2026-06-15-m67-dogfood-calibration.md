@@ -66,10 +66,10 @@ expected output shape more mechanically unavoidable.
 1. Add an author-direct mode for Codex taskpack authoring that asks for only the
    five required files and tells the model to avoid planning workflows, skills,
    repository changes, and exploratory source reading unless required to fill a
-   field.
+   field. Implemented after this calibration.
 2. Add an author timeout diagnostic that reports whether zero taskpack files
    were written, the largest stderr/stdout contributors, and a compact next
-   action.
+   action. Implemented after this calibration.
 3. Re-run the same bounded calibration with the direct author mode before
    starting broader dogfood loops.
 

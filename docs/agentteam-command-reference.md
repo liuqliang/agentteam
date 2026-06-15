@@ -960,6 +960,10 @@ Use it when:
   bounded taskpack with evidence paths, non-goals, success metrics or an
   explicit no-metric-delta rationale, verification guidance, and review-gate
   constraints.
+- Codex authoring uses a direct artifact-production prompt: it asks the model
+  to write the five required files before optional exploration and avoid
+  external planning workflows. Timeout results include required-file counts,
+  missing files, largest output stream, and a compact next action.
 
 Example:
 

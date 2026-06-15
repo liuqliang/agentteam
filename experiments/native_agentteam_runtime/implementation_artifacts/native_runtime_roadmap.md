@@ -1336,6 +1336,13 @@ before writing taskpack files. The next route is to harden taskpack authoring
 with a direct artifact-production mode and better timeout diagnostics before
 broader dogfood loops.
 
+Post-calibration hardening status: taskpack author prompts now include a direct
+artifact-production protocol that tells Codex to write the five required files
+before optional exploration and avoid external planning workflows. Author
+timeouts now record required-file counts, missing files, largest output stream,
+and a compact next action in `author_result.json` and `author_state.json`.
+Re-run bounded author calibration before broader live loops.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
