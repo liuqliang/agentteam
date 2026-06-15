@@ -1,4 +1,4 @@
-from .operator_brief import build_chinese_operator_brief
+from .operator_brief import build_chinese_next_step_rationale, build_chinese_operator_brief
 
 
 def build_completion_summary(
@@ -136,6 +136,9 @@ def _completion_operator_digest(summary):
     merge = summary.get("merge_recommendations") or summary.get("integration_recommendation")
     _append_digest_item(digest, "合并建议", merge)
     _append_digest_item(digest, "下一步", summary.get("next_steps"))
+    next_step_rationale = build_chinese_next_step_rationale(summary, max_items=1)
+    if next_step_rationale:
+        digest.append(next_step_rationale)
     _append_digest_item(digest, "证据缺口", summary.get("evidence_gaps"))
     return digest
 

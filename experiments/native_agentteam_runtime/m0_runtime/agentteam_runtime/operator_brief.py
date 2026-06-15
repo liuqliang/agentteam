@@ -39,8 +39,26 @@ def build_chinese_operator_brief(
     if recommendation:
         lines.append(f"合并建议：{recommendation}")
     _append_item_line(lines, "下一步", summary.get("next_steps"), max_items=1)
+    next_step_rationale = build_chinese_next_step_rationale(summary, max_items=1)
+    if next_step_rationale:
+        lines.append(next_step_rationale)
     _append_item_line(lines, "证据缺口", summary.get("evidence_gaps"), max_items=max_items)
     return lines
+
+
+def build_chinese_next_step_rationale(completion_summary, max_items=1):
+    summary = completion_summary if isinstance(completion_summary, dict) else {}
+    recommendation = summary.get("follow_up_recommendation")
+    if not isinstance(recommendation, dict):
+        return None
+    reason = _first_text(recommendation.get("reason"))
+    if not reason:
+        return None
+    line = f"下一步原因：{reason}"
+    next_steps = _text_items(summary.get("next_steps"))[:max_items]
+    if next_steps:
+        line += f"；相关下一步：{'；'.join(next_steps)}"
+    return line
 
 
 def _append_item_line(lines, label, values, max_items):

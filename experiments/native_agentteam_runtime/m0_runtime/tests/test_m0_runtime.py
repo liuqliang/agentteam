@@ -328,11 +328,58 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("compileall: passed", text)
         self.assertIn("合并建议：Do not merge until integration passes.", text)
         self.assertIn("恢复不改变采样语义的优化，或重新导出 C 模型。", text)
+        self.assertIn(
+            (
+                "下一步原因：A blocked or failed task needs operator review before follow-up work."
+                "；相关下一步：恢复不改变采样语义的优化，或重新导出 C 模型。"
+            ),
+            text,
+        )
         self.assertNotIn("Completion summary:", text)
         self.assertNotIn("中文简报:", text)
         self.assertNotIn("What changed:", text)
         self.assertNotIn("Changed files:", text)
         self.assertNotIn("Task: optimize-gesture-evaluation-pipeline", text)
+
+    def test_completion_summary_chinese_brief_includes_follow_up_reason(self):
+        from agentteam_runtime.completion_summary import build_completion_summary
+
+        summary = build_completion_summary(
+            run_id="RUN-CHINESE-BRIEF",
+            run_status="completed",
+            task_count=1,
+            blocked_count=0,
+            task_reports=[
+                {
+                    "task_id": "TASK-CHINESE-BRIEF",
+                    "status": "implementation completed",
+                    "what_changed": ["补充中文摘要。"],
+                    "changed_files": ["agentteam_runtime/operator_brief.py"],
+                    "verification": ["test_m0_runtime: passed"],
+                    "integration": "passed",
+                    "next_steps": ["继续验证 Feishu 摘要。"],
+                }
+            ],
+        )
+
+        self.assertEqual(
+            summary["follow_up_recommendation"]["reason"],
+            "The run completed with a recommended next implementation step.",
+        )
+        self.assertIn(
+            (
+                "下一步原因：The run completed with a recommended next implementation step."
+                "；相关下一步：继续验证 Feishu 摘要。"
+            ),
+            summary["chinese_operator_brief"],
+        )
+        self.assertIn(
+            (
+                "下一步原因：The run completed with a recommended next implementation step."
+                "；相关下一步：继续验证 Feishu 摘要。"
+            ),
+            summary["operator_digest"],
+        )
 
     def test_feishu_run_completed_summarizes_multiple_tasks(self):
         from agentteam_runtime.notifications import build_feishu_notification_sink_from_env

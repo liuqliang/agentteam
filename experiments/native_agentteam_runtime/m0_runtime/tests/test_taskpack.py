@@ -1282,6 +1282,10 @@ class TaskpackTests(unittest.TestCase):
                 "集成状态：已通过",
                 "合并建议：Review accepted patch before merging.",
                 "下一步：Run full validation.",
+                (
+                    "下一步原因：The run completed with a recommended next implementation step."
+                    "；相关下一步：Run full validation."
+                ),
             ],
         )
         self.assertIn("中文简报:", lines)
@@ -1318,6 +1322,10 @@ class TaskpackTests(unittest.TestCase):
                 "实际结果：算法窗口复制阶段耗时下降 2%。",
                 "合并建议：Review accepted patch before merging.",
                 "下一步：在比赛 QEMU 环境复测端到端延迟。",
+                (
+                    "下一步原因：Accepted changes have an integration baseline and the worker "
+                    "recommended a next step.；相关下一步：在比赛 QEMU 环境复测端到端延迟。"
+                ),
             ],
         )
         lines = []
@@ -1366,6 +1374,10 @@ class TaskpackTests(unittest.TestCase):
                 "实际结果：A 延迟下降 2%。；B 报告覆盖两个任务。",
                 "合并建议：Review accepted patch A.；Review accepted patch B.",
                 "下一步：继续验证 A。；继续验证 B。",
+                (
+                    "下一步原因：The run completed with a recommended next implementation step."
+                    "；相关下一步：继续验证 A。"
+                ),
             ],
         )
 
