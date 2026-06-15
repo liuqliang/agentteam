@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from agentteam_runtime import (
     TaskpackValidationError,
     build_taskpack_runtime_args,
+    draft_deterministic_taskpack_skeleton,
     draft_taskpack_files,
     draft_taskpack_from_goal,
     freeze_taskpack,
@@ -10177,6 +10178,64 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("verification_summary", loaded["backlog"]["items"][0]["required_deliverables"])
             self.assertEqual(loaded["verification"]["command"], ["python3", "-m", "unittest", "discover"])
             self.assertEqual(loaded["backlog"]["items"][0]["write_scope"], ["src/"])
+
+    def test_deterministic_taskpack_skeleton_keeps_uncertain_semantics_as_slots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+
+            result = draft_deterministic_taskpack_skeleton(
+                project_root=repo,
+                goal="Prepare the next bounded implementation task from supplied context.",
+                draft_root=drafts,
+                taskpack_id="deterministic-skeleton",
+                context_refs={
+                    "source_report_path": "/tmp/work/runs/previous/reports/final_report.md",
+                    "repo_map_manifest_path": "/tmp/work/state/repo_map/manifest.json",
+                    "selected_next_goal": "Investigate the next implementation step.",
+                },
+                verification_command=["python3", "-m", "unittest", "discover"],
+            )
+
+            taskpack_dir = Path(result["taskpack_dir"])
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
+            loaded = load_taskpack(taskpack_dir)
+            taskpack = loaded["taskpack"]
+            item = loaded["backlog"]["items"][0]
+
+            self.assertTrue(taskpack["semantic_authoring_required"])
+            self.assertEqual(taskpack["authoring_mode"], "deterministic_skeleton")
+            self.assertEqual(
+                taskpack["context_refs"]["repo_map_manifest_path"],
+                "/tmp/work/state/repo_map/manifest.json",
+            )
+            self.assertEqual(item["work_type"], "code_investigation")
+            self.assertTrue(item["semantic_authoring_required"])
+            self.assertEqual(item["write_scope"], [".agentteam/generated/"])
+            self.assertIn("semantic_slots", item)
+            self.assertIn("task_specific_objective", item["semantic_slots"])
+            self.assertNotIn("optimization_candidate_matrix", item["required_deliverables"])
+            self.assertNotIn("agentteam/**", item["write_scope"])
+
+    def test_deterministic_taskpack_skeleton_rejects_high_semantic_goals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                draft_deterministic_taskpack_skeleton(
+                    project_root=repo,
+                    goal="Optimize the existing competition repository latency.",
+                    draft_root=drafts,
+                    taskpack_id="deterministic-optimization",
+                    context_refs={"repo_map_manifest_path": "/tmp/repo-map/manifest.json"},
+                )
+
+            self.assertIn("requires semantic authoring", str(raised.exception))
 
     def test_validate_taskpack_rejects_missing_goal_alignment_contract(self):
         with tempfile.TemporaryDirectory() as tmp:

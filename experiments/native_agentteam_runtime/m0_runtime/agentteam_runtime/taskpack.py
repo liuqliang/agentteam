@@ -261,6 +261,87 @@ def draft_taskpack_files(
     return {"taskpack_dir": str(taskpack_dir), "taskpack_id": taskpack_id}
 
 
+def draft_deterministic_taskpack_skeleton(
+    project_root,
+    goal,
+    draft_root,
+    taskpack_id=None,
+    context_refs=None,
+    verification_command=None,
+    verification_profile=None,
+    codex_timeout_seconds=1800,
+):
+    if classify_goal_kind(goal) == "optimization" or _is_long_running_followup_goal(goal):
+        raise TaskpackValidationError(
+            "deterministic taskpack skeleton requires semantic authoring for "
+            "optimization or long-running follow-up goals"
+        )
+    result = draft_taskpack_files(
+        project_root=project_root,
+        goal=goal,
+        draft_root=draft_root,
+        taskpack_id=taskpack_id,
+        read_scope=["."],
+        write_scope=[".agentteam/generated/"],
+        verification_command=verification_command,
+        verification_profile=verification_profile,
+        allow_merge=False,
+        codex_timeout_seconds=codex_timeout_seconds,
+    )
+    taskpack_dir = Path(result["taskpack_dir"])
+    refs = _string_dict(context_refs, "context_refs")
+    taskpack = _read_json(taskpack_dir / "taskpack.yaml")
+    backlog = _read_json(taskpack_dir / "backlog.json")
+    verification = _read_json(taskpack_dir / "verification.json")
+    semantic_slots = [
+        "task_specific_objective",
+        "goal_alignment",
+        "read_scope_refinement",
+        "write_scope_refinement",
+        "verification_plan",
+        "evidence_paths",
+    ]
+
+    taskpack["authoring_mode"] = "deterministic_skeleton"
+    taskpack["semantic_authoring_required"] = True
+    taskpack["context_refs"] = refs
+    taskpack["semantic_slots"] = semantic_slots
+    policy = taskpack.get("policy") if isinstance(taskpack.get("policy"), dict) else {}
+    policy["allow_merge"] = False
+    policy["operator_review_required"] = True
+    taskpack["policy"] = policy
+
+    item = backlog["items"][0]
+    item["work_type"] = "code_investigation"
+    item["objective"] = (
+        "Review the supplied deterministic context references and complete the "
+        f"semantic task slots before code changes for: {goal}"
+    )
+    item["goal_alignment"] = (
+        "This deterministic skeleton preserves taskpack.original_goal but does "
+        "not infer repository semantics; semantic authoring is required before "
+        f"selecting code changes for: {goal}"
+    )
+    item["required_deliverables"] = [
+        "context_refs_review",
+        "semantic_slots_completion",
+        "verification_summary",
+        "recommended_next_implementation_tasks",
+    ]
+    item["read_scope"] = ["."]
+    item["write_scope"] = [".agentteam/generated/"]
+    item["semantic_authoring_required"] = True
+    item["context_refs"] = refs
+    item["semantic_slots"] = semantic_slots
+    item["blockers"] = ["semantic_authoring_required"]
+
+    _write_json(taskpack_dir / "taskpack.yaml", taskpack)
+    _write_json(taskpack_dir / "backlog.json", backlog)
+    (taskpack_dir / "README.md").write_text(_render_readme(taskpack, backlog, verification), encoding="utf-8")
+    validate_taskpack(taskpack_dir)
+    return result
+
+
 def load_taskpack(taskpack_dir):
     taskpack_dir = Path(taskpack_dir).resolve()
     taskpack = _read_json(taskpack_dir / "taskpack.yaml")
@@ -994,6 +1075,23 @@ def _string_list(value, default, field_name):
         if not isinstance(item, str):
             raise TaskpackValidationError(f"{field_name} must contain only strings")
     return items
+
+
+def _string_dict(value, field_name):
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TaskpackValidationError(f"{field_name} must be an object")
+    result = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key:
+            raise TaskpackValidationError(f"{field_name} keys must be non-empty strings")
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            result[key] = text
+    return result
 
 
 def _resolve_companion_artifact_path(taskpack_dir, value, field_name):

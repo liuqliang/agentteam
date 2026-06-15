@@ -102,3 +102,21 @@ Remaining calibration signal: the author run succeeded but took 283 seconds,
 which is close to the 300-second timeout. The next reliability work should
 focus on reducing Codex author latency and making the five-file output shape
 even more mechanical before broader live dogfood loops.
+
+## Deterministic Skeleton Experiment
+
+A narrow unit-level experiment was added for a deterministic skeleton helper.
+The helper does not infer repository semantics from repo map data. It only
+emits a valid conservative taskpack skeleton with:
+
+- deterministic five-file structure;
+- `semantic_authoring_required: true`;
+- supplied `context_refs`;
+- conservative `.agentteam/generated/` write scope;
+- `semantic_slots` that an agent must fill before code changes.
+
+The experiment intentionally rejects high-semantic goals such as optimization
+or long-running follow-ups with a clear `requires semantic authoring` error.
+This validates the proposed boundary: deterministic generation can create a
+safe skeleton, but should not pretend to choose code scopes, optimization
+candidates, or task-specific implementation objectives.

@@ -1346,6 +1346,13 @@ taskpack, but still took 283 seconds of a 300-second budget. The next
 reliability route is author-latency reduction and more mechanical five-file
 generation before broader live loops.
 
+Deterministic skeleton experiment status: a unit-level helper can generate a
+valid conservative taskpack skeleton for low-semantic implementation goals while
+marking `semantic_authoring_required`, preserving supplied context references,
+and avoiding inferred write scopes. It explicitly rejects optimization and
+long-running follow-up goals because those require semantic authoring before a
+safe executable task can be generated.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:

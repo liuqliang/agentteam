@@ -50,6 +50,10 @@ _EXPORTS = {
         "check_project_projection_db",
     ),
     "classify_attempt_outcome": (".m0_runtime", "classify_attempt_outcome"),
+    "draft_deterministic_taskpack_skeleton": (
+        ".taskpack",
+        "draft_deterministic_taskpack_skeleton",
+    ),
     "draft_taskpack_files": (".taskpack", "draft_taskpack_files"),
     "draft_taskpack_from_goal": (".taskpack_author", "draft_taskpack_from_goal"),
     "freeze_taskpack": (".taskpack", "freeze_taskpack"),
