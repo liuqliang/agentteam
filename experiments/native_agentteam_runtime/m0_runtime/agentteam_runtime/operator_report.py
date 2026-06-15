@@ -42,6 +42,10 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         if isinstance(operator_report.get("task_reports"), list)
         else []
     )
+    blocked_count = _effective_blocked_count(
+        operator_report.get("blocked_count", 0),
+        task_reports,
+    )
     integration_baseline = _integration_baseline_summary(run_dir, state)
 
     report = {
@@ -53,13 +57,13 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         "run_status": _run_status(payload, state),
         "scheduler_status": _scheduler_status(payload, state),
         "task_count": operator_report.get("task_count", 0),
-        "blocked_count": operator_report.get("blocked_count", 0),
+        "blocked_count": blocked_count,
         "token_usage": token_usage,
         "completion_summary": build_completion_summary(
             run_id=run_dir.name,
             run_status=_run_status(payload, state),
             task_count=operator_report.get("task_count", 0),
-            blocked_count=operator_report.get("blocked_count", 0),
+            blocked_count=blocked_count,
             task_reports=task_reports,
             integration_baseline=integration_baseline,
         ),
@@ -321,6 +325,25 @@ def _write_report_files(report):
     json_path = Path(report["report_json_path"])
     json_payload = {key: value for key, value in report.items() if key != "markdown"}
     json_path.write_text(json.dumps(json_payload, sort_keys=True), encoding="utf-8")
+
+
+def _effective_blocked_count(blocked_count, task_reports):
+    if blocked_count:
+        return blocked_count
+    return sum(1 for task in task_reports if _task_needs_operator_review(task))
+
+
+def _task_needs_operator_review(task):
+    status = str(task.get("status") or "").lower()
+    integration = str(task.get("integration") or "").lower()
+    return (
+        "blocked" in status
+        or "rejected" in status
+        or "failed" in status
+        or "timed_out" in status
+        or "timed out" in status
+        or integration.startswith("failed")
+    )
 
 
 def _latest_terminal_event(events):

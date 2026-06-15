@@ -189,7 +189,6 @@ class FileMailboxExternalRuntimeAdapter:
         )
 
     def run(self, message, worktree_path=None):
-        del worktree_path
         if not self.output_dir:
             return {
                 "result_status": "failed",
@@ -209,16 +208,20 @@ class FileMailboxExternalRuntimeAdapter:
                 }
                 return result
             time.sleep(self.poll_interval_seconds)
-        return {
-            "result_status": "timed_out",
-            "changed_files": [],
-            "output": {
-                "adapter": "mailbox_external",
-                "error": "timeout",
-                "timeout_seconds": self.timeout_seconds,
-                "outbox_path": str(outbox_path),
+        return _with_worktree_salvage(
+            {
+                "result_status": "timed_out",
+                "changed_files": [],
+                "output": {
+                    "adapter": "mailbox_external",
+                    "error": "timeout",
+                    "timeout_seconds": self.timeout_seconds,
+                    "outbox_path": str(outbox_path),
+                },
             },
-        }
+            worktree_path,
+            reason="timeout",
+        )
 
     def _outbox_path(self, agent_id):
         agent = _load_agent(self.agent_pool_path, agent_id)
@@ -267,42 +270,54 @@ class FileMailboxSubprocessRuntimeAdapter:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            return {
-                "result_status": "timed_out",
-                "changed_files": [],
-                "output": {
-                    "adapter": "mailbox_subprocess",
-                    "error": "timeout",
-                    "timeout_seconds": self.timeout_seconds,
-                    "stdout": exc.stdout or "",
-                    "stderr": exc.stderr or "",
+            return _with_worktree_salvage(
+                {
+                    "result_status": "timed_out",
+                    "changed_files": [],
+                    "output": {
+                        "adapter": "mailbox_subprocess",
+                        "error": "timeout",
+                        "timeout_seconds": self.timeout_seconds,
+                        "stdout": _process_text(exc.stdout),
+                        "stderr": _process_text(exc.stderr),
+                    },
                 },
-            }
+                worktree_path,
+                reason="timeout",
+            )
 
         if completed.returncode != 0:
-            return {
-                "result_status": "failed",
-                "changed_files": [],
-                "output": {
-                    "adapter": "mailbox_subprocess",
-                    "exit_code": completed.returncode,
-                    "stdout": completed.stdout,
-                    "stderr": completed.stderr,
+            return _with_worktree_salvage(
+                {
+                    "result_status": "failed",
+                    "changed_files": [],
+                    "output": {
+                        "adapter": "mailbox_subprocess",
+                        "exit_code": completed.returncode,
+                        "stdout": completed.stdout,
+                        "stderr": completed.stderr,
+                    },
                 },
-            }
+                worktree_path,
+                reason="process_failed",
+            )
         try:
             worker_summary = json.loads(completed.stdout)
         except json.JSONDecodeError:
-            return {
-                "result_status": "failed",
-                "changed_files": [],
-                "output": {
-                    "adapter": "mailbox_subprocess",
-                    "error": "invalid_worker_stdout",
-                    "stdout": completed.stdout,
-                    "stderr": completed.stderr,
+            return _with_worktree_salvage(
+                {
+                    "result_status": "failed",
+                    "changed_files": [],
+                    "output": {
+                        "adapter": "mailbox_subprocess",
+                        "error": "invalid_worker_stdout",
+                        "stdout": completed.stdout,
+                        "stderr": completed.stderr,
+                    },
                 },
-            }
+                worktree_path,
+                reason="invalid_worker_stdout",
+            )
 
         result = _runtime_result_from_outbox(
             self._outbox_path(message["to_agent"]),
@@ -316,6 +331,12 @@ class FileMailboxSubprocessRuntimeAdapter:
                 "stdout": completed.stdout,
             },
         }
+        if result["result_status"] == "failed" and result.get("output", {}).get("error") == "mailbox_result_missing":
+            return _with_worktree_salvage(
+                result,
+                worktree_path,
+                reason="mailbox_result_missing",
+            )
         return result
 
     def _build_command(self, message, worktree_path=None):
@@ -575,6 +596,84 @@ def _runtime_result_from_outbox(outbox_path, source_message_id):
         "changed_files": [],
         "output": {"adapter": "mailbox", "error": "mailbox_result_missing"},
     }
+
+
+def _with_worktree_salvage(result, worktree_path, reason):
+    changed_files = _worktree_changed_files(worktree_path)
+    if not changed_files:
+        return result
+
+    declared_files = result.get("changed_files", [])
+    if not isinstance(declared_files, list):
+        declared_files = []
+    all_changed_files = sorted(
+        set(changed_files).union(
+            path for path in declared_files if isinstance(path, str)
+        )
+    )
+    output = result.get("output") if isinstance(result.get("output"), dict) else {}
+    output = {
+        **output,
+        "summary": (
+            "Patch available from worker worktree after timeout or missing outbox; "
+            "not accepted automatically."
+        ),
+        "salvage": {
+            "salvage_status": "patch_available",
+            "reason": reason,
+            "changed_files": all_changed_files,
+            "review_required": True,
+            "integration_status": "not_integrated",
+            "accepted_automatically": False,
+        },
+    }
+    return {
+        **result,
+        "changed_files": all_changed_files,
+        "output": output,
+    }
+
+
+def _worktree_changed_files(worktree_path):
+    if not worktree_path:
+        return []
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return []
+
+    changed_files = []
+    for line in completed.stdout.splitlines():
+        if not line:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if path.startswith(".agentteam/"):
+            continue
+        changed_files.append(path)
+    return sorted(set(changed_files))
+
+
+def _process_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def _append_jsonl(path, records):

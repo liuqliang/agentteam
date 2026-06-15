@@ -284,11 +284,19 @@ def _completion_evidence_gaps(what_changed, changed_files, verification, integra
 def _effective_blocked_count(blocked_count, task_reports):
     if blocked_count:
         return blocked_count
-    return sum(
-        1
-        for task in task_reports
-        if "blocked" in str(task.get("status") or "")
-        or str(task.get("integration") or "").startswith("failed")
+    return sum(1 for task in task_reports if _task_needs_operator_review(task))
+
+
+def _task_needs_operator_review(task):
+    status = str(task.get("status") or "").lower()
+    integration = str(task.get("integration") or "").lower()
+    return (
+        "blocked" in status
+        or "rejected" in status
+        or "failed" in status
+        or "timed_out" in status
+        or "timed out" in status
+        or integration.startswith("failed")
     )
 
 

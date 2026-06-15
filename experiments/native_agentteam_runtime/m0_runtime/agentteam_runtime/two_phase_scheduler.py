@@ -1683,11 +1683,24 @@ def _operator_report_from_state(state):
         "report_schema_version": "operator_run_report.v1",
         "task_count": len(task_reports),
         "blocked_count": sum(
-            1 for report in task_reports if "blocked" in report.get("status", "")
+            1 for report in task_reports if _operator_task_needs_review(report)
         ),
         "token_usage": aggregate_token_usage(token_usages, expected_count=len(task_reports)),
         "task_reports": task_reports,
     }
+
+
+def _operator_task_needs_review(report):
+    status = str(report.get("status") or "").lower()
+    integration = str(report.get("integration") or "").lower()
+    return (
+        "blocked" in status
+        or "rejected" in status
+        or "failed" in status
+        or "timed_out" in status
+        or "timed out" in status
+        or integration.startswith("failed")
+    )
 
 
 def _integration_baseline_event_fields(baseline):

@@ -381,6 +381,113 @@ class M0RuntimeTests(unittest.TestCase):
             summary["operator_digest"],
         )
 
+    def test_completion_summary_treats_rejected_salvage_as_review_blocker(self):
+        from agentteam_runtime.completion_summary import build_completion_summary
+
+        summary = build_completion_summary(
+            run_id="RUN-SALVAGE",
+            run_status="completed",
+            task_count=1,
+            blocked_count=0,
+            task_reports=[
+                {
+                    "task_id": "TASK-SALVAGE",
+                    "status": "implementation rejected",
+                    "what_changed": [
+                        "Patch available from worker worktree after timeout or missing outbox; not accepted automatically."
+                    ],
+                    "changed_files": ["agentteam_runtime/mailbox_worker.py"],
+                    "verification": [],
+                    "integration": "not requested",
+                    "merge_recommendation": "Do not merge until the task is accepted.",
+                }
+            ],
+            integration_baseline={"branch": "agentteam/run/RUN-SALVAGE/integration"},
+        )
+
+        self.assertEqual(
+            summary["status_line"],
+            "completed: 1 task reported, 1 blocked task",
+        )
+        self.assertEqual(
+            summary["follow_up_recommendation"]["action"],
+            "review_blocker",
+        )
+        self.assertEqual(
+            summary["integration_recommendation"],
+            "Do not merge until integration passes.",
+        )
+
+    def test_operator_report_counts_rejected_task_as_blocked(self):
+        from agentteam_runtime.two_phase_scheduler import _operator_report_from_state
+
+        report = _operator_report_from_state(
+            {
+                "steps": [
+                    {
+                        "task_id": "TASK-SALVAGE",
+                        "result": {
+                            "task_id": "TASK-SALVAGE",
+                            "validation_status": "rejected",
+                            "runtime_output": {
+                                "summary": (
+                                    "Patch available from worker worktree after timeout "
+                                    "or missing outbox; not accepted automatically."
+                                )
+                            },
+                            "changed_files": ["agentteam_runtime/mailbox_worker.py"],
+                            "integration_verification_status": "not_requested",
+                        },
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(report["task_count"], 1)
+        self.assertEqual(report["blocked_count"], 1)
+        self.assertEqual(report["task_reports"][0]["status"], "implementation rejected")
+
+    def test_run_completion_report_recomputes_stale_rejected_blocked_count(self):
+        from agentteam_runtime.operator_report import build_run_completion_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "RUN-SALVAGE"
+            run_dir.mkdir()
+            event = {
+                "event_type": "run_completed",
+                "payload": {
+                    "run_status": "completed",
+                    "operator_report": {
+                        "report_schema_version": "operator_run_report.v1",
+                        "task_count": 1,
+                        "blocked_count": 0,
+                        "task_reports": [
+                            {
+                                "task_id": "TASK-SALVAGE",
+                                "status": "implementation rejected",
+                                "what_changed": [
+                                    "Patch available from worker worktree after timeout."
+                                ],
+                                "changed_files": ["agentteam_runtime/mailbox_worker.py"],
+                                "integration": "not requested",
+                            }
+                        ],
+                    },
+                },
+            }
+            (run_dir / "events.jsonl").write_text(
+                json.dumps(event, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            report = build_run_completion_report(run_dir, project="agentteam", write_files=False)
+
+        self.assertEqual(report["blocked_count"], 1)
+        self.assertEqual(
+            report["completion_summary"]["status_line"],
+            "completed: 1 task reported, 1 blocked task",
+        )
+
     def test_feishu_run_completed_summarizes_multiple_tasks(self):
         from agentteam_runtime.notifications import build_feishu_notification_sink_from_env
 
@@ -2695,6 +2802,64 @@ class M0RuntimeTests(unittest.TestCase):
                 {session["runtime_adapter"] for session in state["runtime_sessions"]},
                 {"FileMailboxSubprocessRuntimeAdapter"},
             )
+
+    def test_scheduler_salvages_mailbox_subprocess_timeout_with_tracked_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            worker = tmp_path / "hanging_mailbox_worker.py"
+            _init_git_repo(repo)
+            _write_hanging_mailbox_worker(worker, "README.md")
+            backlog_path = _write_backlog(tmp_path, write_scope=["README.md"])
+
+            result = run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=FileMailboxSubprocessRuntimeAdapter(
+                    FIXTURES / "sample_agent_pool.json",
+                    command=[sys.executable, str(worker)],
+                    timeout_seconds=1,
+                ),
+            )
+
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            runtime_event = next(
+                event for event in events if event["event_type"] == "runtime_output_received"
+            )
+            validation_event = next(
+                event for event in events if event["event_type"] == "validation_rejected"
+            )
+
+            self.assertEqual(result["validation_status"], "rejected")
+            self.assertEqual(result["failure_category"], "timeout")
+            self.assertEqual(result["integration_status"], "not_requested")
+            self.assertEqual(result["integration_queue_status"], "not_queued")
+            self.assertEqual(result["diff_audit"]["actual_changed_files"], ["README.md"])
+            self.assertEqual(runtime_event["payload"]["changed_files"], ["README.md"])
+            self.assertEqual(
+                runtime_event["payload"]["output"]["salvage"]["salvage_status"],
+                "patch_available",
+            )
+            self.assertEqual(
+                runtime_event["payload"]["output"]["salvage"]["changed_files"],
+                ["README.md"],
+            )
+            self.assertTrue(runtime_event["payload"]["output"]["salvage"]["review_required"])
+            self.assertEqual(
+                runtime_event["payload"]["output"]["salvage"]["integration_status"],
+                "not_integrated",
+            )
+            self.assertEqual(validation_event["payload"]["patch_path"], result["patch_path"])
+            self.assertTrue(Path(result["patch_path"]).exists())
+            self.assertIn("README.md", Path(result["patch_path"]).read_text(encoding="utf-8"))
 
     def test_scheduler_loop_can_use_long_running_mailbox_worker_process(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -10236,6 +10401,24 @@ def _write_fake_codex_arg_recorder(path, changed_file):
                 f"    'changed_files': [{changed_file!r}],",
                 "    'output': {'adapter': 'codex', 'mode': 'fake-options'}",
                 "}), encoding='utf-8')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_hanging_mailbox_worker(path, changed_file):
+    path.write_text(
+        "\n".join(
+            [
+                "import pathlib",
+                "import sys",
+                "import time",
+                "args = sys.argv[1:]",
+                "worktree = pathlib.Path(args[args.index('--worktree-path') + 1])",
+                f"target = worktree / {changed_file!r}",
+                "target.write_text(target.read_text(encoding='utf-8') + '\\nsalvaged timeout change\\n', encoding='utf-8')",
+                "time.sleep(60)",
             ]
         ),
         encoding="utf-8",
