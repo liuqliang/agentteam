@@ -1341,7 +1341,10 @@ artifact-production protocol that tells Codex to write the five required files
 before optional exploration and avoid external planning workflows. Author
 timeouts now record required-file counts, missing files, largest output stream,
 and a compact next action in `author_result.json` and `author_state.json`.
-Re-run bounded author calibration before broader live loops.
+A bounded re-run with direct mode completed and validated the generated
+taskpack, but still took 283 seconds of a 300-second budget. The next
+reliability route is author-latency reduction and more mechanical five-file
+generation before broader live loops.
 
 ## Longer-Term Route
 

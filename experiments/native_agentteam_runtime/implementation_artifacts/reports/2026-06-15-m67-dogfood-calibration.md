@@ -75,3 +75,30 @@ expected output shape more mechanically unavoidable.
 
 Do not proceed to M68 model adapters, DB-primary storage, or direct semantic
 authority edits based on this calibration.
+
+## Direct Mode Re-Run
+
+After adding the direct artifact-production protocol and timeout diagnostics,
+the same bounded authoring calibration was re-run with a new draft root:
+
+- Draft root: `/tmp/agentteam-m67-calibration-drafts-v2`
+- Taskpack id: `m67-calibration-draft-v2`
+- Result status: completed.
+- Elapsed time: `283.139` seconds.
+- Required files written: `5/5`.
+- Explicit validation: `agentteam taskpack validate` returned `accepted`.
+- Target repository status after calibration: clean.
+
+The generated draft included the required route-template fields:
+
+- `evidence_paths`
+- `non_goals`
+- `success_metrics_or_no_metric_delta`
+- `verification_summary`
+- `recommended_next_implementation_tasks`
+- `agentteam_target_review_gate`
+
+Remaining calibration signal: the author run succeeded but took 283 seconds,
+which is close to the 300-second timeout. The next reliability work should
+focus on reducing Codex author latency and making the five-file output shape
+even more mechanical before broader live dogfood loops.
