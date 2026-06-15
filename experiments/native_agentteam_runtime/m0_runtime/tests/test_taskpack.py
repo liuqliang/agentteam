@@ -28,6 +28,7 @@ from agentteam_runtime.agentteam import (
     _build_project_authoring_summary,
     _build_run_status_summary,
     _canonical_run_dir,
+    _handle_taskpack_materialize,
     _handle_taskpack_new,
     _handle_run,
     _run_paths_for_frozen_taskpack,
@@ -56,6 +57,7 @@ from agentteam_runtime.projection_db import (
     check_project_projection_db,
     rebuild_project_projection_db,
 )
+import agentteam_runtime.taskpack as taskpack_module
 from agentteam_runtime.taskpack_author import REQUIRED_TASKPACK_FILES
 from agentteam_runtime.taskpack_author import _command_list
 from agentteam_runtime.taskpack_author import _canonicalize_codex_taskpack_files
@@ -10237,6 +10239,115 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn("requires semantic authoring", str(raised.exception))
 
+    def test_materialize_semantic_taskpack_turns_skeleton_into_runtime_launchable_taskpack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            materialized_root = tmp_path / "materialized"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+
+            skeleton = draft_deterministic_taskpack_skeleton(
+                project_root=repo,
+                goal="Prepare the next bounded implementation task from supplied context.",
+                draft_root=drafts,
+                taskpack_id="semantic-skeleton",
+                context_refs={
+                    "source_report_path": "/tmp/work/runs/previous/reports/final_report.md",
+                    "repo_map_manifest_path": "/tmp/work/state/repo_map/manifest.json",
+                },
+            )
+
+            materialized = taskpack_module.materialize_semantic_taskpack(
+                skeleton["taskpack_dir"],
+                output_root=materialized_root,
+                taskpack_id="semantic-executable",
+                semantic_task={
+                    "objective": "Implement the bounded parser cache fix described by the source report.",
+                    "goal_alignment": "Uses source_report_path evidence to select one bounded implementation change.",
+                    "read_scope": ["src/", "tests/"],
+                    "write_scope": ["src/parser.py", "tests/test_parser.py"],
+                    "work_type": "code_implementation",
+                    "required_deliverables": [
+                        "implemented_changes_or_no_safe_change_rationale",
+                        "verification_summary",
+                        "recommended_next_implementation_tasks",
+                    ],
+                    "verification_command": ["python3", "-m", "unittest", "discover"],
+                    "evidence_paths": ["/tmp/work/runs/previous/reports/final_report.md"],
+                },
+            )
+
+            taskpack_dir = Path(materialized["taskpack_dir"])
+            validation = validate_taskpack(taskpack_dir)
+            self.assertEqual(validation["status"], "accepted")
+            loaded = load_taskpack(taskpack_dir)
+            taskpack = loaded["taskpack"]
+            item = loaded["backlog"]["items"][0]
+            self.assertFalse(taskpack.get("semantic_authoring_required"))
+            self.assertEqual(taskpack["authoring_mode"], "semantic_materialized")
+            self.assertEqual(taskpack["materialized_from"]["taskpack_id"], "semantic-skeleton")
+            self.assertFalse(item.get("semantic_authoring_required"))
+            self.assertEqual(item["blockers"], [])
+            self.assertEqual(item["objective"], "Implement the bounded parser cache fix described by the source report.")
+            self.assertEqual(item["write_scope"], ["src/parser.py", "tests/test_parser.py"])
+            self.assertEqual(loaded["verification"]["command"], ["python3", "-m", "unittest", "discover"])
+
+            frozen = freeze_taskpack(taskpack_dir, frozen_root)
+            args = build_taskpack_runtime_args(frozen["frozen_taskpack_dir"], run_root=run_root)
+
+            self.assertEqual(_arg_value(args, "--backlog"), str(Path(frozen["frozen_taskpack_dir"]) / "backlog.json"))
+            self.assertTrue((run_root / "semantic-executable").exists())
+
+    def test_taskpack_materialize_handler_freezes_semantic_completion_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            materialized_root = tmp_path / "materialized"
+            frozen_root = tmp_path / "frozen"
+            _init_repo(repo)
+            skeleton = draft_deterministic_taskpack_skeleton(
+                project_root=repo,
+                goal="Prepare the next bounded implementation task from supplied context.",
+                draft_root=drafts,
+                taskpack_id="handler-skeleton",
+                context_refs={"source_report_path": "/tmp/work/report.md"},
+            )
+            semantic_file = tmp_path / "semantic.json"
+            semantic_file.write_text(
+                json.dumps(
+                    {
+                        "objective": "Implement the bounded report-backed improvement.",
+                        "goal_alignment": "Uses the supplied source report as evidence for the bounded change.",
+                        "read_scope": ["src/"],
+                        "write_scope": ["src/feature.py"],
+                        "required_deliverables": ["verification_summary", "recommended_next_implementation_tasks"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = _handle_taskpack_materialize(
+                SimpleNamespace(
+                    skeleton_taskpack_dir=skeleton["taskpack_dir"],
+                    output_root=str(materialized_root),
+                    taskpack_id="handler-executable",
+                    semantic_json=None,
+                    semantic_json_file=str(semantic_file),
+                    freeze=True,
+                    frozen_root=str(frozen_root),
+                    json=True,
+                )
+            )
+
+            self.assertEqual(result["materialize_status"], "frozen")
+            self.assertEqual(result["taskpack_id"], "handler-executable")
+            self.assertEqual(result["validation"]["status"], "accepted")
+            self.assertTrue((Path(result["frozen"]["frozen_taskpack_dir"]) / "taskpack.yaml").exists())
+
     def test_validate_taskpack_rejects_missing_goal_alignment_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -11336,6 +11447,29 @@ class TaskpackTests(unittest.TestCase):
                 build_taskpack_runtime_args(result["taskpack_dir"], run_root=run_root)
 
             self.assertFalse((run_root / "draft-runtime-args").exists())
+
+    def test_build_taskpack_runtime_args_rejects_semantic_skeleton_without_run_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            skeleton = draft_deterministic_taskpack_skeleton(
+                project_root=repo,
+                goal="Prepare the next bounded implementation task from supplied context.",
+                draft_root=drafts,
+                taskpack_id="runtime-semantic-skeleton",
+                context_refs={"source_report_path": "/tmp/work/report.md"},
+            )
+            frozen = freeze_taskpack(skeleton["taskpack_dir"], frozen_root)
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                build_taskpack_runtime_args(frozen["frozen_taskpack_dir"], run_root=run_root)
+
+            self.assertIn("semantic authoring required before runtime launch", str(raised.exception))
+            self.assertFalse((run_root / "runtime-semantic-skeleton").exists())
 
     def test_build_taskpack_runtime_args_honors_mapped_companion_files(self):
         with tempfile.TemporaryDirectory() as tmp:

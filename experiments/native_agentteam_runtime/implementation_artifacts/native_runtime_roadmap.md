@@ -1353,6 +1353,14 @@ and avoiding inferred write scopes. It explicitly rejects optimization and
 long-running follow-up goals because those require semantic authoring before a
 safe executable task can be generated.
 
+Semantic materialization status: deterministic skeletons remain valid
+authoring artifacts and can be frozen for storage, but runtime launch now
+rejects any taskpack or backlog item that still carries
+`semantic_authoring_required`. A new `agentteam taskpack materialize` path
+converts a skeleton plus explicit semantic completion JSON into an executable
+taskpack, clears the semantic blocker, re-validates the result, and optionally
+freezes it for the normal run path.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:

@@ -342,6 +342,137 @@ def draft_deterministic_taskpack_skeleton(
     return result
 
 
+def materialize_semantic_taskpack(
+    skeleton_taskpack_dir,
+    output_root,
+    semantic_task,
+    taskpack_id=None,
+):
+    skeleton_taskpack_dir = Path(skeleton_taskpack_dir).resolve()
+    loaded = load_taskpack(skeleton_taskpack_dir)
+    _require_semantic_skeleton(loaded)
+    semantic_task = _validate_semantic_task_materialization(semantic_task)
+
+    source_taskpack = loaded["taskpack"]
+    source_taskpack_id = _validate_existing_taskpack_id(source_taskpack.get("taskpack_id"))
+    taskpack_id = _resolve_materialized_taskpack_id(taskpack_id, source_taskpack_id, output_root)
+    output_root = Path(output_root).resolve()
+    taskpack_dir = (output_root / taskpack_id).resolve()
+    _require_contained_path(taskpack_dir, output_root, "taskpack_dir")
+    if taskpack_dir.exists():
+        raise TaskpackValidationError(f"materialized taskpack already exists: {taskpack_dir}")
+
+    inventory = _build_taskpack_artifact_inventory(skeleton_taskpack_dir)
+    _validate_taskpack_artifact_inventory(skeleton_taskpack_dir, inventory)
+    for relative_path, source_path in inventory:
+        destination_path = taskpack_dir / relative_path
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination_path)
+
+    taskpack = _read_json(taskpack_dir / "taskpack.yaml")
+    backlog = _read_json(
+        _resolve_companion_artifact_path(
+            taskpack_dir,
+            (taskpack.get("files") if isinstance(taskpack.get("files"), dict) else {}).get(
+                "backlog",
+                "backlog.json",
+            ),
+            "files.backlog",
+        )
+    )
+    verification = _read_json(
+        _resolve_companion_artifact_path(
+            taskpack_dir,
+            (taskpack.get("files") if isinstance(taskpack.get("files"), dict) else {}).get(
+                "verification",
+                "verification.json",
+            ),
+            "files.verification",
+        )
+    )
+
+    taskpack["taskpack_id"] = taskpack_id
+    taskpack["status"] = "draft"
+    taskpack["authoring_mode"] = "semantic_materialized"
+    taskpack["semantic_authoring_required"] = False
+    taskpack["materialized_from"] = {
+        "taskpack_id": source_taskpack_id,
+        "taskpack_dir": str(skeleton_taskpack_dir),
+        "authoring_mode": source_taskpack.get("authoring_mode") or "unknown",
+    }
+    taskpack["semantic_slots_completed"] = [
+        "task_specific_objective",
+        "goal_alignment",
+        "read_scope_refinement",
+        "write_scope_refinement",
+        "verification_plan",
+        "evidence_paths",
+    ]
+
+    items = backlog.get("items") if isinstance(backlog, dict) else None
+    if not isinstance(items, list) or not items:
+        raise TaskpackValidationError("skeleton backlog must contain at least one task")
+    item = dict(items[0])
+    item["task_id"] = f"TASK-{taskpack_id.upper().replace('-', '_')}-001"
+    item["objective"] = semantic_task["objective"]
+    item["goal_alignment"] = semantic_task["goal_alignment"]
+    item["read_scope"] = semantic_task["read_scope"]
+    item["write_scope"] = semantic_task["write_scope"]
+    item["work_type"] = semantic_task["work_type"]
+    item["required_deliverables"] = semantic_task["required_deliverables"]
+    item["required_role"] = semantic_task["required_role"]
+    item["backlog_status"] = semantic_task["backlog_status"]
+    item["risk_target"] = semantic_task["risk_target"]
+    item["depends_on"] = semantic_task["depends_on"]
+    item["blockers"] = []
+    item["semantic_authoring_required"] = False
+    item["semantic_materialization"] = {
+        "source_taskpack_id": source_taskpack_id,
+        "evidence_paths": semantic_task["evidence_paths"],
+    }
+    if semantic_task["evidence_paths"]:
+        item["evidence_paths"] = semantic_task["evidence_paths"]
+    for key in ("context_refs", "semantic_slots"):
+        if key in item:
+            item.pop(key)
+    backlog["backlog_id"] = f"BL-{taskpack_id}"
+    backlog["items"] = [item]
+
+    verification["command"] = semantic_task["verification_command"]
+
+    _write_json(taskpack_dir / "taskpack.yaml", taskpack)
+    _write_json(
+        _resolve_companion_artifact_path(
+            taskpack_dir,
+            (taskpack.get("files") if isinstance(taskpack.get("files"), dict) else {}).get(
+                "backlog",
+                "backlog.json",
+            ),
+            "files.backlog",
+        ),
+        backlog,
+    )
+    _write_json(
+        _resolve_companion_artifact_path(
+            taskpack_dir,
+            (taskpack.get("files") if isinstance(taskpack.get("files"), dict) else {}).get(
+                "verification",
+                "verification.json",
+            ),
+            "files.verification",
+        ),
+        verification,
+    )
+    (taskpack_dir / "README.md").write_text(_render_readme(taskpack, backlog, verification), encoding="utf-8")
+    validation = validate_taskpack(taskpack_dir)
+    return {
+        "taskpack_dir": str(taskpack_dir),
+        "taskpack_id": taskpack_id,
+        "source_taskpack_id": source_taskpack_id,
+        "validation": validation,
+    }
+
+
 def load_taskpack(taskpack_dir):
     taskpack_dir = Path(taskpack_dir).resolve()
     taskpack = _read_json(taskpack_dir / "taskpack.yaml")
@@ -906,6 +1037,7 @@ def build_taskpack_runtime_args(
     if taskpack.get("status") != "frozen":
         raise TaskpackValidationError("taskpack must be frozen before runtime launch")
     validate_taskpack(taskpack_dir)
+    _raise_if_semantic_authoring_required_for_runtime(loaded)
 
     taskpack_id = _validate_existing_taskpack_id(taskpack.get("taskpack_id"))
     files = taskpack.get("files", {})
@@ -971,6 +1103,31 @@ def build_taskpack_runtime_args(
     return args
 
 
+def _raise_if_semantic_authoring_required_for_runtime(loaded):
+    taskpack = loaded.get("taskpack") if isinstance(loaded, dict) else {}
+    if isinstance(taskpack, dict) and taskpack.get("semantic_authoring_required"):
+        taskpack_id = taskpack.get("taskpack_id") or "unknown"
+        raise TaskpackValidationError(
+            "semantic authoring required before runtime launch "
+            f"for taskpack {taskpack_id}; materialize an executable taskpack first"
+        )
+    backlog = loaded.get("backlog") if isinstance(loaded, dict) else {}
+    items = backlog.get("items") if isinstance(backlog, dict) else []
+    if not isinstance(items, list):
+        return
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        blockers = item.get("blockers")
+        has_semantic_blocker = isinstance(blockers, list) and "semantic_authoring_required" in blockers
+        if item.get("semantic_authoring_required") or has_semantic_blocker:
+            task_id = item.get("task_id") or "unknown"
+            raise TaskpackValidationError(
+                "semantic authoring required before runtime launch "
+                f"for backlog item {task_id}; materialize an executable taskpack first"
+            )
+
+
 def _taskpack_codex_timeout_seconds(taskpack):
     runtime = taskpack.get("runtime")
     codex = runtime.get("codex") if isinstance(runtime, dict) else None
@@ -993,6 +1150,14 @@ def _normalize_taskpack_id(taskpack_id, goal):
             "taskpack_id must be a safe lowercase slug containing only letters, numbers, and hyphens"
         )
     return taskpack_id
+
+
+def _resolve_materialized_taskpack_id(taskpack_id, source_taskpack_id, output_root):
+    output_root = Path(output_root)
+    base_id = taskpack_id
+    if base_id is None:
+        base_id = f"{source_taskpack_id}-executable"
+    return _resolve_draft_taskpack_id(base_id, base_id, output_root)
 
 
 def _resolve_draft_taskpack_id(taskpack_id, goal, draft_root, extra_reserved_path_templates=None):
@@ -1056,6 +1221,99 @@ def _validate_taskpack_verification_command(verification):
     if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
         raise TaskpackValidationError("verification.command must be a non-empty string array")
     return command
+
+
+def _require_semantic_skeleton(loaded):
+    if not isinstance(loaded, dict):
+        raise TaskpackValidationError("taskpack load result must be an object")
+    taskpack = loaded.get("taskpack")
+    if not isinstance(taskpack, dict):
+        raise TaskpackValidationError("taskpack must be an object")
+    if not taskpack.get("semantic_authoring_required"):
+        raise TaskpackValidationError("semantic materialization requires a taskpack with semantic_authoring_required")
+    if taskpack.get("authoring_mode") != "deterministic_skeleton":
+        raise TaskpackValidationError("semantic materialization requires a deterministic_skeleton taskpack")
+    backlog = loaded.get("backlog")
+    items = backlog.get("items") if isinstance(backlog, dict) else None
+    if not isinstance(items, list) or not items:
+        raise TaskpackValidationError("semantic skeleton backlog must contain at least one task")
+    if not any(isinstance(item, dict) and item.get("semantic_authoring_required") for item in items):
+        raise TaskpackValidationError("semantic skeleton must contain a semantic_authoring_required backlog item")
+
+
+def _validate_semantic_task_materialization(semantic_task):
+    if not isinstance(semantic_task, dict):
+        raise TaskpackValidationError("semantic_task must be an object")
+    result = {
+        "objective": _required_non_empty_semantic_string(semantic_task, "objective"),
+        "goal_alignment": _required_non_empty_semantic_string(semantic_task, "goal_alignment"),
+        "read_scope": _required_non_empty_semantic_string_list(semantic_task, "read_scope"),
+        "write_scope": _required_non_empty_semantic_string_list(semantic_task, "write_scope"),
+        "required_deliverables": _required_non_empty_semantic_string_list(
+            semantic_task,
+            "required_deliverables",
+        ),
+        "work_type": _optional_non_empty_semantic_string(
+            semantic_task,
+            "work_type",
+            "code_implementation",
+        ),
+        "required_role": _optional_non_empty_semantic_string(
+            semantic_task,
+            "required_role",
+            DEFAULT_WORKER_ROLE,
+        ),
+        "backlog_status": _optional_non_empty_semantic_string(
+            semantic_task,
+            "backlog_status",
+            "ready",
+        ),
+        "risk_target": _optional_non_empty_semantic_string(
+            semantic_task,
+            "risk_target",
+            "L1",
+        ),
+        "depends_on": _optional_semantic_string_list(semantic_task, "depends_on", []),
+        "evidence_paths": _optional_semantic_string_list(semantic_task, "evidence_paths", []),
+        "verification_command": _optional_semantic_string_list(
+            semantic_task,
+            "verification_command",
+            DEFAULT_VERIFICATION_COMMAND,
+        ),
+    }
+    if not result["verification_command"]:
+        raise TaskpackValidationError("semantic_task.verification_command must be a non-empty string array")
+    return result
+
+
+def _required_non_empty_semantic_string(semantic_task, field_name):
+    value = semantic_task.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise TaskpackValidationError(f"semantic_task.{field_name} must be a non-empty string")
+    return value.strip()
+
+
+def _optional_non_empty_semantic_string(semantic_task, field_name, default):
+    value = semantic_task.get(field_name, default)
+    if not isinstance(value, str) or not value.strip():
+        raise TaskpackValidationError(f"semantic_task.{field_name} must be a non-empty string")
+    return value.strip()
+
+
+def _required_non_empty_semantic_string_list(semantic_task, field_name):
+    values = _optional_semantic_string_list(semantic_task, field_name, None)
+    if not values:
+        raise TaskpackValidationError(f"semantic_task.{field_name} must be a non-empty string array")
+    return values
+
+
+def _optional_semantic_string_list(semantic_task, field_name, default):
+    value = semantic_task.get(field_name, default)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+        raise TaskpackValidationError(f"semantic_task.{field_name} must be a string array")
+    return [item.strip() for item in value]
 
 
 def _is_non_empty_string(value):

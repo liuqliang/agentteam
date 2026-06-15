@@ -991,6 +991,56 @@ Example:
 agentteam taskpack freeze /path/to/draft --frozen-root ~/.local/share/agentteam/project/frozen
 ```
 
+### `agentteam taskpack materialize`
+
+Converts a deterministic semantic skeleton into an executable taskpack.
+
+Use it when:
+
+- A mechanical skeleton preserved deterministic context, but marked
+  `semantic_authoring_required`.
+- A semantic author has filled in the concrete objective, goal alignment,
+  read/write scopes, deliverables, verification command, and evidence paths.
+- You want the resulting taskpack to enter the normal freeze/run path.
+
+Example semantic file:
+
+```json
+{
+  "objective": "Implement the bounded parser cache fix described by the source report.",
+  "goal_alignment": "Uses source_report_path evidence to select one bounded implementation change.",
+  "read_scope": ["src/", "tests/"],
+  "write_scope": ["src/parser.py", "tests/test_parser.py"],
+  "work_type": "code_implementation",
+  "required_deliverables": [
+    "implemented_changes_or_no_safe_change_rationale",
+    "verification_summary",
+    "recommended_next_implementation_tasks"
+  ],
+  "verification_command": ["python3", "-m", "unittest", "discover"],
+  "evidence_paths": ["/path/to/source/report.md"]
+}
+```
+
+Example:
+
+```bash
+agentteam taskpack materialize /path/to/skeleton \
+  --semantic-json-file semantic.json \
+  --output-root ~/.local/share/agentteam/project/drafts \
+  --taskpack-id parser-cache-fix \
+  --freeze \
+  --frozen-root ~/.local/share/agentteam/project/frozen
+```
+
+Notes:
+
+- `validate` and `freeze` can accept a semantic skeleton as an authoring
+  artifact, but `run`, `continue`, `start`, and `next` will reject it before
+  launch while `semantic_authoring_required` is present.
+- Materialization clears the semantic blocker only after the required semantic
+  fields are supplied and the resulting taskpack validates.
+
 ### `agentteam taskpack list`
 
 Lists frozen taskpacks for a project, including liveness-aware run status.

@@ -85,6 +85,7 @@ from .taskpack import (
     draft_taskpack_files,
     freeze_taskpack,
     load_taskpack,
+    materialize_semantic_taskpack,
     validate_taskpack,
 )
 from .taskpack_author import draft_taskpack_from_goal
@@ -348,10 +349,11 @@ _HELP_COMMANDS = [
     },
     {
         "name": "taskpack",
-        "summary": "Draft, validate, freeze, list, and delete taskpacks.",
+        "summary": "Draft, materialize, validate, freeze, list, and delete taskpacks.",
         "examples": [
             "agentteam taskpack new --goal \"profile algorithm latency\" --write-scope output/current/",
             "agentteam taskpack new --goal \"profile algorithm latency\" --write-scope output/current/ --freeze",
+            "agentteam taskpack materialize <skeleton-dir> --semantic-json-file semantic.json --output-root <drafts> --freeze --frozen-root <frozen>",
             "agentteam taskpack list --project-root <repo>",
             "agentteam taskpack delete --project-root <repo> --taskpack <id> --dry-run",
             "agentteam taskpack delete --project-root <repo> --taskpack <id> --delete-run --force",
@@ -361,6 +363,7 @@ _HELP_COMMANDS = [
             "draft: create a taskpack from a goal without running it",
             "validate: validate a draft or frozen taskpack",
             "freeze: freeze an accepted draft for execution",
+            "materialize: convert a semantic skeleton into an executable taskpack",
             "list: list frozen taskpacks and liveness-aware run status",
             "delete: remove draft/frozen taskpack files; run deletion requires --delete-run --force",
         ],
@@ -438,6 +441,7 @@ def _build_parser():
     _add_taskpack_draft_parser(taskpack_subcommands)
     _add_taskpack_validate_parser(taskpack_subcommands)
     _add_taskpack_freeze_parser(taskpack_subcommands)
+    _add_taskpack_materialize_parser(taskpack_subcommands)
     _add_taskpack_list_parser(taskpack_subcommands)
     _add_taskpack_delete_parser(taskpack_subcommands)
     _add_run_parser(subcommands)
@@ -862,6 +866,23 @@ def _add_taskpack_freeze_parser(subcommands):
     parser.add_argument("taskpack_dir", help="Draft taskpack directory to freeze.")
     parser.add_argument("--frozen-root", required=True, help="Directory where frozen taskpacks are written.")
     parser.set_defaults(handler=_handle_taskpack_freeze)
+
+
+def _add_taskpack_materialize_parser(subcommands):
+    parser = subcommands.add_parser(
+        "materialize",
+        help="Convert a semantic skeleton taskpack into an executable taskpack.",
+    )
+    parser.add_argument("skeleton_taskpack_dir", help="Deterministic skeleton taskpack directory.")
+    parser.add_argument("--output-root", required=True, help="Directory where the executable draft is written.")
+    parser.add_argument("--taskpack-id", help="Optional id for the executable taskpack.")
+    semantic_source = parser.add_mutually_exclusive_group(required=True)
+    semantic_source.add_argument("--semantic-json", help="Semantic completion JSON object.")
+    semantic_source.add_argument("--semantic-json-file", help="Path to a semantic completion JSON object.")
+    parser.add_argument("--freeze", action="store_true", help="Freeze the materialized taskpack immediately.")
+    parser.add_argument("--frozen-root", help="Directory where frozen taskpacks are written when --freeze is set.")
+    parser.add_argument("--json", action="store_true", help="Print result as JSON instead of human text.")
+    parser.set_defaults(handler=_handle_taskpack_materialize)
 
 
 def _add_taskpack_list_parser(subcommands):
@@ -1479,6 +1500,71 @@ def _write_taskpack_new_text(summary):
 
 def _handle_taskpack_freeze(args):
     return freeze_taskpack(args.taskpack_dir, args.frozen_root)
+
+
+def _handle_taskpack_materialize(args):
+    if args.freeze and not args.frozen_root:
+        raise AgentTeamCliError("--frozen-root is required when --freeze is set")
+    semantic_task = _load_semantic_task_arg(args.semantic_json, args.semantic_json_file)
+    materialized = materialize_semantic_taskpack(
+        args.skeleton_taskpack_dir,
+        output_root=args.output_root,
+        taskpack_id=args.taskpack_id,
+        semantic_task=semantic_task,
+    )
+    validation = validate_taskpack(materialized["taskpack_dir"])
+    frozen = None
+    if args.freeze:
+        frozen = freeze_taskpack(materialized["taskpack_dir"], args.frozen_root)
+    summary = {
+        "materialize_status": "frozen" if frozen else "draft",
+        "taskpack_id": materialized["taskpack_id"],
+        "source_taskpack_id": materialized["source_taskpack_id"],
+        "materialized": materialized,
+        "validation": validation,
+        "frozen": frozen,
+        "paths": {
+            "skeleton_taskpack_dir": str(Path(args.skeleton_taskpack_dir).resolve()),
+            "taskpack_dir": materialized["taskpack_dir"],
+            "output_root": str(Path(args.output_root).resolve()),
+            "frozen_root": str(Path(args.frozen_root).resolve()) if args.frozen_root else None,
+        },
+    }
+    if args.json:
+        return summary
+    _write_taskpack_materialize_text(summary)
+    return 0
+
+
+def _load_semantic_task_arg(raw_json, json_file):
+    if raw_json is not None:
+        source = "--semantic-json"
+        text = raw_json
+    else:
+        source = "--semantic-json-file"
+        text = Path(json_file).read_text(encoding="utf-8")
+    try:
+        semantic_task = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise AgentTeamCliError(f"{source} must contain valid JSON", error=str(exc)) from exc
+    if not isinstance(semantic_task, dict):
+        raise AgentTeamCliError(f"{source} must contain a JSON object")
+    return semantic_task
+
+
+def _write_taskpack_materialize_text(summary):
+    lines = [
+        f"taskpack_id: {summary['taskpack_id']}",
+        f"materialize_status: {summary['materialize_status']}",
+        f"source_taskpack_id: {summary['source_taskpack_id']}",
+        f"taskpack_dir: {summary['materialized']['taskpack_dir']}",
+        f"validation: {summary['validation']['status']}",
+    ]
+    frozen = summary.get("frozen")
+    if isinstance(frozen, dict):
+        lines.append(f"frozen_dir: {frozen['frozen_taskpack_dir']}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
 
 
 def _handle_taskpack_list(args):
