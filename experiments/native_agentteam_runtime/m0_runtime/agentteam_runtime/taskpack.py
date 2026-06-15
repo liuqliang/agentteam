@@ -144,8 +144,65 @@ ROADMAP_FOLLOWUP_REQUIRED_DELIVERABLES = [
     "evidence_paths",
     "non_goals",
     "success_metrics_or_no_metric_delta",
+    "candidate_changes_or_no_safe_change_rationale",
     "implemented_changes_or_no_safe_change_rationale",
     "verification_summary",
+    "review_gate",
+    "recommended_next_implementation_tasks",
+]
+BROAD_FRAMEWORK_ACTION_MARKERS = [
+    "enhance",
+    "enhancement",
+    "improve",
+    "improvement",
+    "strengthen",
+    "harden",
+    "hardening",
+    "extend",
+    "long-run",
+    "long running",
+    "long-running",
+    "long-term",
+    "reliability",
+    "增强",
+    "完善",
+    "改进",
+    "强化",
+    "提升",
+    "长期",
+    "可靠性",
+]
+BROAD_FRAMEWORK_SCOPE_MARKERS = [
+    "agentteam",
+    "framework",
+    "runtime",
+    "scheduler",
+    "worker",
+    "taskpack",
+    "task pack",
+    "pursue",
+    "queue",
+    "heartbeat",
+    "orchestration",
+    "capability",
+    "infrastructure",
+    "框架",
+    "运行时",
+    "调度",
+    "worker",
+    "任务包",
+    "队列",
+    "心跳",
+    "能力",
+]
+BROAD_FRAMEWORK_REQUIRED_DELIVERABLES = [
+    "repository_understanding_summary",
+    "evidence_paths",
+    "candidate_changes_or_no_safe_change_rationale",
+    "non_goals",
+    "implemented_changes_or_no_safe_change_rationale",
+    "verification_summary",
+    "review_gate",
     "recommended_next_implementation_tasks",
 ]
 AGENTTEAM_TARGET_REVIEW_GATE_DELIVERABLE = "agentteam_target_review_gate"
@@ -670,8 +727,14 @@ def validate_taskpack(taskpack_dir):
         and goal_kind == "implementation"
         and _is_long_running_followup_goal(effective_goal)
     )
+    is_broad_framework_goal = (
+        semantic_contract_enabled
+        and goal_kind == "implementation"
+        and _is_broad_framework_goal(effective_goal)
+    )
     semantic_authoring_required = bool(taskpack.get("semantic_authoring_required"))
     has_followup_quality_item = False
+    has_broad_framework_quality_item = False
     for item in items:
         if not isinstance(item, dict):
             errors.append("backlog.items entries must be objects")
@@ -699,7 +762,7 @@ def validate_taskpack(taskpack_dir):
             errors.append(f"{task_id_label} required_deliverables must be a non-empty list")
         elif semantic_contract_enabled and not all(_is_non_empty_string(deliverable) for deliverable in deliverables):
             errors.append(f"{task_id_label} required_deliverables entries must be non-empty strings")
-        elif semantic_contract_enabled and goal_kind == "optimization" and _is_optimization_code_item(item):
+        if semantic_contract_enabled and goal_kind == "optimization" and _is_optimization_code_item(item):
             has_optimization_code_item = True
             if not _optimization_item_preserves_goal_intent(item):
                 errors.append(f"{task_id_label} optimization task must preserve optimization intent")
@@ -713,7 +776,7 @@ def validate_taskpack(taskpack_dir):
                 errors.append(
                     f"{task_id_label} optimization required_deliverables missing: {', '.join(missing)}"
                 )
-        elif semantic_contract_enabled and is_long_running_followup and _is_followup_code_item(item):
+        if semantic_contract_enabled and is_long_running_followup and _is_followup_code_item(item):
             has_followup_quality_item = True
             if not _followup_objective_uses_previous_evidence(item):
                 errors.append(f"{task_id_label} long-running follow-up task must tie objective to previous evidence")
@@ -731,6 +794,14 @@ def validate_taskpack(taskpack_dir):
             if missing:
                 errors.append(
                     f"{task_id_label} long-running follow-up required_deliverables missing: "
+                    f"{', '.join(missing)}"
+                )
+        if semantic_contract_enabled and is_broad_framework_goal and _is_broad_framework_code_item(item):
+            has_broad_framework_quality_item = True
+            missing = _missing_broad_framework_deliverables(deliverables)
+            if missing:
+                errors.append(
+                    f"{task_id_label} broad framework required_deliverables missing: "
                     f"{', '.join(missing)}"
                 )
         if not _is_non_empty_string(required_role):
@@ -799,6 +870,17 @@ def validate_taskpack(taskpack_dir):
     ):
         errors.append(
             "long-running follow-up taskpack requires at least one ready code-facing backlog item "
+            "unless the operator asked for documentation"
+        )
+    if (
+        semantic_contract_enabled
+        and is_broad_framework_goal
+        and not semantic_authoring_required
+        and not _goal_requests_documentation(effective_goal)
+        and not has_broad_framework_quality_item
+    ):
+        errors.append(
+            "broad framework taskpack requires at least one ready code-facing backlog item "
             "unless the operator asked for documentation"
         )
 
@@ -881,6 +963,14 @@ def _default_goal_alignment(goal):
             "instead of generic safe-but-trivial work for: "
             f"{goal}"
         )
+    if classify_goal_kind(goal) == "implementation" and _is_broad_framework_goal(goal):
+        return (
+            "This broad framework enhancement task must preserve taskpack.original_goal, "
+            "identify evidence paths, candidate changes, non-goals, and review gates, "
+            "then execute a measurable code-facing or evidence-backed repository step "
+            "instead of tiny documentation-only work for: "
+            f"{goal}"
+        )
     if classify_goal_kind(goal) == "optimization":
         return (
             "This optimization task must preserve the original goal, establish "
@@ -928,20 +1018,17 @@ def _default_required_deliverables(goal):
             "baseline_or_current_behavior",
             "optimization_candidate_matrix",
             "evidence_paths",
+            "non_goals",
             "implemented_changes_or_no_safe_change_rationale",
             "metric_delta_or_no_safe_change_evidence",
             "verification_summary",
+            "review_gate",
             "recommended_next_implementation_tasks",
         ]
     if _is_long_running_followup_goal(goal):
-        return [
-            "repository_understanding_summary",
-            "previous_evidence_summary",
-            "evidence_paths",
-            "implemented_changes_or_no_safe_change_rationale",
-            "verification_summary",
-            "recommended_next_implementation_tasks",
-        ]
+        return list(ROADMAP_FOLLOWUP_REQUIRED_DELIVERABLES)
+    if _is_broad_framework_goal(goal):
+        return list(BROAD_FRAMEWORK_REQUIRED_DELIVERABLES)
     if goal_kind == "audit":
         return [
             "repository_understanding_summary",
@@ -964,6 +1051,11 @@ def _default_task_objective(goal, goal_kind):
         return (
             "Implement the next measurable follow-up step using previous report "
             f"evidence and verification context for: {goal}"
+        )
+    if goal_kind == "implementation" and _is_broad_framework_goal(goal):
+        return (
+            "Implement a measurable code-facing or evidence-backed framework "
+            f"enhancement for: {goal}"
         )
     return goal
 
@@ -1062,6 +1154,29 @@ def _missing_followup_deliverables(deliverables):
     return [
         deliverable
         for deliverable in _default_required_deliverables("Follow-up goal: previous report")
+        if deliverable not in present
+    ]
+
+
+def _is_broad_framework_goal(goal):
+    text = str(goal or "").lower()
+    return (
+        any(marker in text for marker in BROAD_FRAMEWORK_ACTION_MARKERS)
+        and any(marker in text for marker in BROAD_FRAMEWORK_SCOPE_MARKERS)
+    )
+
+
+def _is_broad_framework_code_item(item):
+    return _is_followup_code_item(item)
+
+
+def _missing_broad_framework_deliverables(deliverables):
+    if not isinstance(deliverables, list):
+        return list(BROAD_FRAMEWORK_REQUIRED_DELIVERABLES)
+    present = set(deliverables)
+    return [
+        deliverable
+        for deliverable in BROAD_FRAMEWORK_REQUIRED_DELIVERABLES
         if deliverable not in present
     ]
 

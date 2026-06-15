@@ -9205,6 +9205,35 @@ class TaskpackTests(unittest.TestCase):
             )
             self.assertIn("avoid safe-but-trivial documentation-only changes unless the operator explicitly asked for documentation", prompt)
 
+    def test_codex_taskpack_author_prompt_requires_broad_framework_quality_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "framework-quality"
+            author_context_dir = tmp_path / "drafts" / ".framework-quality-author"
+            _init_repo(repo)
+
+            prompt = _author_prompt(
+                project_root=repo,
+                goal="Strengthen the AgentTeam framework long-run reliability.",
+                taskpack_id="framework-quality",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                repo_map={
+                    "paths": {
+                        "manifest_path": "manifest.json",
+                        "inventory_path": "inventory.json",
+                        "symbols_path": "symbols.json",
+                    }
+                },
+                verification_profile=None,
+            )
+
+            self.assertIn("broad framework enhancement goals", prompt)
+            self.assertIn("candidate_changes_or_no_safe_change_rationale", prompt)
+            self.assertIn("non_goals", prompt)
+            self.assertIn("review_gate", prompt)
+
     def test_codex_taskpack_author_prompt_includes_roadmap_followup_template(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -9361,6 +9390,77 @@ class TaskpackTests(unittest.TestCase):
                 validate_taskpack(taskpack_dir)
 
             self.assertIn("optimization taskpack requires", str(raised.exception))
+
+    def test_validate_taskpack_rejects_broad_framework_goal_with_documentation_only_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Strengthen the AgentTeam framework long-run reliability.",
+                draft_root=drafts,
+                taskpack_id="doc-only-framework",
+                write_scope=["docs/reliability.md"],
+            )
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("broad framework taskpack requires", str(raised.exception))
+
+    def test_validate_taskpack_rejects_broad_framework_goal_missing_quality_deliverables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Strengthen the AgentTeam framework long-run reliability.",
+                draft_root=drafts,
+                taskpack_id="missing-framework-deliverables",
+                write_scope=["src/runtime.py"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["required_deliverables"] = [
+                "goal_alignment_summary",
+                "verification_summary",
+            ]
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("broad framework required_deliverables missing", str(raised.exception))
+
+    def test_draft_taskpack_files_adds_quality_deliverables_for_long_running_followup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal=(
+                    "Follow-up goal:\n"
+                    "Continue the original implementation.\n\n"
+                    "Previous taskpack context:\n"
+                    "- source_report_path: /tmp/work/runs/previous/reports/final_report.md\n"
+                ),
+                draft_root=drafts,
+                taskpack_id="followup-quality-deliverables",
+                write_scope=["src/runtime.py"],
+            )
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            deliverables = loaded["backlog"]["items"][0]["required_deliverables"]
+            self.assertIn("roadmap_followup_route_template", deliverables)
+            self.assertIn("candidate_changes_or_no_safe_change_rationale", deliverables)
+            self.assertIn("non_goals", deliverables)
+            self.assertIn("review_gate", deliverables)
 
     def test_validate_taskpack_rejects_goal_kind_downgrade_for_optimization_goal(self):
         with tempfile.TemporaryDirectory() as tmp:

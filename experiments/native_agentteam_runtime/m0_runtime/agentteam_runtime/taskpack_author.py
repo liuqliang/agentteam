@@ -9,6 +9,7 @@ from pathlib import Path
 from .repo_grounding import build_repo_grounding
 from .repo_map import build_repository_map
 from .taskpack import (
+    BROAD_FRAMEWORK_REQUIRED_DELIVERABLES,
     TASKPACK_SEMANTIC_CONTRACT_VERSION,
     TaskpackValidationError,
     auto_materialize_semantic_taskpack,
@@ -16,6 +17,8 @@ from .taskpack import (
     _default_goal_alignment,
     _default_required_deliverables,
     _default_work_type,
+    _is_broad_framework_goal,
+    _is_long_running_followup_goal,
     _normalize_taskpack_verification_profile,
     _require_contained_path,
     _resolve_draft_taskpack_id,
@@ -799,6 +802,15 @@ def _author_prompt(
             "for documentation; otherwise prefer bounded code/test/repository changes or explain why "
             "no safe in-repo change is justified"
         ),
+        (
+            "- broad framework enhancement goals must produce measurable code-facing or "
+            "evidence-backed work, not tiny documentation-only tasks unless the original "
+            "goal explicitly asks for documentation"
+        ),
+        (
+            "- broad framework enhancement goals required_deliverables must include "
+            f"{', '.join(BROAD_FRAMEWORK_REQUIRED_DELIVERABLES)}"
+        ),
         "",
         *_roadmap_followup_template_prompt(),
         "",
@@ -828,8 +840,9 @@ def _author_prompt(
         (
             "- optimization required_deliverables must include repository_understanding_summary, "
             "baseline_or_current_behavior, optimization_candidate_matrix, evidence_paths, "
-            "implemented_changes_or_no_safe_change_rationale, metric_delta_or_no_safe_change_evidence, "
-            "verification_summary, and recommended_next_implementation_tasks"
+            "non_goals, implemented_changes_or_no_safe_change_rationale, "
+            "metric_delta_or_no_safe_change_evidence, verification_summary, review_gate, "
+            "and recommended_next_implementation_tasks"
         ),
         "- backlog item read_scope is a non-empty string array",
         "- backlog item write_scope is a narrow repository-relative string array; never use repository root",
@@ -970,8 +983,9 @@ def _roadmap_followup_template_prompt():
             "repository_understanding_summary, previous_evidence_summary, "
             "roadmap_followup_route_template, evidence_paths, non_goals, "
             "success_metrics_or_no_metric_delta, "
+            "candidate_changes_or_no_safe_change_rationale, "
             "implemented_changes_or_no_safe_change_rationale, verification_summary, "
-            "and recommended_next_implementation_tasks."
+            "review_gate, and recommended_next_implementation_tasks."
         ),
         (
             "- State explicit non_goals in goal_alignment or required_deliverables "
@@ -1113,6 +1127,11 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
     backlog_path = taskpack_dir / files.get("backlog", "backlog.json")
     backlog = _read_json(backlog_path)
     if isinstance(backlog, dict) and isinstance(backlog.get("items"), list):
+        quality_gate_goal = (
+            goal_kind == "optimization"
+            or _is_long_running_followup_goal(effective_goal)
+            or _is_broad_framework_goal(effective_goal)
+        )
         for item in backlog["items"]:
             if not isinstance(item, dict):
                 continue
@@ -1130,7 +1149,7 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
                 item["required_deliverables"] = _default_required_deliverables(
                     taskpack_data.get("original_goal") or taskpack_data.get("goal") or item.get("objective")
                 )
-            elif goal_kind == "optimization" and isinstance(item.get("required_deliverables"), list):
+            elif quality_gate_goal and isinstance(item.get("required_deliverables"), list):
                 for deliverable in _default_required_deliverables(effective_goal):
                     if deliverable not in item["required_deliverables"]:
                         item["required_deliverables"].append(deliverable)
