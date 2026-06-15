@@ -1,6 +1,19 @@
+from .token_usage import format_token_usage
+
+
 FOLLOW_UP_QUEUE_SCHEMA_VERSION = "follow_up_queue.v1"
 DEFAULT_QUEUE_LIMIT = 5
 DEFAULT_TEXT_LIMIT = 480
+TOKEN_USAGE_KEYS = [
+    "usage_status",
+    "reported_attempt_count",
+    "unreported_attempt_count",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cached_input_tokens",
+    "reasoning_tokens",
+]
 GENERIC_NEXT_STEP_TEXTS = {
     "continue optimization",
     "continue optimizing",
@@ -164,9 +177,33 @@ def _queue_items_from_goal_memory(
                 "source_taskpack_id": item.get("source_taskpack_id") or fallback_source_taskpack_id,
                 "source_report_path": item.get("source_report_path") or fallback_source_report_path,
                 **_goal_memory_item_readiness(item),
+                **_goal_memory_recap_metadata(item, text_limit),
             }
         )
     return items
+
+
+def _goal_memory_recap_metadata(item, text_limit):
+    metadata = {}
+    for key in [
+        "source_result_status",
+        "source_run_outcome",
+        "stop_reason",
+        "recommended_next_step",
+        "suggested_verification",
+    ]:
+        value = _bounded_text(item.get(key), text_limit)
+        if value:
+            metadata[key] = value
+    evidence_paths = _evidence_path_items(item.get("source_evidence_paths"), text_limit)
+    if evidence_paths:
+        metadata["source_evidence_paths"] = evidence_paths
+    if isinstance(item.get("token_usage"), dict):
+        metadata["token_usage"] = _token_usage_copy(item["token_usage"])
+    blockers = _text_items(item.get("blockers"))
+    if blockers:
+        metadata["blockers"] = [_bounded_text(blocker, text_limit) for blocker in blockers[:3]]
+    return metadata
 
 
 def _append_selected_item_lines(lines, item):
@@ -180,6 +217,15 @@ def _append_selected_item_lines(lines, item):
         lines.append(f"selected_source_report: {item['source_report_path']}")
     if item.get("source_command"):
         lines.append(f"selected_source_command: {item['source_command']}")
+    result = item.get("source_run_outcome") or item.get("source_result_status")
+    if result:
+        lines.append(f"selected_result: {result}")
+    for path in _evidence_path_texts(item.get("source_evidence_paths")):
+        lines.append(f"selected_evidence_path: {path}")
+    if item.get("stop_reason"):
+        lines.append(f"selected_stop_reason: {item['stop_reason']}")
+    if isinstance(item.get("token_usage"), dict):
+        lines.append(f"selected_token_usage: {format_token_usage(item['token_usage'])}")
     if item.get("readiness"):
         lines.append(f"selected_readiness: {item['readiness']}")
     blockers = _text_items(item.get("blockers"))
@@ -187,6 +233,8 @@ def _append_selected_item_lines(lines, item):
         lines.append(f"selected_blockers: {'；'.join(blockers)}")
     if item.get("suggested_verification"):
         lines.append(f"selected_verification: {item['suggested_verification']}")
+    if item.get("recommended_next_step"):
+        lines.append(f"selected_recommended_next_step: {item['recommended_next_step']}")
 
 
 def _report_item_readiness(summary):
@@ -310,6 +358,35 @@ def _bounded_text(value, limit):
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 15)] + "...[truncated]"
+
+
+def _evidence_path_items(values, text_limit):
+    items = []
+    seen = set()
+    for value in values or []:
+        if isinstance(value, dict):
+            path = value.get("path")
+            kind = value.get("type") or "evidence"
+        else:
+            path = value
+            kind = "evidence"
+        path = _bounded_text(path, text_limit)
+        kind = _bounded_text(kind, text_limit)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        items.append({"type": kind or "evidence", "path": path})
+        if len(items) >= DEFAULT_QUEUE_LIMIT:
+            break
+    return items
+
+
+def _evidence_path_texts(values):
+    return [item["path"] for item in _evidence_path_items(values, DEFAULT_TEXT_LIMIT)]
+
+
+def _token_usage_copy(value):
+    return {key: value.get(key) for key in TOKEN_USAGE_KEYS}
 
 
 def _text_items(values):

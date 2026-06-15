@@ -7262,6 +7262,77 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("Long-goal memory:", rendered)
         self.assertIn("memory_bounds: round_history<=3 text<=80 queue<=2", rendered)
 
+    def test_goal_memory_carries_latest_round_recap_for_followup_context(self):
+        report_path = "/tmp/agentteam-work/runs/pursue-loop/reports/final_report.md"
+        report_json_path = "/tmp/agentteam-work/runs/pursue-loop/reports/final_report.json"
+
+        memory = build_goal_memory(
+            pursue_id="pursue-loop",
+            original_goal="持续增强 AgentTeam 长期任务可靠性。",
+            work_root="/tmp/agentteam-work",
+            rounds=[
+                {
+                    "round": 1,
+                    "taskpack_id": "pursue-loop",
+                    "status": "completed",
+                    "run_status": "completed",
+                    "blocked_count": 1,
+                    "report_path": report_path,
+                }
+            ],
+            source_report={
+                "run_id": "pursue-loop",
+                "run_dir": "/tmp/agentteam-work/runs/pursue-loop",
+                "run_status": "completed",
+                "run_outcome": "completed_with_review_required",
+                "blocked_count": 1,
+                "report_path": report_path,
+                "report_json_path": report_json_path,
+                "token_usage": {
+                    "usage_status": "reported",
+                    "reported_attempt_count": 1,
+                    "unreported_attempt_count": 0,
+                    "input_tokens": 1200,
+                    "output_tokens": 300,
+                    "total_tokens": 1500,
+                },
+                "completion_summary": {
+                    "what_changed": ["持久化上一轮 recap。"],
+                    "changed_files": ["agentteam_runtime/goal_memory.py"],
+                    "verification": ["python3 -m unittest test_taskpack.GoalMemory passed"],
+                    "measured_results": ["latest recap persisted"],
+                    "next_steps": ["继续实现 queue recap 展示。"],
+                    "evidence_gaps": ["需要 operator review。"],
+                },
+            },
+            stop_reason="review_gate_required",
+        )
+        rendered = render_goal_memory_prompt_context(memory)
+
+        latest = memory["latest_round_recap"]
+        self.assertEqual(latest["taskpack_id"], "pursue-loop")
+        self.assertEqual(latest["result_status"], "completed")
+        self.assertEqual(latest["run_outcome"], "completed_with_review_required")
+        self.assertEqual(latest["stop_reason"], "review_gate_required")
+        self.assertEqual(latest["recommended_next_step"], "继续实现 queue recap 展示。")
+        self.assertEqual(latest["token_usage"]["usage_status"], "reported")
+        self.assertEqual(latest["token_usage"]["total_tokens"], 1500)
+        self.assertIn({"type": "report", "path": report_path}, latest["evidence_paths"])
+        self.assertIn({"type": "report_json", "path": report_json_path}, latest["evidence_paths"])
+        self.assertIn("需要 operator review。", latest["blockers"])
+        self.assertEqual(memory["round_history"][-1]["recommended_next_step"], "继续实现 queue recap 展示。")
+        self.assertEqual(
+            memory["follow_up_queue"][0]["source_evidence_paths"],
+            latest["evidence_paths"],
+        )
+        self.assertEqual(memory["follow_up_queue"][0]["stop_reason"], "review_gate_required")
+        self.assertEqual(memory["follow_up_queue"][0]["token_usage"]["total_tokens"], 1500)
+        self.assertIn("latest_result: completed_with_review_required", rendered)
+        self.assertIn(f"latest_evidence_path: {report_path}", rendered)
+        self.assertIn("latest_stop_reason: review_gate_required", rendered)
+        self.assertIn("latest_token_usage: Token usage: total=1500 input=1200 output=300 reported=1/1", rendered)
+        self.assertIn("latest_recommended_next_step: 继续实现 queue recap 展示。", rendered)
+
     def test_follow_up_queue_summary_merges_report_and_goal_memory(self):
         from agentteam_runtime.follow_up_queue import build_follow_up_queue_summary
 
@@ -7426,6 +7497,141 @@ class TaskpackTests(unittest.TestCase):
             "selected_verification: python3 -m unittest test_taskpack.FollowUpQueue passed",
             text,
         )
+
+    def test_follow_up_queue_text_surfaces_goal_memory_recap_fields(self):
+        from agentteam_runtime.follow_up_queue import (
+            build_follow_up_queue_summary,
+            render_follow_up_queue_text,
+        )
+
+        report_path = "/tmp/agentteam-work/runs/pursue-loop/reports/final_report.md"
+        summary = build_follow_up_queue_summary(
+            source_report={"run_id": "pursue-loop-r2"},
+            goal_memory={
+                "memory_path": "/tmp/agentteam-work/pursue/pursue-loop-goal-memory.json",
+                "follow_up_queue": [
+                    {
+                        "objective": "继续实现 queue recap 展示。",
+                        "source_taskpack_id": "pursue-loop",
+                        "source_report_path": report_path,
+                        "source_result_status": "completed",
+                        "source_run_outcome": "completed_with_review_required",
+                        "source_evidence_paths": [{"type": "report", "path": report_path}],
+                        "stop_reason": "review_gate_required",
+                        "token_usage": {
+                            "usage_status": "unavailable",
+                            "reported_attempt_count": 0,
+                            "unreported_attempt_count": 1,
+                            "input_tokens": None,
+                            "output_tokens": None,
+                            "total_tokens": None,
+                        },
+                        "blockers": ["需要 operator review。"],
+                        "suggested_verification": "python3 -m unittest test_taskpack.FollowUpQueue passed",
+                    }
+                ],
+            },
+            source_taskpack_id="pursue-loop-r2",
+            limit=5,
+        )
+
+        selected = summary["selected_item"]
+        self.assertEqual(selected["source"], "goal_memory.follow_up_queue")
+        self.assertEqual(selected["source_result_status"], "completed")
+        self.assertEqual(selected["source_run_outcome"], "completed_with_review_required")
+        self.assertEqual(selected["source_evidence_paths"], [{"type": "report", "path": report_path}])
+        self.assertEqual(selected["stop_reason"], "review_gate_required")
+        self.assertEqual(selected["token_usage"]["usage_status"], "unavailable")
+        self.assertEqual(selected["blockers"], ["需要 operator review。"])
+
+        text = render_follow_up_queue_text(summary, next_only=True)
+
+        self.assertIn("selected_result: completed_with_review_required", text)
+        self.assertIn(f"selected_evidence_path: {report_path}", text)
+        self.assertIn("selected_stop_reason: review_gate_required", text)
+        self.assertIn("selected_token_usage: Token usage: unavailable", text)
+        self.assertIn("selected_blockers: 需要 operator review。", text)
+        self.assertIn(
+            "selected_verification: python3 -m unittest test_taskpack.FollowUpQueue passed",
+            text,
+        )
+
+    def test_operator_report_loads_pursue_goal_memory_round_recap(self):
+        from agentteam_runtime.operator_report import (
+            find_pursue_recap_for_run,
+            render_run_completion_report,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp) / "agentteam-work"
+            run_dir = work_root / "runs" / "pursue-loop"
+            run_dir.mkdir(parents=True)
+            report_path = str(run_dir / "reports" / "final_report.md")
+            memory_path = work_root / "pursue" / "pursue-loop-goal-memory.json"
+            _write_json(
+                memory_path,
+                {
+                    "memory_schema_version": "goal_memory.v1",
+                    "memory_path": str(memory_path),
+                    "latest_round_recap": {
+                        "taskpack_id": "pursue-loop",
+                        "result_status": "completed",
+                        "run_outcome": "completed_with_review_required",
+                        "stop_reason": "review_gate_required",
+                        "recommended_next_step": "继续实现 queue recap 展示。",
+                        "evidence_paths": [{"type": "report", "path": report_path}],
+                        "blockers": ["需要 operator review。"],
+                        "token_usage": {
+                            "usage_status": "unavailable",
+                            "reported_attempt_count": 0,
+                            "unreported_attempt_count": 1,
+                            "input_tokens": None,
+                            "output_tokens": None,
+                            "total_tokens": None,
+                        },
+                    },
+                },
+            )
+            _write_json(
+                work_root / "pursue" / "pursue-loop.json",
+                {
+                    "pursue_id": "pursue-loop",
+                    "rounds_completed": 1,
+                    "max_rounds": 2,
+                    "stop_reason": "review_gate_required",
+                    "latest_taskpack_id": "pursue-loop",
+                    "latest_report_path": report_path,
+                    "goal_memory_path": str(memory_path),
+                    "operator_next_action": "agentteam report --taskpack pursue-loop",
+                    "runs": [{"taskpack_id": "pursue-loop"}],
+                },
+            )
+
+            recap = find_pursue_recap_for_run(run_dir)
+            markdown = render_run_completion_report(
+                {
+                    "project": "agentteam",
+                    "run_id": "pursue-loop",
+                    "run_dir": str(run_dir),
+                    "run_status": "completed",
+                    "run_outcome": "completed_with_review_required",
+                    "scheduler_status": "idle",
+                    "task_count": 0,
+                    "blocked_count": 0,
+                    "token_usage": {},
+                    "pursue_recap": recap,
+                    "integration_baseline": {},
+                    "completion_summary": {},
+                    "operator_report": {},
+                }
+            )
+
+        self.assertEqual(recap["latest_round_recap"]["recommended_next_step"], "继续实现 queue recap 展示。")
+        self.assertEqual(recap["latest_round_recap"]["token_usage"]["usage_status"], "unavailable")
+        self.assertIn("- Latest result: completed_with_review_required", markdown)
+        self.assertIn(f"- Evidence: {report_path}", markdown)
+        self.assertIn("- Token usage: unavailable", markdown)
+        self.assertIn("- Recommended next step: 继续实现 queue recap 展示。", markdown)
 
     def test_semantic_feedback_proposal_helper_writes_review_artifact(self):
         from agentteam_runtime.semantic_feedback import write_semantic_feedback_proposal

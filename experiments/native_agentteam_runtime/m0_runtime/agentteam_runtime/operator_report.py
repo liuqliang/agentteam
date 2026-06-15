@@ -126,6 +126,7 @@ def render_run_completion_report(report):
             lines.append(f"- Latest report: {pursue_recap['latest_report_path']}")
         if pursue_recap.get("operator_next_action"):
             lines.append(f"- Next action: {pursue_recap['operator_next_action']}")
+        _extend_pursue_round_recap_lines(lines, pursue_recap.get("latest_round_recap"))
     summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
     if summary:
         lines.extend(["", "## Operator Summary"])
@@ -248,6 +249,7 @@ def concise_report_lines(report, max_tasks=3):
             lines.append(f"pursue_latest_taskpack: {pursue_recap['latest_taskpack_id']}")
         if pursue_recap.get("operator_next_action"):
             lines.append(f"pursue_next_action: {pursue_recap['operator_next_action']}")
+        lines.extend(_concise_pursue_round_recap_lines(pursue_recap.get("latest_round_recap")))
     summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
     for brief_line in _text_items(summary.get("chinese_operator_brief"))[:3]:
         lines.append(f"中文简报: {brief_line}")
@@ -323,6 +325,56 @@ def concise_report_lines(report, max_tasks=3):
     return lines
 
 
+def _extend_pursue_round_recap_lines(lines, latest_round_recap):
+    if not isinstance(latest_round_recap, dict) or not latest_round_recap:
+        return
+    result = latest_round_recap.get("run_outcome") or latest_round_recap.get("result_status")
+    if result:
+        lines.append(f"- Latest result: {result}")
+    evidence_paths = _evidence_path_texts(latest_round_recap.get("evidence_paths"))
+    if evidence_paths:
+        lines.append(f"- Evidence: {evidence_paths[0]}")
+    blockers = _text_items(latest_round_recap.get("blockers"))
+    if blockers:
+        lines.append(f"- Blockers: {'; '.join(blockers[:3])}")
+    token_usage = latest_round_recap.get("token_usage")
+    if isinstance(token_usage, dict):
+        lines.append(f"- {format_token_usage(token_usage)}")
+    if latest_round_recap.get("recommended_next_step"):
+        lines.append(f"- Recommended next step: {latest_round_recap['recommended_next_step']}")
+
+
+def _concise_pursue_round_recap_lines(latest_round_recap):
+    if not isinstance(latest_round_recap, dict) or not latest_round_recap:
+        return []
+    lines = []
+    result = latest_round_recap.get("run_outcome") or latest_round_recap.get("result_status")
+    if result:
+        lines.append(f"pursue_latest_result: {result}")
+    evidence_paths = _evidence_path_texts(latest_round_recap.get("evidence_paths"))
+    if evidence_paths:
+        lines.append(f"pursue_evidence_path: {evidence_paths[0]}")
+    token_usage = latest_round_recap.get("token_usage")
+    if isinstance(token_usage, dict):
+        lines.append(format_token_usage(token_usage, label="pursue_token_usage"))
+    if latest_round_recap.get("recommended_next_step"):
+        lines.append(f"pursue_next_step: {latest_round_recap['recommended_next_step']}")
+    return lines
+
+
+def _evidence_path_texts(values):
+    paths = []
+    seen = set()
+    for item in values or []:
+        path = item.get("path") if isinstance(item, dict) else item
+        text = str(path or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        paths.append(text)
+    return paths
+
+
 def _write_report_files(report):
     report_path = Path(report["report_path"])
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -382,10 +434,34 @@ def find_pursue_recap_for_run(run_dir):
             continue
         recap = dict(recap)
         recap["recap_path"] = str(path.resolve())
+        recap = _augment_pursue_recap_with_goal_memory(recap)
         candidates.append((modified, path.name, recap))
     if not candidates:
         return {}
     return sorted(candidates, key=lambda item: (item[0], item[1]))[-1][2]
+
+
+def _augment_pursue_recap_with_goal_memory(recap):
+    if not isinstance(recap, dict):
+        return {}
+    memory_path = recap.get("goal_memory_path")
+    if not memory_path:
+        return recap
+    memory = _read_json_if_exists(memory_path)
+    if not isinstance(memory, dict) or not memory:
+        return recap
+    enriched = dict(recap)
+    latest_round_recap = memory.get("latest_round_recap")
+    if isinstance(latest_round_recap, dict) and latest_round_recap:
+        enriched.setdefault("latest_round_recap", latest_round_recap)
+    latest_queue = memory.get("follow_up_queue")
+    if isinstance(latest_queue, list) and latest_queue and "latest_follow_up_queue" not in enriched:
+        enriched["latest_follow_up_queue"] = {
+            "queue_status": "ready",
+            "item_count": len(latest_queue),
+            "next_goal": latest_queue[0].get("objective") if isinstance(latest_queue[0], dict) else None,
+        }
+    return enriched
 
 
 def _pursue_recap_root_for_run(run_dir):
