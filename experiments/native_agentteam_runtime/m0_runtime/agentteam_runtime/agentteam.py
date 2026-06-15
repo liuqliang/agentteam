@@ -92,6 +92,9 @@ from .taskpack_author import draft_taskpack_from_goal
 from .token_usage import format_token_usage, token_usage_from_state
 
 
+AUTHOR_RUNTIME_CHOICES = ["fake", "codex", "deterministic"]
+
+
 class AgentTeamCliError(RuntimeError):
     def __init__(self, message, **details):
         super().__init__(message)
@@ -487,7 +490,7 @@ def _add_submit_parser(subcommands):
     parser.add_argument("--taskpack-id", help="Optional safe taskpack id slug.")
     parser.add_argument(
         "--author-runtime",
-        choices=["fake", "codex"],
+        choices=AUTHOR_RUNTIME_CHOICES,
         default="fake",
         help="Runtime used to author the taskpack.",
     )
@@ -536,7 +539,7 @@ def _add_init_parser(subcommands):
     parser.add_argument("--work-root", help="Directory for drafts, frozen taskpacks, and runs.")
     parser.add_argument(
         "--author-runtime",
-        choices=["fake", "codex"],
+        choices=AUTHOR_RUNTIME_CHOICES,
         default="codex",
         help="Runtime used to author taskpacks for this project.",
     )
@@ -585,7 +588,7 @@ def _add_start_parser(subcommands):
     parser.add_argument("--work-root", help="Override the profile work root for this run.")
     parser.add_argument(
         "--author-runtime",
-        choices=["fake", "codex"],
+        choices=AUTHOR_RUNTIME_CHOICES,
         help="Override the profile taskpack author runtime.",
     )
     parser.add_argument(
@@ -633,7 +636,7 @@ def _add_next_parser(subcommands):
     parser.add_argument("--work-root", help="Override the profile work root for this run.")
     parser.add_argument(
         "--author-runtime",
-        choices=["fake", "codex"],
+        choices=AUTHOR_RUNTIME_CHOICES,
         help="Override the profile taskpack author runtime.",
     )
     parser.add_argument(
@@ -718,7 +721,7 @@ def _add_pursue_parser(subcommands):
     )
     parser.add_argument(
         "--author-runtime",
-        choices=["fake", "codex"],
+        choices=AUTHOR_RUNTIME_CHOICES,
         help="Override the profile taskpack author runtime.",
     )
     parser.add_argument(
@@ -837,7 +840,7 @@ def _add_taskpack_draft_parser(subcommands):
     parser.add_argument("--taskpack-id", help="Optional safe taskpack id slug.")
     parser.add_argument(
         "--author-runtime",
-        choices=["fake", "codex"],
+        choices=AUTHOR_RUNTIME_CHOICES,
         default="fake",
         help="Runtime used to author the taskpack.",
     )
@@ -5569,7 +5572,7 @@ def _prompt_project_profile(args, project_root):
     )
     author_runtime = _prompt_choice(
         "Author runtime",
-        choices=["fake", "codex"],
+        choices=AUTHOR_RUNTIME_CHOICES,
         default=args.author_runtime or "codex",
     )
     runtime = _prompt_choice(
@@ -5683,7 +5686,7 @@ def _prompt_submit_args(args):
     )
     args.author_runtime = _prompt_choice(
         "Author runtime",
-        choices=["fake", "codex"],
+        choices=AUTHOR_RUNTIME_CHOICES,
         default=args.author_runtime,
     )
     args.runtime = _prompt_choice(

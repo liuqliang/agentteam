@@ -6,10 +6,12 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .repo_grounding import build_repo_grounding
 from .repo_map import build_repository_map
 from .taskpack import (
     TASKPACK_SEMANTIC_CONTRACT_VERSION,
     TaskpackValidationError,
+    auto_materialize_semantic_taskpack,
     classify_goal_kind,
     _default_goal_alignment,
     _default_required_deliverables,
@@ -17,6 +19,7 @@ from .taskpack import (
     _normalize_taskpack_verification_profile,
     _require_contained_path,
     _resolve_draft_taskpack_id,
+    draft_deterministic_taskpack_skeleton,
     draft_taskpack_files,
     validate_taskpack,
 )
@@ -55,6 +58,15 @@ def draft_taskpack_from_goal(
             verification_profile=verification_profile,
             codex_timeout_seconds=codex_timeout_seconds,
         )
+    if author_runtime == "deterministic":
+        return _draft_with_deterministic_author(
+            project_root=project_root,
+            goal=goal,
+            draft_root=draft_root,
+            taskpack_id=taskpack_id,
+            codex_timeout_seconds=codex_timeout_seconds,
+            verification_profile=verification_profile,
+        )
     if author_runtime == "codex":
         return _draft_with_codex(
             project_root=project_root,
@@ -68,6 +80,250 @@ def draft_taskpack_from_goal(
             progress_interval_seconds=progress_interval_seconds,
         )
     raise TaskpackValidationError(f"unsupported taskpack author runtime: {author_runtime}")
+
+
+def _draft_with_deterministic_author(
+    project_root,
+    goal,
+    draft_root,
+    taskpack_id=None,
+    codex_timeout_seconds=600,
+    verification_profile=None,
+):
+    project_root = Path(project_root).resolve()
+    draft_root = Path(draft_root).resolve()
+    taskpack_id = _resolve_draft_taskpack_id(
+        taskpack_id,
+        goal,
+        draft_root,
+        extra_reserved_path_templates=[".{taskpack_id}-deterministic-author"],
+    )
+    author_context_dir = (draft_root / f".{taskpack_id}-deterministic-author").resolve()
+    _require_contained_path(author_context_dir, draft_root, "author_context_dir")
+    author_context_dir.mkdir(parents=True, exist_ok=False)
+
+    repo_map = build_repository_map(project_root, author_context_dir)
+    grounding = build_repo_grounding(project_root)
+    verification_command = _deterministic_author_verification_command(
+        grounding,
+        verification_profile,
+    )
+    read_scope, write_scope = _deterministic_author_scopes(repo_map, goal)
+    context_refs = _deterministic_author_context_refs(
+        goal=goal,
+        repo_map=repo_map,
+        grounding=grounding,
+        read_scope=read_scope,
+        write_scope=write_scope,
+        verification_command=verification_command,
+    )
+
+    skeleton_root = author_context_dir / "skeletons"
+    skeleton = draft_deterministic_taskpack_skeleton(
+        project_root=project_root,
+        goal=goal,
+        draft_root=skeleton_root,
+        taskpack_id=f"{taskpack_id}-skeleton",
+        context_refs=context_refs,
+        verification_command=verification_command,
+        verification_profile=verification_profile,
+        codex_timeout_seconds=codex_timeout_seconds,
+    )
+    materialized = auto_materialize_semantic_taskpack(
+        skeleton["taskpack_dir"],
+        output_root=draft_root,
+        taskpack_id=taskpack_id,
+    )
+    return {
+        "taskpack_dir": materialized["taskpack_dir"],
+        "taskpack_id": materialized["taskpack_id"],
+        "author_runtime": "deterministic",
+        "source_taskpack_id": materialized["source_taskpack_id"],
+    }
+
+
+def _deterministic_author_context_refs(
+    *,
+    goal,
+    repo_map,
+    grounding,
+    read_scope,
+    write_scope,
+    verification_command,
+):
+    manifest = repo_map.get("manifest") if isinstance(repo_map.get("manifest"), dict) else {}
+    paths = repo_map.get("paths") if isinstance(repo_map.get("paths"), dict) else {}
+    structure = grounding.get("repository_structure") if isinstance(grounding, dict) else {}
+    languages = [
+        f"{item.get('language')}={item.get('file_count')}"
+        for item in grounding.get("languages", [])
+        if isinstance(item, dict) and item.get("language")
+    ]
+    tools = [
+        f"{item.get('tool_id')}:{item.get('path')}"
+        for item in grounding.get("project_tools", [])
+        if isinstance(item, dict) and item.get("tool_id") and item.get("path")
+    ]
+    top_level_entries = [
+        f"{item.get('path')}[{item.get('file_count')}]"
+        for item in structure.get("top_level_entries", [])
+        if isinstance(item, dict) and item.get("path")
+    ]
+    selected_next_goal = (
+        "Use repo_grounding.v1 and repo_structure.v1 deterministic signals to "
+        f"implement the bounded next step: {goal}"
+    )
+    return {
+        "source_report_path": "not provided",
+        "goal_memory_path": "not provided",
+        "selected_next_goal": selected_next_goal,
+        "repo_map_manifest_path": paths.get("manifest_path") or "not provided",
+        "repo_map_inventory_path": paths.get("inventory_path") or "not provided",
+        "repo_map_symbols_path": paths.get("symbols_path") or "not provided",
+        "repo_grounding_schema_version": grounding.get("grounding_schema_version") or "repo_grounding.v1",
+        "repo_structure_schema_version": structure.get("structure_schema_version") or "repo_structure.v1",
+        "repo_grounding_summary": "; ".join(
+            [
+                f"scan_status={grounding.get('scan_status') or 'unknown'}",
+                f"tracked_files={grounding.get('tracked_file_count', 0)}",
+                "languages=" + ",".join(languages[:8]),
+                "tools=" + ",".join(tools[:8]),
+            ]
+        ),
+        "repo_structure_summary": "; ".join(
+            [
+                f"repo_map_scan_status={manifest.get('scan_status') or 'unknown'}",
+                f"top_level_entries={','.join(top_level_entries[:12])}",
+                f"top_level_omitted={max(0, len(top_level_entries) - 12)}",
+            ]
+        ),
+        "read_scope": "\n".join(read_scope),
+        "write_scope": "\n".join(write_scope),
+        "verification_command": json.dumps(verification_command),
+        "required_deliverables": "\n".join(
+            list(_default_required_deliverables(goal)) + ["agentteam_target_review_gate"]
+        ),
+        "non_goals": "natural-language report formatting; DB-primary storage; model adapters; merge; push; release activation",
+    }
+
+
+def _deterministic_author_verification_command(grounding, verification_profile):
+    profile = _normalize_taskpack_verification_profile(verification_profile)
+    correctness = profile.get("correctness") if isinstance(profile.get("correctness"), dict) else {}
+    command = correctness.get("command") if isinstance(correctness, dict) else None
+    if isinstance(command, list) and command and all(isinstance(part, str) and part for part in command):
+        return list(command)
+    for candidate in grounding.get("candidate_verification_commands", []):
+        if not isinstance(candidate, dict):
+            continue
+        command = candidate.get("command")
+        if isinstance(command, list) and command and all(isinstance(part, str) and part for part in command):
+            return list(command)
+    return ["python3", "-m", "unittest", "discover"]
+
+
+def _deterministic_author_scopes(repo_map, goal, max_source_files=6, max_test_files=4):
+    inventory = repo_map.get("inventory") if isinstance(repo_map.get("inventory"), dict) else {}
+    files = inventory.get("files") if isinstance(inventory.get("files"), list) else []
+    goal_tokens = _deterministic_goal_tokens(goal)
+    ranked = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        if not isinstance(path, str) or not path:
+            continue
+        category = entry.get("category") or "unknown"
+        if category not in {"source", "test"}:
+            continue
+        score = _deterministic_path_score(path, goal_tokens)
+        if score <= 0:
+            continue
+        ranked.append((score, category, path))
+
+    ranked.sort(key=lambda item: (-item[0], _deterministic_category_order(item[1]), item[2]))
+    source_paths = [
+        path
+        for _score, category, path in ranked
+        if category == "source"
+    ][:max_source_files]
+    test_paths = [
+        path
+        for _score, category, path in ranked
+        if category == "test"
+    ][:max_test_files]
+    if not source_paths:
+        source_paths = _fallback_scope_paths(files, category="source", limit=max_source_files)
+    if not test_paths:
+        test_paths = _fallback_scope_paths(files, category="test", limit=max_test_files)
+
+    write_scope = _dedupe_paths(source_paths + test_paths)
+    if not write_scope:
+        write_scope = [".agentteam/generated/"]
+    read_scope = _dedupe_paths(write_scope)
+    return read_scope, write_scope
+
+
+def _deterministic_goal_tokens(goal):
+    text = str(goal or "").lower()
+    tokens = {
+        token
+        for token in re.split(r"[^a-z0-9]+", text)
+        if len(token) >= 3
+    }
+    if "repo_grounding" in text or "grounding" in tokens:
+        tokens.update({"repo", "grounding"})
+    if "repo_structure" in text or "structure" in tokens:
+        tokens.update({"repo", "structure"})
+    if "taskpack" in text:
+        tokens.add("taskpack")
+    if "author" in text or "authoring" in tokens:
+        tokens.add("author")
+    if "semantic" in tokens or "materialization" in tokens:
+        tokens.update({"semantic", "materialize", "materialization"})
+    return tokens
+
+
+def _deterministic_path_score(path, goal_tokens):
+    path_tokens = {
+        token
+        for token in re.split(r"[^a-z0-9]+", path.lower())
+        if len(token) >= 3
+    }
+    score = len(path_tokens & goal_tokens)
+    lowered = path.lower()
+    for marker in ("taskpack", "author", "grounding", "repo_map", "semantic"):
+        if marker in lowered and marker.replace("_", "") in goal_tokens:
+            score += 2
+        elif marker in lowered and marker in goal_tokens:
+            score += 2
+    return score
+
+
+def _deterministic_category_order(category):
+    return {"source": 0, "test": 1}.get(category, 2)
+
+
+def _fallback_scope_paths(files, *, category, limit):
+    paths = [
+        entry.get("path")
+        for entry in files
+        if isinstance(entry, dict)
+        and entry.get("category") == category
+        and isinstance(entry.get("path"), str)
+    ]
+    return sorted(paths)[:limit]
+
+
+def _dedupe_paths(paths):
+    result = []
+    seen = set()
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        result.append(path)
+    return result
 
 
 def _draft_with_codex(

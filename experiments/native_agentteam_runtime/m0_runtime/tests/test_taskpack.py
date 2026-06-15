@@ -8711,6 +8711,120 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("metric_delta_or_no_safe_change_evidence", task["required_deliverables"])
             self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
 
+    def test_deterministic_taskpack_author_materializes_executable_taskpack_from_grounding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "agentteam"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            runtime_pkg = repo / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+            tests_dir = repo / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "tests"
+            runtime_pkg.mkdir(parents=True)
+            tests_dir.mkdir(parents=True)
+            (runtime_pkg / "__init__.py").write_text("# runtime\n", encoding="utf-8")
+            (runtime_pkg / "taskpack_author.py").write_text("def author():\n    return True\n", encoding="utf-8")
+            (runtime_pkg / "taskpack.py").write_text("def materialize():\n    return True\n", encoding="utf-8")
+            (runtime_pkg / "repo_grounding.py").write_text("def grounding():\n    return True\n", encoding="utf-8")
+            (runtime_pkg / "repo_map.py").write_text("def map_repo():\n    return True\n", encoding="utf-8")
+            (tests_dir / "test_taskpack.py").write_text("def test_taskpack():\n    assert True\n", encoding="utf-8")
+            (tests_dir / "test_m0_runtime.py").write_text("def test_runtime():\n    assert True\n", encoding="utf-8")
+            (repo / "pyproject.toml").write_text("[project]\nname = 'agentteam-fixture'\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add runtime files"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            result = draft_taskpack_from_goal(
+                project_root=repo,
+                goal=(
+                    "Feed compact repo_grounding.v1 and repo_structure.v1 signals into "
+                    "taskpack authoring and automatic semantic materialization context."
+                ),
+                draft_root=drafts,
+                author_runtime="deterministic",
+                taskpack_id="deterministic-author",
+            )
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            taskpack = loaded["taskpack"]
+            task = loaded["backlog"]["items"][0]
+            self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
+            self.assertEqual(taskpack["taskpack_id"], "deterministic-author")
+            self.assertEqual(taskpack["authoring_mode"], "semantic_materialized")
+            self.assertFalse(taskpack.get("semantic_authoring_required"))
+            self.assertEqual(taskpack["semantic_completion"]["authority"], "automatic_deterministic")
+            self.assertIn("repo_grounding.v1", task["goal_alignment"])
+            self.assertIn("agentteam_target_review_gate", task["required_deliverables"])
+            self.assertIn(
+                "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
+                task["write_scope"],
+            )
+            self.assertIn(
+                "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+                task["write_scope"],
+            )
+            self.assertEqual(loaded["verification"]["command"], ["python3", "-m", "unittest", "discover"])
+            self.assertEqual(
+                taskpack["policy"]["source_control_restrictions"],
+                ["no_merge", "no_push", "no_release_activation"],
+            )
+
+    def test_agentteam_cli_taskpack_draft_supports_deterministic_author_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "agentteam"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            runtime_pkg = repo / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+            runtime_pkg.mkdir(parents=True)
+            (runtime_pkg / "__init__.py").write_text("# runtime\n", encoding="utf-8")
+            (runtime_pkg / "taskpack_author.py").write_text("def author():\n    return True\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add runtime package"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "draft",
+                    "--project-root",
+                    str(repo),
+                    "--goal",
+                    "Add deterministic taskpack author runtime.",
+                    "--draft-root",
+                    str(drafts),
+                    "--taskpack-id",
+                    "cli-deterministic-author",
+                    "--author-runtime",
+                    "deterministic",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["taskpack_id"], "cli-deterministic-author")
+            self.assertEqual(
+                validate_taskpack(drafts / "cli-deterministic-author")["status"],
+                "accepted",
+            )
+
     def test_codex_taskpack_author_prompt_includes_agentteam_target_policy(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
