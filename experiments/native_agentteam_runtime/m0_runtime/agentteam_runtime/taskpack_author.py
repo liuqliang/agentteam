@@ -632,6 +632,8 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
     taskpack_dir = Path(taskpack_dir)
     taskpack = _read_json(taskpack_dir / "taskpack.yaml")
     if isinstance(taskpack, dict):
+        taskpack = _unwrap_nested_taskpack_object(taskpack)
+    if isinstance(taskpack, dict):
         if not taskpack.get("semantic_contract_version"):
             taskpack["semantic_contract_version"] = TASKPACK_SEMANTIC_CONTRACT_VERSION
         if not taskpack.get("original_goal") and taskpack.get("goal"):
@@ -713,6 +715,19 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
         if canonical_command != command:
             verification["command"] = canonical_command
             _write_json(verification_path, verification)
+
+
+def _unwrap_nested_taskpack_object(taskpack):
+    nested = taskpack.get("taskpack")
+    if not isinstance(nested, dict):
+        return taskpack
+    unwrapped = dict(nested)
+    for key, value in taskpack.items():
+        if key == "taskpack":
+            continue
+        if key not in unwrapped:
+            unwrapped[key] = value
+    return unwrapped
 
 
 def _apply_verification_profile_to_taskpack(taskpack_dir, verification_profile):

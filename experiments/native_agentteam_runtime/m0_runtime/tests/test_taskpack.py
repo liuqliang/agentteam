@@ -9379,6 +9379,81 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(backlog["items"][0]["backlog_status"], "ready")
             self.assertEqual(backlog["items"][0]["blockers"], [])
 
+    def test_codex_taskpack_author_unwraps_nested_taskpack_object(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "codex-wrapped-taskpack"
+            _init_repo(repo)
+            taskpack_dir.mkdir(parents=True)
+            (taskpack_dir / "taskpack.yaml").write_text(
+                json.dumps(
+                    {
+                        "goal_kind": "implementation",
+                        "semantic_contract_version": "task_semantics.v1",
+                        "taskpack": {
+                            "taskpack_schema_version": "taskpack.v1",
+                            "taskpack_id": "codex-wrapped-taskpack",
+                            "status": "draft",
+                            "semantic_contract_version": "task_semantics.v1",
+                            "project_root": str(repo),
+                            "goal": "Implement a bounded runtime improvement.",
+                            "original_goal": "Implement a bounded runtime improvement.",
+                            "goal_kind": "implementation",
+                            "runtime": {"default_backend": "codex"},
+                            "files": {
+                                "agent_pool": "agent_pool.json",
+                                "backlog": "backlog.json",
+                                "verification": "verification.json",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "agent_pool.json").write_text(
+                json.dumps(
+                    {
+                        "agents": [
+                            {
+                                "agent_id": "implementation-worker-1",
+                                "role": "implementation_worker",
+                                "status": "idle",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "backlog.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "wrapped-001",
+                                "title": "Implement bounded runtime improvement.",
+                                "status": "ready",
+                                "required_role": "implementation_worker",
+                                "read_scope": ["README.md"],
+                                "write_scope": ["src/runtime.py"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "verification.json").write_text(
+                json.dumps({"command": ["python3", "-m", "unittest", "discover"]}),
+                encoding="utf-8",
+            )
+
+            _canonicalize_codex_taskpack_files(taskpack_dir)
+
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
+            taskpack = json.loads((taskpack_dir / "taskpack.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(taskpack["taskpack_id"], "codex-wrapped-taskpack")
+            self.assertNotIn("taskpack", taskpack)
+
     def test_codex_taskpack_author_canonicalizes_optimization_contract_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
