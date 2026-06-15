@@ -1,0 +1,168 @@
+{
+  "artifact_schema_version": "route_integration_evidence.v1",
+  "task_id": "route-integration-evidence-003",
+  "attempt_id": "route-integration-evidence-003-ATTEMPT-001",
+  "created_at": "2026-06-15",
+  "objective": "Prepare L1 integration evidence that automatic semantic skeleton completion and deterministic repository grounding work as one implementation route while preserving AgentTeam-as-target review gates.",
+  "repository_understanding_summary": {
+    "repo_context_package": "/tmp/agentteam-self-semantic-grounding-rerun3/runs/auto-semantic-grounding-rerun3/repo_contexts/route-integration-evidence-003-ATTEMPT-001-implementation_worker.json",
+    "selected_source_files": [
+      "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
+      "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
+      "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/repo_grounding.py",
+      "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/repo_map.py",
+      "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/m0_runtime.py",
+      "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py"
+    ],
+    "selected_test_files": [
+      "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+      "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py"
+    ],
+    "semantic_completion_entrypoints": [
+      "draft_deterministic_taskpack_skeleton",
+      "auto_materialize_semantic_taskpack",
+      "validate_taskpack"
+    ],
+    "repo_grounding_entrypoints": [
+      "build_repository_map",
+      "build_repo_grounding"
+    ],
+    "measured_grounding": {
+      "repo_map_schema_version": "repo_map.v1",
+      "repo_map_scan_status": "degraded",
+      "repo_map_inventory_file_count": 230,
+      "repo_grounding_schema_version": "repo_grounding.v1",
+      "repo_grounding_scan_status": "ok",
+      "repo_grounding_tracked_file_count": 230,
+      "repo_grounding_languages": [
+        "python",
+        "shell"
+      ],
+      "repo_grounding_candidate_commands": [
+        [
+          "python3",
+          "-m",
+          "unittest",
+          "discover"
+        ]
+      ]
+    }
+  },
+  "previous_evidence_summary": {
+    "m65_grounding": "M65 added read-only repo_grounding.v1 summaries and the agentteam grounding command. It intentionally does not execute candidate commands, install dependencies, mutate the repository, or replace per-attempt repo_context.v1.",
+    "m67_dogfood_calibration": "The first live Codex authoring calibration timed out after 300.158 seconds with zero taskpack files. The direct artifact-production rerun completed in 283.139 seconds, wrote 5/5 required files, and validated accepted.",
+    "m67_deterministic_skeleton": "The deterministic skeleton experiment emits a valid conservative five-file taskpack skeleton with semantic_authoring_required=true, supplied context_refs, conservative write scope, and semantic_slots; it does not infer repository semantics by itself.",
+    "source_report_path": "not provided",
+    "goal_memory_path": "not provided"
+  },
+  "roadmap_followup_route_template": {
+    "route_name": "closed-loop semantic skeleton plus repo grounding",
+    "inputs": [
+      "source_report_path or explicit not provided marker",
+      "goal_memory_path or explicit not provided marker",
+      "repo_context_path",
+      "repo_map_manifest_path",
+      "queue-selected next_goal",
+      "declared read_scope and write_scope",
+      "non_goals and AgentTeam-as-target review gate"
+    ],
+    "steps": [
+      "Build or read repo_map.v1 for deterministic repository inventory and selected context.",
+      "Build repo_grounding.v1 for language, tool, test-entrypoint, and candidate verification-command signals.",
+      "Draft a deterministic taskpack skeleton with context_refs carrying the previous evidence, repo context, repo map, selected next_goal, non-goals, deliverables, and verification command.",
+      "Auto-materialize the semantic skeleton without operator-authored semantic JSON.",
+      "Validate the materialized taskpack and assert AgentTeam-as-target policy keeps allow_merge=false, operator_review_required=true, and source_control_restrictions no_merge/no_push/no_release_activation.",
+      "Use the grounding candidate command as evidence for the bounded verification plan, but do not execute merge, push, release activation, or semantic authority edits."
+    ],
+    "required_deliverables": [
+      "repository_understanding_summary",
+      "previous_evidence_summary",
+      "roadmap_followup_route_template",
+      "evidence_paths",
+      "non_goals",
+      "success_metrics_or_no_metric_delta",
+      "implemented_changes_or_no_safe_change_rationale",
+      "verification_summary",
+      "recommended_next_implementation_tasks",
+      "agentteam_target_review_gate"
+    ]
+  },
+  "evidence_paths": [
+    "/tmp/agentteam-self-semantic-grounding-rerun3/drafts/.auto-semantic-grounding-rerun3-author/state/repo_map/manifest.json",
+    "/tmp/agentteam-self-semantic-grounding-rerun3/drafts/.auto-semantic-grounding-rerun3-author/state/repo_map/inventory.json",
+    "/tmp/agentteam-self-semantic-grounding-rerun3/drafts/.auto-semantic-grounding-rerun3-author/state/repo_map/symbols.json",
+    "/tmp/agentteam-self-semantic-grounding-rerun3/runs/auto-semantic-grounding-rerun3/repo_contexts/route-integration-evidence-003-ATTEMPT-001-implementation_worker.json",
+    "/tmp/agentteam-route-integration-evidence-003-ATTEMPT-001/integration_checks.json",
+    "/tmp/agentteam-route-integration-evidence-003-ATTEMPT-001/state/repo_map/manifest.json",
+    "/tmp/agentteam-route-integration-evidence-003-ATTEMPT-001/materialized/route-integration-evidence-003-executable",
+    "experiments/native_agentteam_runtime/implementation_artifacts/reports/2026-06-15-m67-dogfood-calibration.md",
+    "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-06-14-m65-language-aware-grounding.md"
+  ],
+  "non_goals": [
+    "natural-language report formatting",
+    "M68 model adapters",
+    "DB-primary storage",
+    "direct semantic authority edits",
+    "git merge",
+    "git push",
+    "release activation"
+  ],
+  "success_metrics_or_no_metric_delta": {
+    "metric_delta": "No source metric delta; this task only adds a structured evidence artifact.",
+    "measured_results": {
+      "combined_harness_exit_code": 0,
+      "materialized_validation_status": "accepted",
+      "semantic_completion_authority": "automatic_deterministic",
+      "operator_semantic_json_required": false,
+      "focused_unit_tests": {
+        "tests_run": 2,
+        "status": "OK",
+        "elapsed_seconds": 0.048
+      }
+    }
+  },
+  "implemented_changes_or_no_safe_change_rationale": {
+    "implemented_changes": [
+      "Added this structured route-integration evidence artifact under implementation_artifacts/reports."
+    ],
+    "no_runtime_source_change_rationale": "Existing helpers already satisfy the bounded L1 integration proof when run together. Changing runtime source or tests in this task would exceed the evidence-preparation objective and risk drifting into natural-language report formatting, semantic authority edits, or broader release work."
+  },
+  "verification_summary": {
+    "commands": [
+      {
+        "command": "PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime python3 - <<'PY' ... combined skeleton, auto-materialization, repo map, and repo grounding harness ... PY",
+        "result": "exit 0; validation_status=accepted; semantic_completion_authority=automatic_deterministic; repo_grounding_schema_version=repo_grounding.v1; repo_grounding_tracked_file_count=230; policy source_control_restrictions=no_merge/no_push/no_release_activation"
+      },
+      {
+        "command": "PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime python3 -m unittest experiments.native_agentteam_runtime.m0_runtime.tests.test_taskpack.TaskpackTests.test_auto_materialize_semantic_taskpack_completes_roadmap_skeleton_without_operator_json experiments.native_agentteam_runtime.m0_runtime.tests.test_m0_runtime.M0RuntimeTests.test_repo_grounding_detects_languages_project_tools_and_tests",
+        "result": "exit 0; Ran 2 tests in 0.048s; OK"
+      }
+    ]
+  },
+  "recommended_next_implementation_tasks": [
+    {
+      "task": "Feed compact repo_grounding.v1 signals into taskpack_author context for roadmap-derived follow-up taskpacks.",
+      "scope": "taskpack_author.py and focused tests only",
+      "verification": "Assert generated prompts or deterministic context_refs include grounding languages, tools, test entrypoints, and candidate verification commands without executing those commands."
+    },
+    {
+      "task": "Promote the temporary combined route harness into a durable unittest or CLI dry-run evidence command.",
+      "scope": "tests and optionally an implementation-artifacts helper command",
+      "verification": "A focused test validates skeleton drafting, auto-materialization, repo_map.v1, repo_grounding.v1, validation accepted, and AgentTeam-as-target review restrictions together."
+    },
+    {
+      "task": "Use grounding-derived candidate verification commands when automatic semantic materialization has no explicit verification_command context_ref.",
+      "scope": "taskpack.py/taskpack_author.py with no semantic authority edits",
+      "verification": "Unit tests cover explicit command precedence, grounding fallback, and no command execution during authoring."
+    }
+  ],
+  "agentteam_target_review_gate": {
+    "operator_review_required": true,
+    "source_control_restrictions": [
+      "no_merge",
+      "no_push",
+      "no_release_activation"
+    ],
+    "operator_note": "This evidence artifact is review input only. Source merge, push, release activation, and semantic authority changes remain operator-gated."
+  }
+}
