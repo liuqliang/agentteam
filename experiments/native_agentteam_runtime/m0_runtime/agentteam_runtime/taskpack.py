@@ -93,6 +93,24 @@ FOLLOWUP_PREVIOUS_EVIDENCE_MARKERS = [
     "evidence",
     "report",
 ]
+FOLLOWUP_CONCRETE_PREVIOUS_EVIDENCE_MARKERS = [
+    "source_report_path",
+    "source report path",
+    "verification result",
+    "verification results",
+    "failed verification",
+    "blocker",
+    "blockers",
+    "goal_memory_path",
+    "goal memory path",
+    "goal_memory",
+    "completed_rounds",
+    "latest_run_ids",
+    "queue-selected next_goal",
+    "queue selected next_goal",
+    "selected next_goal",
+    "next_goal",
+]
 FOLLOWUP_MEASURABLE_NEXT_STEP_MARKERS = [
     "next-step",
     "next step",
@@ -396,6 +414,11 @@ def validate_taskpack(taskpack_dir):
             has_followup_quality_item = True
             if not _followup_objective_uses_previous_evidence(item):
                 errors.append(f"{task_id_label} long-running follow-up task must tie objective to previous evidence")
+            if not _followup_objective_names_concrete_previous_evidence(item):
+                errors.append(
+                    f"{task_id_label} long-running follow-up task must tie objective "
+                    "to concrete previous evidence"
+                )
             if not _followup_objective_has_measurable_next_step(item):
                 errors.append(
                     f"{task_id_label} long-running follow-up task must define "
@@ -704,6 +727,11 @@ def _is_followup_code_item(item):
 def _followup_objective_uses_previous_evidence(item):
     text = str(item.get("objective") or "").lower()
     return any(marker in text for marker in FOLLOWUP_PREVIOUS_EVIDENCE_MARKERS)
+
+
+def _followup_objective_names_concrete_previous_evidence(item):
+    text = str(item.get("objective") or "").lower()
+    return any(marker in text for marker in FOLLOWUP_CONCRETE_PREVIOUS_EVIDENCE_MARKERS)
 
 
 def _followup_objective_has_measurable_next_step(item):

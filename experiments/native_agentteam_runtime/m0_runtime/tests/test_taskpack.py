@@ -8705,6 +8705,10 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("Preserve the operator's original goal", prompt)
             self.assertIn("decompose broad or long-running goals into narrow, measurable next-step tasks", prompt)
             self.assertIn("tie each executable next-step objective to previous evidence", prompt)
+            self.assertIn(
+                "include a concise rationale naming source_report_path, verification results, blockers, goal_memory_path, or the queue-selected next_goal",
+                prompt,
+            )
             self.assertIn("avoid safe-but-trivial documentation-only changes unless the operator explicitly asked for documentation", prompt)
 
     def test_fake_taskpack_author_draft_can_be_frozen(self):
@@ -8944,6 +8948,85 @@ class TaskpackTests(unittest.TestCase):
                 "long-running follow-up task must define a measurable next-step implementation objective",
                 str(raised.exception),
             )
+
+    def test_validate_taskpack_rejects_followup_objective_without_concrete_previous_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal=(
+                    "Follow-up goal:\n"
+                    "Continue the original implementation.\n\n"
+                    "Previous taskpack context:\n"
+                    "- source_taskpack_id: first-pass\n"
+                    "- source_report_path: /tmp/work/runs/first-pass/reports/final_report.md\n\n"
+                    "Instructions for the new taskpack:\n"
+                    "- Use the previous findings, verification results, blockers, and next steps as context."
+                ),
+                draft_root=drafts,
+                taskpack_id="vague-evidence-followup",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["objective"] = (
+                "Implement the next step using previous report evidence."
+            )
+            backlog["items"][0]["goal_alignment"] = (
+                "This follows the selected next_goal but does not name the source report, "
+                "verification result, blocker, or goal memory that justified the choice."
+            )
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn(
+                "long-running follow-up task must tie objective to concrete previous evidence",
+                str(raised.exception),
+            )
+
+    def test_validate_taskpack_accepts_measurable_followup_objective_with_concrete_previous_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal=(
+                    "Follow-up goal:\n"
+                    "Continue the original implementation.\n\n"
+                    "Previous taskpack context:\n"
+                    "- source_taskpack_id: first-pass\n"
+                    "- source_report_path: /tmp/work/runs/first-pass/reports/final_report.md\n\n"
+                    "Long-goal memory:\n"
+                    "- goal_memory_path: /tmp/work/state/goal_memory.json\n"
+                    "- completed_rounds: 1\n\n"
+                    "Instructions for the new taskpack:\n"
+                    "- Use the previous findings, verification results, blockers, and next steps as context."
+                ),
+                draft_root=drafts,
+                taskpack_id="evidence-tied-followup",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["objective"] = (
+                "Implement the measurable next step from source_report_path "
+                "/tmp/work/runs/first-pass/reports/final_report.md: fix the verification "
+                "results blocker and verify it with a focused regression test."
+            )
+            backlog["items"][0]["goal_alignment"] = (
+                "The selected next_goal is justified by goal_memory_path "
+                "/tmp/work/state/goal_memory.json and the previous report blocker."
+            )
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
 
     def test_taskpack_author_uses_unique_implicit_id_when_default_exists(self):
         with tempfile.TemporaryDirectory() as tmp:

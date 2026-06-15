@@ -345,6 +345,10 @@ def _author_prompt(
             "blockers, or reported next steps"
         ),
         (
+            "- include a concise rationale naming source_report_path, verification results, "
+            "blockers, goal_memory_path, or the queue-selected next_goal"
+        ),
+        (
             "- avoid safe-but-trivial documentation-only changes unless the operator explicitly asked "
             "for documentation; otherwise prefer bounded code/test/repository changes or explain why "
             "no safe in-repo change is justified"
