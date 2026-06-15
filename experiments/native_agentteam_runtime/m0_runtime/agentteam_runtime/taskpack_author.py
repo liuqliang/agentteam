@@ -353,6 +353,9 @@ def _author_prompt(
             "for documentation; otherwise prefer bounded code/test/repository changes or explain why "
             "no safe in-repo change is justified"
         ),
+        "",
+        *_roadmap_followup_template_prompt(),
+        "",
         (
             "- optimization goals, including optimize/improve/performance/accuracy/比赛/优化/提升, "
             "must set taskpack.goal_kind to optimization"
@@ -418,6 +421,46 @@ def _agentteam_target_policy_prompt():
         "- preserve the original operator requirement in taskpack.original_goal and each backlog item goal_alignment.",
         "- do not request git merge or git push; source merge, push, and release activation require operator review after the run.",
         "- include agentteam_target_review_gate in required_deliverables.",
+    ]
+
+
+def _roadmap_followup_template_prompt():
+    return [
+        "Roadmap-derived follow-up task template:",
+        (
+            "- Use this template when the goal references a roadmap, route note, "
+            "queue-selected next_goal, source_report_path, previous taskpack, "
+            "or goal_memory_path."
+        ),
+        (
+            "- Each executable backlog item should name source_report_path or "
+            "goal_memory_path in objective or goal_alignment and include concrete "
+            "previous evidence: verification result, blocker, selected next_goal, "
+            "or evidence path."
+        ),
+        (
+            "- required_deliverables for roadmap-derived follow-ups should include "
+            "repository_understanding_summary, previous_evidence_summary, "
+            "roadmap_followup_route_template, evidence_paths, non_goals, "
+            "success_metrics_or_no_metric_delta, "
+            "implemented_changes_or_no_safe_change_rationale, verification_summary, "
+            "and recommended_next_implementation_tasks."
+        ),
+        (
+            "- State explicit non_goals in goal_alignment or required_deliverables "
+            "when roadmap excludes broader work such as M68 model adapters, "
+            "DB-primary storage, direct semantic authority edits, merge, push, "
+            "or release activation."
+        ),
+        (
+            "- source merge, push, and release activation remain operator review gates; "
+            "workers may only prepare patches, reports, evidence, and integration baselines."
+        ),
+        (
+            "- Prefer bounded code/test/repository tasks; documentation-only follow-ups "
+            "must say why the route explicitly asks for docs or why no safe code change "
+            "is justified."
+        ),
     ]
 
 

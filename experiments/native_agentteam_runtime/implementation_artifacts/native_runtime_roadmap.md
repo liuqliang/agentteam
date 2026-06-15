@@ -1327,10 +1327,10 @@ author guidance before broader live calibration. Keep M68 multi-model adapters,
 DB-primary storage, and direct semantic authority edits out of this route.
 
 M67 follow-up status: `next_goal` specificity, Chinese next-step rationale,
-and `agentteam queue next` selected-item provenance/readiness are implemented
-with focused runtime tests. The remaining post-M66 route is taskpack-author
-route-template guidance for roadmap-derived follow-ups, then bounded live
-dogfood calibration.
+`agentteam queue next` selected-item provenance/readiness, and taskpack-author
+route-template guidance for roadmap-derived follow-ups are implemented with
+focused runtime tests. The remaining post-M66 route is bounded live dogfood
+calibration.
 
 ## Longer-Term Route
 

@@ -956,6 +956,10 @@ Drafts a taskpack from a goal without running it.
 Use it when:
 
 - You want to inspect or validate a Codex-authored taskpack before freezing.
+- You want Codex authoring to turn a roadmap-derived follow-up goal into a
+  bounded taskpack with evidence paths, non-goals, success metrics or an
+  explicit no-metric-delta rationale, verification guidance, and review-gate
+  constraints.
 
 Example:
 

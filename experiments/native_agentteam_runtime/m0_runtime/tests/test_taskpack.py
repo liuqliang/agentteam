@@ -8771,6 +8771,44 @@ class TaskpackTests(unittest.TestCase):
             )
             self.assertIn("avoid safe-but-trivial documentation-only changes unless the operator explicitly asked for documentation", prompt)
 
+    def test_codex_taskpack_author_prompt_includes_roadmap_followup_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "m67-roadmap-followup"
+            author_context_dir = tmp_path / "drafts" / ".m67-roadmap-followup-author"
+            _init_repo(repo)
+
+            prompt = _author_prompt(
+                project_root=repo,
+                goal=(
+                    "Follow-up goal:\n"
+                    "Continue the roadmap-derived implementation route.\n\n"
+                    "Previous taskpack context:\n"
+                    "- source_taskpack_id: m67-agentteam-dogfood\n"
+                    "- source_report_path: /tmp/work/runs/m67/reports/final_report.md\n"
+                    "- selected next_goal: Add taskpack-author route-template guidance.\n"
+                ),
+                taskpack_id="m67-roadmap-followup",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                repo_map={
+                    "paths": {
+                        "manifest_path": "manifest.json",
+                        "inventory_path": "inventory.json",
+                        "symbols_path": "symbols.json",
+                    }
+                },
+                verification_profile=None,
+            )
+
+            self.assertIn("Roadmap-derived follow-up task template:", prompt)
+            self.assertIn("evidence_paths", prompt)
+            self.assertIn("non_goals", prompt)
+            self.assertIn("success_metrics_or_no_metric_delta", prompt)
+            self.assertIn("roadmap_followup_route_template", prompt)
+            self.assertIn("source merge, push, and release activation remain operator review gates", prompt)
+
     def test_fake_taskpack_author_draft_can_be_frozen(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
