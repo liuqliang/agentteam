@@ -232,9 +232,16 @@ def draft_taskpack_files(
 
     read_scope = _string_list(read_scope, ["."], "read_scope")
     write_scope = _string_list(write_scope, [".agentteam/generated/"], "write_scope")
-    verification_profile = _normalize_taskpack_verification_profile(verification_profile)
+    verification_profile = _normalize_taskpack_verification_profile(
+        verification_profile,
+        project_root=project_root,
+    )
     default_verification_command = verification_profile["correctness"]["command"]
     verification_command = _string_list(verification_command, default_verification_command, "verification_command")
+    verification_command = _canonical_taskpack_verification_command(
+        verification_command,
+        project_root,
+    )
     goal_kind = classify_goal_kind(goal)
 
     taskpack_dir.mkdir(parents=True, exist_ok=False)
@@ -915,7 +922,7 @@ def _verification_command_allowed(executable, project_root):
     return relative.as_posix() in {".venv/bin/python", "venv/bin/python"} and executable_path.is_file()
 
 
-def _normalize_taskpack_verification_profile(profile=None):
+def _normalize_taskpack_verification_profile(profile=None, project_root=None):
     profile = profile if isinstance(profile, dict) else {}
     correctness = profile.get("correctness") if isinstance(profile.get("correctness"), dict) else {}
     performance = profile.get("performance") if isinstance(profile.get("performance"), dict) else {}
@@ -924,12 +931,20 @@ def _normalize_taskpack_verification_profile(profile=None):
         DEFAULT_VERIFICATION_COMMAND,
         "verification_profile.correctness.command",
     )
+    correctness_command = _canonical_taskpack_verification_command(
+        correctness_command,
+        project_root,
+    )
     performance_command = performance.get("command")
     if performance_command is not None:
         performance_command = _profile_command_or_default(
             performance_command,
             None,
             "verification_profile.performance.command",
+        )
+        performance_command = _canonical_taskpack_verification_command(
+            performance_command,
+            project_root,
         )
     metrics = performance.get("metrics", [])
     if not isinstance(metrics, list) or not all(isinstance(metric, str) and metric for metric in metrics):
@@ -942,6 +957,53 @@ def _normalize_taskpack_verification_profile(profile=None):
             "metrics": list(metrics),
         },
     }
+
+
+def _canonical_taskpack_verification_command(command, project_root=None):
+    if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
+        return command
+    if not command:
+        return []
+    project_python = _project_verification_python(project_root)
+    python_executable = str(project_python) if project_python is not None else "python3"
+    python_index = _verification_python_command_index(command)
+    if python_index is None:
+        return list(command)
+    if Path(command[0]).name == "env":
+        return [python_executable, *command[python_index + 1 :]]
+    canonical = list(command)
+    if python_index == 0 or project_python is not None:
+        canonical[python_index] = python_executable
+    return canonical
+
+
+def _project_verification_python(project_root):
+    if not project_root:
+        return None
+    root = Path(project_root)
+    candidates = [
+        root / ".venv" / "bin" / "python",
+        root / "venv" / "bin" / "python",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _verification_python_command_index(command):
+    for index, part in enumerate(command):
+        if _is_verification_python_command(part):
+            return index
+    return None
+
+
+def _is_verification_python_command(value):
+    path = Path(value)
+    name = path.name
+    if value in {".venv/bin/python", "venv/bin/python"}:
+        return True
+    return bool(re.fullmatch(r"python(?:3(?:\.\d+)?)?", name))
 
 
 def _profile_command_or_default(command, default, field_name):
@@ -1501,7 +1563,11 @@ def _derive_semantic_task_from_loaded_skeleton(loaded):
         "risk_target": item.get("risk_target") or "L1",
         "depends_on": item.get("depends_on") if isinstance(item.get("depends_on"), list) else [],
         "evidence_paths": evidence_paths,
-        "verification_command": _semantic_verification_command_from_context(context_refs, verification),
+        "verification_command": _semantic_verification_command_from_context(
+            context_refs,
+            verification,
+            project_root,
+        ),
     }
 
 
@@ -1565,7 +1631,7 @@ def _parse_semantic_ref_list(value, field_name):
     return values
 
 
-def _semantic_verification_command_from_context(context_refs, verification):
+def _semantic_verification_command_from_context(context_refs, verification, project_root=None):
     default = _validate_taskpack_verification_command(verification)
     value = _semantic_context_text(
         context_refs,
@@ -1574,8 +1640,8 @@ def _semantic_verification_command_from_context(context_refs, verification):
     if not value:
         candidate = _semantic_candidate_verification_command_from_context(context_refs)
         if candidate:
-            return candidate
-        return list(default)
+            return _canonical_taskpack_verification_command(candidate, project_root)
+        return _canonical_taskpack_verification_command(list(default), project_root)
     if value.startswith("["):
         command = _parse_semantic_ref_list(value, "context_refs.verification_command")
     else:
@@ -1585,7 +1651,7 @@ def _semantic_verification_command_from_context(context_refs, verification):
             raise TaskpackValidationError("context_refs.verification_command must be shell-splittable") from exc
     if not command or not all(isinstance(part, str) and part for part in command):
         raise TaskpackValidationError("context_refs.verification_command must be a non-empty string array")
-    return command
+    return _canonical_taskpack_verification_command(command, project_root)
 
 
 def _semantic_candidate_verification_command_from_context(context_refs):

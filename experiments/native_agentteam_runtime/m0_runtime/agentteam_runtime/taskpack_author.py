@@ -17,6 +17,7 @@ from .taskpack import (
     _default_goal_alignment,
     _default_required_deliverables,
     _default_work_type,
+    _canonical_taskpack_verification_command,
     _is_broad_framework_goal,
     _is_long_running_followup_goal,
     _normalize_taskpack_verification_profile,
@@ -110,6 +111,7 @@ def _draft_with_deterministic_author(
     verification_command = _deterministic_author_verification_command(
         grounding,
         verification_profile,
+        project_root,
     )
     read_scope, write_scope, scope_diagnostic = _deterministic_author_scopes(
         repo_map,
@@ -284,18 +286,21 @@ def _deterministic_context_json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
-def _deterministic_author_verification_command(grounding, verification_profile):
-    profile = _normalize_taskpack_verification_profile(verification_profile)
+def _deterministic_author_verification_command(grounding, verification_profile, project_root=None):
+    profile = _normalize_taskpack_verification_profile(
+        verification_profile,
+        project_root=project_root,
+    )
     correctness = profile.get("correctness") if isinstance(profile.get("correctness"), dict) else {}
     command = correctness.get("command") if isinstance(correctness, dict) else None
     if isinstance(command, list) and command and all(isinstance(part, str) and part for part in command):
-        return list(command)
+        return _canonical_taskpack_verification_command(command, project_root)
     for candidate in grounding.get("candidate_verification_commands", []):
         if not isinstance(candidate, dict):
             continue
         command = candidate.get("command")
         if isinstance(command, list) and command and all(isinstance(part, str) and part for part in command):
-            return list(command)
+            return _canonical_taskpack_verification_command(command, project_root)
     return ["python3", "-m", "unittest", "discover"]
 
 
@@ -1198,8 +1203,12 @@ def _apply_verification_profile_to_taskpack(taskpack_dir, verification_profile):
     if not verification_profile:
         return
     taskpack_dir = Path(taskpack_dir)
-    profile = _normalize_taskpack_verification_profile(verification_profile)
     taskpack = _read_json(taskpack_dir / "taskpack.yaml")
+    project_root = taskpack.get("project_root") if isinstance(taskpack, dict) else None
+    profile = _normalize_taskpack_verification_profile(
+        verification_profile,
+        project_root=project_root,
+    )
     files = taskpack.get("files") if isinstance(taskpack.get("files"), dict) else {}
     verification_path = taskpack_dir / files.get("verification", "verification.json")
     verification = _read_json(verification_path)
@@ -1214,55 +1223,7 @@ def _apply_verification_profile_to_taskpack(taskpack_dir, verification_profile):
 
 
 def _canonical_verification_command(command, project_root):
-    if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
-        return command
-    project_python = _project_python(project_root)
-    python_index = _python_command_index(command)
-    if python_index is None:
-        return command
-    python_executable = str(project_python) if project_python is not None else "python3"
-    if _is_env_python_wrapper(command, python_index):
-        return [python_executable, *command[python_index + 1 :]]
-    canonical = list(command)
-    if python_index == 0 or project_python is not None:
-        canonical[python_index] = python_executable
-    return canonical
-
-
-def _is_env_python_wrapper(command, python_index):
-    if python_index != 1:
-        return False
-    executable = Path(command[0]).name
-    return executable == "env"
-
-
-def _project_python(project_root):
-    if not project_root:
-        return None
-    root = Path(project_root)
-    candidates = [
-        root / ".venv" / "bin" / "python",
-        root / "venv" / "bin" / "python",
-    ]
-    for candidate in candidates:
-        if candidate.exists() and candidate.is_file():
-            return candidate
-    return None
-
-
-def _python_command_index(command):
-    for index, part in enumerate(command[:3]):
-        if _is_python_command(part):
-            return index
-    return None
-
-
-def _is_python_command(value):
-    path = Path(value)
-    name = path.name
-    if value in {".venv/bin/python", "venv/bin/python"}:
-        return True
-    return bool(re.fullmatch(r"python(?:3(?:\.\d+)?)?", name))
+    return _canonical_taskpack_verification_command(command, project_root)
 
 
 def _command_list(command):

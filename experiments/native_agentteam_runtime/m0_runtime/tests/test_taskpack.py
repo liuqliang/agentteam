@@ -59,6 +59,7 @@ from agentteam_runtime.projection_db import (
 )
 import agentteam_runtime.taskpack as taskpack_module
 from agentteam_runtime.taskpack_author import REQUIRED_TASKPACK_FILES
+from agentteam_runtime.taskpack_author import _apply_verification_profile_to_taskpack
 from agentteam_runtime.taskpack_author import _command_list
 from agentteam_runtime.taskpack_author import _canonicalize_codex_taskpack_files
 from agentteam_runtime.taskpack_author import _author_prompt
@@ -8972,6 +8973,85 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("baseline_or_current_behavior", task["required_deliverables"])
             self.assertIn("optimization_candidate_matrix", task["required_deliverables"])
             self.assertIn("metric_delta_or_no_safe_change_evidence", task["required_deliverables"])
+            self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
+
+    def test_draft_taskpack_canonicalizes_env_python_verification_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            profile = {
+                "correctness": {
+                    "command": [
+                        "env",
+                        "PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime",
+                        "python3",
+                        "-m",
+                        "unittest",
+                        "discover",
+                    ]
+                }
+            }
+
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement a small parser improvement.",
+                draft_root=drafts,
+                taskpack_id="env-python-profile",
+                verification_profile=profile,
+            )
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            self.assertEqual(
+                loaded["verification"]["command"],
+                ["python3", "-m", "unittest", "discover"],
+            )
+            self.assertEqual(
+                loaded["verification"]["verification_profile"]["correctness"]["command"],
+                ["python3", "-m", "unittest", "discover"],
+            )
+            self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
+
+    def test_apply_verification_profile_canonicalizes_env_python_wrapper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            profile = {
+                "correctness": {
+                    "command": [
+                        "env",
+                        "PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime",
+                        "python3",
+                        "-m",
+                        "unittest",
+                        "experiments.native_agentteam_runtime.m0_runtime.tests.test_taskpack",
+                        "experiments.native_agentteam_runtime.m0_runtime.tests.test_m0_runtime",
+                    ]
+                }
+            }
+
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement AgentTeam report diagnostics.",
+                draft_root=drafts,
+                taskpack_id="codex-profile-apply",
+            )
+            _apply_verification_profile_to_taskpack(result["taskpack_dir"], profile)
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            self.assertEqual(
+                loaded["verification"]["command"],
+                [
+                    "python3",
+                    "-m",
+                    "unittest",
+                    "experiments.native_agentteam_runtime.m0_runtime.tests.test_taskpack",
+                    "experiments.native_agentteam_runtime.m0_runtime.tests.test_m0_runtime",
+                ],
+            )
             self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
 
     def test_deterministic_taskpack_author_materializes_executable_taskpack_from_grounding(self):
