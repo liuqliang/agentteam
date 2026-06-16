@@ -1346,6 +1346,17 @@ taskpack, but still took 283 seconds of a 300-second budget. The next
 reliability route is author-latency reduction and more mechanical five-file
 generation before broader live loops.
 
+Post-template hardening status: Codex taskpack authoring now creates a
+`required_file_templates.json` scaffold in the author context and references it
+from the prompt. The scaffold makes the five-file output shape explicit without
+placing placeholder files in the taskpack directory. If Codex times out after
+writing all five required files, the author path now attempts a safe salvage:
+canonicalize files, apply the verification profile, and accept the draft only
+when validation passes. A live smoke on 2026-06-16 generated and validated a
+bounded AgentTeam diagnostics taskpack in 287 seconds with normal Codex exit;
+latency remains high, but complete valid output is no longer discarded solely
+because the child process misses the timeout boundary.
+
 Deterministic skeleton experiment status: a unit-level helper can generate a
 valid conservative taskpack skeleton for low-semantic implementation goals while
 marking `semantic_authoring_required`, preserving supplied context references,

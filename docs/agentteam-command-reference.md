@@ -833,6 +833,9 @@ Use it when:
 - You want to send the report summary without rerunning the task.
 - You want the same bounded Chinese multi-task operator digest that
   `agentteam report` renders, without reading the full terminal log.
+- You want completion notifications to include worker diagnostics, including
+  pool diagnostic status, diagnostic-state counts, and notable stale or failed
+  workers when the run recorded them.
 
 Examples:
 
@@ -964,6 +967,15 @@ Use it when:
   to write the five required files before optional exploration and avoid
   external planning workflows. Timeout results include required-file counts,
   missing files, largest output stream, and a compact next action.
+- Codex authoring writes `required_file_templates.json` under the author
+  context directory and points the prompt at it. The bundle is a scaffold for
+  the five required files; it is not placed in the taskpack directory and does
+  not make an empty draft valid.
+- If Codex times out after writing all five required files, AgentTeam attempts
+  a safe salvage: it canonicalizes the draft, applies the verification profile,
+  and accepts the draft only when `validate_taskpack` passes. Accepted salvages
+  are recorded as `accepted_after_timeout` in `author_result.json` and
+  `author_state.json`.
 
 Example:
 
