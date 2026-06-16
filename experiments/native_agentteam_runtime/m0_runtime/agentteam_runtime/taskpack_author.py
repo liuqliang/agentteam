@@ -10,6 +10,7 @@ from .repo_grounding import build_repo_grounding
 from .repo_map import build_repository_map
 from .taskpack import (
     BROAD_FRAMEWORK_REQUIRED_DELIVERABLES,
+    DEFAULT_WORKER_ROLE,
     TASKPACK_SEMANTIC_CONTRACT_VERSION,
     TaskpackValidationError,
     auto_materialize_semantic_taskpack,
@@ -551,6 +552,14 @@ def _draft_with_codex(
 
     repo_map = build_repository_map(project_root, author_context_dir)
 
+    template_bundle_path = _write_author_template_bundle(
+        author_context_dir=author_context_dir,
+        taskpack_id=taskpack_id,
+        project_root=project_root,
+        goal=goal,
+        verification_profile=verification_profile,
+    )
+
     prompt = _author_prompt(
         project_root=project_root,
         goal=goal,
@@ -559,6 +568,7 @@ def _draft_with_codex(
         author_context_dir=author_context_dir,
         repo_map=repo_map,
         verification_profile=verification_profile,
+        template_bundle_path=template_bundle_path,
     )
     prompt_path = author_context_dir / "author_prompt.md"
     prompt_path.write_text(prompt, encoding="utf-8")
@@ -728,6 +738,116 @@ def _utc_now():
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _write_author_template_bundle(
+    *,
+    author_context_dir,
+    taskpack_id,
+    project_root,
+    goal,
+    verification_profile=None,
+):
+    author_context_dir = Path(author_context_dir)
+    project_root = Path(project_root).resolve()
+    goal_kind = classify_goal_kind(goal)
+    task_id = f"TASK-{taskpack_id.upper().replace('-', '_')}-001"
+    profile = _normalize_taskpack_verification_profile(
+        verification_profile,
+        project_root=project_root,
+    )
+    verification_command = profile["correctness"]["command"]
+    templates = {
+        "taskpack.yaml": {
+            "taskpack_schema_version": "taskpack.v1",
+            "taskpack_id": taskpack_id,
+            "status": "draft",
+            "semantic_contract_version": TASKPACK_SEMANTIC_CONTRACT_VERSION,
+            "project_root": str(project_root),
+            "goal": goal,
+            "original_goal": goal,
+            "goal_kind": goal_kind,
+            "runtime": {
+                "default_backend": "codex",
+                "codex": {
+                    "sandbox": "workspace-write",
+                    "timeout_seconds": "replace_with_codex_timeout_seconds",
+                },
+            },
+            "policy": {
+                "allow_merge": False,
+                "operator_review_required": True,
+            },
+            "files": {
+                "agent_pool": "agent_pool.json",
+                "backlog": "backlog.json",
+                "verification": "verification.json",
+            },
+        },
+        "agent_pool.json": {
+            "scheduler_agent_id": "agent-scheduler",
+            "agents": [
+                {
+                    "agent_id": "agent-implementation-worker-1",
+                    "role": DEFAULT_WORKER_ROLE,
+                    "status": "idle",
+                    "inbox_path": "mailboxes/agent-implementation-worker-1/inbox.jsonl",
+                    "outbox_path": "mailboxes/agent-implementation-worker-1/outbox.jsonl",
+                }
+            ],
+            "role_runtime_profiles": {
+                DEFAULT_WORKER_ROLE: {"adapter": "codex"},
+            },
+        },
+        "backlog.json": {
+            "backlog_id": f"BL-{taskpack_id}",
+            "items": [
+                {
+                    "task_id": task_id,
+                    "objective": "replace_with_bounded_executable_objective",
+                    "goal_alignment": _default_goal_alignment(goal),
+                    "work_type": _default_work_type(goal_kind),
+                    "required_deliverables": list(_default_required_deliverables(goal)),
+                    "read_scope": ["replace_with_narrow_read_scope"],
+                    "write_scope": ["replace_with_narrow_write_scope"],
+                    "required_role": DEFAULT_WORKER_ROLE,
+                    "backlog_status": "ready",
+                    "risk_target": "L1",
+                    "depends_on": [],
+                    "blockers": [],
+                }
+            ],
+        },
+        "verification.json": {
+            "verification_schema_version": "taskpack_verification.v1",
+            "command": verification_command,
+            "verification_profile": profile,
+            "success_criteria": [
+                "verification command exits with code 0",
+                "runtime validation accepts changed files inside declared write_scope",
+            ],
+        },
+        "README.md": (
+            "# Taskpack draft\n\n"
+            "Replace this template with a concise summary of the taskpack goal, "
+            "scopes, and verification command.\n"
+        ),
+    }
+    path = author_context_dir / "required_file_templates.json"
+    _write_json(
+        path,
+        {
+            "template_schema_version": "agentteam_author_required_file_templates.v1",
+            "taskpack_id": taskpack_id,
+            "required_files": list(REQUIRED_TASKPACK_FILES),
+            "instruction": (
+                "Use these templates as structural scaffolds only; replace placeholder "
+                "values with task-specific content before writing files into taskpack_dir."
+            ),
+            "templates": templates,
+        },
+    )
+    return path
+
+
 def _author_prompt(
     project_root,
     goal,
@@ -736,6 +856,7 @@ def _author_prompt(
     author_context_dir,
     repo_map,
     verification_profile=None,
+    template_bundle_path=None,
 ):
     repo_paths = repo_map["paths"]
     verification_profile_json = json.dumps(verification_profile or {}, sort_keys=True)
@@ -754,6 +875,8 @@ def _author_prompt(
         "Do not edit the project root. Do not run repository-changing commands.",
         "Write only these files directly inside the taskpack directory:",
         *[f"- {name}" for name in REQUIRED_TASKPACK_FILES],
+        "",
+        *_author_template_bundle_prompt(template_bundle_path),
         "",
         (
             "Do not create helper files, subdirectories, symlinks, "
@@ -892,6 +1015,23 @@ def _direct_artifact_protocol_prompt():
             "- If context is incomplete, write a conservative valid taskpack with a "
             "bounded audit or implementation item instead of spending the budget on "
             "open-ended analysis."
+        ),
+    ]
+
+
+def _author_template_bundle_prompt(template_bundle_path):
+    if not template_bundle_path:
+        return []
+    return [
+        "Required file template bundle:",
+        f"- {template_bundle_path}",
+        (
+            "- Open this bundle first and use it as a structural scaffold for the "
+            "five required files."
+        ),
+        (
+            "- Do not copy placeholder values blindly; replace placeholder values "
+            "with task-specific objective, scope, evidence, and verification content."
         ),
     ]
 

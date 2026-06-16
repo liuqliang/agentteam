@@ -64,6 +64,7 @@ from agentteam_runtime.taskpack_author import _command_list
 from agentteam_runtime.taskpack_author import _canonicalize_codex_taskpack_files
 from agentteam_runtime.taskpack_author import _author_prompt
 from agentteam_runtime.taskpack_author import _run_codex_author_command
+from agentteam_runtime.taskpack_author import _write_author_template_bundle
 
 
 def _init_repo(path):
@@ -9459,6 +9460,60 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("Direct artifact-production protocol:", prompt)
             self.assertIn("Do not read skill docs", prompt)
             self.assertIn("write the five required taskpack files before optional exploration", prompt)
+
+    def test_codex_taskpack_author_prompt_references_required_file_template_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            author_context_dir = tmp_path / "drafts" / ".direct-author-author"
+            taskpack_dir = tmp_path / "drafts" / "direct-author"
+            _init_repo(repo)
+            author_context_dir.mkdir(parents=True)
+            template_path = _write_author_template_bundle(
+                author_context_dir=author_context_dir,
+                taskpack_id="direct-author",
+                project_root=repo,
+                goal="Draft a bounded follow-up taskpack.",
+                verification_profile={
+                    "correctness": {
+                        "command": [
+                            "env",
+                            "PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime",
+                            "python3",
+                            "-m",
+                            "unittest",
+                            "discover",
+                        ]
+                    }
+                },
+            )
+
+            prompt = _author_prompt(
+                project_root=repo,
+                goal="Draft a bounded follow-up taskpack.",
+                taskpack_id="direct-author",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                repo_map={
+                    "paths": {
+                        "manifest_path": "manifest.json",
+                        "inventory_path": "inventory.json",
+                        "symbols_path": "symbols.json",
+                    }
+                },
+                verification_profile=None,
+                template_bundle_path=template_path,
+            )
+            bundle = json.loads(template_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(set(bundle["templates"]), set(REQUIRED_TASKPACK_FILES))
+            self.assertEqual(
+                bundle["templates"]["verification.json"]["command"],
+                ["python3", "-m", "unittest", "discover"],
+            )
+            self.assertIn("Required file template bundle:", prompt)
+            self.assertIn(str(template_path), prompt)
+            self.assertIn("replace placeholder values", prompt)
 
     def test_codex_taskpack_author_timeout_result_includes_file_diagnostic(self):
         with tempfile.TemporaryDirectory() as tmp:
