@@ -9560,6 +9560,58 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(diagnostic["largest_stream"], "stderr")
             self.assertIn("author-direct", diagnostic["next_action"])
 
+    def test_codex_taskpack_author_spools_raw_output_outside_result_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            draft_root = tmp_path / "drafts"
+            taskpack_dir = draft_root / "spooled-author"
+            author_context_dir = draft_root / ".spooled-author-author"
+            taskpack_dir.mkdir(parents=True)
+            author_context_dir.mkdir(parents=True)
+            result_path = author_context_dir / "author_result.json"
+            state_path = author_context_dir / "author_state.json"
+            prompt_path = author_context_dir / "author_prompt.md"
+            prompt_path.write_text("prompt", encoding="utf-8")
+            stdout_text = "stdout-line\n" * 700
+            stderr_text = "stderr-line\n" * 700
+
+            completed = _run_codex_author_command(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys; "
+                        f"sys.stdout.write({stdout_text!r}); "
+                        f"sys.stderr.write({stderr_text!r}); "
+                        "sys.exit(1)"
+                    ),
+                ],
+                draft_root=draft_root,
+                prompt="",
+                timeout_seconds=5,
+                state_path=state_path,
+                result_path=result_path,
+                taskpack_id="spooled-author",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                prompt_path=prompt_path,
+            )
+
+            self.assertEqual(completed.returncode, 1)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertNotIn("stdout", result)
+            self.assertNotIn("stderr", result)
+            output = result["output"]
+            self.assertEqual(output["stdout_bytes"], len(stdout_text.encode("utf-8")))
+            self.assertEqual(output["stderr_bytes"], len(stderr_text.encode("utf-8")))
+            self.assertLess(len(output["stdout_excerpt"]), len(stdout_text))
+            self.assertLess(len(output["stderr_excerpt"]), len(stderr_text))
+            self.assertEqual(Path(output["stdout_path"]).read_text(encoding="utf-8"), stdout_text)
+            self.assertEqual(Path(output["stderr_path"]).read_text(encoding="utf-8"), stderr_text)
+            self.assertEqual(state["output"]["stdout_path"], output["stdout_path"])
+            self.assertEqual(state["output"]["stderr_path"], output["stderr_path"])
+
     def test_fake_taskpack_author_draft_can_be_frozen(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

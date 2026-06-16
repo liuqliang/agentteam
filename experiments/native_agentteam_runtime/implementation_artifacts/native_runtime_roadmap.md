@@ -1357,6 +1357,12 @@ bounded AgentTeam diagnostics taskpack in 287 seconds with normal Codex exit;
 latency remains high, but complete valid output is no longer discarded solely
 because the child process misses the timeout boundary.
 
+Post-output-spooling hardening status: Codex author stdout/stderr are now
+written to `author_stdout.log` and `author_stderr.log` under the author context
+directory. `author_result.json` and `author_state.json` keep the output paths,
+byte counts, and bounded excerpts instead of embedding full raw streams, so
+operator-facing diagnostics remain compact while raw evidence stays available.
+
 Deterministic skeleton experiment status: a unit-level helper can generate a
 valid conservative taskpack skeleton for low-semantic implementation goals while
 marking `semantic_authoring_required`, preserving supplied context references,

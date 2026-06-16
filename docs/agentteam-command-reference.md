@@ -971,6 +971,10 @@ Use it when:
   context directory and points the prompt at it. The bundle is a scaffold for
   the five required files; it is not placed in the taskpack directory and does
   not make an empty draft valid.
+- Author stdout/stderr are spooled to `author_stdout.log` and
+  `author_stderr.log` in the author context directory. `author_result.json` and
+  `author_state.json` keep paths, byte counts, and bounded excerpts instead of
+  embedding full raw streams.
 - If Codex times out after writing all five required files, AgentTeam attempts
   a safe salvage: it canonicalizes the draft, applies the verification profile,
   and accepts the draft only when `validate_taskpack` passes. Accepted salvages

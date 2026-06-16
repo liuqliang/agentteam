@@ -37,6 +37,7 @@ REQUIRED_TASKPACK_FILES = [
     "verification.json",
     "README.md",
 ]
+AUTHOR_OUTPUT_EXCERPT_CHARS = 2000
 
 
 def draft_taskpack_from_goal(
@@ -591,13 +592,15 @@ def _draft_with_codex(
         progress_interval_seconds=progress_interval_seconds,
     )
     if completed.returncode != -9:
+        existing_result = _read_json(result_path)
+        if not isinstance(existing_result, dict):
+            existing_result = {}
         _write_json(
             result_path,
             {
+                **existing_result,
                 "status": "completed" if completed.returncode == 0 else "failed",
                 "exit_code": completed.returncode,
-                "stdout": completed.stdout,
-                "stderr": completed.stderr,
             },
         )
 
@@ -711,6 +714,7 @@ def _run_codex_author_command(
                 returncode = -9 if timed_out else process.returncode
                 status = "timed_out" if timed_out else ("completed" if returncode == 0 else "failed")
                 completed = subprocess.CompletedProcess(command, returncode, stdout, stderr)
+                output = _write_author_output_summary(author_context_dir, stdout, stderr)
                 diagnostic = _codex_author_diagnostic(taskpack_dir, stdout, stderr)
                 _write_json(
                     result_path,
@@ -718,8 +722,7 @@ def _run_codex_author_command(
                         "status": status,
                         "exit_code": returncode,
                         "timeout_seconds": timeout_seconds,
-                        "stdout": stdout,
-                        "stderr": stderr,
+                        "output": output,
                         "diagnostic": diagnostic,
                     },
                 )
@@ -727,8 +730,9 @@ def _run_codex_author_command(
                     **base_state,
                     "author_status": status,
                     "exit_code": returncode,
-                    "stdout_bytes": len(stdout.encode("utf-8")),
-                    "stderr_bytes": len(stderr.encode("utf-8")),
+                    "stdout_bytes": output["stdout_bytes"],
+                    "stderr_bytes": output["stderr_bytes"],
+                    "output": output,
                     "diagnostic": diagnostic,
                     "finished_at": _utc_now(),
                 }
@@ -784,6 +788,38 @@ def _write_author_state(state_path, state, started_monotonic, progress_callback=
     _write_json(state_path, state)
     if progress_callback:
         progress_callback(dict(state))
+
+
+def _write_author_output_summary(author_context_dir, stdout, stderr):
+    author_context_dir = Path(author_context_dir)
+    stdout_text = str(stdout or "")
+    stderr_text = str(stderr or "")
+    stdout_path = author_context_dir / "author_stdout.log"
+    stderr_path = author_context_dir / "author_stderr.log"
+    stdout_path.write_text(stdout_text, encoding="utf-8")
+    stderr_path.write_text(stderr_text, encoding="utf-8")
+    return {
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "stdout_bytes": len(stdout_text.encode("utf-8")),
+        "stderr_bytes": len(stderr_text.encode("utf-8")),
+        "stdout_excerpt": _bounded_author_output_excerpt(stdout_text),
+        "stderr_excerpt": _bounded_author_output_excerpt(stderr_text),
+    }
+
+
+def _bounded_author_output_excerpt(text, limit=AUTHOR_OUTPUT_EXCERPT_CHARS):
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    marker = "[truncated output]\n"
+    tail_limit = max(limit - len(marker), 0)
+    omitted = len(text) - tail_limit
+    marker = f"[truncated {omitted} chars]\n"
+    tail_limit = max(limit - len(marker), 0)
+    omitted = len(text) - tail_limit
+    marker = f"[truncated {omitted} chars]\n"
+    return marker + text[-tail_limit:]
 
 
 def _utc_now():
