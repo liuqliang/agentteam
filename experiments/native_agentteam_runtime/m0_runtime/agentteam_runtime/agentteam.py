@@ -5342,6 +5342,7 @@ def _read_jsonl(path):
 
 
 def _read_json_if_exists(path):
+    path = Path(path)
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))

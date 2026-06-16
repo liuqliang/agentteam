@@ -8367,6 +8367,74 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["next_goal"], summary["items"][0]["objective"])
             self.assertIn("agentteam next --from-taskpack first-pass", summary["next_command"])
 
+    def test_agentteam_cli_queue_show_loads_pursue_goal_memory_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "pursue-loop-r2"
+            memory_path = work_root / "pursue" / "pursue-loop-goal-memory.json"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "queue-project")
+            _write_completed_operator_run(run_dir)
+            _write_json(
+                memory_path,
+                {
+                    "memory_schema_version": "goal_memory.v1",
+                    "memory_path": str(memory_path),
+                    "latest_taskpack_id": "pursue-loop-r2",
+                    "follow_up_queue": [
+                        {
+                            "objective": "继续修复 queue show 的 pursue recap 路径读取。",
+                            "source_taskpack_id": "pursue-loop-r2",
+                            "source_report_path": str(run_dir / "reports" / "final_report.md"),
+                            "readiness": "ready",
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                work_root / "pursue" / "pursue-loop.json",
+                {
+                    "pursue_id": "pursue-loop",
+                    "rounds_completed": 2,
+                    "max_rounds": 2,
+                    "stop_reason": "max_rounds_reached",
+                    "latest_taskpack_id": "pursue-loop-r2",
+                    "latest_report_path": str(run_dir / "reports" / "final_report.md"),
+                    "goal_memory_path": str(memory_path),
+                    "runs": [{"taskpack_id": "pursue-loop-r2"}],
+                },
+            )
+
+            queue_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "queue",
+                    "show",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "pursue-loop-r2",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(queue_completed.returncode, 0, queue_completed.stderr)
+            summary = json.loads(queue_completed.stdout)
+            self.assertEqual(summary["queue_status"], "ready")
+            self.assertEqual(summary["selected_item"]["source"], "report.next_steps")
+            self.assertTrue(
+                any(item["source"] == "goal_memory.follow_up_queue" for item in summary["items"])
+            )
+
     def test_agentteam_cli_queue_next_renders_suggested_next_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
