@@ -486,13 +486,16 @@ class TaskpackTests(unittest.TestCase):
         self.assertTrue(summary.get("projection_db_path"))
         self.assertNotIn("projection_warning", summary)
 
-    def assertProjectionFallbackMetadata(self, summary, projection_status):
+    def assertProjectionFallbackHealthMetadata(self, summary, projection_status):
         self.assertEqual(summary.get("projection_source"), "files")
         self.assertEqual(summary.get("projection_status"), projection_status)
         self.assertEqual(summary.get("projection_warning"), "projection_db_unavailable")
+        self.assertTrue(summary.get("projection_db_path"))
+
+    def assertProjectionFallbackMetadata(self, summary, projection_status):
+        self.assertProjectionFallbackHealthMetadata(summary, projection_status)
         self.assertEqual(summary.get("next_action"), "run agentteam db rebuild")
         self.assertEqual(summary.get("operator_hint"), "agentteam db rebuild")
-        self.assertTrue(summary.get("projection_db_path"))
 
     def test_project_projection_db_rebuild_indexes_runs_taskpacks_events_and_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1832,7 +1835,15 @@ class TaskpackTests(unittest.TestCase):
                 "report": self._run_agentteam_json("report", "--project-root", str(repo)),
             }
             for command, summary in stale.items():
-                self.assertProjectionFallbackMetadata(summary, "stale")
+                if command == "status":
+                    self.assertProjectionFallbackHealthMetadata(summary, "stale")
+                    self.assertEqual(summary.get("projection_next_action"), "run agentteam db rebuild")
+                    self.assertIn(
+                        "agentteam report --taskpack projection-parity-run",
+                        summary.get("next_action") or "",
+                    )
+                else:
+                    self.assertProjectionFallbackMetadata(summary, "stale")
                 self.assertEqual(
                     self._projection_parity_payload(command, summary),
                     expected[command],
@@ -1858,7 +1869,15 @@ class TaskpackTests(unittest.TestCase):
                 "report": self._run_agentteam_json("report", "--project-root", str(repo)),
             }
             for command, summary in corrupt.items():
-                self.assertProjectionFallbackMetadata(summary, "corrupt")
+                if command == "status":
+                    self.assertProjectionFallbackHealthMetadata(summary, "corrupt")
+                    self.assertEqual(summary.get("projection_next_action"), "run agentteam db rebuild")
+                    self.assertIn(
+                        "agentteam report --taskpack projection-parity-run",
+                        summary.get("next_action") or "",
+                    )
+                else:
+                    self.assertProjectionFallbackMetadata(summary, "corrupt")
                 self.assertEqual(
                     self._projection_parity_payload(command, summary),
                     expected[command],
@@ -4338,8 +4357,90 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             summary = json.loads(completed.stdout)
-            self.assertProjectionFallbackMetadata(summary, "stale")
+            self.assertProjectionFallbackHealthMetadata(summary, "stale")
+            self.assertEqual(summary["projection_next_action"], "run agentteam db rebuild")
+            self.assertIn("agentteam report --taskpack status-db-run", summary["next_action"])
+            self.assertIn("agentteam paths --taskpack status-db-run", summary["next_action"])
             self.assertEqual(summary["latest_run"], "status-db-run")
+
+    def test_agentteam_cli_status_prioritizes_integration_guidance_over_projection_noise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "status-actionable-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "status-actionable-project")
+            _write_completed_operator_run(run_dir)
+            rebuild_project_projection_db(work_root)
+            with (run_dir / "events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "event_id": "EVT-0002",
+                            "event_type": "backlog_updated",
+                            "sequence": 2,
+                            "time": "2026-06-12T00:00:01Z",
+                            "payload": {
+                                "task_id": "optimize-pipeline",
+                                "task_status": "done",
+                            },
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["projection_warning"], "projection_db_unavailable")
+            self.assertIn("projection_next_action", summary)
+            self.assertEqual(summary["projection_next_action"], "run agentteam db rebuild")
+            self.assertIn("agentteam report --taskpack status-actionable-run", summary["next_action"])
+            self.assertIn("agentteam paths --taskpack status-actionable-run", summary["next_action"])
+            self.assertIn("integration baseline", summary["operator_hint"])
+            self.assertNotEqual(summary["next_action"], summary["projection_next_action"])
+
+            text_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(text_completed.returncode, 0, text_completed.stderr)
+            self.assertIn("projection_warning: projection_db_unavailable", text_completed.stdout)
+            self.assertIn("projection_next_action: run agentteam db rebuild", text_completed.stdout)
+            self.assertIn(
+                "next_action: agentteam report --taskpack status-actionable-run",
+                text_completed.stdout,
+            )
 
     def test_agentteam_cli_logs_tails_latest_run_events(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -3878,6 +3878,10 @@ def _projection_text_lines(summary):
         lines.append(f"projection_status: {summary['projection_status']}")
     if summary.get("projection_warning"):
         lines.append(f"projection_warning: {summary['projection_warning']}")
+    if summary.get("projection_next_action"):
+        lines.append(f"projection_next_action: {summary['projection_next_action']}")
+    if summary.get("projection_operator_hint"):
+        lines.append(f"projection_operator_hint: {summary['projection_operator_hint']}")
     if summary.get("next_action"):
         lines.append(f"next_action: {summary['next_action']}")
     if summary.get("operator_hint"):
@@ -4454,7 +4458,73 @@ def _build_run_status_summary(profile, run_dir):
         "run_dir": str(run_dir),
         **projection_metadata,
     }
+    return _with_prioritized_status_guidance(summary)
+
+
+def _with_prioritized_status_guidance(summary):
+    guidance = _status_operator_guidance(summary)
+    if not guidance:
+        return summary
+    summary = dict(summary)
+    if summary.get("projection_warning"):
+        if summary.get("next_action"):
+            summary.setdefault("projection_next_action", summary["next_action"])
+        if summary.get("operator_hint"):
+            summary.setdefault("projection_operator_hint", summary["operator_hint"])
+    summary["next_action"] = guidance["next_action"]
+    if guidance.get("operator_hint"):
+        summary["operator_hint"] = guidance["operator_hint"]
     return summary
+
+
+def _status_operator_guidance(summary):
+    run_id = summary.get("latest_run") or "latest"
+    run_dir = summary.get("run_dir") or "<run>"
+    permission_requests = int(summary.get("permission_requests") or 0)
+    if permission_requests:
+        return {
+            "next_action": f"agentteam permissions list --run-dir {run_dir}",
+            "operator_hint": "Resolve pending permission requests before continuing runtime work.",
+        }
+    manual_gates = int(summary.get("manual_gates") or 0)
+    if manual_gates:
+        return {
+            "next_action": f"agentteam resume --run-dir {run_dir} --interactive",
+            "operator_hint": "Answer the pending manual gate before continuing runtime work.",
+        }
+    pursue_recap = summary.get("pursue_recap") if isinstance(summary.get("pursue_recap"), dict) else {}
+    pursue_action = _first_non_empty_text(pursue_recap.get("operator_next_action"))
+    if pursue_action:
+        return {
+            "next_action": pursue_action,
+            "operator_hint": "Use the pursue or follow-up queue guidance before projection DB maintenance.",
+        }
+    baseline = summary.get("integration_baseline") if isinstance(summary.get("integration_baseline"), dict) else {}
+    if baseline.get("branch"):
+        commands = _review_commands_for_run(run_id, baseline)
+        action_parts = [
+            commands.get("report") or f"agentteam report --taskpack {run_id}",
+            commands.get("paths") or f"agentteam paths --taskpack {run_id}",
+        ]
+        if baseline.get("worktree_exists") and commands.get("diff"):
+            action_parts.append(commands["diff"])
+        action_parts.append(
+            f"review integration baseline before {commands.get('integrate') or f'agentteam integrate --taskpack {run_id}'}"
+        )
+        return {
+            "next_action": "; ".join(action_parts),
+            "operator_hint": (
+                "Review the integration baseline before source merge, push, or release activation."
+            ),
+        }
+    tasks = summary.get("tasks") if isinstance(summary.get("tasks"), dict) else {}
+    integration = summary.get("integration") if isinstance(summary.get("integration"), dict) else {}
+    if int(tasks.get("blocked") or 0) or int(integration.get("blocked") or 0):
+        return {
+            "next_action": f"agentteam report --taskpack {run_id}",
+            "operator_hint": "Review blocked task or integration evidence before continuing.",
+        }
+    return None
 
 
 def _build_paths_summary(args, profile, run_dir):
