@@ -5164,6 +5164,8 @@ def _status_last_worker(worker_registry):
     worker_id = worker.get("worker_agent_id") or worker.get("worker_id") or "unknown-worker"
     worker_status = worker.get("worker_status") or "unknown"
     details = [f"{worker_id} {worker_status}"]
+    if worker.get("worker_diagnostic_state"):
+        details.append(f"diagnostic={worker['worker_diagnostic_state']}")
     if worker.get("last_activity"):
         details.append(f"activity={worker['last_activity']}")
     if worker.get("last_poll_status"):

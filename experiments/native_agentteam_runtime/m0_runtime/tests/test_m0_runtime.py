@@ -4786,6 +4786,7 @@ class M0RuntimeTests(unittest.TestCase):
                     {
                         "worker_agent_id": "agent-implementation-worker-1",
                         "worker_status": "running",
+                        "worker_diagnostic_state": "processing_stale",
                         "last_activity": "processing",
                         "last_poll_status": "processing",
                         "heartbeat_task_id": "TASK-001",
@@ -4796,6 +4797,7 @@ class M0RuntimeTests(unittest.TestCase):
         )
 
         self.assertIn("agent-implementation-worker-1 running", line)
+        self.assertIn("diagnostic=processing_stale", line)
         self.assertIn("activity=processing", line)
         self.assertIn("poll=processing", line)
         self.assertIn("task=TASK-001", line)
