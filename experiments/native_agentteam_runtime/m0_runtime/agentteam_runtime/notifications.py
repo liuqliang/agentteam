@@ -267,7 +267,13 @@ def _event_text(event, run_dir, project):
         lines.append(f"Failure: {failure}")
     operator_report = payload.get("operator_report")
     if isinstance(operator_report, dict):
-        lines.extend(_operator_report_text(operator_report))
+        report = dict(operator_report)
+        worker_diagnostics = payload.get("worker_diagnostics")
+        if isinstance(worker_diagnostics, dict) and worker_diagnostics:
+            report["worker_diagnostics"] = worker_diagnostics
+        lines.extend(_operator_report_text(report))
+    else:
+        _extend_notification_worker_diagnostic_lines(lines, payload)
     lines.extend(
         [
             f"Run dir: {run_dir}",
@@ -285,6 +291,7 @@ def _operator_report_text(report):
         lines.append("中文工作汇报:")
         _extend_notification_pursue_recap_lines(lines, report)
         _extend_limited_section_items(lines, operator_digest)
+        _extend_notification_worker_diagnostic_lines(lines, report)
         lines.append(format_token_usage(_notification_token_usage(report, task_reports)))
         return lines
 
@@ -292,6 +299,7 @@ def _operator_report_text(report):
         lines.append("工作摘要:")
         lines.append("- 无结构化任务报告；请查看 agentteam report。")
         _extend_notification_pursue_recap_lines(lines, report)
+        _extend_notification_worker_diagnostic_lines(lines, report)
         lines.append(format_token_usage(_notification_token_usage(report, task_reports)))
         return lines
 
@@ -313,8 +321,48 @@ def _operator_report_text(report):
     _extend_notification_pursue_recap_lines(lines, report)
     lines.append("中文工作汇报:")
     _extend_limited_section_items(lines, summary.get("operator_digest"))
+    _extend_notification_worker_diagnostic_lines(lines, report)
     lines.append(format_token_usage(_notification_token_usage(report, task_reports)))
     return lines
+
+
+def _extend_notification_worker_diagnostic_lines(lines, report):
+    diagnostics = report.get("worker_diagnostics") if isinstance(report, dict) else None
+    if not isinstance(diagnostics, dict) or not diagnostics:
+        return
+    pool_status = diagnostics.get("pool_diagnostic_status") or "unknown"
+    counts = diagnostics.get("diagnostic_worker_counts")
+    parts = [f"pool={pool_status}"]
+    if isinstance(counts, dict):
+        for key, value in sorted(counts.items()):
+            if value:
+                parts.append(f"{key}={value}")
+    lines.append(f"- Worker 诊断：{'；'.join(parts)}")
+    workers = diagnostics.get("workers")
+    if not isinstance(workers, list):
+        return
+    for worker in _notable_notification_workers(workers):
+        worker_id = worker.get("worker_agent_id") or worker.get("worker_id") or "unknown-worker"
+        details = [f"{worker_id} diagnostic={worker.get('worker_diagnostic_state') or 'unknown'}"]
+        if worker.get("worker_status"):
+            details.append(f"status={worker['worker_status']}")
+        if worker.get("last_activity"):
+            details.append(f"activity={worker['last_activity']}")
+        if worker.get("heartbeat_age_seconds") is not None:
+            details.append(f"heartbeat_age_seconds={worker['heartbeat_age_seconds']}")
+        lines.append(f"- Worker：{' '.join(details)}")
+
+
+def _notable_notification_workers(workers):
+    notable_states = {"no_heartbeat", "processing_stale", "exited", "unknown"}
+    notable = []
+    for worker in workers:
+        if not isinstance(worker, dict):
+            continue
+        state = worker.get("worker_diagnostic_state") or "unknown"
+        if state in notable_states:
+            notable.append(worker)
+    return notable[:3]
 
 
 def _extend_notification_pursue_recap_lines(lines, report):

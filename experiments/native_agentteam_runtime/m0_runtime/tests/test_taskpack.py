@@ -2969,6 +2969,27 @@ class TaskpackTests(unittest.TestCase):
             run_dir = work_root / "runs" / "completed-run"
             _init_repo(repo)
             _write_completed_operator_run(run_dir)
+            (run_dir / "state" / "worker_process_registry.json").write_text(
+                json.dumps(
+                    {
+                        "registry_status": "running",
+                        "worker_count": 1,
+                        "pool_diagnostic_status": "attention",
+                        "diagnostic_worker_counts": {"processing_stale": 1},
+                        "workers": [
+                            {
+                                "worker_agent_id": "implementation-worker-1",
+                                "worker_status": "running",
+                                "worker_diagnostic_state": "processing_stale",
+                                "last_activity": "processing",
+                                "heartbeat_age_seconds": 181,
+                            }
+                        ],
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
             server, payloads = _start_webhook_capture_server()
             try:
                 env = _test_env()
@@ -3040,6 +3061,8 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("Token usage: total=1500 input=1200 output=300 reported=1/1", message)
             self.assertIn("Scanned the repository and implemented one evidence-backed optimization.", message)
             self.assertIn("gesture_recognition/sim_eval.py", message)
+            self.assertIn("Worker 诊断：pool=attention；processing_stale=1", message)
+            self.assertIn("implementation-worker-1 diagnostic=processing_stale", message)
             self.assertNotIn("Completion summary:", message)
             self.assertNotIn("What changed:", message)
 

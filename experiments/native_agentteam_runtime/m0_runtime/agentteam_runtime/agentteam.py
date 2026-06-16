@@ -2969,6 +2969,7 @@ def _run_completed_notification_event(report):
             "task_count": report.get("task_count", 0),
             "blocked_count": report.get("blocked_count", 0),
             "operator_report": report.get("operator_report") or {},
+            "worker_diagnostics": report.get("worker_diagnostics") or {},
         },
     }
 
