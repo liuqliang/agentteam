@@ -4442,6 +4442,63 @@ class TaskpackTests(unittest.TestCase):
                 text_completed.stdout,
             )
 
+    def test_agentteam_cli_status_prioritizes_running_guidance_before_integration_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "status-running-baseline"
+            baseline_worktree = run_dir / "integration-baseline"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "status-running-project")
+            baseline_worktree.mkdir(parents=True)
+            _write_json(
+                run_dir / "state" / "two_phase_scheduler_state.json",
+                {
+                    "scheduler_status": "running",
+                    "integration_baseline": {
+                        "integration_baseline_status": "ready",
+                        "integration_baseline_branch": "agentteam/run/status-running-baseline/integration",
+                        "integration_baseline_worktree_path": str(baseline_worktree.resolve()),
+                        "integration_baseline_head_sha": "abc123",
+                    },
+                    "inflight_attempts": [
+                        {
+                            "task_id": "optimize-pipeline",
+                            "attempt_id": "ATTEMPT-001",
+                            "agent_id": "implementation-worker-1",
+                        }
+                    ],
+                },
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["run_status"], "running")
+            self.assertIn("agentteam watch --taskpack status-running-baseline", summary["next_action"])
+            self.assertNotIn("review integration baseline", summary["next_action"])
+            self.assertNotIn("agentteam integrate", summary["next_action"])
+            self.assertIn("run is still active", summary["operator_hint"])
+
     def test_agentteam_cli_logs_tails_latest_run_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

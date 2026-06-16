@@ -4492,6 +4492,11 @@ def _status_operator_guidance(summary):
             "next_action": f"agentteam resume --run-dir {run_dir} --interactive",
             "operator_hint": "Answer the pending manual gate before continuing runtime work.",
         }
+    if _status_summary_is_active(summary):
+        return {
+            "next_action": f"agentteam watch --taskpack {run_id}; agentteam status --run-dir {run_dir}",
+            "operator_hint": "The run is still active; watch progress before reviewing integration results.",
+        }
     pursue_recap = summary.get("pursue_recap") if isinstance(summary.get("pursue_recap"), dict) else {}
     pursue_action = _first_non_empty_text(pursue_recap.get("operator_next_action"))
     if pursue_action:
@@ -4525,6 +4530,21 @@ def _status_operator_guidance(summary):
             "operator_hint": "Review blocked task or integration evidence before continuing.",
         }
     return None
+
+
+def _status_summary_is_active(summary):
+    overall_status = str(summary.get("overall_status") or "").strip().lower()
+    run_status = str(summary.get("run_status") or summary.get("status") or "").strip().lower()
+    if overall_status in {"authoring", "running"} or run_status == "running":
+        return True
+    inflight = summary.get("inflight") if isinstance(summary.get("inflight"), dict) else {}
+    if int(inflight.get("total") or 0) > 0:
+        return True
+    workers = summary.get("workers") if isinstance(summary.get("workers"), dict) else {}
+    if int(workers.get("running") or 0) > 0:
+        return True
+    authoring = summary.get("authoring") if isinstance(summary.get("authoring"), dict) else {}
+    return int(authoring.get("active_count") or 0) > 0
 
 
 def _build_paths_summary(args, profile, run_dir):
