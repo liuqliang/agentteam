@@ -603,6 +603,20 @@ def _draft_with_codex(
 
     _raise_if_target_repo_modified(project_root, repo_status_before)
     if completed.returncode == -9:
+        salvage = _salvage_timed_out_codex_taskpack(
+            taskpack_dir=taskpack_dir,
+            verification_profile=verification_profile,
+        )
+        if salvage["accepted"]:
+            _record_codex_author_salvage(result_path, state_path, salvage)
+            return {
+                "taskpack_dir": str(taskpack_dir),
+                "taskpack_id": taskpack_id,
+                "author_context_path": str(author_context_dir),
+                "author_result_path": str(result_path),
+                "author_timeout_salvaged": True,
+                "author_salvage": salvage,
+            }
         raise TaskpackValidationError(
             _codex_author_failure_message(
                 "codex taskpack author timed out",
@@ -622,6 +636,7 @@ def _draft_with_codex(
         "taskpack_id": taskpack_id,
         "author_context_path": str(author_context_dir),
         "author_result_path": str(result_path),
+        "author_timeout_salvaged": False,
     }
 
 
@@ -719,6 +734,43 @@ def _run_codex_author_command(
                 }
                 _write_author_state(state_path, final_state, started_monotonic, progress_callback)
                 return completed
+
+
+def _salvage_timed_out_codex_taskpack(*, taskpack_dir, verification_profile=None):
+    try:
+        _verify_required_taskpack_files(taskpack_dir)
+        _canonicalize_codex_taskpack_files(taskpack_dir)
+        _apply_verification_profile_to_taskpack(taskpack_dir, verification_profile)
+        validation = validate_taskpack(taskpack_dir)
+    except Exception as exc:
+        return {
+            "accepted": False,
+            "reason": "validation_failed_after_timeout",
+            "error_class": exc.__class__.__name__,
+            "error_summary": str(exc),
+        }
+    return {
+        "accepted": True,
+        "reason": "complete_valid_taskpack_written_before_timeout",
+        "validation": validation,
+    }
+
+
+def _record_codex_author_salvage(result_path, state_path, salvage):
+    result = _read_json(result_path)
+    if not isinstance(result, dict):
+        result = {}
+    result["status"] = "accepted_after_timeout"
+    result["salvage"] = salvage
+    _write_json(result_path, result)
+
+    state = _read_json(state_path)
+    if not isinstance(state, dict):
+        state = {}
+    state["author_status"] = "accepted_after_timeout"
+    state["salvage"] = salvage
+    state["updated_at"] = _utc_now()
+    _write_json(state_path, state)
 
 
 def _write_author_state(state_path, state, started_monotonic, progress_callback=None):

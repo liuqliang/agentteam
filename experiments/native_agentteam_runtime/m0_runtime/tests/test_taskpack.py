@@ -10865,6 +10865,108 @@ class TaskpackTests(unittest.TestCase):
             self.assertTrue(Path(state["prompt_path"]).exists())
             self.assertTrue(Path(state["result_path"]).exists())
 
+    def test_codex_taskpack_author_accepts_valid_complete_draft_on_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            taskpack_dir = drafts / "timeout-complete-draft"
+            fake_codex = tmp_path / "fake_timeout_complete_author.py"
+            _init_repo(repo)
+            fake_codex.write_text(
+                "\n".join(
+                    [
+                        "import json",
+                        "import pathlib",
+                        "import sys",
+                        "import time",
+                        "repo = pathlib.Path(sys.argv[1]).resolve()",
+                        "taskpack_dir = pathlib.Path(sys.argv[2]).resolve()",
+                        "taskpack_id = taskpack_dir.name",
+                        "goal = 'Improve fixture behavior.'",
+                        "taskpack = {",
+                        "    'taskpack_schema_version': 'taskpack.v1',",
+                        "    'taskpack_id': taskpack_id,",
+                        "    'status': 'draft',",
+                        "    'semantic_contract_version': 'task_semantics.v1',",
+                        "    'project_root': str(repo),",
+                        "    'goal': goal,",
+                        "    'original_goal': goal,",
+                        "    'goal_kind': 'implementation',",
+                        "    'runtime': {'default_backend': 'codex'},",
+                        (
+                            "    'files': {'agent_pool': 'agent_pool.json', "
+                            "'backlog': 'backlog.json', 'verification': 'verification.json'},"
+                        ),
+                        "    'policy': {'allow_merge': False},",
+                        "}",
+                        "agent_pool = {",
+                        "    'scheduler_agent_id': 'agent-scheduler',",
+                        "    'role_runtime_profiles': {'implementation_worker': {'adapter': 'codex'}},",
+                        "    'agents': [{",
+                        "        'agent_id': 'agent-implementation-worker-1',",
+                        "        'role': 'implementation_worker',",
+                        "        'status': 'idle',",
+                        "        'inbox_path': 'mailboxes/agent-implementation-worker-1/inbox.jsonl',",
+                        "        'outbox_path': 'mailboxes/agent-implementation-worker-1/outbox.jsonl',",
+                        "    }],",
+                        "}",
+                        "backlog = {'backlog_id': 'BL-timeout-complete-draft', 'items': [{",
+                        "    'task_id': 'TASK-TIMEOUT-COMPLETE-DRAFT-001',",
+                        "    'objective': 'Improve fixture behavior.',",
+                        "    'goal_alignment': 'Preserves the original goal: Improve fixture behavior.',",
+                        "    'work_type': 'code_implementation',",
+                        "    'required_deliverables': ['verification_summary'],",
+                        "    'backlog_status': 'ready',",
+                        "    'risk_target': 'L1',",
+                        "    'depends_on': [],",
+                        "    'read_scope': ['README.md'],",
+                        "    'write_scope': ['README.md'],",
+                        "    'required_role': 'implementation_worker',",
+                        "    'blockers': [],",
+                        "}]}",
+                        (
+                            "verification = {'verification_schema_version': "
+                            "'taskpack_verification.v1', 'command': ['python3', '-m', "
+                            "'unittest', 'discover'], 'success_criteria': ['tests pass']}"
+                        ),
+                        "for name, payload in [",
+                        "    ('taskpack.yaml', taskpack),",
+                        "    ('agent_pool.json', agent_pool),",
+                        "    ('backlog.json', backlog),",
+                        "    ('verification.json', verification),",
+                        "]:",
+                        (
+                            "    (taskpack_dir / name).write_text(json.dumps(payload), "
+                            "encoding='utf-8')"
+                        ),
+                        "(taskpack_dir / 'README.md').write_text('# timeout complete draft\\n', encoding='utf-8')",
+                        "time.sleep(10)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = draft_taskpack_from_goal(
+                project_root=repo,
+                goal="Improve fixture behavior.",
+                draft_root=drafts,
+                author_runtime="codex",
+                taskpack_id="timeout-complete-draft",
+                codex_command=["python3", str(fake_codex), str(repo), str(taskpack_dir)],
+                codex_timeout_seconds=0.2,
+            )
+
+            self.assertTrue(result["author_timeout_salvaged"])
+            self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
+            result_path = drafts / ".timeout-complete-draft-author" / "author_result.json"
+            state_path = drafts / ".timeout-complete-draft-author" / "author_state.json"
+            author_result = json.loads(result_path.read_text(encoding="utf-8"))
+            author_state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(author_result["status"], "accepted_after_timeout")
+            self.assertEqual(author_state["author_status"], "accepted_after_timeout")
+            self.assertTrue(author_result["salvage"]["accepted"])
+
     def test_project_authoring_summary_reports_running_author(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
