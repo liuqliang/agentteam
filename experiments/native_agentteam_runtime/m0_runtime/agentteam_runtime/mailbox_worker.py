@@ -11,6 +11,7 @@ from .m0_runtime import CodexRuntimeAdapter, FakeRuntimeAdapter, SystemClock
 
 
 IDLE_HEARTBEAT_MIN_INTERVAL_SECONDS = 15
+HEARTBEAT_PROGRESS_MAX_CHARS = 220
 
 
 class FileMailboxWorker:
@@ -94,6 +95,14 @@ class FileMailboxWorker:
             "reason": reason,
             "worktree_path": str(worktree_path) if worktree_path else None,
         }
+        progress_summary = _heartbeat_progress_summary(
+            activity,
+            reason=reason,
+            message=message,
+            runtime_result=runtime_result,
+        )
+        if progress_summary:
+            payload["progress_summary"] = progress_summary
         if message:
             message_payload = message.get("payload", {})
             payload.update(
@@ -761,6 +770,46 @@ def _process_text(value):
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return str(value)
+
+
+def _heartbeat_progress_summary(
+    activity,
+    *,
+    reason=None,
+    message=None,
+    runtime_result=None,
+):
+    payload = message.get("payload", {}) if isinstance(message, dict) else {}
+    task_id = _compact_progress_text(payload.get("task_id"))
+    attempt_id = _compact_progress_text(payload.get("attempt_id"))
+    objective = _compact_progress_text(payload.get("objective"), max_chars=140)
+    parts = [str(activity)]
+    if task_id:
+        parts.append(task_id)
+    if activity == "processing" and attempt_id:
+        parts.append(f"attempt={attempt_id}")
+    if activity == "processed" and isinstance(runtime_result, dict):
+        result_status = _compact_progress_text(runtime_result.get("result_status"))
+        if result_status:
+            parts.append(f"result={result_status}")
+        changed_files = runtime_result.get("changed_files")
+        if isinstance(changed_files, list):
+            parts.append(f"changed_files={len(changed_files)}")
+        return _compact_progress_text(" ".join(parts))
+    if objective:
+        return _compact_progress_text(f"{' '.join(parts)}: {objective}")
+    if reason:
+        return _compact_progress_text(f"{' '.join(parts)}: {reason}")
+    return _compact_progress_text(" ".join(parts))
+
+
+def _compact_progress_text(value, *, max_chars=HEARTBEAT_PROGRESS_MAX_CHARS):
+    if value is None:
+        return ""
+    text = " ".join(str(value).split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 3)].rstrip() + "..."
 
 
 def _append_jsonl(path, records):

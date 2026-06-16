@@ -5175,6 +5175,8 @@ def _status_last_worker(worker_registry):
         details.append(f"task={worker['heartbeat_task_id']}")
     if worker.get("heartbeat_result_status"):
         details.append(f"result={worker['heartbeat_result_status']}")
+    if worker.get("heartbeat_progress_summary"):
+        details.append(f"progress={worker['heartbeat_progress_summary']}")
     if worker.get("exit_code") is not None:
         details.append(f"exit_code={worker['exit_code']}")
     if worker.get("stopped_by"):

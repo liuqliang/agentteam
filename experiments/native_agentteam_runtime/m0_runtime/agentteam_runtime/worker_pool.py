@@ -219,6 +219,7 @@ class FileMailboxWorkerPoolSupervisor:
                 "heartbeat_message_id": heartbeat.get("source_message_id"),
                 "heartbeat_result_status": heartbeat.get("result_status"),
                 "heartbeat_changed_file_count": heartbeat.get("changed_file_count"),
+                "heartbeat_progress_summary": heartbeat.get("progress_summary"),
                 "heartbeat_age_seconds": heartbeat_age_seconds,
             }
         diagnostic_state = _worker_diagnostic_state(

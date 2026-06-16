@@ -676,6 +676,10 @@ class M0RuntimeTests(unittest.TestCase):
                         "heartbeat_age_seconds": 181,
                         "heartbeat_stale_after_seconds": 120,
                         "heartbeat_task_id": "TASK-001",
+                        "heartbeat_progress_summary": (
+                            "processing TASK-001 attempt=ATTEMPT-001: "
+                            "Run long Codex worker task"
+                        ),
                         "heartbeat_path": str(
                             run_dir
                             / "state"
@@ -711,9 +715,17 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("agent-implementation-worker-1", markdown)
         self.assertIn("diagnostic=processing_stale", markdown)
         self.assertIn("heartbeat_age_seconds=181", markdown)
+        self.assertIn(
+            "progress=processing TASK-001 attempt=ATTEMPT-001: Run long Codex worker task",
+            markdown,
+        )
         self.assertIn("worker_diagnostics: pool=attention", concise)
         self.assertIn(
             "worker agent-implementation-worker-1: diagnostic=processing_stale",
+            concise,
+        )
+        self.assertIn(
+            "progress=processing TASK-001 attempt=ATTEMPT-001: Run long Codex worker task",
             concise,
         )
 
@@ -2861,9 +2873,20 @@ class M0RuntimeTests(unittest.TestCase):
                 runtime_adapter.processing_heartbeat["source_message_id"],
                 "MSG-MAILBOX-HEARTBEAT-001",
             )
+            self.assertEqual(
+                runtime_adapter.processing_heartbeat["progress_summary"],
+                (
+                    "processing TASK-MAILBOX attempt=ATTEMPT-MAILBOX-001: "
+                    "Exercise file mailbox worker runtime."
+                ),
+            )
             self.assertEqual(final_heartbeat["activity"], "processed")
             self.assertEqual(final_heartbeat["result_status"], "completed")
             self.assertEqual(final_heartbeat["changed_file_count"], 1)
+            self.assertEqual(
+                final_heartbeat["progress_summary"],
+                "processed TASK-MAILBOX result=completed changed_files=1",
+            )
 
     def test_file_mailbox_worker_throttles_idle_heartbeat_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4710,6 +4733,10 @@ class M0RuntimeTests(unittest.TestCase):
                         "worker_agent_id": "agent-repo-map",
                         "worker_pid": os.getpid(),
                         "task_id": "TASK-001",
+                        "progress_summary": (
+                            "processing TASK-001 attempt=ATTEMPT-001: "
+                            "Run long Codex worker task"
+                        ),
                     },
                     sort_keys=True,
                 ),
@@ -4744,8 +4771,16 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue(health["workers"][0]["heartbeat_is_stale"])
             self.assertGreaterEqual(health["workers"][0]["heartbeat_age_seconds"], 10)
             self.assertEqual(
+                health["workers"][0]["heartbeat_progress_summary"],
+                "processing TASK-001 attempt=ATTEMPT-001: Run long Codex worker task",
+            )
+            self.assertEqual(
                 registry["workers"][0]["worker_diagnostic_state"],
                 "processing_stale",
+            )
+            self.assertEqual(
+                registry["workers"][0]["heartbeat_progress_summary"],
+                "processing TASK-001 attempt=ATTEMPT-001: Run long Codex worker task",
             )
             self.assertEqual(registry["diagnostic_worker_counts"]["processing_stale"], 1)
 
@@ -4794,6 +4829,10 @@ class M0RuntimeTests(unittest.TestCase):
                         "last_poll_status": "processing",
                         "heartbeat_task_id": "TASK-001",
                         "heartbeat_result_status": "completed",
+                        "heartbeat_progress_summary": (
+                            "processing TASK-001 attempt=ATTEMPT-001: "
+                            "Run long Codex worker task"
+                        ),
                     }
                 ]
             }
@@ -4805,6 +4844,10 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("poll=processing", line)
         self.assertIn("task=TASK-001", line)
         self.assertIn("result=completed", line)
+        self.assertIn(
+            "progress=processing TASK-001 attempt=ATTEMPT-001: Run long Codex worker task",
+            line,
+        )
 
     def test_status_run_outcome_marks_completed_run_with_blockers_for_review(self):
         from agentteam_runtime.agentteam import _status_run_outcome

@@ -361,10 +361,13 @@ def concise_report_lines(report, max_tasks=3):
                 )
                 diagnostic_state = worker.get("worker_diagnostic_state") or "unknown"
                 worker_status = worker.get("worker_status") or "unknown"
-                lines.append(
+                line = (
                     f"worker {worker_id}: diagnostic={diagnostic_state} "
                     f"status={worker_status}"
                 )
+                if worker.get("heartbeat_progress_summary"):
+                    line += f" progress={worker['heartbeat_progress_summary']}"
+                lines.append(line)
     for task in task_reports[:max_tasks]:
         if not isinstance(task, dict):
             continue
@@ -510,6 +513,8 @@ def _extend_worker_diagnostic_lines(lines, worker_diagnostics):
             details.append(f"task={worker['heartbeat_task_id']}")
         if worker.get("heartbeat_result_status"):
             details.append(f"result={worker['heartbeat_result_status']}")
+        if worker.get("heartbeat_progress_summary"):
+            details.append(f"progress={worker['heartbeat_progress_summary']}")
         if worker.get("heartbeat_path"):
             details.append(f"heartbeat_path={worker['heartbeat_path']}")
         lines.append(f"- {worker_id}: {' '.join(details)}")
