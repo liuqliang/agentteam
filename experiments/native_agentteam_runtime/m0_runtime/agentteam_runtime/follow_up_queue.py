@@ -29,6 +29,43 @@ GENERIC_NEXT_STEP_TEXTS = {
     "继续改进",
     "继续验证",
 }
+ASCII_ACTIONABLE_NEXT_STEP_MARKERS = {
+    "add",
+    "benchmark",
+    "fix",
+    "implement",
+    "implementation",
+    "instrument",
+    "measure",
+    "test",
+    "validate",
+    "validation",
+    "verification",
+    "verify",
+}
+CJK_ACTIONABLE_NEXT_STEP_MARKERS = {
+    "修复",
+    "复测",
+    "实现",
+    "度量",
+    "测试",
+    "补充",
+    "验证",
+}
+REVIEW_ONLY_NEXT_STEP_MARKERS = {
+    "diff",
+    "human review",
+    "integrate",
+    "operator review",
+    "push",
+    "release activation",
+    "review",
+    "人工审阅",
+    "人工确认",
+    "按既有流程集成",
+    "操作员审阅",
+    "审阅",
+}
 
 
 def build_follow_up_queue_summary(
@@ -267,7 +304,9 @@ def _goal_memory_item_readiness(item):
 def _dedupe_items(items, limit):
     deduped = []
     seen = set()
-    for item in items:
+    for item in _prioritized_items(items):
+        if not isinstance(item, dict):
+            continue
         objective = item.get("objective")
         source_taskpack_id = item.get("source_taskpack_id")
         if not objective:
@@ -280,6 +319,30 @@ def _dedupe_items(items, limit):
         if limit and len(deduped) >= limit:
             break
     return deduped
+
+
+def _prioritized_items(items):
+    return [
+        item
+        for _, item in sorted(
+            enumerate(items or []),
+            key=lambda pair: (_queue_item_priority(pair[1]), pair[0]),
+        )
+    ]
+
+
+def _queue_item_priority(item):
+    objective = item.get("objective") if isinstance(item, dict) else ""
+    readiness = (
+        str(item.get("readiness") or "ready").strip().lower()
+        if isinstance(item, dict)
+        else "ready"
+    )
+    if readiness == "ready" and _is_actionable_next_step(objective):
+        return 0
+    if _is_review_only_next_step(objective):
+        return 2
+    return 1
 
 
 def _next_command(source_taskpack_id, next_goal):
@@ -322,9 +385,38 @@ def _is_generic_next_step(value):
     return text in GENERIC_NEXT_STEP_TEXTS
 
 
+def _is_actionable_next_step(value):
+    text = _normalized_next_step_text(value)
+    return _has_ascii_token(text, ASCII_ACTIONABLE_NEXT_STEP_MARKERS) or any(
+        marker in text for marker in CJK_ACTIONABLE_NEXT_STEP_MARKERS
+    )
+
+
+def _is_review_only_next_step(value):
+    text = _normalized_next_step_text(value)
+    if not text or _is_actionable_next_step(text):
+        return False
+    return any(marker in text for marker in REVIEW_ONLY_NEXT_STEP_MARKERS)
+
+
 def _normalized_next_step_text(value):
     text = " ".join(str(value or "").strip().lower().split())
     return text.strip(" \t\r\n。.!！,，;；:：")
+
+
+def _has_ascii_token(text, markers):
+    token_chars = []
+    tokens = set()
+    for char in str(text or ""):
+        if char.isascii() and (char.isalnum() or char in {"_", "-"}):
+            token_chars.append(char)
+            continue
+        if token_chars:
+            tokens.add("".join(token_chars))
+            token_chars = []
+    if token_chars:
+        tokens.add("".join(token_chars))
+    return any(marker in tokens for marker in markers)
 
 
 def _report_evidence_anchor(summary):

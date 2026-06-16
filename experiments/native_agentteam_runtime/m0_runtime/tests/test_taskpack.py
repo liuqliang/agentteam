@@ -7506,6 +7506,64 @@ class TaskpackTests(unittest.TestCase):
             'agentteam next --from-taskpack first-pass --goal "补充 follow_up_queue next_goal 具体化回归测试。"',
         )
 
+    def test_follow_up_queue_prefers_actionable_step_over_review_only_step(self):
+        from agentteam_runtime.follow_up_queue import build_follow_up_queue_summary
+
+        summary = build_follow_up_queue_summary(
+            source_report={
+                "run_id": "agentteam-long-run-reliability-003-r2",
+                "report_path": (
+                    "/tmp/agentteam-long-run-reliability/runs/"
+                    "agentteam-long-run-reliability-003-r2/reports/final_report.md"
+                ),
+                "completion_summary": {
+                    "next_steps": [
+                        (
+                            "operator 审阅 `operator_report.py` 与 `test_taskpack.py` 的 diff，"
+                            "确认 scoped `review_gate` 语义符合 AgentTeam-as-target 策略。"
+                        ),
+                    ],
+                    "follow_up_recommendation": {
+                        "action": "integrate_then_next",
+                        "next_command": (
+                            "agentteam next --from-taskpack agentteam-long-run-reliability-003-r2 "
+                            '--goal "operator 审阅 `operator_report.py` 与 `test_taskpack.py` 的 diff，'
+                            '确认 scoped `review_gate` 语义符合 AgentTeam-as-target 策略。"'
+                        ),
+                    },
+                },
+            },
+            goal_memory={
+                "memory_path": (
+                    "/tmp/agentteam-long-run-reliability/pursue/"
+                    "agentteam-long-run-reliability-003-goal-memory.json"
+                ),
+                "follow_up_queue": [
+                    {
+                        "objective": "补充 queue selector 的 operator-integrated 后续验证测试。",
+                        "source_taskpack_id": "agentteam-long-run-reliability-004",
+                        "source_report_path": "/tmp/agentteam-long-run-reliability/runs/004/report.md",
+                        "readiness": "ready",
+                    }
+                ],
+            },
+            source_taskpack_id="agentteam-long-run-reliability-003-r2",
+            limit=5,
+        )
+
+        self.assertEqual(
+            summary["next_goal"],
+            "补充 queue selector 的 operator-integrated 后续验证测试。",
+        )
+        self.assertEqual(summary["selected_item"]["source"], "goal_memory.follow_up_queue")
+        self.assertTrue(
+            any(
+                item["objective"].startswith("operator 审阅")
+                for item in summary["items"]
+                if isinstance(item, dict)
+            )
+        )
+
     def test_follow_up_queue_summary_enriches_generic_next_step_with_report_evidence(self):
         from agentteam_runtime.follow_up_queue import build_follow_up_queue_summary
 
