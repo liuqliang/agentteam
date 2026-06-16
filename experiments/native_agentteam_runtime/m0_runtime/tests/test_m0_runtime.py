@@ -4767,10 +4767,13 @@ class M0RuntimeTests(unittest.TestCase):
                 command=[sys.executable, "-c", "import sys; sys.exit(0)"],
             )
             worker.start()
-            worker.process.wait(timeout=5)
-            pool.workers = [worker]
+            try:
+                worker.process.wait(timeout=5)
+                pool.workers = [worker]
 
-            health = pool.health_check()
+                health = pool.health_check()
+            finally:
+                worker.stop(timeout_seconds=1)
 
             self.assertEqual(health["pool_status"], "degraded")
             self.assertEqual(health["pool_diagnostic_status"], "attention")
