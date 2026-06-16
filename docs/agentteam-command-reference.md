@@ -967,6 +967,9 @@ Use it when:
   to write the five required files before optional exploration and avoid
   external planning workflows. Timeout results include required-file counts,
   missing files, largest output stream, and a compact next action.
+- Non-timeout Codex author failures also report compact required-file
+  diagnostics and the `author_result.json` / `author_state.json` paths instead
+  of printing raw model output.
 - Codex authoring writes `required_file_templates.json` under the author
   context directory and points the prompt at it. The bundle is a scaffold for
   the five required files; it is not placed in the taskpack directory and does

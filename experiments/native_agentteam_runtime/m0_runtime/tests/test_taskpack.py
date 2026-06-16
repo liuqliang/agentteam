@@ -9612,6 +9612,47 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(state["output"]["stdout_path"], output["stdout_path"])
             self.assertEqual(state["output"]["stderr_path"], output["stderr_path"])
 
+    def test_codex_taskpack_author_failure_message_includes_compact_diagnostic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            fake_codex = tmp_path / "fake_failed_author.py"
+            _init_repo(repo)
+            fake_codex.write_text(
+                "\n".join(
+                    [
+                        "import sys",
+                        "sys.stderr.write('failure-detail\\n' * 100)",
+                        "sys.exit(2)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                draft_taskpack_from_goal(
+                    project_root=repo,
+                    goal="Improve fixture behavior.",
+                    draft_root=drafts,
+                    author_runtime="codex",
+                    taskpack_id="failed-author",
+                    codex_command=[sys.executable, str(fake_codex)],
+                    codex_timeout_seconds=5,
+                )
+
+            message = str(raised.exception)
+            self.assertIn("codex taskpack author failed with exit code 2", message)
+            self.assertIn("required_files_written=0/5", message)
+            self.assertIn("largest_stream=stderr", message)
+            self.assertIn("result_path=", message)
+            self.assertIn("state_path=", message)
+            self.assertNotIn("failure-detail", message)
+            result_path = drafts / ".failed-author-author" / "author_result.json"
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertIn("output", result)
+            self.assertNotIn("stderr", result)
+
     def test_fake_taskpack_author_draft_can_be_frozen(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

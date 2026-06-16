@@ -628,7 +628,13 @@ def _draft_with_codex(
             )
         )
     if completed.returncode != 0:
-        raise TaskpackValidationError(f"codex taskpack author failed with exit code {completed.returncode}")
+        raise TaskpackValidationError(
+            _codex_author_failure_message(
+                f"codex taskpack author failed with exit code {completed.returncode}",
+                result_path=result_path,
+                state_path=state_path,
+            )
+        )
 
     _verify_required_taskpack_files(taskpack_dir)
     _canonicalize_codex_taskpack_files(taskpack_dir)
