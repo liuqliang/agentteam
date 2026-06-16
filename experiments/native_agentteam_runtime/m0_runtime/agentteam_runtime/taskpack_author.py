@@ -11,6 +11,7 @@ from .repo_map import build_repository_map
 from .taskpack import (
     BROAD_FRAMEWORK_REQUIRED_DELIVERABLES,
     DEFAULT_WORKER_ROLE,
+    OPTIMIZATION_CODE_WORK_TYPES,
     TASKPACK_SEMANTIC_CONTRACT_VERSION,
     TaskpackValidationError,
     auto_materialize_semantic_taskpack,
@@ -24,6 +25,7 @@ from .taskpack import (
     _normalize_taskpack_verification_profile,
     _require_contained_path,
     _resolve_draft_taskpack_id,
+    _write_scope_is_document_only,
     draft_deterministic_taskpack_skeleton,
     draft_taskpack_files,
     validate_taskpack,
@@ -1275,6 +1277,19 @@ def _apply_agentteam_target_task_policy(item):
         deliverables.append("agentteam_target_review_gate")
 
 
+def _apply_optimization_code_task_policy(item):
+    _append_text_field(
+        item,
+        "goal_alignment",
+        (
+            "Optimization investigation must preserve optimization intent by recording "
+            "baseline/current behavior, profiling or candidate matrix, metric/benchmark "
+            "measurement, verification evidence, and a no-safe-change rationale when no "
+            "code change is justified."
+        ),
+    )
+
+
 def _append_text_field(item, field, addition):
     value = item.get(field)
     if not value:
@@ -1380,10 +1395,22 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
                 item["objective"] = item["title"]
             if not item.get("work_type"):
                 item["work_type"] = _default_work_type(goal_kind)
+            elif (
+                quality_gate_goal
+                and item.get("work_type") == "audit"
+                and not _write_scope_is_document_only(item.get("write_scope") or [])
+            ):
+                item["work_type"] = "code_investigation"
             if not item.get("goal_alignment"):
                 item["goal_alignment"] = _default_goal_alignment(
                     taskpack_data.get("original_goal") or taskpack_data.get("goal") or item.get("objective")
                 )
+            if (
+                goal_kind == "optimization"
+                and item.get("work_type") in OPTIMIZATION_CODE_WORK_TYPES
+                and not _write_scope_is_document_only(item.get("write_scope") or [])
+            ):
+                _apply_optimization_code_task_policy(item)
             if not item.get("required_deliverables"):
                 item["required_deliverables"] = _default_required_deliverables(
                     taskpack_data.get("original_goal") or taskpack_data.get("goal") or item.get("objective")

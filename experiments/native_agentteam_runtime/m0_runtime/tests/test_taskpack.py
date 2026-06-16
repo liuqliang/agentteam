@@ -10874,6 +10874,82 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("metric_delta_or_no_safe_change_evidence", task["required_deliverables"])
             self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
 
+    def test_codex_taskpack_author_canonicalizes_optimization_audit_to_code_investigation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "codex-optimization-audit"
+            _init_repo(repo)
+            taskpack_dir.mkdir(parents=True)
+            (taskpack_dir / "taskpack.yaml").write_text(
+                json.dumps(
+                    {
+                        "taskpack_schema_version": "taskpack.v1",
+                        "taskpack_id": "codex-optimization-audit",
+                        "status": "draft",
+                        "project_root": str(repo),
+                        "goal": "优化 AgentTeam 长期运行状态提示。",
+                        "goal_kind": "optimization",
+                        "runtime": {"default_backend": "codex"},
+                        "files": {
+                            "agent_pool": "agent_pool.json",
+                            "backlog": "backlog.json",
+                            "verification": "verification.json",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "agent_pool.json").write_text(
+                json.dumps(
+                    {
+                        "agents": [
+                            {
+                                "agent_id": "implementation-worker-1",
+                                "role": "implementation_worker",
+                                "status": "idle",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "backlog.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "task_id": "optimize-progress-breadcrumb",
+                                "objective": (
+                                    "Audit progress breadcrumb output and implement a narrow "
+                                    "code/test fix if a concrete ambiguity is found."
+                                ),
+                                "backlog_status": "ready",
+                                "required_role": "implementation_worker",
+                                "work_type": "audit",
+                                "goal_alignment": (
+                                    "Ties directly to previous evidence and the queue-selected next_goal."
+                                ),
+                                "read_scope": ["experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py"],
+                                "write_scope": ["experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (taskpack_dir / "verification.json").write_text(
+                json.dumps({"command": ["python3", "-m", "unittest", "discover"]}),
+                encoding="utf-8",
+            )
+
+            _canonicalize_codex_taskpack_files(taskpack_dir)
+
+            backlog = json.loads((taskpack_dir / "backlog.json").read_text(encoding="utf-8"))
+            task = backlog["items"][0]
+            self.assertEqual(task["work_type"], "code_investigation")
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
+
     def test_codex_taskpack_author_uses_project_venv_for_python_verification(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
