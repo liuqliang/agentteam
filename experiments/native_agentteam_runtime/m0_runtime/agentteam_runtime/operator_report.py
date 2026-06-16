@@ -130,14 +130,18 @@ def render_run_completion_report(report):
             lines.append(f"- Next action: {pursue_recap['operator_next_action']}")
         _extend_pursue_round_recap_lines(lines, pursue_recap.get("latest_round_recap"))
     summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
+    if summary or pursue_recap:
+        _extend_chinese_work_report_lines(lines, report, summary, pursue_recap)
     if summary:
         lines.extend(["", "## Operator Summary"])
         if summary.get("status_line"):
             lines.append(f"- Status: {summary['status_line']}")
         _extend_summary_item(lines, "中文简报", summary.get("chinese_operator_brief"))
+        _extend_summary_item(lines, "Why", summary.get("why"))
         _extend_summary_item(lines, "What changed", summary.get("what_changed"))
         _extend_summary_item(lines, "Changed files", summary.get("changed_files"))
         _extend_summary_item(lines, "Verification", summary.get("verification"))
+        _extend_summary_item(lines, "Risks", summary.get("risks"))
         if summary.get("integration"):
             lines.append(f"- Integration: {summary['integration']}")
         evidence_status = summary.get("evidence_status_counts")
@@ -201,9 +205,11 @@ def render_run_completion_report(report):
                 f"- Status: {task.get('status') or 'unknown'}",
             ]
         )
+        _extend_bullets(lines, "Why", task.get("why"))
         _extend_bullets(lines, "What changed", task.get("what_changed"))
         _extend_bullets(lines, "Changed files", task.get("changed_files"))
         _extend_bullets(lines, "Verification", task.get("verification"))
+        _extend_bullets(lines, "Risks", task.get("risks"))
         if task.get("integration"):
             lines.append(f"- Integration: {task['integration']}")
         if task.get("evidence_status"):
@@ -353,6 +359,43 @@ def concise_report_lines(report, max_tasks=3):
                 "agentteam_target_review: source merge, push, and release activation require operator review"
             )
     return lines
+
+
+def _extend_chinese_work_report_lines(lines, report, summary, pursue_recap):
+    digest = _text_items(summary.get("operator_digest")) if isinstance(summary, dict) else []
+    has_recap = isinstance(pursue_recap, dict) and bool(pursue_recap)
+    if not digest and not has_recap and not isinstance(report.get("token_usage"), dict):
+        return
+    lines.extend(["", "## 中文工作汇报"])
+    if has_recap:
+        rounds_completed = pursue_recap.get("rounds_completed")
+        max_rounds = pursue_recap.get("max_rounds")
+        if rounds_completed is not None or max_rounds is not None:
+            lines.append(
+                f"- 当前轮次：{_count_or_unknown(rounds_completed)}/{_count_or_unknown(max_rounds)}"
+            )
+        if pursue_recap.get("stop_reason"):
+            lines.append(f"- 停止原因：{pursue_recap['stop_reason']}")
+        next_step = _pursue_recap_next_step(pursue_recap)
+        if next_step:
+            lines.append(f"- 下一步：{next_step}")
+    lines.extend(f"- {item}" for item in digest)
+    lines.append(f"- {format_token_usage(report.get('token_usage'))}")
+
+
+def _pursue_recap_next_step(pursue_recap):
+    latest_round_recap = pursue_recap.get("latest_round_recap")
+    if isinstance(latest_round_recap, dict):
+        next_step = _first_text(latest_round_recap.get("recommended_next_step"))
+        if next_step:
+            return next_step
+    return _first_text(pursue_recap.get("operator_next_action"))
+
+
+def _count_or_unknown(value):
+    if value is None:
+        return "unknown"
+    return value
 
 
 def _extend_pursue_round_recap_lines(lines, latest_round_recap):

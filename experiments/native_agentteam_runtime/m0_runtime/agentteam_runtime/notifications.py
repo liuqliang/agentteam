@@ -283,6 +283,7 @@ def _operator_report_text(report):
     operator_digest = _operator_summary_digest(report)
     if operator_digest:
         lines.append("中文工作汇报:")
+        _extend_notification_pursue_recap_lines(lines, report)
         _extend_limited_section_items(lines, operator_digest)
         lines.append(format_token_usage(_notification_token_usage(report, task_reports)))
         return lines
@@ -290,6 +291,7 @@ def _operator_report_text(report):
     if not task_reports:
         lines.append("工作摘要:")
         lines.append("- 无结构化任务报告；请查看 agentteam report。")
+        _extend_notification_pursue_recap_lines(lines, report)
         lines.append(format_token_usage(_notification_token_usage(report, task_reports)))
         return lines
 
@@ -308,10 +310,42 @@ def _operator_report_text(report):
         f"- 状态：{report.get('run_status') or 'completed'}；"
         f"任务：{task_count}；阻塞：{blocked_count}"
     )
+    _extend_notification_pursue_recap_lines(lines, report)
     lines.append("中文工作汇报:")
     _extend_limited_section_items(lines, summary.get("operator_digest"))
     lines.append(format_token_usage(_notification_token_usage(report, task_reports)))
     return lines
+
+
+def _extend_notification_pursue_recap_lines(lines, report):
+    recap = report.get("pursue_recap") if isinstance(report, dict) else {}
+    if not isinstance(recap, dict) or not recap:
+        return
+    rounds_completed = recap.get("rounds_completed")
+    max_rounds = recap.get("max_rounds")
+    if rounds_completed is not None or max_rounds is not None:
+        lines.append(f"- Pursue 轮次：{_count_or_unknown(rounds_completed)}/{_count_or_unknown(max_rounds)}")
+    stop_reason = recap.get("stop_reason")
+    if stop_reason:
+        lines.append(f"- 停止原因：{stop_reason}")
+    next_step = _pursue_recap_next_step(recap)
+    if next_step:
+        lines.append(f"- 下一步：{next_step}")
+
+
+def _pursue_recap_next_step(recap):
+    latest_round_recap = recap.get("latest_round_recap")
+    if isinstance(latest_round_recap, dict):
+        next_step = _first_text(latest_round_recap.get("recommended_next_step"))
+        if next_step:
+            return next_step
+    return _first_text(recap.get("operator_next_action"))
+
+
+def _count_or_unknown(value):
+    if value is None:
+        return "unknown"
+    return value
 
 
 def _operator_summary_digest(report):
@@ -376,6 +410,11 @@ def _text_items(values):
     if isinstance(values, tuple):
         return [str(item) for item in values if item is not None and str(item)]
     return [str(values)] if str(values) else []
+
+
+def _first_text(values):
+    items = _text_items(values)
+    return items[0] if items else None
 
 
 def _event_message_summary(event):

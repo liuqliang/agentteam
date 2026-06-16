@@ -341,6 +341,86 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertNotIn("Changed files:", text)
         self.assertNotIn("Task: optimize-gesture-evaluation-pipeline", text)
 
+    def test_feishu_run_completed_includes_chinese_why_risks_and_pursue_recap(self):
+        from agentteam_runtime.notifications import build_feishu_notification_sink_from_env
+
+        calls = []
+
+        def fake_post(url, payload, timeout_seconds):
+            calls.append({"url": url, "payload": payload, "timeout_seconds": timeout_seconds})
+            return {"status_code": 200, "body": {"code": 0, "msg": "success"}}
+
+        sink = build_feishu_notification_sink_from_env(
+            webhook_env="AGENTTEAM_FEISHU_TEST_WEBHOOK",
+            project="agentteam",
+            env={
+                "AGENTTEAM_FEISHU_TEST_WEBHOOK": (
+                    "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token"
+                ),
+            },
+            http_post=fake_post,
+            clock=lambda: 1599360473,
+        )
+        result = sink.notify(
+            {
+                "event_id": "EVT-102",
+                "sequence": 102,
+                "event_type": "run_completed",
+                "correlation_id": "run:completed",
+                "payload": {
+                    "run_status": "completed",
+                    "operator_report": {
+                        "report_schema_version": "operator_run_report.v1",
+                        "task_count": 1,
+                        "blocked_count": 0,
+                        "pursue_recap": {
+                            "pursue_id": "pursue-loop",
+                            "rounds_completed": 2,
+                            "max_rounds": 4,
+                            "stop_reason": "review_gate_required",
+                            "operator_next_action": "agentteam report --taskpack pursue-loop",
+                            "latest_round_recap": {
+                                "recommended_next_step": "继续执行 bounded dogfood 验证。",
+                            },
+                        },
+                        "task_reports": [
+                            {
+                                "task_id": "round-002-reporting",
+                                "status": "implementation completed",
+                                "why": ["为了让 operator 在多轮结束后看清本轮取舍。"],
+                                "what_changed": ["补充中文汇报字段映射。"],
+                                "changed_files": ["agentteam_runtime/operator_report.py"],
+                                "verification": ["test_m0_runtime: passed"],
+                                "risks": ["真实 Feishu webhook 仍需 operator 环境验证。"],
+                                "integration": "passed",
+                                "next_steps": ["运行 2 轮 AgentTeam-as-target dogfood。"],
+                            }
+                        ],
+                        "token_usage": {
+                            "usage_status": "unavailable",
+                            "reported_attempt_count": 0,
+                            "unreported_attempt_count": 1,
+                            "input_tokens": None,
+                            "output_tokens": None,
+                            "total_tokens": None,
+                        },
+                    },
+                },
+            },
+            {"run_dir": "/tmp/agentteam-run"},
+        )
+
+        self.assertEqual(result["event_type"], "notification_sent")
+        text = calls[0]["payload"]["content"]["text"]
+        self.assertIn("Pursue 轮次：2/4", text)
+        self.assertIn("停止原因：review_gate_required", text)
+        self.assertIn("下一步：继续执行 bounded dogfood 验证。", text)
+        self.assertIn("为什么：为了让 operator 在多轮结束后看清本轮取舍。", text)
+        self.assertIn("风险：真实 Feishu webhook 仍需 operator 环境验证。", text)
+        self.assertIn("涉及文件：agentteam_runtime/operator_report.py", text)
+        self.assertIn("验证结果：test_m0_runtime: passed", text)
+        self.assertIn("Token usage: unavailable", text)
+
     def test_completion_summary_chinese_brief_includes_follow_up_reason(self):
         from agentteam_runtime.completion_summary import build_completion_summary
 
@@ -378,6 +458,76 @@ class M0RuntimeTests(unittest.TestCase):
                 "下一步原因：The run completed with a recommended next implementation step."
                 "；相关下一步：继续验证 Feishu 摘要。"
             ),
+            summary["operator_digest"],
+        )
+
+    def test_completion_summary_operator_digest_includes_why_and_risks(self):
+        from agentteam_runtime.completion_summary import build_completion_summary
+
+        summary = build_completion_summary(
+            run_id="RUN-CHINESE-DIGEST",
+            run_status="completed",
+            task_count=1,
+            blocked_count=0,
+            task_reports=[
+                {
+                    "task_id": "TASK-REPORT",
+                    "status": "implementation completed",
+                    "why": ["为了让 operator 在多轮结束后看清本轮取舍。"],
+                    "what_changed": ["补充中文 operator digest。"],
+                    "changed_files": ["agentteam_runtime/completion_summary.py"],
+                    "verification": ["test_m0_runtime: passed"],
+                    "risks": ["真实 Feishu webhook 仍需 operator 环境验证。"],
+                    "integration": "passed",
+                    "next_steps": ["运行 bounded dogfood。"],
+                }
+            ],
+        )
+
+        self.assertEqual(
+            summary["why"],
+            ["为了让 operator 在多轮结束后看清本轮取舍。"],
+        )
+        self.assertEqual(
+            summary["risks"],
+            ["真实 Feishu webhook 仍需 operator 环境验证。"],
+        )
+        self.assertIn(
+            "为什么：为了让 operator 在多轮结束后看清本轮取舍。",
+            summary["operator_digest"],
+        )
+        self.assertIn(
+            "风险：真实 Feishu webhook 仍需 operator 环境验证。",
+            summary["operator_digest"],
+        )
+
+    def test_completion_summary_operator_digest_derives_review_gate_risk(self):
+        from agentteam_runtime.completion_summary import build_completion_summary
+
+        summary = build_completion_summary(
+            run_id="RUN-REVIEW-GATE-RISK",
+            run_status="completed",
+            task_count=1,
+            blocked_count=0,
+            task_reports=[
+                {
+                    "task_id": "TASK-REVIEW-GATE",
+                    "status": "implementation completed",
+                    "what_changed": ["补充 review gate 风险汇报。"],
+                    "changed_files": ["agentteam_runtime/completion_summary.py"],
+                    "verification": ["test_m0_runtime: passed"],
+                    "integration": "passed",
+                }
+            ],
+            integration_baseline={"branch": "agentteam/run/RUN-REVIEW-GATE-RISK/integration"},
+        )
+
+        self.assertIn(
+            "存在 review gate；source merge、push、release activation 仍需 operator 审阅。",
+            summary["risks"],
+        )
+        self.assertIn(
+            "风险：存在 review gate；source merge、push、release activation 仍需 operator 审阅。",
             summary["operator_digest"],
         )
 

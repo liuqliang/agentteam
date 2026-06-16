@@ -1325,6 +1325,7 @@ class TaskpackTests(unittest.TestCase):
                 "涉及文件：gesture_recognition/sim_eval.py",
                 "验证结果：unit_tests: passed",
                 "实际结果：算法窗口复制阶段耗时下降 2%。",
+                "风险：存在 review gate；source merge、push、release activation 仍需 operator 审阅。",
                 "合并建议：Review accepted patch before merging.",
                 "下一步：在比赛 QEMU 环境复测端到端延迟。",
                 (
@@ -7632,6 +7633,62 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn(f"- Evidence: {report_path}", markdown)
         self.assertIn("- Token usage: unavailable", markdown)
         self.assertIn("- Recommended next step: 继续实现 queue recap 展示。", markdown)
+
+    def test_operator_report_renders_chinese_digest_with_stop_reason_and_tokens(self):
+        from agentteam_runtime.operator_report import render_run_completion_report
+
+        markdown = render_run_completion_report(
+            {
+                "project": "agentteam",
+                "run_id": "pursue-loop",
+                "run_dir": "/tmp/agentteam-work/runs/pursue-loop",
+                "run_status": "completed",
+                "run_outcome": "completed_with_review_required",
+                "scheduler_status": "idle",
+                "task_count": 1,
+                "blocked_count": 0,
+                "token_usage": {
+                    "usage_status": "unavailable",
+                    "reported_attempt_count": 0,
+                    "unreported_attempt_count": 1,
+                    "input_tokens": None,
+                    "output_tokens": None,
+                    "total_tokens": None,
+                },
+                "pursue_recap": {
+                    "pursue_id": "pursue-loop",
+                    "rounds_completed": 2,
+                    "max_rounds": 4,
+                    "stop_reason": "review_gate_required",
+                    "operator_next_action": "agentteam report --taskpack pursue-loop",
+                    "latest_round_recap": {
+                        "recommended_next_step": "继续执行 bounded dogfood 验证。",
+                    },
+                },
+                "integration_baseline": {},
+                "completion_summary": {
+                    "operator_digest": [
+                        "为什么：为了让 operator 在多轮结束后看清本轮取舍。",
+                        "做了什么：补充中文汇报字段映射。",
+                        "涉及文件：agentteam_runtime/operator_report.py",
+                        "验证结果：test_taskpack: passed",
+                        "风险：真实 Feishu webhook 仍需 operator 环境验证。",
+                        "下一步：运行 2 轮 AgentTeam-as-target dogfood。",
+                    ],
+                },
+                "operator_report": {"task_reports": []},
+            }
+        )
+
+        self.assertIn("## 中文工作汇报", markdown)
+        self.assertIn("- 当前轮次：2/4", markdown)
+        self.assertIn("- 停止原因：review_gate_required", markdown)
+        self.assertIn("- 下一步：继续执行 bounded dogfood 验证。", markdown)
+        self.assertIn("- 为什么：为了让 operator 在多轮结束后看清本轮取舍。", markdown)
+        self.assertIn("- 涉及文件：agentteam_runtime/operator_report.py", markdown)
+        self.assertIn("- 验证结果：test_taskpack: passed", markdown)
+        self.assertIn("- 风险：真实 Feishu webhook 仍需 operator 环境验证。", markdown)
+        self.assertIn("- Token usage: unavailable", markdown)
 
     def test_semantic_feedback_proposal_helper_writes_review_artifact(self):
         from agentteam_runtime.semantic_feedback import write_semantic_feedback_proposal

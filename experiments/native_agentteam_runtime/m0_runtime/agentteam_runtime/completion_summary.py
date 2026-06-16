@@ -38,6 +38,26 @@ def build_completion_summary(
             + _text_items(task.get("measured_results"))
         )
     )
+    why = _unique_limited(
+        item
+        for task in task_reports
+        for item in (
+            _text_items(task.get("why"))
+            + _text_items(task.get("why_changed"))
+            + _text_items(task.get("rationale"))
+            + _text_items(task.get("goal_alignment"))
+        )
+    )
+    risks = _unique_limited(
+        item
+        for task in task_reports
+        for item in (
+            _text_items(task.get("risks"))
+            + _text_items(task.get("risk"))
+            + _text_items(task.get("risk_summary"))
+            + _text_items(task.get("missing_evidence"))
+        )
+    )
     next_steps = _unique_limited(
         item
         for task in task_reports
@@ -64,6 +84,8 @@ def build_completion_summary(
         "changed_files": changed_files,
         "verification": verification,
         "measured_results": measured_results,
+        "why": why,
+        "risks": risks,
         "integration": integration,
         "evidence_status_counts": evidence_status_counts,
         "integration_recommendation": _integration_recommendation(
@@ -88,6 +110,11 @@ def build_completion_summary(
         integration_baseline,
         summary["follow_up_recommendation"],
     )
+    summary["risks"] = _completion_risks(
+        summary.get("risks"),
+        summary.get("evidence_gaps"),
+        summary.get("review_gate"),
+    )
     summary["operator_digest"] = _completion_operator_digest(summary)
     summary["chinese_operator_brief"] = build_chinese_operator_brief(
         run_id=run_id,
@@ -107,9 +134,11 @@ def extend_completion_summary_lines(lines, summary):
         lines.append(f"Status: {summary['status_line']}")
     _extend_section(lines, "中文简报:", summary.get("chinese_operator_brief"))
     _extend_section(lines, "中文工作汇报:", summary.get("operator_digest"))
+    _extend_section(lines, "Why:", summary.get("why"))
     _extend_section(lines, "What changed:", summary.get("what_changed"))
     _extend_section(lines, "Changed files:", summary.get("changed_files"))
     _extend_section(lines, "Verification:", summary.get("verification"))
+    _extend_section(lines, "Risks:", summary.get("risks"))
     if summary.get("integration"):
         lines.append(f"Integration: {summary['integration']}")
     if summary.get("integration_recommendation"):
@@ -129,10 +158,12 @@ def extend_completion_summary_lines(lines, summary):
 
 def _completion_operator_digest(summary):
     digest = []
+    _append_digest_item(digest, "为什么", summary.get("why"))
     _append_digest_item(digest, "做了什么", summary.get("what_changed"))
     _append_digest_item(digest, "涉及文件", summary.get("changed_files"))
     _append_digest_item(digest, "验证结果", summary.get("verification"))
     _append_digest_item(digest, "实际结果", summary.get("measured_results"))
+    _append_digest_item(digest, "风险", summary.get("risks"))
     merge = summary.get("merge_recommendations") or summary.get("integration_recommendation")
     _append_digest_item(digest, "合并建议", merge)
     _append_digest_item(digest, "下一步", summary.get("next_steps"))
@@ -279,6 +310,15 @@ def _completion_evidence_gaps(what_changed, changed_files, verification, integra
     if integration == "not recorded":
         gaps.append("No integration status was recorded.")
     return gaps
+
+
+def _completion_risks(risks, evidence_gaps, review_gate):
+    items = _text_items(risks)
+    if not items:
+        items = _text_items(evidence_gaps)
+    if isinstance(review_gate, dict) and review_gate:
+        items.append("存在 review gate；source merge、push、release activation 仍需 operator 审阅。")
+    return _unique_limited(items)
 
 
 def _effective_blocked_count(blocked_count, task_reports):
