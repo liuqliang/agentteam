@@ -2130,6 +2130,70 @@ class TaskpackTests(unittest.TestCase):
             lines,
         )
 
+    def test_concise_report_lines_do_not_require_review_gate_for_non_agentteam_target(self):
+        lines = concise_report_lines(
+            {
+                "report_path": "/tmp/final_report.md",
+                "run_status": "completed",
+                "task_count": 1,
+                "blocked_count": 0,
+                "token_usage": {"total_tokens": 10, "input_tokens": 8, "output_tokens": 2},
+                "completion_summary": {
+                    "chinese_operator_brief": ["本次运行已完成，共 1 个任务，0 个阻塞。"],
+                    "changed_files": ["gesture_recognition/sim_eval.py"],
+                    "verification": ["unit_tests: passed"],
+                    "follow_up_recommendation": {
+                        "action": "review_report",
+                        "report_command": "agentteam report --taskpack taskpack-7",
+                    },
+                },
+                "operator_report": {
+                    "task_reports": [
+                        {
+                            "task_id": "TASK-NON-AGENTTEAM-001",
+                            "status": "implementation completed",
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertFalse(
+            any(line.startswith("report_completeness:") for line in lines),
+            lines,
+        )
+
+    def test_concise_report_lines_require_review_gate_for_agentteam_target(self):
+        lines = concise_report_lines(
+            {
+                "report_path": "/tmp/final_report.md",
+                "run_status": "completed",
+                "task_count": 1,
+                "blocked_count": 0,
+                "token_usage": {"total_tokens": 10, "input_tokens": 8, "output_tokens": 2},
+                "completion_summary": {
+                    "chinese_operator_brief": ["本次运行已完成，共 1 个任务，0 个阻塞。"],
+                    "changed_files": ["experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/operator_report.py"],
+                    "verification": ["unit_tests: passed"],
+                    "follow_up_recommendation": {
+                        "action": "review_report",
+                        "report_command": "agentteam report --taskpack taskpack-7",
+                    },
+                },
+                "operator_report": {
+                    "task_reports": [
+                        {
+                            "task_id": "TASK-AGENTTEAM-001",
+                            "status": "implementation completed",
+                            "agentteam_target_review_required": True,
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertIn("report_completeness: missing=review_gate", lines)
+
     def test_install_local_replaces_existing_launcher_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"

@@ -241,9 +241,16 @@ def concise_report_lines(report, max_tasks=3):
             f"blocked={report.get('blocked_count', 0)}"
         ),
     ]
+    task_reports = (
+        report.get("operator_report", {}).get("task_reports", [])
+        if isinstance(report.get("operator_report"), dict)
+        else []
+    )
     token_usage = report.get("token_usage")
     if isinstance(token_usage, dict):
         lines.append(format_token_usage(token_usage, label="tokens"))
+    else:
+        lines.append("tokens: unavailable")
     pursue_recap = report.get("pursue_recap") if isinstance(report.get("pursue_recap"), dict) else {}
     if pursue_recap:
         lines.append(
@@ -305,6 +312,27 @@ def concise_report_lines(report, max_tasks=3):
             command = review_gate.get(key)
             if command:
                 lines.append(f"review_{label}: {command}")
+    completeness_gaps = []
+    if not (
+        _text_items(summary.get("chinese_operator_brief"))
+        or _text_items(summary.get("operator_digest"))
+    ):
+        completeness_gaps.append("chinese_operator_report")
+    if not compact_text_items(summary.get("changed_files")):
+        completeness_gaps.append("changed_files")
+    if not compact_text_items(summary.get("verification")):
+        completeness_gaps.append("verification")
+    if not (
+        isinstance(follow_up, dict)
+        and (follow_up.get("action") or follow_up.get("next_command"))
+    ):
+        completeness_gaps.append("follow_up")
+    if _agentteam_target_review_required(task_reports) and not (
+        isinstance(review_gate, dict) and review_gate
+    ):
+        completeness_gaps.append("review_gate")
+    if completeness_gaps:
+        lines.append(f"report_completeness: missing={', '.join(completeness_gaps)}")
     next_step = compact_text_items(summary.get("next_steps"))
     if next_step:
         lines.append(f"next: {next_step}")
@@ -337,11 +365,6 @@ def concise_report_lines(report, max_tasks=3):
                     f"worker {worker_id}: diagnostic={diagnostic_state} "
                     f"status={worker_status}"
                 )
-    task_reports = (
-        report.get("operator_report", {}).get("task_reports", [])
-        if isinstance(report.get("operator_report"), dict)
-        else []
-    )
     for task in task_reports[:max_tasks]:
         if not isinstance(task, dict):
             continue
@@ -359,6 +382,17 @@ def concise_report_lines(report, max_tasks=3):
                 "agentteam_target_review: source merge, push, and release activation require operator review"
             )
     return lines
+
+
+def _agentteam_target_review_required(task_reports):
+    for task in task_reports:
+        if not isinstance(task, dict):
+            continue
+        if task.get("agentteam_target_review_required"):
+            return True
+        if "agentteam_target_review_gate" in _text_items(task.get("required_deliverables")):
+            return True
+    return False
 
 
 def _extend_chinese_work_report_lines(lines, report, summary, pursue_recap):
