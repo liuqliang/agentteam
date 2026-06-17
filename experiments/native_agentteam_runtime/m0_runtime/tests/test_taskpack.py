@@ -49,7 +49,7 @@ from agentteam_runtime.diagnostic_chat import (
     render_runtime_diagnostic_context,
 )
 from agentteam_runtime.goal_memory import build_goal_memory, render_goal_memory_prompt_context
-from agentteam_runtime.notifications import _permission_request_text
+from agentteam_runtime.notifications import FeishuWebhookNotifier, _permission_request_text
 from agentteam_runtime.operator_report import concise_report_lines
 from agentteam_runtime.profile import build_project_profile, write_project_profile
 import agentteam_runtime.projection_db as projection_db
@@ -3206,6 +3206,37 @@ class TaskpackTests(unittest.TestCase):
             "Deny: agentteam permissions deny --run-dir /tmp/agentteam-run --request-id PERM-001",
             message,
         )
+
+    def test_feishu_notification_failure_summary_includes_body_message(self):
+        def fake_http_post(_url, _payload, _timeout_seconds):
+            return {
+                "status_code": 200,
+                "body": {
+                    "code": 11232,
+                    "msg": "security keyword mismatch",
+                },
+            }
+
+        notifier = FeishuWebhookNotifier(
+            webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/redacted-token",
+            project="notify-project",
+            http_post=fake_http_post,
+        )
+        result = notifier.notify_event(
+            {
+                "event_id": "EVT-001",
+                "sequence": 1,
+                "event_type": "run_completed",
+                "payload": {"run_status": "completed"},
+            },
+            run_dir="/tmp/run",
+        )
+
+        payload = result["payload"]
+        self.assertEqual(payload["notification_status"], "failed")
+        self.assertIn("body_code=11232", payload["error_summary"])
+        self.assertIn("body_msg=security keyword mismatch", payload["error_summary"])
+        self.assertNotIn("redacted-token", payload["error_summary"])
 
     def test_agentteam_cli_notify_test_requires_configured_feishu_webhook(self):
         with tempfile.TemporaryDirectory() as tmp:

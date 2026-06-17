@@ -117,6 +117,7 @@ class FeishuWebhookNotifier:
         status_code = response.get("status_code")
         body = response.get("body")
         body_code = body.get("code") if isinstance(body, dict) else None
+        body_msg = body.get("msg") if isinstance(body, dict) else None
         if 200 <= int(status_code or 0) < 300 and body_code in {None, 0}:
             return self._notification_event("notification_sent", event, "sent")
         return self._notification_event(
@@ -124,7 +125,9 @@ class FeishuWebhookNotifier:
             event,
             "failed",
             error_class="FeishuWebhookError",
-            error_summary=self._sanitize(f"status_code={status_code} body_code={body_code}"),
+            error_summary=self._sanitize(
+                _feishu_error_summary(status_code, body_code, body_msg)
+            ),
         )
 
     def _event_payload(self, event, run_dir):
@@ -184,6 +187,13 @@ class FeishuWebhookNotifier:
             if secret:
                 redacted = redacted.replace(secret, "[redacted]")
         return redacted
+
+
+def _feishu_error_summary(status_code, body_code, body_msg=None):
+    parts = [f"status_code={status_code}", f"body_code={body_code}"]
+    if body_msg:
+        parts.append(f"body_msg={body_msg}")
+    return " ".join(parts)
 
 
 def _manual_gate_text(event, run_dir, project):
