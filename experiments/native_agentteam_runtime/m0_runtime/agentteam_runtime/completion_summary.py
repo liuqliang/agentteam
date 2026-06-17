@@ -71,17 +71,21 @@ def build_completion_summary(
     if not what_changed and not task_reports:
         what_changed = ["No task-level operator report was found in this run."]
     integration = _completion_integration(task_reports)
+    changed_files_note = _changed_files_note(task_reports, changed_files)
     evidence_gaps = _completion_evidence_gaps(
         what_changed=what_changed,
         changed_files=changed_files,
         verification=verification,
         integration=integration,
+        task_reports=task_reports,
     )
     evidence_status_counts = _evidence_status_counts(task_reports)
     summary = {
         "status_line": _completion_status_line(run_status, task_count, blocked_count),
         "what_changed": what_changed,
         "changed_files": changed_files,
+        "changed_files_note": changed_files_note,
+        "changed_files_note_zh": _changed_files_note_zh(changed_files_note),
         "verification": verification,
         "measured_results": measured_results,
         "why": why,
@@ -137,6 +141,8 @@ def extend_completion_summary_lines(lines, summary):
     _extend_section(lines, "Why:", summary.get("why"))
     _extend_section(lines, "What changed:", summary.get("what_changed"))
     _extend_section(lines, "Changed files:", summary.get("changed_files"))
+    if not summary.get("changed_files") and summary.get("changed_files_note"):
+        lines.append(f"Changed files: {summary['changed_files_note']}")
     _extend_section(lines, "Verification:", summary.get("verification"))
     _extend_section(lines, "Risks:", summary.get("risks"))
     if summary.get("integration"):
@@ -160,7 +166,15 @@ def _completion_operator_digest(summary):
     digest = []
     _append_digest_item(digest, "为什么", summary.get("why"))
     _append_digest_item(digest, "做了什么", summary.get("what_changed"))
-    _append_digest_item(digest, "涉及文件", summary.get("changed_files"))
+    _append_digest_item(
+        digest,
+        "涉及文件",
+        (
+            summary.get("changed_files")
+            or summary.get("changed_files_note_zh")
+            or summary.get("changed_files_note")
+        ),
+    )
     _append_digest_item(digest, "验证结果", summary.get("verification"))
     _append_digest_item(digest, "实际结果", summary.get("measured_results"))
     _append_digest_item(digest, "风险", summary.get("risks"))
@@ -299,17 +313,54 @@ def _append_digest_item(digest, label, values):
         digest.append(f"{label}：{text}")
 
 
-def _completion_evidence_gaps(what_changed, changed_files, verification, integration):
+def _completion_evidence_gaps(what_changed, changed_files, verification, integration, task_reports=None):
     gaps = []
     if not what_changed:
         gaps.append("No natural-language change summary was reported.")
-    if not changed_files:
+    if not changed_files and not _all_reports_are_explicit_no_change(task_reports):
         gaps.append("No changed files were reported.")
     if not verification:
         gaps.append("No verification evidence was reported.")
     if integration == "not recorded":
         gaps.append("No integration status was recorded.")
     return gaps
+
+
+def _changed_files_note(task_reports, changed_files):
+    if changed_files:
+        return None
+    if not _all_reports_are_explicit_no_change(task_reports):
+        return None
+    return "No source files changed; this task was completed as a no-change investigation."
+
+
+def _changed_files_note_zh(note):
+    if not note:
+        return None
+    return "未修改源文件；该任务是无需代码变更的调查任务。"
+
+
+def _all_reports_are_explicit_no_change(task_reports):
+    reports = [task for task in task_reports or [] if isinstance(task, dict)]
+    return bool(reports) and all(_report_is_explicit_no_change(task) for task in reports)
+
+
+def _report_is_explicit_no_change(task):
+    if "changed_files" not in task or _text_items(task.get("changed_files")):
+        return False
+    if task.get("no_code_changes_required") is True or task.get("no_source_changes_required") is True:
+        return True
+    work_type = str(task.get("work_type") or task.get("task_type") or "").strip().lower()
+    return work_type in {
+        "analysis",
+        "audit",
+        "code_investigation",
+        "diagnostic",
+        "investigation",
+        "planning",
+        "read_only",
+        "review",
+    }
 
 
 def _completion_risks(risks, evidence_gaps, review_gate):

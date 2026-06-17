@@ -30,7 +30,16 @@ def build_chinese_operator_brief(
         )
     ]
     _append_item_line(lines, "主要变更", summary.get("what_changed"), max_items=max_items)
-    _append_item_line(lines, "涉及文件", summary.get("changed_files"), max_items=max_items)
+    _append_item_line(
+        lines,
+        "涉及文件",
+        (
+            summary.get("changed_files")
+            or summary.get("changed_files_note_zh")
+            or summary.get("changed_files_note")
+        ),
+        max_items=max_items,
+    )
     _append_item_line(lines, "验证情况", summary.get("verification"), max_items=max_items)
     integration = _integration_label(summary.get("integration"))
     if integration:

@@ -420,6 +420,10 @@ Notes:
 
 - `queue show` and `queue next` are read-only. They do not draft a taskpack,
   start workers, merge code, or mutate run artifacts.
+- When `--run-dir` is supplied, the run directory determines the work root.
+  This lets you inspect historical runs from outside the original project
+  directory. If the current project has a profile, AgentTeam keeps profile
+  metadata such as the project key but does not use that profile's work root.
 - Queue items are built from structured report `next_steps`,
   `follow_up_recommendation`, and long-goal `goal_memory.follow_up_queue` when
   available.
@@ -604,6 +608,11 @@ agentteam status --run-dir <run-dir>
 agentteam status --json
 ```
 
+When `--run-dir` is supplied, `status` can summarize that run even if the
+current directory has no `.agentteam/profile.json`. If a project profile is
+available, its project key is retained, but the run directory still determines
+the work root used for projection DB checks and related artifacts.
+
 Text output includes:
 
 - `overall_status`
@@ -686,6 +695,9 @@ agentteam logs --taskpack <taskpack-id> --lines 10
 agentteam logs --run-dir <run-dir> --json
 ```
 
+When `--run-dir` is supplied, `logs` follows the same profileless run-directory
+resolution as `status`.
+
 Text output shows the run id, returned event count, run directory, and compact
 event lines.
 
@@ -718,6 +730,9 @@ agentteam report --run-dir <run-dir>
 agentteam report --json
 ```
 
+When `--run-dir` is supplied, `report` follows the same profileless
+run-directory resolution as `status`.
+
 Side effects:
 
 - Writes report artifacts under the run's report/artifact area.
@@ -737,6 +752,11 @@ Completion summaries include:
   structured fields. Multi-task runs aggregate unique task-level changes,
   changed files, verification evidence, measured results, merge guidance, and
   next steps into bounded Chinese lines instead of showing only the first task.
+- `changed_files_note`: when every task explicitly reports `changed_files: []`
+  and declares itself as a no-code investigation, audit, review, or planning
+  task, the summary records that no source files changed instead of treating
+  the empty change list as an evidence gap. Missing `changed_files` fields are
+  still reported as evidence gaps.
 - `follow_up_recommendation`: suggested `integrate`, `next`, or blocker-review
   action with command text when the structured report supports it.
 - `review_gate`: concise review-gate guidance when accepted changes are waiting

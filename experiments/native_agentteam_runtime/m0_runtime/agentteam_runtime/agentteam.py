@@ -2209,18 +2209,31 @@ def _handle_queue(args):
 
 
 def _queue_profile_and_work_root(args, project_root):
-    if args.run_dir:
+    return _profile_and_work_root_for_args_run_dir(args, project_root)
+
+
+def _profile_and_work_root_for_args_run_dir(args, project_root):
+    if getattr(args, "run_dir", None):
         run_dir = Path(args.run_dir).resolve()
-        work_root = run_dir.parent.parent if run_dir.parent.name == "runs" else run_dir.parent
+        work_root = _infer_work_root_from_run_dir(run_dir).resolve()
         profile_path = profile_path_for_project(project_root)
         if profile_path.exists():
             profile = load_project_profile(project_root)
             profile = {**profile, "work_root": str(work_root)}
         else:
             profile = {"project_key": "unknown", "work_root": str(work_root)}
-        return profile, work_root.resolve()
+        return profile, work_root
     profile = load_project_profile(project_root)
     return profile, Path(profile["work_root"]).resolve()
+
+
+def _infer_work_root_from_run_dir(run_dir):
+    run_dir = Path(run_dir).resolve()
+    if run_dir.parent.name == "runs":
+        return run_dir.parent.parent
+    if run_dir.parent.parent.name == "runs" and run_dir.parent.name == run_dir.name:
+        return run_dir.parent.parent.parent
+    return run_dir.parent
 
 
 def _queue_source_run_dir(args, profile, work_root):
@@ -2766,7 +2779,7 @@ def _append_run_event_once(run_dir, event_type, payload):
 
 def _handle_status(args):
     project_root = Path(args.project_root or ".").resolve()
-    profile = load_project_profile(project_root)
+    profile, _work_root = _profile_and_work_root_for_args_run_dir(args, project_root)
     run_dir = None
     try:
         run_dir = _canonical_run_dir(Path(args.run_dir).resolve()) if args.run_dir else _latest_run_dir(profile)
@@ -3637,15 +3650,12 @@ def _handle_stats(args):
 
 
 def _watch_profile(args):
+    if args.run_dir:
+        project_root = Path(args.project_root or ".").resolve()
+        profile, _work_root = _profile_and_work_root_for_args_run_dir(args, project_root)
+        return profile
     if args.project_root:
         return load_project_profile(Path(args.project_root).resolve())
-    if args.run_dir:
-        run_dir = Path(args.run_dir).resolve()
-        work_root = run_dir.parent.parent if run_dir.parent.name == "runs" else run_dir.parent
-        return {
-            "project_key": "unknown",
-            "work_root": str(work_root),
-        }
     return load_project_profile(Path(".").resolve())
 
 
@@ -5263,7 +5273,7 @@ def _status_last_worker(worker_registry):
     workers = worker_registry.get("workers") if isinstance(worker_registry, dict) else None
     if not isinstance(workers, list) or not workers:
         return None
-    worker = workers[-1]
+    worker = _status_display_worker(workers)
     if not isinstance(worker, dict):
         return None
     worker_id = worker.get("worker_agent_id") or worker.get("worker_id") or "unknown-worker"
@@ -5286,6 +5296,35 @@ def _status_last_worker(worker_registry):
     if worker.get("stopped_by"):
         details.append(f"stopped_by={worker['stopped_by']}")
     return " ".join(details)
+
+
+def _status_display_worker(workers):
+    candidates = [
+        (worker, index)
+        for index, worker in enumerate(workers)
+        if isinstance(worker, dict)
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: (_status_worker_display_priority(item[0]), item[1]),
+    )[0]
+
+
+def _status_worker_display_priority(worker):
+    status = str(worker.get("worker_status") or "").strip().lower()
+    diagnostic = str(worker.get("worker_diagnostic_state") or "").strip().lower()
+    activity = str(worker.get("last_activity") or "").strip().lower()
+    if status in {"running", "started", "busy"}:
+        return 4
+    if status == "idle":
+        return 3
+    if diagnostic in {"processing", "processing_stale"} or activity == "processing":
+        return 2
+    if status == "quarantined":
+        return 1
+    return 0
 
 
 def _status_last_failure(snapshot, state):

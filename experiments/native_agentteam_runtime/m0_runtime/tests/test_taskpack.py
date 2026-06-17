@@ -1220,6 +1220,38 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("Evidence gaps:", lines)
         self.assertIn("- No verification evidence was reported.", lines)
 
+    def test_completion_summary_does_not_treat_explicit_no_change_task_as_missing_files(self):
+        summary = build_completion_summary(
+            run_id="audit-run",
+            run_status="completed",
+            task_count=1,
+            blocked_count=0,
+            task_reports=[
+                {
+                    "task_id": "AUDIT-001",
+                    "status": "investigation completed",
+                    "work_type": "code_investigation",
+                    "what_changed": ["Reviewed the run and found no safe in-repo code change."],
+                    "changed_files": [],
+                    "verification": ["read-only audit completed"],
+                    "integration": "not_applicable",
+                    "no_code_changes_required": True,
+                }
+            ],
+        )
+        lines = []
+
+        extend_completion_summary_lines(lines, summary)
+
+        self.assertNotIn("No changed files were reported.", summary["evidence_gaps"])
+        self.assertEqual(summary["changed_files_note"], "No source files changed; this task was completed as a no-change investigation.")
+        self.assertEqual(summary["changed_files_note_zh"], "未修改源文件；该任务是无需代码变更的调查任务。")
+        self.assertIn("Changed files: No source files changed; this task was completed as a no-change investigation.", lines)
+        self.assertIn(
+            "涉及文件：未修改源文件；该任务是无需代码变更的调查任务。",
+            summary["chinese_operator_brief"],
+        )
+
     def test_completion_summary_reports_evidence_status_counts(self):
         summary = build_completion_summary(
             run_id="evidence-run",
@@ -4804,6 +4836,163 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn(
                 "last_worker: implementation-worker-1 stopped exit_code=-15 stopped_by=terminated",
                 status_completed.stdout,
+            )
+
+    def test_agentteam_cli_status_prefers_active_worker_for_last_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "active-worker-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "status-project")
+            _write_json(
+                run_dir / "state" / "two_phase_scheduler_state.json",
+                {
+                    "scheduler_status": "running",
+                    "backlog": {
+                        "items": [
+                            {
+                                "task_id": "optimize-pipeline",
+                                "backlog_status": "ready",
+                            }
+                        ]
+                    },
+                    "inflight_attempts": [
+                        {
+                            "task_id": "optimize-pipeline",
+                            "attempt_id": "ATTEMPT-001",
+                            "agent_id": "implementation-worker-active",
+                        }
+                    ],
+                    "steps": [],
+                },
+            )
+            _write_json(
+                run_dir / "state" / "worker_process_registry.json",
+                {
+                    "registry_status": "running",
+                    "workers": [
+                        {
+                            "worker_agent_id": "implementation-worker-active",
+                            "worker_status": "running",
+                            "worker_diagnostic_state": "processing",
+                            "last_activity": "processing",
+                            "heartbeat_task_id": "optimize-pipeline",
+                            "heartbeat_progress_summary": "reading target files",
+                        },
+                        {
+                            "worker_agent_id": "implementation-worker-old",
+                            "worker_status": "stopped",
+                            "exit_code": 0,
+                        },
+                    ],
+                },
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertIn("implementation-worker-active running", summary["last_worker"])
+            self.assertIn("progress=reading target files", summary["last_worker"])
+
+    def test_agentteam_cli_status_run_dir_does_not_require_project_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            run_dir = _write_completed_operator_run(tmp_path / "work" / "runs" / "profileless-run")
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                cwd=tmp_path,
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["latest_run"], "profileless-run")
+            self.assertEqual(summary["project"], "unknown")
+            self.assertEqual(summary["run_dir"], str(run_dir.resolve()))
+
+    def test_agentteam_cli_status_run_dir_uses_run_dir_work_root_over_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            profile_work_root = tmp_path / "profile-work"
+            explicit_work_root = tmp_path / "explicit-work"
+            run_dir = _write_completed_operator_run(explicit_work_root / "runs" / "explicit-run")
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, profile_work_root, "profile-project")
+            _write_json(
+                explicit_work_root / "pursue" / "explicit-run-goal-memory.json",
+                {
+                    "memory_schema_version": "goal_memory.v1",
+                    "latest_taskpack_id": "explicit-run",
+                },
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["project"], "profile-project")
+            self.assertEqual(summary["latest_run"], "explicit-run")
+            self.assertEqual(summary.get("projection_status"), "missing")
+            self.assertEqual(
+                summary.get("projection_db_path"),
+                str((explicit_work_root / "agentteam.db").resolve()),
+            )
+            self.assertNotEqual(
+                summary.get("projection_db_path"),
+                str((profile_work_root / "agentteam.db").resolve()),
+            )
+            self.assertIn(
+                "agentteam report --taskpack explicit-run",
+                summary.get("next_action") or "",
             )
 
     def test_agentteam_cli_status_reports_active_authoring_over_idle_run(self):
