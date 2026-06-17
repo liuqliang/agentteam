@@ -2185,8 +2185,7 @@ def _handle_next(args):
 
 def _handle_queue(args):
     project_root = Path(args.project_root or ".").resolve()
-    profile = load_project_profile(project_root)
-    work_root = Path(profile["work_root"]).resolve()
+    profile, work_root = _queue_profile_and_work_root(args, project_root)
     run_dir = _queue_source_run_dir(args, profile, work_root)
     if not run_dir.exists():
         raise AgentTeamCliError("source run not found", run_dir=str(run_dir))
@@ -2207,6 +2206,15 @@ def _handle_queue(args):
     sys.stdout.write(render_follow_up_queue_text(summary, next_only=args.queue_command == "next"))
     sys.stdout.flush()
     return 0
+
+
+def _queue_profile_and_work_root(args, project_root):
+    if args.run_dir and not profile_path_for_project(project_root).exists():
+        run_dir = Path(args.run_dir).resolve()
+        work_root = run_dir.parent.parent if run_dir.parent.name == "runs" else run_dir.parent
+        return {"project_key": "unknown", "work_root": str(work_root)}, work_root.resolve()
+    profile = load_project_profile(project_root)
+    return profile, Path(profile["work_root"]).resolve()
 
 
 def _queue_source_run_dir(args, profile, work_root):

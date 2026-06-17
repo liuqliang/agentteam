@@ -8651,6 +8651,43 @@ class TaskpackTests(unittest.TestCase):
                 any(item["source"] == "goal_memory.follow_up_queue" for item in summary["items"])
             )
 
+    def test_agentteam_cli_queue_show_run_dir_does_not_require_project_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            profileless_repo = tmp_path / "profileless-repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "explicit-run"
+            _init_repo(profileless_repo)
+            _write_completed_operator_run(run_dir)
+
+            queue_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "queue",
+                    "show",
+                    "--project-root",
+                    str(profileless_repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                cwd=profileless_repo,
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(queue_completed.returncode, 0, queue_completed.stderr)
+            summary = json.loads(queue_completed.stdout)
+            self.assertEqual(summary["queue_status"], "ready")
+            self.assertEqual(summary["source_taskpack_id"], "explicit-run")
+            self.assertEqual(summary["source_run_dir"], str(run_dir))
+            self.assertTrue(summary["items"])
+
     def test_agentteam_cli_queue_next_renders_suggested_next_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
