@@ -8688,6 +8688,62 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["source_run_dir"], str(run_dir))
             self.assertTrue(summary["items"])
 
+    def test_agentteam_cli_queue_show_run_dir_uses_run_dir_work_root_over_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            profile_work_root = tmp_path / "profile-work-root"
+            explicit_work_root = tmp_path / "explicit-work-root"
+            run_dir = explicit_work_root / "runs" / "explicit-run"
+            memory_path = explicit_work_root / "pursue" / "explicit-goal-memory.json"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, profile_work_root, "queue-project")
+            _write_completed_operator_run(run_dir)
+            _write_json(
+                memory_path,
+                {
+                    "memory_schema_version": "goal_memory.v1",
+                    "memory_path": str(memory_path),
+                    "latest_taskpack_id": "explicit-run",
+                    "follow_up_queue": [
+                        {
+                            "objective": "继续验证显式 run-dir 的 goal memory 读取。",
+                            "source_taskpack_id": "explicit-run",
+                            "source_report_path": str(run_dir / "reports" / "final_report.md"),
+                            "readiness": "ready",
+                        }
+                    ],
+                },
+            )
+
+            queue_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "queue",
+                    "show",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                cwd=repo,
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(queue_completed.returncode, 0, queue_completed.stderr)
+            summary = json.loads(queue_completed.stdout)
+            self.assertEqual(summary["goal_memory_path"], str(memory_path))
+            self.assertTrue(
+                any(item["source"] == "goal_memory.follow_up_queue" for item in summary["items"])
+            )
+
     def test_agentteam_cli_queue_next_renders_suggested_next_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

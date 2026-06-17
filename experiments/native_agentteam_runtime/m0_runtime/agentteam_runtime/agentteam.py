@@ -2209,10 +2209,16 @@ def _handle_queue(args):
 
 
 def _queue_profile_and_work_root(args, project_root):
-    if args.run_dir and not profile_path_for_project(project_root).exists():
+    if args.run_dir:
         run_dir = Path(args.run_dir).resolve()
         work_root = run_dir.parent.parent if run_dir.parent.name == "runs" else run_dir.parent
-        return {"project_key": "unknown", "work_root": str(work_root)}, work_root.resolve()
+        profile_path = profile_path_for_project(project_root)
+        if profile_path.exists():
+            profile = load_project_profile(project_root)
+            profile = {**profile, "work_root": str(work_root)}
+        else:
+            profile = {"project_key": "unknown", "work_root": str(work_root)}
+        return profile, work_root.resolve()
     profile = load_project_profile(project_root)
     return profile, Path(profile["work_root"]).resolve()
 
