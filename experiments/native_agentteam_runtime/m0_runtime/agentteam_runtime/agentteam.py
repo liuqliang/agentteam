@@ -79,7 +79,7 @@ from .release_manager import (
     prune_releases,
     update_status,
 )
-from .notifications import FeishuWebhookNotifier
+from .notifications import FeishuWebhookNotifier, diagnose_feishu_webhook_delivery
 from .taskpack import (
     build_taskpack_runtime_args,
     draft_taskpack_files,
@@ -271,10 +271,12 @@ _HELP_COMMANDS = [
         "examples": [
             "agentteam notify test --project-root <repo>",
             "agentteam notify test --dry-run --json",
+            "agentteam notify diagnose --project-root <repo> --dry-run --json",
             "agentteam notify run-completed --project-root <repo> --taskpack <id>",
         ],
         "subcommands": [
             "test: send a diagnostic Feishu notification from the current project profile",
+            "diagnose: test rich and concise Feishu payload variants without exposing secrets",
             "run-completed: resend a completion summary for an existing run",
         ],
     },
@@ -1240,6 +1242,22 @@ def _add_notify_parser(subcommands):
     test_parser.add_argument("--dry-run", action="store_true", help="Validate configuration without sending.")
     test_parser.add_argument("--json", action="store_true", help="Print notification test result as JSON.")
     test_parser.set_defaults(handler=_handle_notify)
+
+    diagnose_parser = notify_subcommands.add_parser(
+        "diagnose",
+        help="Diagnose Feishu webhook payload variants using the current project profile.",
+    )
+    diagnose_parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    diagnose_parser.add_argument("--notification-project", help="Project label used in the notification.")
+    diagnose_parser.add_argument("--feishu-webhook-env", help="Override the profile Feishu webhook env var name.")
+    diagnose_parser.add_argument(
+        "--feishu-signing-secret-env",
+        help="Override the profile Feishu signing secret env var name.",
+    )
+    diagnose_parser.add_argument("--message", help="Optional diagnostic message body.")
+    diagnose_parser.add_argument("--dry-run", action="store_true", help="Validate payload variants without sending.")
+    diagnose_parser.add_argument("--json", action="store_true", help="Print notification diagnosis as JSON.")
+    diagnose_parser.set_defaults(handler=_handle_notify)
 
     run_completed_parser = notify_subcommands.add_parser(
         "run-completed",
@@ -2837,6 +2855,12 @@ def _handle_notify(args):
             return summary
         _write_notify_text(summary)
         return 0
+    if args.notify_command == "diagnose":
+        summary = _notify_diagnose(args)
+        if args.json:
+            return summary
+        _write_notify_diagnose_text(summary)
+        return 0
     raise AgentTeamCliError("unknown notify command", command=args.notify_command)
 
 
@@ -2978,6 +3002,73 @@ def _notify_run_completed(args):
     if summary["notify_status"] != "sent":
         raise AgentTeamCliError("Feishu run-completed notification failed", **summary)
     return summary
+
+
+def _notify_diagnose(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    project = (
+        args.notification_project
+        or profile.get("notification_project")
+        or profile.get("project_key")
+        or project_root.name
+    )
+    webhook_env = _profile_feishu_value(args, profile, "webhook_env")
+    signing_secret_env = _profile_feishu_value(args, profile, "signing_secret_env")
+    if not webhook_env:
+        raise AgentTeamCliError(
+            "Feishu webhook env is not configured",
+            project=str(project_root),
+        )
+    webhook_url = os.environ.get(webhook_env)
+    if not webhook_url:
+        raise AgentTeamCliError(
+            "Feishu webhook env value is not set",
+            webhook_env=webhook_env,
+            project=str(project_root),
+        )
+    signing_secret = os.environ.get(signing_secret_env) if signing_secret_env else None
+    diagnosis = diagnose_feishu_webhook_delivery(
+        webhook_url=webhook_url,
+        signing_secret=signing_secret,
+        project=project,
+        dry_run=args.dry_run,
+        message=args.message,
+    )
+    delivery_variants = diagnosis.get("delivery_variants") or []
+    variants = []
+    for variant in delivery_variants:
+        if not isinstance(variant, dict):
+            continue
+        variant_summary = {
+            "variant": variant.get("variant"),
+            "status": variant.get("notification_status") or "unknown",
+        }
+        for field in (
+            "msg_type",
+            "content_length",
+            "signed",
+            "delivery_attempt_count",
+            "max_delivery_attempts",
+            "error_class",
+            "error_summary",
+        ):
+            if field in variant:
+                variant_summary[field] = variant[field]
+        variants.append(variant_summary)
+    return {
+        "diagnosis_status": diagnosis.get("diagnosis_status") or "unknown",
+        "provider": diagnosis.get("provider") or "feishu",
+        "project": project,
+        "project_root": str(project_root),
+        "webhook_env": webhook_env,
+        "webhook_env_set": bool(webhook_url),
+        "signing_secret_env": signing_secret_env,
+        "signing_enabled": bool(signing_secret),
+        "dry_run": bool(args.dry_run),
+        "variants": variants,
+        "delivery_variants": delivery_variants,
+    }
 
 
 def _run_completed_notification_event(report):
@@ -4874,6 +4965,26 @@ def _write_notify_text(summary):
         lines.append(f"error_class: {summary['error_class']}")
     if summary.get("error_summary"):
         lines.append(f"error_summary: {summary['error_summary']}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _write_notify_diagnose_text(summary):
+    lines = [
+        f"diagnosis_status: {summary['diagnosis_status']}",
+        f"provider: {summary['provider']}",
+        f"project: {summary['project']}",
+        f"webhook_env: {summary['webhook_env']}",
+        f"signing_enabled: {str(bool(summary.get('signing_enabled'))).lower()}",
+    ]
+    for variant in summary.get("variants") or []:
+        attempt_count = variant.get("delivery_attempt_count")
+        attempt_text = "" if attempt_count is None else f" attempts={attempt_count}"
+        lines.append(
+            f"variant {variant.get('variant')}: {variant.get('status')}{attempt_text}"
+        )
+        if variant.get("error_summary"):
+            lines.append(f"  error_summary: {variant['error_summary']}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 

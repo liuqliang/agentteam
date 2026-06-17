@@ -828,7 +828,7 @@ Behavior:
 
 ### `agentteam notify test`
 
-Sends or dry-runs a diagnostic Feishu notification.
+Sends or dry-runs one diagnostic Feishu notification.
 
 Use it when:
 
@@ -842,6 +842,28 @@ agentteam notify test
 agentteam notify test --dry-run --json
 agentteam notify test --message "AgentTeam notification check"
 ```
+
+### `agentteam notify diagnose`
+
+Checks Feishu notification delivery variants without exposing webhook secrets.
+
+Use it when:
+
+- `notify test` or a run-completed notification fails.
+- You want to compare the normal rich text payload with the concise text
+  fallback payload.
+- You want a dry-run summary of payload construction before sending anything.
+
+Examples:
+
+```bash
+agentteam notify diagnose --dry-run --json
+agentteam notify diagnose --message "AgentTeam delivery diagnosis"
+```
+
+The command prints the webhook env var name, whether the env value is present,
+signing status, and one row each for `rich_text` and `concise_text`. It does
+not print the webhook URL, hook token, or signing secret.
 
 ### `agentteam notify run-completed`
 

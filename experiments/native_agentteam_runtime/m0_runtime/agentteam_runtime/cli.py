@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import time
 
 from .daemon import run_file_daemon
@@ -17,7 +18,10 @@ from .m0_runtime import (
     run_scheduler_loop,
     run_simulation,
 )
-from .notifications import build_feishu_notification_sink_from_env
+from .notifications import (
+    build_feishu_notification_sink_from_env,
+    diagnose_feishu_webhook_delivery,
+)
 from .observability import build_runtime_observability
 from .two_phase_scheduler import TwoPhaseFileScheduler
 
@@ -150,6 +154,16 @@ def main(argv=None):
         help="Optional environment variable containing the Feishu custom bot signing secret.",
     )
     parser.add_argument(
+        "--diagnose-feishu-webhook",
+        action="store_true",
+        help="Read-only Feishu webhook diagnosis; prints rich and concise variant results as JSON.",
+    )
+    parser.add_argument(
+        "--diagnose-feishu-dry-run",
+        action="store_true",
+        help="With --diagnose-feishu-webhook, build variant payload metadata without sending.",
+    )
+    parser.add_argument(
         "--auto-decompose-backlog",
         action="store_true",
         help="Let the two-phase worker-pool path dispatch a planner task when no work is ready.",
@@ -263,6 +277,12 @@ def main(argv=None):
         parser.error("--show-state-index and --show-runtime-observability are mutually exclusive")
     if not args.show_runtime_observability and args.observability_view != "summary":
         parser.error("--observability-view requires --show-runtime-observability")
+    if args.diagnose_feishu_dry_run and not args.diagnose_feishu_webhook:
+        parser.error("--diagnose-feishu-dry-run requires --diagnose-feishu-webhook")
+    if args.diagnose_feishu_webhook:
+        result = _diagnose_feishu_webhook(parser, args)
+        print(json.dumps(result, sort_keys=True))
+        return
     if args.show_state_index:
         result = read_scheduler_state_index(args.output_dir)
         print(json.dumps(result, sort_keys=True))
@@ -543,6 +563,42 @@ def _build_notification_sink(args):
         signing_secret_env=args.feishu_signing_secret_env,
         project=args.notification_project,
     )
+
+
+def _diagnose_feishu_webhook(parser, args):
+    if not args.feishu_webhook_env:
+        parser.error("--feishu-webhook-env is required with --diagnose-feishu-webhook")
+    webhook_url = os.environ.get(args.feishu_webhook_env)
+    signing_secret = (
+        os.environ.get(args.feishu_signing_secret_env)
+        if args.feishu_signing_secret_env
+        else None
+    )
+    summary = {
+        "diagnosis_status": "configuration_failed",
+        "provider": "feishu",
+        "project": args.notification_project,
+        "webhook_env": args.feishu_webhook_env,
+        "webhook_env_set": bool(webhook_url),
+        "signing_secret_env": args.feishu_signing_secret_env,
+        "signing_enabled": bool(signing_secret),
+        "delivery_variants": [],
+    }
+    if not webhook_url:
+        summary["error_summary"] = "Feishu webhook env value is not set"
+        return summary
+    result = diagnose_feishu_webhook_delivery(
+        webhook_url=webhook_url,
+        signing_secret=signing_secret,
+        project=args.notification_project,
+        dry_run=args.diagnose_feishu_dry_run,
+    )
+    result.pop("webhook_url_set", None)
+    result.pop("signing_enabled", None)
+    summary.update(result)
+    summary["webhook_env_set"] = True
+    summary["signing_enabled"] = bool(signing_secret)
+    return summary
 
 
 def _require_execution_arg(parser, value, flag):

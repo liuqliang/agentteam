@@ -133,7 +133,10 @@ class M0RuntimeTests(unittest.TestCase):
     def test_feishu_custom_bot_notifier_records_failure_without_secret_leak(self):
         from agentteam_runtime.notifications import FeishuWebhookNotifier
 
+        calls = []
+
         def failing_post(_url, _payload, _timeout_seconds):
+            calls.append({"url": _url, "payload": _payload, "timeout_seconds": _timeout_seconds})
             raise TimeoutError("network timed out near webhook secret-token")
 
         notifier = FeishuWebhookNotifier(
@@ -161,6 +164,141 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertEqual(result["event_type"], "notification_failed")
         payload = json.dumps(result["payload"], sort_keys=True)
         self.assertIn("TimeoutError", payload)
+        self.assertNotIn("secret-token", payload)
+        self.assertNotIn("demo", payload)
+
+    def test_feishu_custom_bot_notifier_retries_failure_with_bounded_metadata(self):
+        from agentteam_runtime.notifications import FeishuWebhookNotifier
+
+        calls = []
+
+        def failing_post(_url, _payload, _timeout_seconds):
+            calls.append({"url": _url, "payload": _payload, "timeout_seconds": _timeout_seconds})
+            raise TimeoutError("network timed out near webhook secret-token")
+
+        notifier = FeishuWebhookNotifier(
+            webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/secret-token",
+            signing_secret="demo",
+            project="agentteam",
+            http_post=failing_post,
+            clock=lambda: 1599360473,
+            max_attempts=2,
+        )
+        result = notifier.notify_event(
+            {
+                "event_id": "EVT-RETRY",
+                "sequence": 13,
+                "event_type": "run_completed",
+                "correlation_id": "run:retry",
+                "payload": {"run_status": "completed"},
+            },
+            run_dir="/tmp/agentteam-run",
+        )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["event_type"], "notification_failed")
+        self.assertEqual(result["payload"]["notification_status"], "failed")
+        self.assertEqual(result["payload"]["delivery_attempt_count"], 2)
+        self.assertEqual(result["payload"]["max_delivery_attempts"], 2)
+        attempts = result["payload"]["delivery_attempts"]
+        self.assertEqual([attempt["attempt"] for attempt in attempts], [1, 2])
+        self.assertEqual({attempt["variant"] for attempt in attempts}, {"rich_text"})
+        self.assertEqual({attempt["error_class"] for attempt in attempts}, {"TimeoutError"})
+        payload = json.dumps(result["payload"], sort_keys=True)
+        self.assertIn("[redacted]", payload)
+        self.assertNotIn("secret-token", payload)
+        self.assertNotIn("demo", payload)
+
+    def test_feishu_custom_bot_notifier_falls_back_when_rich_message_is_rejected(self):
+        from agentteam_runtime.notifications import FeishuWebhookNotifier
+
+        calls = []
+
+        def fake_post(_url, payload, _timeout_seconds):
+            calls.append(payload)
+            if len(calls) == 1:
+                return {
+                    "status_code": 200,
+                    "body": {
+                        "code": 11232,
+                        "msg": "rich message rejected near webhook secret-token",
+                    },
+                }
+            return {"status_code": 200, "body": {"code": 0, "msg": "success"}}
+
+        notifier = FeishuWebhookNotifier(
+            webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/secret-token",
+            signing_secret="demo",
+            project="agentteam",
+            http_post=fake_post,
+            clock=lambda: 1599360473,
+            max_attempts=2,
+        )
+        result = notifier.notify_event(
+            {
+                "event_id": "EVT-FALLBACK",
+                "sequence": 14,
+                "event_type": "run_completed",
+                "correlation_id": "run:fallback",
+                "payload": {
+                    "run_status": "completed",
+                    "operator_report": {
+                        "task_reports": [
+                            {
+                                "task_id": "TASK-FALLBACK",
+                                "status": "implementation completed",
+                                "what_changed": ["Built a rich Feishu notification."],
+                                "verification": ["unit test passed"],
+                                "integration": "passed",
+                            }
+                        ],
+                    },
+                },
+            },
+            run_dir="/tmp/agentteam-run",
+        )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["event_type"], "notification_sent")
+        self.assertEqual(result["payload"]["notification_status"], "sent")
+        self.assertTrue(result["payload"]["fallback_used"])
+        self.assertEqual(result["payload"]["fallback_reason"], "rich_message_rejected")
+        self.assertEqual(result["payload"]["delivery_variant"], "concise_text")
+        self.assertEqual(result["payload"]["delivery_attempt_count"], 2)
+        self.assertEqual(result["payload"]["delivery_attempts"][0]["body_code"], 11232)
+        self.assertEqual(result["payload"]["delivery_attempts"][1]["result"], "sent")
+        self.assertLess(
+            len(calls[1]["content"]["text"]),
+            len(calls[0]["content"]["text"]),
+        )
+        payload = json.dumps(result["payload"], sort_keys=True)
+        self.assertIn("body_code=11232", payload)
+        self.assertNotIn("secret-token", payload)
+        self.assertNotIn("demo", payload)
+
+    def test_feishu_webhook_diagnosis_tests_variants_without_secret_leak(self):
+        from agentteam_runtime.notifications import diagnose_feishu_webhook_delivery
+
+        calls = []
+
+        def fake_post(url, payload, timeout_seconds):
+            calls.append({"url": url, "payload": payload, "timeout_seconds": timeout_seconds})
+            return {"status_code": 200, "body": {"code": 0, "msg": "success"}}
+
+        summary = diagnose_feishu_webhook_delivery(
+            webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/secret-token",
+            signing_secret="demo",
+            project="agentteam",
+            http_post=fake_post,
+            clock=lambda: 1599360473,
+        )
+
+        self.assertEqual(summary["diagnosis_status"], "sent")
+        self.assertEqual([item["variant"] for item in summary["delivery_variants"]], ["rich_text", "concise_text"])
+        self.assertEqual([item["notification_status"] for item in summary["delivery_variants"]], ["sent", "sent"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual({call["payload"]["msg_type"] for call in calls}, {"text"})
+        payload = json.dumps(summary, sort_keys=True)
         self.assertNotIn("secret-token", payload)
         self.assertNotIn("demo", payload)
 
@@ -4204,6 +4342,57 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(summary["validation_status"], "accepted")
             self.assertEqual(summary["task_id"], "TASK-001")
             self.assertTrue((output_dir / "events.jsonl").exists())
+
+    def test_cli_diagnoses_feishu_webhook_variants_without_printing_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT / "m0_runtime")
+            env["AGENTTEAM_FEISHU_DIAG_WEBHOOK"] = (
+                "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token"
+            )
+            env["AGENTTEAM_FEISHU_DIAG_SECRET"] = "demo-secret"
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentteam_runtime.cli",
+                    "--output-dir",
+                    str(output_dir),
+                    "--diagnose-feishu-webhook",
+                    "--diagnose-feishu-dry-run",
+                    "--notification-project",
+                    "agentteam",
+                    "--feishu-webhook-env",
+                    "AGENTTEAM_FEISHU_DIAG_WEBHOOK",
+                    "--feishu-signing-secret-env",
+                    "AGENTTEAM_FEISHU_DIAG_SECRET",
+                ],
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stderr, "")
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["diagnosis_status"], "dry_run")
+            self.assertEqual(summary["webhook_env"], "AGENTTEAM_FEISHU_DIAG_WEBHOOK")
+            self.assertTrue(summary["webhook_env_set"])
+            self.assertTrue(summary["signing_enabled"])
+            self.assertEqual(
+                [item["variant"] for item in summary["delivery_variants"]],
+                ["rich_text", "concise_text"],
+            )
+            self.assertEqual(
+                [item["notification_status"] for item in summary["delivery_variants"]],
+                ["dry_run", "dry_run"],
+            )
+            self.assertNotIn("secret-token", completed.stdout)
+            self.assertNotIn("demo-secret", completed.stdout)
 
     def test_cli_can_run_scheduler_loop_until_idle(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -3182,6 +3182,87 @@ class TaskpackTests(unittest.TestCase):
             self.assertNotIn("Completion summary:", message)
             self.assertNotIn("What changed:", message)
 
+    def test_agentteam_cli_notify_diagnose_dry_run_does_not_print_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            env = _test_env()
+            env["AGENTTEAM_FEISHU_DIAG_WEBHOOK"] = (
+                "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token"
+            )
+            env["AGENTTEAM_FEISHU_DIAG_SECRET"] = "demo-secret"
+            init_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "init",
+                    "--project-root",
+                    str(repo),
+                    "--project-key",
+                    "notify-diagnose-project",
+                    "--work-root",
+                    str(work_root),
+                    "--author-runtime",
+                    "fake",
+                    "--runtime",
+                    "fake",
+                    "--notification-project",
+                    "notify-diagnose-project",
+                    "--feishu-webhook-env",
+                    "AGENTTEAM_FEISHU_DIAG_WEBHOOK",
+                    "--feishu-signing-secret-env",
+                    "AGENTTEAM_FEISHU_DIAG_SECRET",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(init_completed.returncode, 0, init_completed.stderr)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "notify",
+                    "diagnose",
+                    "--project-root",
+                    str(repo),
+                    "--dry-run",
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertNotIn("secret-token", completed.stdout)
+            self.assertNotIn("demo-secret", completed.stdout)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["diagnosis_status"], "dry_run")
+            self.assertEqual(summary["provider"], "feishu")
+            self.assertEqual(summary["project"], "notify-diagnose-project")
+            self.assertEqual(summary["webhook_env"], "AGENTTEAM_FEISHU_DIAG_WEBHOOK")
+            self.assertTrue(summary["webhook_env_set"])
+            self.assertEqual(summary["signing_secret_env"], "AGENTTEAM_FEISHU_DIAG_SECRET")
+            self.assertTrue(summary["signing_enabled"])
+            self.assertEqual(
+                [item["variant"] for item in summary["variants"]],
+                ["rich_text", "concise_text"],
+            )
+            self.assertEqual(
+                [item["status"] for item in summary["variants"]],
+                ["dry_run", "dry_run"],
+            )
+
     def test_permission_request_notification_includes_approve_and_deny_hints(self):
         message = _permission_request_text(
             {

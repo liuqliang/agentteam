@@ -24,6 +24,10 @@ DEFAULT_NOTIFICATION_EVENT_TYPES = {
     "rollback_activated",
 }
 
+RICH_TEXT_VARIANT = "rich_text"
+CONCISE_TEXT_VARIANT = "concise_text"
+RICH_MESSAGE_REJECTION_BODY_CODES = {11232}
+
 
 def build_feishu_notification_sink_from_env(
     webhook_env,
@@ -90,6 +94,9 @@ class FeishuWebhookNotifier:
         clock=None,
         timeout_seconds=5,
         message_limit=1800,
+        max_attempts=2,
+        retry_backoff_seconds=0,
+        sleep=None,
     ):
         self.webhook_url = webhook_url
         self.signing_secret = signing_secret
@@ -98,46 +105,152 @@ class FeishuWebhookNotifier:
         self.clock = clock or time.time
         self.timeout_seconds = timeout_seconds
         self.message_limit = message_limit
+        self.max_attempts = max(1, int(max_attempts))
+        self.retry_backoff_seconds = max(0, retry_backoff_seconds)
+        self.sleep = sleep or time.sleep
 
     def notify_manual_gate(self, event, run_dir):
         return self.notify_event(event, run_dir)
 
     def notify_event(self, event, run_dir):
-        payload = self._event_payload(event, run_dir)
-        try:
-            response = self.http_post(self.webhook_url, payload, self.timeout_seconds)
-        except Exception as exc:
+        rich_result = self._send_payload(
+            self._event_payload(event, run_dir, variant=RICH_TEXT_VARIANT),
+            variant=RICH_TEXT_VARIANT,
+        )
+        if rich_result["sent"]:
+            metadata = self._delivery_metadata(rich_result)
             return self._notification_event(
-                "notification_failed",
+                "notification_sent",
                 event,
-                "failed",
-                error_class=exc.__class__.__name__,
-                error_summary=self._sanitize(str(exc)),
+                "sent",
+                delivery_metadata=metadata,
             )
-        status_code = response.get("status_code")
-        body = response.get("body")
-        body_code = body.get("code") if isinstance(body, dict) else None
-        body_msg = body.get("msg") if isinstance(body, dict) else None
-        if 200 <= int(status_code or 0) < 300 and body_code in {None, 0}:
-            return self._notification_event("notification_sent", event, "sent")
+
+        fallback_result = None
+        fallback_reason = None
+        if self._rich_message_was_rejected(rich_result):
+            fallback_reason = "rich_message_rejected"
+            fallback_result = self._send_payload(
+                self._event_payload(event, run_dir, variant=CONCISE_TEXT_VARIANT),
+                variant=CONCISE_TEXT_VARIANT,
+            )
+            if fallback_result["sent"]:
+                return self._notification_event(
+                    "notification_sent",
+                    event,
+                    "sent",
+                    delivery_metadata=self._delivery_metadata(
+                        rich_result,
+                        fallback_result=fallback_result,
+                        fallback_reason=fallback_reason,
+                    ),
+                )
+
+        failed_result = fallback_result or rich_result
         return self._notification_event(
             "notification_failed",
             event,
             "failed",
-            error_class="FeishuWebhookError",
-            error_summary=self._sanitize(
-                _feishu_error_summary(status_code, body_code, body_msg)
+            error_class=failed_result.get("error_class") or "FeishuWebhookError",
+            error_summary=failed_result.get("error_summary"),
+            delivery_metadata=self._delivery_metadata(
+                rich_result,
+                fallback_result=fallback_result,
+                fallback_reason=fallback_reason,
             ),
         )
 
-    def _event_payload(self, event, run_dir):
+    def _send_payload(self, payload, variant):
+        attempts = []
+        last_error_class = None
+        last_error_summary = None
+        for attempt_index in range(1, self.max_attempts + 1):
+            try:
+                response = self.http_post(self.webhook_url, payload, self.timeout_seconds)
+            except Exception as exc:
+                last_error_class = exc.__class__.__name__
+                last_error_summary = self._sanitize(str(exc))
+                attempts.append(
+                    {
+                        "variant": variant,
+                        "attempt": attempt_index,
+                        "result": "failed",
+                        "error_class": last_error_class,
+                        "error_summary": _bounded_text(last_error_summary, 300),
+                    }
+                )
+                if attempt_index < self.max_attempts:
+                    self._sleep_before_retry()
+                continue
+
+            status_code = response.get("status_code")
+            body = response.get("body")
+            body_code = body.get("code") if isinstance(body, dict) else None
+            body_msg = body.get("msg") if isinstance(body, dict) else None
+            if _feishu_response_succeeded(status_code, body_code):
+                attempts.append(
+                    {
+                        "variant": variant,
+                        "attempt": attempt_index,
+                        "result": "sent",
+                        "status_code": status_code,
+                        "body_code": body_code,
+                    }
+                )
+                return {
+                    "sent": True,
+                    "variant": variant,
+                    "attempts": attempts,
+                }
+
+            last_error_class = "FeishuWebhookError"
+            last_error_summary = self._sanitize(
+                _feishu_error_summary(status_code, body_code, body_msg)
+            )
+            attempts.append(
+                {
+                    "variant": variant,
+                    "attempt": attempt_index,
+                    "result": "failed",
+                    "status_code": status_code,
+                    "body_code": body_code,
+                    "error_class": last_error_class,
+                    "error_summary": _bounded_text(last_error_summary, 300),
+                }
+            )
+            if (
+                attempt_index < self.max_attempts
+                and _feishu_response_is_retryable(status_code, body_code)
+            ):
+                self._sleep_before_retry()
+                continue
+            break
+
+        return {
+            "sent": False,
+            "variant": variant,
+            "attempts": attempts,
+            "error_class": last_error_class,
+            "error_summary": last_error_summary,
+        }
+
+    def _sleep_before_retry(self):
+        if self.retry_backoff_seconds:
+            self.sleep(self.retry_backoff_seconds)
+
+    def _event_payload(self, event, run_dir, variant=RICH_TEXT_VARIANT):
         timestamp = str(int(self.clock()))
+        text = _event_text(event, run_dir, self.project)
+        limit = self.message_limit
+        if variant == CONCISE_TEXT_VARIANT:
+            text = _concise_event_text(event, run_dir, self.project)
+            limit = min(self.message_limit, 600)
         payload = {
             "msg_type": "text",
             "content": {
                 "text": _bounded_text(
-                    _event_text(event, run_dir, self.project),
-                    self.message_limit,
+                    text,
+                    limit,
                 )
             },
         }
@@ -146,6 +259,38 @@ class FeishuWebhookNotifier:
             payload["sign"] = feishu_custom_bot_sign(timestamp, self.signing_secret)
         return payload
 
+    def _delivery_metadata(self, rich_result, fallback_result=None, fallback_reason=None):
+        attempts = list(rich_result.get("attempts") or [])
+        if fallback_result:
+            attempts.extend(fallback_result.get("attempts") or [])
+        if not attempts:
+            return {}
+        include_metadata = (
+            len(attempts) > 1
+            or not rich_result.get("sent")
+            or fallback_result is not None
+        )
+        if not include_metadata:
+            return {}
+        metadata = {
+            "delivery_variant": attempts[-1].get("variant", rich_result.get("variant")),
+            "delivery_attempt_count": len(attempts),
+            "max_delivery_attempts": self.max_attempts,
+            "delivery_attempts": attempts,
+        }
+        if fallback_result is not None:
+            metadata["fallback_used"] = True
+            metadata["fallback_reason"] = fallback_reason or "fallback"
+        else:
+            metadata["fallback_used"] = False
+        return metadata
+
+    def _rich_message_was_rejected(self, result):
+        for attempt in result.get("attempts") or []:
+            if attempt.get("body_code") in RICH_MESSAGE_REJECTION_BODY_CODES:
+                return True
+        return False
+
     def _notification_event(
         self,
         event_type,
@@ -153,6 +298,7 @@ class FeishuWebhookNotifier:
         notification_status,
         error_class=None,
         error_summary=None,
+        delivery_metadata=None,
     ):
         payload = {
             "provider": "feishu",
@@ -167,6 +313,8 @@ class FeishuWebhookNotifier:
             payload["error_class"] = error_class
         if error_summary:
             payload["error_summary"] = _bounded_text(error_summary, 300)
+        if delivery_metadata:
+            payload.update(delivery_metadata)
         return {
             "event_type": event_type,
             "actor": "agent-notifier",
@@ -189,11 +337,135 @@ class FeishuWebhookNotifier:
         return redacted
 
 
+def diagnose_feishu_webhook_delivery(
+    webhook_url,
+    signing_secret=None,
+    project="default",
+    http_post=None,
+    clock=None,
+    timeout_seconds=5,
+    max_attempts=1,
+    dry_run=False,
+    message=None,
+):
+    notifier = FeishuWebhookNotifier(
+        webhook_url=webhook_url,
+        signing_secret=signing_secret,
+        project=project,
+        http_post=http_post,
+        clock=clock,
+        timeout_seconds=timeout_seconds,
+        max_attempts=max_attempts,
+    )
+    event = _diagnostic_event(project, message=message)
+    variants = []
+    for variant in (RICH_TEXT_VARIANT, CONCISE_TEXT_VARIANT):
+        payload = notifier._event_payload(event, run_dir=f"diagnose:{project}", variant=variant)
+        variant_summary = _diagnostic_payload_summary(payload, variant)
+        if dry_run:
+            variants.append({**variant_summary, "notification_status": "dry_run"})
+            continue
+        result = notifier._send_payload(payload, variant=variant)
+        variant_summary.update(
+            {
+                "notification_status": "sent" if result["sent"] else "failed",
+                "delivery_attempt_count": len(result.get("attempts") or []),
+                "max_delivery_attempts": notifier.max_attempts,
+                "delivery_attempts": result.get("attempts") or [],
+            }
+        )
+        if result.get("error_class"):
+            variant_summary["error_class"] = result["error_class"]
+        if result.get("error_summary"):
+            variant_summary["error_summary"] = _bounded_text(result["error_summary"], 300)
+        variants.append(variant_summary)
+
+    if dry_run:
+        diagnosis_status = "dry_run"
+    elif all(variant.get("notification_status") == "sent" for variant in variants):
+        diagnosis_status = "sent"
+    else:
+        diagnosis_status = "failed"
+    return {
+        "diagnosis_status": diagnosis_status,
+        "provider": "feishu",
+        "project": project,
+        "webhook_url_set": bool(webhook_url),
+        "signing_enabled": bool(signing_secret),
+        "delivery_variants": variants,
+    }
+
+
+def _diagnostic_event(project, message=None):
+    return {
+        "event_id": "feishu-diagnosis",
+        "sequence": 0,
+        "event_type": "run_completed",
+        "actor": "agentteam-cli",
+        "target_agent_id": None,
+        "idempotency_key": "notify:diagnose-feishu",
+        "correlation_id": "notify:diagnose-feishu",
+        "payload": {
+            "run_status": "diagnostic",
+            "operator_report": {
+                "report_schema_version": "operator_run_report.v1",
+                "task_count": 1,
+                "blocked_count": 0,
+                "task_reports": [
+                    {
+                        "task_id": "feishu-diagnosis",
+                        "status": "diagnostic",
+                        "what_changed": [
+                            message or f"Feishu webhook delivery diagnosis for {project}."
+                        ],
+                        "changed_files": [],
+                        "verification": ["Webhook variant delivery diagnosis was triggered."],
+                        "integration": "not requested",
+                        "merge_recommendation": "No merge action; notification diagnosis only.",
+                        "next_steps": [
+                            "Review rich_text and concise_text variant delivery results."
+                        ],
+                    }
+                ],
+            },
+        },
+    }
+
+
+def _diagnostic_payload_summary(payload, variant):
+    content = payload.get("content") if isinstance(payload, dict) else {}
+    text = content.get("text", "") if isinstance(content, dict) else ""
+    return {
+        "variant": variant,
+        "msg_type": payload.get("msg_type") if isinstance(payload, dict) else None,
+        "content_length": len(text),
+        "signed": bool(isinstance(payload, dict) and payload.get("sign")),
+    }
+
+
 def _feishu_error_summary(status_code, body_code, body_msg=None):
     parts = [f"status_code={status_code}", f"body_code={body_code}"]
     if body_msg:
         parts.append(f"body_msg={body_msg}")
     return " ".join(parts)
+
+
+def _feishu_response_succeeded(status_code, body_code):
+    try:
+        http_status = int(status_code or 0)
+    except (TypeError, ValueError):
+        http_status = 0
+    return 200 <= http_status < 300 and body_code in {None, 0}
+
+
+def _feishu_response_is_retryable(status_code, body_code):
+    if body_code in RICH_MESSAGE_REJECTION_BODY_CODES:
+        return False
+    try:
+        http_status = int(status_code or 0)
+    except (TypeError, ValueError):
+        return False
+    return http_status in {408, 409, 425, 429} or http_status >= 500
 
 
 def _manual_gate_text(event, run_dir, project):
@@ -251,6 +523,45 @@ def _permission_request_text(event, run_dir, project):
             f"Run dir: {run_dir}",
             f"Approve: {approve_command}",
             f"Deny: {deny_command}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _concise_event_text(event, run_dir, project):
+    event_type = event.get("event_type", "event")
+    payload = event.get("payload", {})
+    lines = [
+        f"[AgentTeam] {event_type}",
+        f"Project: {project}",
+    ]
+    run_status = payload.get("run_status") or payload.get("scheduler_status")
+    if run_status:
+        lines.append(f"Status: {run_status}")
+    task_id = payload.get("task_id")
+    if not task_id and isinstance(payload.get("operator_report"), dict):
+        task_reports = payload["operator_report"].get("task_reports")
+        if isinstance(task_reports, list) and task_reports:
+            first_task = task_reports[0] if isinstance(task_reports[0], dict) else {}
+            task_id = first_task.get("task_id")
+    if task_id:
+        lines.append(f"Task: {task_id}")
+    if event_type == "manual_gate_required":
+        question_id = payload.get("question_id", "unknown")
+        lines.append(f"Question id: {question_id}")
+        lines.append(
+            "Resume: python3 -m agentteam_runtime.agentteam resume "
+            f"--run-dir {run_dir} --interactive --question-id {question_id}"
+        )
+    elif event_type == "permission_request_required":
+        request_id = payload.get("request_id", "unknown")
+        lines.append(f"Request id: {request_id}")
+        lines.append(f"Approve: agentteam permissions approve --run-dir {run_dir} --request-id {request_id}")
+        lines.append(f"Deny: agentteam permissions deny --run-dir {run_dir} --request-id {request_id}")
+    lines.extend(
+        [
+            f"Run dir: {run_dir}",
+            f"Summary: {_event_message_summary(event)}",
         ]
     )
     return "\n".join(lines)
