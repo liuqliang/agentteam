@@ -5108,6 +5108,79 @@ class TaskpackTests(unittest.TestCase):
             self.assertNotIn("agentteam watch", text_completed.stdout)
             self.assertNotIn("run is still active", text_completed.stdout)
 
+    def test_agentteam_cli_status_treats_stop_requested_inflight_as_inactive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "stop-requested-inflight-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "status-project")
+            _write_json(
+                run_dir / "state" / "two_phase_scheduler_state.json",
+                {
+                    "scheduler_status": "stop_requested",
+                    "previous_scheduler_status": "waiting",
+                    "stop_mode": "stop",
+                    "backlog": {
+                        "items": [
+                            {
+                                "task_id": "optimize-pipeline",
+                                "backlog_status": "ready",
+                            }
+                        ]
+                    },
+                    "inflight_attempts": [
+                        {
+                            "task_id": "optimize-pipeline",
+                            "attempt_id": "ATTEMPT-001",
+                            "agent_id": "implementation-worker-1",
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                run_dir / "state" / "worker_process_registry.json",
+                {
+                    "registry_status": "stop_requested",
+                    "stop_mode": "stop",
+                    "workers": [
+                        {
+                            "worker_agent_id": "implementation-worker-1",
+                            "worker_status": "stop_requested",
+                            "stopped_by": "terminate_requested",
+                        }
+                    ],
+                },
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["run_status"], "stop_requested")
+            self.assertEqual(summary["liveness_status"], "stop_requested")
+            self.assertEqual(summary["inflight"]["total"], 0)
+            self.assertEqual(summary["inactive_inflight"]["total"], 1)
+            self.assertNotIn("agentteam watch", summary.get("next_action", ""))
+
     def test_agentteam_cli_status_prefers_active_worker_for_last_worker(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

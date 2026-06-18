@@ -5264,7 +5264,13 @@ def _status_task_counts(snapshot, state):
     }
 
 
-_INACTIVE_INFLIGHT_RUN_STATUSES = {"completed", "failed", "stopped", "timed_out"}
+_INACTIVE_INFLIGHT_RUN_STATUSES = {
+    "completed",
+    "failed",
+    "stop_requested",
+    "stopped",
+    "timed_out",
+}
 
 
 def _status_inflight_attempts(state):
