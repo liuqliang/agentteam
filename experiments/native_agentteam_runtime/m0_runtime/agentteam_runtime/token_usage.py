@@ -116,6 +116,7 @@ def aggregate_token_usage(usages, expected_count=0):
     if reported_count == 0:
         return {
             "usage_status": "unavailable",
+            "reason": "no reported token usage from runtime attempts",
             "reported_attempt_count": 0,
             "unreported_attempt_count": expected_count,
             **{field: None for field in TOKEN_USAGE_FIELDS},
@@ -152,7 +153,15 @@ def token_usage_from_state(state):
 
 
 def format_token_usage(usage, label="Token usage"):
-    if not isinstance(usage, dict) or usage.get("usage_status") == "unavailable":
+    if isinstance(usage, dict) and usage.get("usage_status") == "not_applicable":
+        reason = usage.get("reason")
+        suffix = f" ({reason})" if reason else ""
+        return f"{label}: not applicable{suffix}"
+    if isinstance(usage, dict) and usage.get("usage_status") == "unavailable":
+        reason = usage.get("reason")
+        suffix = f" ({reason})" if reason else ""
+        return f"{label}: unavailable{suffix}"
+    if not isinstance(usage, dict):
         return f"{label}: unavailable"
     total = _value_text(usage.get("total_tokens"))
     input_tokens = _value_text(usage.get("input_tokens"))

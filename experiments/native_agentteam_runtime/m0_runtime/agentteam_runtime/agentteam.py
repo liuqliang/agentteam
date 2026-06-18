@@ -3106,6 +3106,10 @@ def _notify_test_event(project, message=None):
             "run_status": "diagnostic",
             "operator_report": {
                 "report_schema_version": "operator_run_report.v1",
+                "token_usage": {
+                    "usage_status": "not_applicable",
+                    "reason": "diagnostic notification; no AgentTeam run",
+                },
                 "task_count": 1,
                 "blocked_count": 0,
                 "task_reports": [

@@ -65,6 +65,17 @@ class FixedClock:
 
 
 class M0RuntimeTests(unittest.TestCase):
+    def test_token_usage_unavailable_output_explains_missing_runtime_reports(self):
+        from agentteam_runtime.token_usage import aggregate_token_usage, format_token_usage
+
+        usage = aggregate_token_usage([None, None], expected_count=2)
+
+        self.assertEqual(usage["usage_status"], "unavailable")
+        self.assertEqual(
+            format_token_usage(usage),
+            "Token usage: unavailable (no reported token usage from runtime attempts)",
+        )
+
     def test_feishu_custom_bot_notifier_signs_and_formats_manual_gate_message(self):
         from agentteam_runtime.notifications import (
             FeishuWebhookNotifier,

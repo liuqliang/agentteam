@@ -3070,7 +3070,11 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("[AgentTeam] run_completed", message)
             self.assertIn("工作摘要:", message)
             self.assertIn("中文工作汇报:", message)
-            self.assertIn("Token usage: unavailable", message)
+            self.assertIn(
+                "Token usage: not applicable (diagnostic notification; no AgentTeam run)",
+                message,
+            )
+            self.assertNotIn("Token usage: unavailable", message)
             self.assertIn("AgentTeam notification test for notify-project.", message)
             self.assertIn("If you receive this message, Feishu notification delivery works.", message)
             self.assertNotIn("Completion summary:", message)
