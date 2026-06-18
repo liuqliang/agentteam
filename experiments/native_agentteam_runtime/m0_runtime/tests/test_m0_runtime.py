@@ -71,9 +71,76 @@ class M0RuntimeTests(unittest.TestCase):
         usage = aggregate_token_usage([None, None], expected_count=2)
 
         self.assertEqual(usage["usage_status"], "unavailable")
+        self.assertEqual(usage["unavailable_reason"], "missing_runtime_token_usage")
         self.assertEqual(
             format_token_usage(usage),
-            "Token usage: unavailable (no reported token usage from runtime attempts)",
+            "Token usage: unavailable (missing_runtime_token_usage)",
+        )
+
+    def test_token_usage_records_source_for_runtime_result_and_codex_jsonl(self):
+        from agentteam_runtime.token_usage import (
+            aggregate_token_usage,
+            format_token_usage,
+            token_usage_from_jsonl,
+            token_usage_from_result,
+        )
+
+        codex_usage = token_usage_from_jsonl(
+            json.dumps(
+                {
+                    "type": "turn_completed",
+                    "usage": {
+                        "input_tokens": 7,
+                        "output_tokens": 3,
+                        "total_tokens": 10,
+                    },
+                }
+            )
+        )
+        runtime_usage = token_usage_from_result(
+            {
+                "result_status": "completed",
+                "changed_files": [],
+                "output": {
+                    "usage": {
+                        "input_tokens": 11,
+                        "output_tokens": 5,
+                        "total_tokens": 16,
+                    }
+                },
+            }
+        )
+        aggregate = aggregate_token_usage(
+            [codex_usage, runtime_usage],
+            expected_count=2,
+        )
+
+        self.assertEqual(codex_usage["usage_source"], "codex_jsonl")
+        self.assertEqual(runtime_usage["usage_source"], "runtime_result")
+        self.assertEqual(aggregate["usage_status"], "reported")
+        self.assertEqual(aggregate["usage_source"], "mixed")
+        self.assertEqual(aggregate["usage_sources"], ["codex_jsonl", "runtime_result"])
+        self.assertEqual(aggregate["total_tokens"], 26)
+        self.assertIn("source=mixed", format_token_usage(aggregate))
+
+    def test_token_usage_preserves_not_applicable_diagnostic_semantics(self):
+        from agentteam_runtime.token_usage import aggregate_token_usage, format_token_usage
+
+        usage = aggregate_token_usage(
+            [
+                {
+                    "usage_status": "not_applicable",
+                    "reason": "diagnostic_notification",
+                }
+            ],
+            expected_count=1,
+        )
+
+        self.assertEqual(usage["usage_status"], "not_applicable")
+        self.assertEqual(usage["reason"], "diagnostic_notification")
+        self.assertEqual(
+            format_token_usage(usage),
+            "Token usage: not applicable (diagnostic_notification)",
         )
 
     def test_feishu_custom_bot_notifier_signs_and_formats_manual_gate_message(self):
@@ -312,6 +379,10 @@ class M0RuntimeTests(unittest.TestCase):
         payload = json.dumps(summary, sort_keys=True)
         self.assertNotIn("secret-token", payload)
         self.assertNotIn("demo", payload)
+        self.assertIn(
+            "Token usage: not applicable (diagnostic_notification)",
+            calls[0]["payload"]["content"]["text"],
+        )
 
     def test_feishu_notification_sink_from_env_skips_missing_webhook(self):
         from agentteam_runtime.notifications import build_feishu_notification_sink_from_env
@@ -364,6 +435,7 @@ class M0RuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["event_type"], "notification_sent")
         self.assertEqual(calls[0]["payload"]["sign"], "l1N0gAcBjdwBvGm1xMjOF0XSyaLRpR7tuO5dHfhAYc8=")
+        self.assertNotIn("Token usage: unavailable", calls[0]["payload"]["content"]["text"])
         self.assertNotIn("secret-token", json.dumps(result["payload"], sort_keys=True))
         self.assertNotIn("demo", json.dumps(result["payload"], sort_keys=True))
 
@@ -1275,6 +1347,8 @@ class M0RuntimeTests(unittest.TestCase):
                 report["token_usage"],
                 {
                     "usage_status": "reported",
+                    "usage_source": "runtime_result",
+                    "usage_sources": ["runtime_result"],
                     "reported_attempt_count": 1,
                     "unreported_attempt_count": 0,
                     "input_tokens": 1200,
@@ -1285,6 +1359,7 @@ class M0RuntimeTests(unittest.TestCase):
                 },
             )
             self.assertEqual(task_report["task_id"], "TASK-001")
+            self.assertEqual(task_report["token_usage"]["usage_source"], "runtime_result")
             self.assertEqual(task_report["token_usage"]["total_tokens"], 1500)
             self.assertEqual(
                 task_report["what_changed"],
@@ -10022,6 +10097,7 @@ class M0RuntimeTests(unittest.TestCase):
                     "total_tokens": 1555,
                     "cached_input_tokens": 100,
                     "reasoning_tokens": 77,
+                    "usage_source": "codex_jsonl",
                 },
             )
 

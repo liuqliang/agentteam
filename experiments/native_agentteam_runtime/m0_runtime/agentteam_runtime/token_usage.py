@@ -9,6 +9,11 @@ TOKEN_USAGE_FIELDS = [
     "reasoning_tokens",
 ]
 
+TOKEN_USAGE_SOURCE_CODEX_JSONL = "codex_jsonl"
+TOKEN_USAGE_SOURCE_RUNTIME_RESULT = "runtime_result"
+TOKEN_USAGE_SOURCE_MIXED = "mixed"
+TOKEN_USAGE_UNAVAILABLE_REASON_MISSING_RUNTIME = "missing_runtime_token_usage"
+
 
 _FIELD_ALIASES = {
     "input_tokens": ["input_tokens", "prompt_tokens", "prompt"],
@@ -35,7 +40,10 @@ def token_usage_from_result(result):
         output.get("token_usage"),
         output.get("usage"),
     ]:
-        usage = normalize_token_usage(candidate)
+        usage = normalize_token_usage(
+            candidate,
+            default_source=TOKEN_USAGE_SOURCE_RUNTIME_RESULT,
+        )
         if usage:
             return usage
     return None
@@ -52,13 +60,16 @@ def token_usage_from_jsonl(text):
         except json.JSONDecodeError:
             continue
         for candidate in _usage_candidates(event):
-            normalized = normalize_token_usage(candidate)
+            normalized = normalize_token_usage(
+                candidate,
+                default_source=TOKEN_USAGE_SOURCE_CODEX_JSONL,
+            )
             if normalized:
                 usage = normalized
     return usage
 
 
-def normalize_token_usage(candidate):
+def normalize_token_usage(candidate, default_source=None):
     if not isinstance(candidate, dict):
         return None
     usage = {}
@@ -68,6 +79,9 @@ def normalize_token_usage(candidate):
         usage["total_tokens"] = _computed_total(usage)
     if not any(usage[field] is not None for field in TOKEN_USAGE_FIELDS):
         return None
+    source = _usage_source(candidate, default_source=default_source)
+    if source:
+        usage["usage_source"] = source
     return usage
 
 
@@ -105,6 +119,9 @@ def _looks_like_usage(value):
 
 
 def aggregate_token_usage(usages, expected_count=0):
+    usages = list(usages or [])
+    not_applicable = [_not_applicable_usage(usage) for usage in usages]
+    not_applicable = [usage for usage in not_applicable if usage]
     normalized = []
     for usage in usages:
         normalized_usage = normalize_token_usage(usage)
@@ -114,9 +131,12 @@ def aggregate_token_usage(usages, expected_count=0):
     reported_count = len(normalized)
     unreported_count = max(expected_count - reported_count, 0)
     if reported_count == 0:
+        if not_applicable and len(not_applicable) == expected_count:
+            return _aggregate_not_applicable_usage(not_applicable)
         return {
             "usage_status": "unavailable",
-            "reason": "no reported token usage from runtime attempts",
+            "reason": TOKEN_USAGE_UNAVAILABLE_REASON_MISSING_RUNTIME,
+            "unavailable_reason": TOKEN_USAGE_UNAVAILABLE_REASON_MISSING_RUNTIME,
             "reported_attempt_count": 0,
             "unreported_attempt_count": expected_count,
             **{field: None for field in TOKEN_USAGE_FIELDS},
@@ -125,12 +145,19 @@ def aggregate_token_usage(usages, expected_count=0):
         field: _sum_optional(usage.get(field) for usage in normalized)
         for field in TOKEN_USAGE_FIELDS
     }
-    return {
+    aggregate = {
         "usage_status": "reported" if unreported_count == 0 else "partial",
         "reported_attempt_count": reported_count,
         "unreported_attempt_count": unreported_count,
         **totals,
     }
+    sources = _usage_sources(normalized)
+    if sources:
+        aggregate["usage_sources"] = sources
+        aggregate["usage_source"] = (
+            sources[0] if len(sources) == 1 else TOKEN_USAGE_SOURCE_MIXED
+        )
+    return aggregate
 
 
 def aggregate_token_usage_from_results(results):
@@ -158,7 +185,7 @@ def format_token_usage(usage, label="Token usage"):
         suffix = f" ({reason})" if reason else ""
         return f"{label}: not applicable{suffix}"
     if isinstance(usage, dict) and usage.get("usage_status") == "unavailable":
-        reason = usage.get("reason")
+        reason = usage.get("unavailable_reason") or usage.get("reason")
         suffix = f" ({reason})" if reason else ""
         return f"{label}: unavailable{suffix}"
     if not isinstance(usage, dict):
@@ -170,6 +197,9 @@ def format_token_usage(usage, label="Token usage"):
     unreported = usage.get("unreported_attempt_count", 0)
     expected = reported + unreported
     suffix = f" reported={reported}/{expected}" if expected else ""
+    source = usage.get("usage_source")
+    if isinstance(source, str) and source.strip():
+        suffix = f"{suffix} source={source.strip()}"
     return f"{label}: total={total} input={input_tokens} output={output_tokens}{suffix}"
 
 
@@ -183,6 +213,59 @@ def _first_int(mapping, keys):
         if isinstance(value, str) and value.isdigit():
             return int(value)
     return None
+
+
+def _usage_source(candidate, default_source=None):
+    source = candidate.get("usage_source") or candidate.get("token_usage_source")
+    if isinstance(source, str) and source.strip():
+        return source.strip()
+    if isinstance(default_source, str) and default_source.strip():
+        return default_source.strip()
+    return None
+
+
+def _usage_sources(usages):
+    sources = []
+    for usage in usages:
+        values = usage.get("usage_sources")
+        if not isinstance(values, list):
+            values = [usage.get("usage_source")]
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                sources.append(value.strip())
+    return sorted(set(sources))
+
+
+def _not_applicable_usage(usage):
+    if not isinstance(usage, dict):
+        return None
+    if usage.get("usage_status") != "not_applicable":
+        return None
+    reason = usage.get("reason")
+    return {
+        "usage_status": "not_applicable",
+        "reason": reason if isinstance(reason, str) and reason.strip() else None,
+    }
+
+
+def _aggregate_not_applicable_usage(usages):
+    reasons = sorted(
+        {
+            usage["reason"]
+            for usage in usages
+            if isinstance(usage.get("reason"), str) and usage["reason"].strip()
+        }
+    )
+    aggregate = {
+        "usage_status": "not_applicable",
+        "reported_attempt_count": 0,
+        "unreported_attempt_count": 0,
+        **{field: None for field in TOKEN_USAGE_FIELDS},
+    }
+    if reasons:
+        aggregate["reason"] = reasons[0] if len(reasons) == 1 else "mixed"
+        aggregate["reasons"] = reasons
+    return aggregate
 
 
 def _computed_total(usage):

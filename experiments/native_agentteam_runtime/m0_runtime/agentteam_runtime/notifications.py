@@ -397,6 +397,10 @@ def diagnose_feishu_webhook_delivery(
 
 
 def _diagnostic_event(project, message=None):
+    token_usage = {
+        "usage_status": "not_applicable",
+        "reason": "diagnostic_notification",
+    }
     return {
         "event_id": "feishu-diagnosis",
         "sequence": 0,
@@ -425,8 +429,10 @@ def _diagnostic_event(project, message=None):
                         "next_steps": [
                             "Review rich_text and concise_text variant delivery results."
                         ],
+                        "token_usage": token_usage,
                     }
                 ],
+                "token_usage": token_usage,
             },
         },
     }

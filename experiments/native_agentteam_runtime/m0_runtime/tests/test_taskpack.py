@@ -1562,6 +1562,59 @@ class TaskpackTests(unittest.TestCase):
                 stdout.getvalue(),
             )
 
+    def test_run_status_summary_preserves_token_usage_source_and_unavailable_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            reported_run_dir = work_root / "runs" / "reported-run"
+            reported_state_dir = reported_run_dir / "state"
+            reported_state_dir.mkdir(parents=True)
+            _write_json(
+                reported_state_dir / "two_phase_scheduler_state.json",
+                {
+                    "scheduler_status": "idle",
+                    "backlog": {"items": []},
+                    "inflight_attempts": [],
+                    "steps": [
+                        {
+                            "task_id": "TASK-001",
+                            "result": {
+                                "token_usage": {
+                                    "usage_source": "codex_jsonl",
+                                    "input_tokens": 1200,
+                                    "output_tokens": 300,
+                                    "total_tokens": 1500,
+                                },
+                            },
+                        }
+                    ],
+                },
+            )
+            missing_run_dir = work_root / "runs" / "missing-run"
+            missing_state_dir = missing_run_dir / "state"
+            missing_state_dir.mkdir(parents=True)
+            _write_json(
+                missing_state_dir / "two_phase_scheduler_state.json",
+                {
+                    "scheduler_status": "idle",
+                    "backlog": {"items": []},
+                    "inflight_attempts": [],
+                    "steps": [{"task_id": "TASK-002", "result": {}}],
+                },
+            )
+            profile = {"project_key": "fixture", "work_root": str(work_root)}
+
+            reported = _build_run_status_summary(profile, reported_run_dir)
+            missing = _build_run_status_summary(profile, missing_run_dir)
+
+            self.assertEqual(reported["token_usage"]["usage_status"], "reported")
+            self.assertEqual(reported["token_usage"]["usage_source"], "codex_jsonl")
+            self.assertEqual(reported["token_usage"]["usage_sources"], ["codex_jsonl"])
+            self.assertEqual(
+                missing["token_usage"]["unavailable_reason"],
+                "missing_runtime_token_usage",
+            )
+
     def test_execution_result_text_reports_followup_work_summary(self):
         result = {
             "status": "completed",

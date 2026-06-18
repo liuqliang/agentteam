@@ -758,10 +758,12 @@ Completion summaries include:
   the empty change list as an evidence gap. Missing `changed_files` fields are
   still reported as evidence gaps.
 - `Token usage`: `reported` means AgentTeam parsed real usage from the runtime
-  result, such as Codex `--json` events. `unavailable` means a runtime attempt
-  existed but the worker/runtime adapter did not report token usage.
-  `not applicable` means the message is diagnostic or manual and is not tied to
-  an AgentTeam run.
+  result. Report JSON includes `usage_source`/`usage_sources` such as
+  `codex_jsonl`, `runtime_result`, or `mixed`. `unavailable` means a runtime
+  attempt existed but the worker/runtime adapter did not report token usage;
+  report JSON includes `unavailable_reason`, currently
+  `missing_runtime_token_usage`. `not applicable` means the message is
+  diagnostic or manual and is not tied to an AgentTeam run.
 - `follow_up_recommendation`: suggested `integrate`, `next`, or blocker-review
   action with command text when the structured report supports it.
 - `review_gate`: concise review-gate guidance when accepted changes are waiting
