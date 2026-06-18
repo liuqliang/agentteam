@@ -90,6 +90,7 @@ def stop_run(run_dir, grace_seconds=5, force=False, stale_only=False, operator="
         for worker in updated_workers
     ):
         stop_status = "stop_requested"
+    stop_mode = "stale_cleanup" if stale_only else "stop"
 
     if isinstance(registry, dict):
         registry["registry_status"] = stop_status
@@ -97,7 +98,7 @@ def stop_run(run_dir, grace_seconds=5, force=False, stale_only=False, operator="
         registry["workers"] = updated_workers
         registry["stop_requested_at"] = now
         registry["stop_operator"] = operator
-        registry["stop_mode"] = "stale_cleanup" if stale_only else "stop"
+        registry["stop_mode"] = stop_mode
         _write_json(registry_path, registry)
 
     if isinstance(state, dict) and state:
@@ -106,10 +107,42 @@ def stop_run(run_dir, grace_seconds=5, force=False, stale_only=False, operator="
         state["scheduler_status"] = stop_status
         state["stop_requested_at"] = now
         state["stop_operator"] = operator
-        state["stop_mode"] = "stale_cleanup" if stale_only else "stop"
+        state["stop_mode"] = stop_mode
         _write_json(state_path, state)
+    stop_request = write_run_stop_request(
+        run_dir,
+        stop_status=stop_status,
+        requested_at=now,
+        operator=operator,
+        mode=stop_mode,
+    )
 
-    return _stop_summary(stop_status, run_dir, state_path, registry_path, updated_workers)
+    return _stop_summary(
+        stop_status,
+        run_dir,
+        state_path,
+        registry_path,
+        updated_workers,
+        stop_request_path=stop_request["stop_request_path"],
+    )
+
+
+def read_run_stop_request(run_dir):
+    request = _read_json_if_exists(_run_stop_request_path(run_dir))
+    return request if isinstance(request, dict) else {}
+
+
+def write_run_stop_request(run_dir, stop_status, requested_at, operator, mode):
+    path = _run_stop_request_path(run_dir)
+    request = {
+        "stop_request_path": str(path),
+        "stop_status": stop_status,
+        "stop_requested_at": requested_at,
+        "stop_operator": operator,
+        "stop_mode": mode,
+    }
+    _write_json(path, request)
+    return request
 
 
 def cleanup_stale_runs(profile, operator="operator"):
@@ -401,11 +434,19 @@ def _write_stop_file(path):
     stop_file.write_text("stop\n", encoding="utf-8")
 
 
-def _stop_summary(stop_status, run_dir, state_path, registry_path, workers, skipped_live=0):
+def _stop_summary(
+    stop_status,
+    run_dir,
+    state_path,
+    registry_path,
+    workers,
+    skipped_live=0,
+    stop_request_path=None,
+):
     counts = _worker_counts(workers)
     if skipped_live:
         counts["skipped_live"] = skipped_live
-    return {
+    summary = {
         "stop_status": stop_status,
         "latest_run": run_dir.name,
         "run_dir": str(run_dir),
@@ -413,6 +454,9 @@ def _stop_summary(stop_status, run_dir, state_path, registry_path, workers, skip
         "registry_path": str(registry_path) if registry_path else None,
         "workers": counts,
     }
+    if stop_request_path:
+        summary["stop_request_path"] = str(stop_request_path)
+    return summary
 
 
 def _worker_counts(workers):
@@ -454,6 +498,10 @@ def _worker_registry_path(run_dir):
     if legacy.exists():
         return legacy
     return process_registry
+
+
+def _run_stop_request_path(run_dir):
+    return Path(run_dir) / "state" / "run_stop_request.json"
 
 
 def _read_json_if_exists(path):

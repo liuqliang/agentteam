@@ -6973,6 +6973,161 @@ class M0RuntimeTests(unittest.TestCase):
                 {"TASK-001": "done", "TASK-002": "done"},
             )
 
+    def test_stop_run_marker_prevents_active_two_phase_tick_from_restarting_run(self):
+        from agentteam_runtime.operator_control import stop_run
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                ],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_inflight=1,
+            )
+            dispatch = scheduler.dispatch_ready()
+            registry_path = output_dir / "state" / "worker_process_registry.json"
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "registry_status": "running",
+                        "workers": [
+                            {
+                                "worker_agent_id": "agent-repo-map",
+                                "worker_status": "running",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            stop = stop_run(output_dir, force=True, operator="test-operator")
+            tick = scheduler.tick()
+            state = json.loads(scheduler.state_path.read_text(encoding="utf-8"))
+            stop_request = json.loads(
+                (output_dir / "state" / "run_stop_request.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            self.assertEqual(dispatch["inflight_count"], 1)
+            self.assertEqual(stop["stop_status"], "stopped")
+            self.assertEqual(stop_request["stop_status"], "stopped")
+            self.assertEqual(stop_request["stop_operator"], "test-operator")
+            self.assertEqual(tick["tick_status"], "stopped")
+            self.assertEqual(tick["inflight_count"], 0)
+            self.assertEqual(tick["inactive_inflight_count"], 1)
+            self.assertEqual(state["scheduler_status"], "stopped")
+            self.assertEqual(state["stop_operator"], "test-operator")
+            self.assertEqual(len(state["inflight_attempts"]), 1)
+
+    def test_supervised_two_phase_scheduler_honors_stop_request_before_supervising_pool(self):
+        from agentteam_runtime.operator_control import stop_run
+
+        class RestartingWorkerPool:
+            def __init__(self):
+                self.supervise_calls = 0
+
+            def supervise_once(self):
+                self.supervise_calls += 1
+                return {
+                    "supervision_status": "running",
+                    "restarted_count": 1,
+                    "before": self.health_check(),
+                    "restart": {"restarted_count": 1},
+                    "after": self.health_check(),
+                }
+
+            def health_check(self):
+                return {
+                    "pool_status": "degraded",
+                    "workers": [
+                        {
+                            "worker_agent_id": "agent-repo-map",
+                            "worker_status": "exited",
+                        }
+                    ],
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-001", write_scope=["generated/task-001/"]),
+                ],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_inflight=1,
+            )
+            scheduler.state["scheduler_status"] = "running"
+            scheduler._write_state()
+            (output_dir / "state" / "worker_process_registry.json").write_text(
+                json.dumps(
+                    {
+                        "registry_status": "running",
+                        "workers": [
+                            {
+                                "worker_agent_id": "agent-repo-map",
+                                "worker_status": "running",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stop_run(output_dir, force=True, operator="test-operator")
+            worker_pool = RestartingWorkerPool()
+            args = SimpleNamespace(
+                agent_pool=str(agent_pool_path),
+                backlog=str(backlog_path),
+                output_dir=str(output_dir),
+                project_root=None,
+                max_inflight=1,
+                max_attempts=1,
+                lease_timeout_seconds=900,
+                integrate_accepted_patch=False,
+                commit_verified_integration=False,
+                auto_decompose_backlog=False,
+                decomposition_milestone_id="M21",
+                decomposition_planner_role="task_planner",
+                decomposition_default_worker_role="repo_map_agent",
+                planner_context_artifact=[],
+                planner_context_excerpt_chars=1200,
+                max_steps=3,
+            )
+
+            result = _run_supervised_two_phase_scheduler(
+                args,
+                integration_verification_command=None,
+                worker_pool=worker_pool,
+                notification_sink=None,
+            )
+
+            self.assertEqual(result["scheduler_status"], "stopped")
+            self.assertEqual(result["tick_count"], 0)
+            self.assertEqual(result["inflight_count"], 0)
+            self.assertEqual(worker_pool.supervise_calls, 0)
+
     def test_supervised_two_phase_scheduler_waits_past_max_steps_for_running_inflight_worker(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

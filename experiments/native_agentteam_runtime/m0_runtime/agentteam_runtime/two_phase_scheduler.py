@@ -31,9 +31,13 @@ from .m0_runtime import (
 )
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
 from .notifications import DEFAULT_NOTIFICATION_EVENT_TYPES
+from .operator_control import read_run_stop_request
 from .planner_context import build_planner_context
 from .task_proposal import normalize_evidence_summary, normalize_task_proposal
 from .token_usage import aggregate_token_usage, token_usage_from_result
+
+
+_STOP_SCHEDULER_STATUSES = {"stopped", "stop_requested"}
 
 
 class TwoPhaseFileScheduler:
@@ -111,6 +115,8 @@ class TwoPhaseFileScheduler:
         self.state = self._load_or_create_state()
 
     def dispatch_ready(self):
+        if self.stop_if_requested():
+            return self._stopped_dispatch_result()
         self._ensure_decomposition_task()
         capacity = self.max_inflight - len(self.state["inflight_attempts"])
         if capacity <= 0:
@@ -150,6 +156,8 @@ class TwoPhaseFileScheduler:
         }
 
     def collect_ready_results(self):
+        if self.stop_if_requested():
+            return self._stopped_collect_result()
         collected = []
         remaining = []
         for inflight in self.state["inflight_attempts"]:
@@ -178,6 +186,9 @@ class TwoPhaseFileScheduler:
         }
 
     def tick(self):
+        stopped = self.stop_if_requested()
+        if stopped:
+            return stopped
         collect = self.collect_ready_results()
         dispatch = self.dispatch_ready()
         if collect["collected_count"] or dispatch["dispatch_count"]:
@@ -200,6 +211,18 @@ class TwoPhaseFileScheduler:
     def run_until_idle(self, max_ticks=100, poll_interval_seconds=0.02):
         if max_ticks < 1:
             raise ValueError("max_ticks must be at least 1")
+        stopped = self.stop_if_requested()
+        if stopped:
+            self._emit_run_event_once(
+                "run_stopped",
+                self._run_event_payload("stopped", {"tick_count": 0}),
+            )
+            return {
+                **self.summary(),
+                "scheduler_status": self.state["scheduler_status"],
+                "tick_count": 0,
+                "last_tick": stopped,
+            }
         self._emit_run_event_once(
             "run_started",
             self._run_event_payload("running", {"max_ticks": max_ticks}),
@@ -209,6 +232,17 @@ class TwoPhaseFileScheduler:
         for _ in range(max_ticks):
             tick_count += 1
             last_tick = self.tick()
+            if last_tick["tick_status"] in _STOP_SCHEDULER_STATUSES:
+                self._emit_run_event_once(
+                    "run_stopped",
+                    self._run_event_payload("stopped", {"tick_count": tick_count}),
+                )
+                return {
+                    **self.summary(),
+                    "scheduler_status": self.state["scheduler_status"],
+                    "tick_count": tick_count,
+                    "last_tick": last_tick,
+                }
             if last_tick["tick_status"] == "idle":
                 summary = {
                     **self.summary(),
@@ -237,6 +271,8 @@ class TwoPhaseFileScheduler:
         }
 
     def summary(self):
+        active_inflight_count = self._active_inflight_count()
+        inactive_inflight_count = self._inactive_inflight_count()
         processed_task_ids = [
             step["task_id"]
             for step in self.state["steps"]
@@ -246,7 +282,8 @@ class TwoPhaseFileScheduler:
             "scheduler_status": self.state["scheduler_status"],
             "processed_task_ids": processed_task_ids,
             "step_count": len(self.state["steps"]),
-            "inflight_count": len(self.state["inflight_attempts"]),
+            "inflight_count": active_inflight_count,
+            "inactive_inflight_count": inactive_inflight_count,
             "max_attempts": self.state["max_attempts"],
             "lease_timeout_seconds": self.state["lease_timeout_seconds"],
             "steps": self.state["steps"],
@@ -254,6 +291,11 @@ class TwoPhaseFileScheduler:
             "state_path": str(self.state_path),
             "state_db_path": str(self.state_db_path),
         }
+
+    def stop_if_requested(self):
+        if not self._apply_run_stop_request():
+            return None
+        return self._stopped_tick_result()
 
     def _dispatch_task(self, agent_pool, task):
         step_id = self._next_step_id(task["task_id"])
@@ -1520,11 +1562,13 @@ class TwoPhaseFileScheduler:
         return canonical
 
     def _run_event_payload(self, run_status, extra=None):
+        summary = self.summary()
         payload = {
             "run_status": run_status,
             "scheduler_status": self.state.get("scheduler_status"),
-            "processed_task_count": len(self.summary()["processed_task_ids"]),
-            "inflight_count": len(self.state["inflight_attempts"]),
+            "processed_task_count": len(summary["processed_task_ids"]),
+            "inflight_count": summary["inflight_count"],
+            "inactive_inflight_count": summary["inactive_inflight_count"],
             "step_count": len(self.state["steps"]),
         }
         if run_status != "running":
@@ -1590,6 +1634,63 @@ class TwoPhaseFileScheduler:
     def _write_state(self):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(json.dumps(self.state, sort_keys=True), encoding="utf-8")
+
+    def _apply_run_stop_request(self):
+        request = read_run_stop_request(self.output_dir)
+        if not request:
+            return None
+        stop_status = request.get("stop_status") or "stopped"
+        previous_status = self.state.get("scheduler_status")
+        if previous_status != stop_status and "previous_scheduler_status" not in self.state:
+            self.state["previous_scheduler_status"] = previous_status
+        self.state["scheduler_status"] = stop_status
+        for key in ("stop_requested_at", "stop_operator", "stop_mode", "stop_request_path"):
+            if request.get(key):
+                self.state[key] = request[key]
+        self._write_state()
+        return request
+
+    def _stopped_tick_result(self):
+        return {
+            "tick_status": self.state.get("scheduler_status") or "stopped",
+            "collect": self._stopped_collect_result(),
+            "dispatch": self._stopped_dispatch_result(),
+            "inflight_count": 0,
+            "inactive_inflight_count": self._inactive_inflight_count(),
+            "processed_task_ids": self.summary()["processed_task_ids"],
+        }
+
+    def _stopped_collect_result(self):
+        return {
+            "collect_status": "stopped",
+            "collected_task_ids": [],
+            "collected_count": 0,
+            "inflight_count": 0,
+            "inactive_inflight_count": self._inactive_inflight_count(),
+            "results": [],
+        }
+
+    def _stopped_dispatch_result(self):
+        return {
+            "dispatch_status": "stopped",
+            "dispatched_task_ids": [],
+            "dispatch_count": 0,
+            "inflight_count": 0,
+            "inactive_inflight_count": self._inactive_inflight_count(),
+        }
+
+    def _active_inflight_count(self):
+        if self._run_stop_status_is_terminal():
+            return 0
+        return len(self.state["inflight_attempts"])
+
+    def _inactive_inflight_count(self):
+        if not self._run_stop_status_is_terminal():
+            return 0
+        return len(self.state["inflight_attempts"])
+
+    def _run_stop_status_is_terminal(self):
+        return self.state.get("scheduler_status") in _STOP_SCHEDULER_STATUSES
 
 
 def run_two_phase_scheduler_loop(*args, max_ticks=100, poll_interval_seconds=0.02, **kwargs):

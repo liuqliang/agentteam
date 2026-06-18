@@ -479,6 +479,24 @@ def _run_supervised_two_phase_scheduler(
         decomposition_context_excerpt_chars=args.planner_context_excerpt_chars,
         notification_sink=notification_sink,
     )
+    stopped = scheduler.stop_if_requested()
+    if stopped:
+        scheduler._emit_run_event_once(
+            "run_stopped",
+            scheduler._run_event_payload("stopped", {"tick_count": 0}),
+        )
+        return {
+            **scheduler.summary(),
+            "scheduler_status": scheduler.state["scheduler_status"],
+            "tick_count": 0,
+            "last_tick": stopped,
+            "worker_pool_supervision": [],
+            "worker_pool_health": {
+                "pool_status": "stopped",
+                "workers": [],
+                "health_source": "run_stop_request",
+            },
+        }
     scheduler._emit_run_event_once(
         "run_started",
         scheduler._run_event_payload("running", {"max_ticks": args.max_steps}),
@@ -488,6 +506,19 @@ def _run_supervised_two_phase_scheduler(
     stalled_wait_ticks = 0
     last_tick = None
     while True:
+        stopped = scheduler.stop_if_requested()
+        if stopped:
+            scheduler._emit_run_event_once(
+                "run_stopped",
+                scheduler._run_event_payload("stopped", {"tick_count": tick_count}),
+            )
+            result = {
+                **scheduler.summary(),
+                "scheduler_status": scheduler.state["scheduler_status"],
+                "tick_count": tick_count,
+                "last_tick": stopped,
+            }
+            break
         tick_count += 1
         supervision_result = worker_pool.supervise_once()
         supervision.append(supervision_result)
@@ -495,6 +526,18 @@ def _run_supervised_two_phase_scheduler(
             _quarantined_agent_ids(supervision_result["after"])
         )
         last_tick = scheduler.tick()
+        if last_tick["tick_status"] in {"stopped", "stop_requested"}:
+            scheduler._emit_run_event_once(
+                "run_stopped",
+                scheduler._run_event_payload("stopped", {"tick_count": tick_count}),
+            )
+            result = {
+                **scheduler.summary(),
+                "scheduler_status": scheduler.state["scheduler_status"],
+                "tick_count": tick_count,
+                "last_tick": last_tick,
+            }
+            break
         supervision.append(worker_pool.supervise_once())
         if last_tick["tick_status"] == "idle":
             scheduler._emit_run_event_once(
@@ -531,10 +574,19 @@ def _run_supervised_two_phase_scheduler(
             time.sleep(0.02)
         else:
             stalled_wait_ticks = 0
+    worker_pool_health = (
+        {
+            "pool_status": "stopped",
+            "workers": [],
+            "health_source": "run_stop_request",
+        }
+        if result.get("scheduler_status") in {"stopped", "stop_requested"}
+        else worker_pool.health_check()
+    )
     return {
         **result,
         "worker_pool_supervision": supervision,
-        "worker_pool_health": worker_pool.health_check(),
+        "worker_pool_health": worker_pool_health,
     }
 
 
