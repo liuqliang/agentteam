@@ -5007,6 +5007,107 @@ class TaskpackTests(unittest.TestCase):
                 status_completed.stdout,
             )
 
+    def test_agentteam_cli_status_treats_stopped_stale_inflight_as_inactive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "stopped-stale-inflight-run"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "status-project")
+            _write_json(
+                run_dir / "state" / "two_phase_scheduler_state.json",
+                {
+                    "scheduler_status": "stopped",
+                    "previous_scheduler_status": "running",
+                    "stop_mode": "stale_cleanup",
+                    "backlog": {
+                        "items": [
+                            {
+                                "task_id": "optimize-pipeline",
+                                "backlog_status": "ready",
+                            }
+                        ]
+                    },
+                    "inflight_attempts": [
+                        {
+                            "task_id": "optimize-pipeline",
+                            "attempt_id": "ATTEMPT-001",
+                            "agent_id": "implementation-worker-1",
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                run_dir / "state" / "worker_process_registry.json",
+                {
+                    "registry_status": "stopped",
+                    "stop_mode": "stale_cleanup",
+                    "workers": [
+                        {
+                            "worker_agent_id": "implementation-worker-1",
+                            "worker_status": "stopped",
+                            "stopped_by": "stale_pid",
+                        }
+                    ],
+                },
+            )
+
+            json_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            text_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(json_completed.returncode, 0, json_completed.stderr)
+            summary = json.loads(json_completed.stdout)
+            self.assertEqual(summary["overall_status"], "stopped")
+            self.assertEqual(summary["run_status"], "stopped")
+            self.assertEqual(summary["liveness_status"], "stopped")
+            self.assertEqual(summary["inflight"]["total"], 0)
+            self.assertEqual(summary["inactive_inflight"]["total"], 1)
+            self.assertNotIn("agentteam watch", summary.get("next_action", ""))
+            self.assertNotIn("run is still active", summary.get("operator_hint", ""))
+
+            self.assertEqual(text_completed.returncode, 0, text_completed.stderr)
+            self.assertIn("overall_status: stopped", text_completed.stdout)
+            self.assertIn("run_status: stopped", text_completed.stdout)
+            self.assertIn("liveness: stopped", text_completed.stdout)
+            self.assertIn("inflight: 0", text_completed.stdout)
+            self.assertIn("inactive_inflight: 1", text_completed.stdout)
+            self.assertNotIn("agentteam watch", text_completed.stdout)
+            self.assertNotIn("run is still active", text_completed.stdout)
+
     def test_agentteam_cli_status_prefers_active_worker_for_last_worker(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

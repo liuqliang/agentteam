@@ -4565,6 +4565,7 @@ def _build_run_status_summary(profile, run_dir):
         "evidence": _status_evidence_counts(state),
         "integration_baseline": _paths_integration_baseline(run_dir, state),
         "inflight": _status_inflight_attempts(state),
+        "inactive_inflight": _status_inactive_inflight_attempts(state),
         "workers": _status_worker_counts(worker_registry),
         "last_worker": _status_last_worker(worker_registry),
         "token_usage": token_usage_from_state(state),
@@ -4654,6 +4655,12 @@ def _status_operator_guidance(summary):
 def _status_summary_is_active(summary):
     overall_status = str(summary.get("overall_status") or "").strip().lower()
     run_status = str(summary.get("run_status") or summary.get("status") or "").strip().lower()
+    liveness_status = str(summary.get("liveness_status") or "").strip().lower()
+    if (
+        run_status in _INACTIVE_INFLIGHT_RUN_STATUSES
+        and liveness_status not in {"running-alive", "running-stale"}
+    ):
+        return False
     if overall_status in {"authoring", "running"} or run_status == "running":
         return True
     inflight = summary.get("inflight") if isinstance(summary.get("inflight"), dict) else {}
@@ -5037,6 +5044,7 @@ def _write_status_text(summary):
         f"integration_baseline_head: {summary['integration_baseline'].get('head_sha') or 'unknown'}",
         format_token_usage(summary.get("token_usage"), label="tokens"),
         f"inflight: {summary['inflight']['total']}",
+        *_inactive_inflight_status_lines(summary.get("inactive_inflight")),
         f"manual_gates: {summary['manual_gates']}",
         f"permission_requests: {summary['permission_requests']}",
         *_pursue_recap_status_lines(summary.get("pursue_recap")),
@@ -5256,16 +5264,44 @@ def _status_task_counts(snapshot, state):
     }
 
 
+_INACTIVE_INFLIGHT_RUN_STATUSES = {"completed", "failed", "stopped", "timed_out"}
+
+
 def _status_inflight_attempts(state):
     attempts = state.get("inflight_attempts") if isinstance(state, dict) else None
     if not isinstance(attempts, list):
         return {"total": 0, "tasks": []}
+    if _state_inflight_attempts_are_inactive(state):
+        return {"total": 0, "tasks": []}
+    return _status_attempt_summary(attempts)
+
+
+def _status_inactive_inflight_attempts(state):
+    attempts = state.get("inflight_attempts") if isinstance(state, dict) else None
+    if not isinstance(attempts, list) or not _state_inflight_attempts_are_inactive(state):
+        return {"total": 0, "tasks": []}
+    return _status_attempt_summary(attempts)
+
+
+def _state_inflight_attempts_are_inactive(state):
+    status = str(state.get("scheduler_status") or "").strip().lower() if isinstance(state, dict) else ""
+    return status in _INACTIVE_INFLIGHT_RUN_STATUSES
+
+
+def _status_attempt_summary(attempts):
     tasks = [
         attempt.get("task_id")
         for attempt in attempts
         if isinstance(attempt, dict) and attempt.get("task_id")
     ]
     return {"total": len(attempts), "tasks": tasks}
+
+
+def _inactive_inflight_status_lines(inactive_inflight):
+    if not isinstance(inactive_inflight, dict):
+        return []
+    total = int(inactive_inflight.get("total") or 0)
+    return [f"inactive_inflight: {total}"] if total else []
 
 
 def _status_evidence_counts(state):
