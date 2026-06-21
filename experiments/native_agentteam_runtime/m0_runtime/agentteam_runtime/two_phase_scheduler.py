@@ -25,6 +25,7 @@ from .m0_runtime import (
     ensure_integration_baseline_worktree,
     rebuild_sqlite_state_index,
     reset_integration_baseline_worktree,
+    run_integration_verification_additions,
     run_integration_verification,
     skip_integration_baseline_commit,
     write_patch_artifact,
@@ -617,6 +618,8 @@ class TwoPhaseFileScheduler:
             "integration_verification_exit_code": None,
             "integration_verification_stdout": "",
             "integration_verification_stderr": "",
+            "integration_verification_additions_status": "not_requested",
+            "integration_verification_additions": [],
             "integration_commit_status": "not_requested",
             "integration_commit_sha": None,
             "integration_commit_message": None,
@@ -1093,6 +1096,33 @@ class TwoPhaseFileScheduler:
                     self.integration_verification_command,
                     integration["integration_worktree_path"],
                 )
+                verification_additions = _runtime_verification_additions(
+                    {"output": result.get("runtime_output", {})}
+                )
+                if verification["integration_verification_status"] == "passed":
+                    additions = run_integration_verification_additions(
+                        verification_additions,
+                        integration["integration_worktree_path"],
+                    )
+                    verification.update(additions)
+                    additions_status = additions[
+                        "integration_verification_additions_status"
+                    ]
+                    if additions_status in {"failed", "rejected"}:
+                        verification["integration_verification_status"] = "failed"
+                        verification[
+                            "integration_verification_failure_reason"
+                        ] = f"verification_addition_{additions_status}"
+                elif verification_additions:
+                    verification.update(
+                        {
+                            "integration_verification_additions_status": "skipped",
+                            "integration_verification_additions": [],
+                            "integration_verification_additions_skip_reason": (
+                                "primary_verification_failed"
+                            ),
+                        }
+                    )
                 result.update(verification)
                 events.append(
                     self._event(
@@ -1749,6 +1779,15 @@ def _runtime_evidence_summary(task, runtime_result):
     }
 
 
+def _runtime_verification_additions(runtime_result):
+    output = (
+        runtime_result.get("output", {})
+        if isinstance(runtime_result.get("output"), dict)
+        else {}
+    )
+    return output.get("verification_additions", [])
+
+
 def _integration_blocked_by_evidence(result, patch_path):
     if not patch_path:
         return False
@@ -1945,11 +1984,24 @@ def _operator_measured_result(output, operator_summary):
 def _operator_integration_summary(result):
     status = result.get("integration_verification_status")
     if status == "failed":
+        additions_status = result.get("integration_verification_additions_status")
+        if additions_status in {"failed", "rejected"}:
+            labels = [
+                item.get("label")
+                for item in result.get("integration_verification_additions", [])
+                if isinstance(item, dict)
+                and item.get("verification_addition_status") == additions_status
+            ]
+            label_text = ", ".join(labels) if labels else "worker verification addition"
+            return f"failed: {additions_status} verification addition {label_text}"
         failure = _first_failure_line(result.get("integration_verification_stderr", ""))
         return f"failed: {failure}" if failure else "failed"
     if status in {None, "not_requested"}:
         return "not requested"
     if status == "passed":
+        if result.get("integration_verification_additions_status") == "passed":
+            count = len(result.get("integration_verification_additions", []))
+            return f"passed with {count} worker verification addition(s)"
         return "passed"
     return str(status)
 

@@ -44,7 +44,11 @@ from agentteam_runtime import (
 )
 from agentteam_runtime.agentteam import _run_runtime_command_with_progress
 from agentteam_runtime.cli import _run_supervised_two_phase_scheduler
-from agentteam_runtime.m0_runtime import apply_patch_to_integration_worktree, run_integration_verification
+from agentteam_runtime.m0_runtime import (
+    apply_patch_to_integration_worktree,
+    run_integration_verification,
+    run_integration_verification_additions,
+)
 from agentteam_runtime.two_phase_scheduler import _operator_task_report, _runtime_evidence_summary
 
 
@@ -6527,6 +6531,298 @@ class M0RuntimeTests(unittest.TestCase):
                 "committed",
             )
 
+    def test_two_phase_worker_verification_addition_runs_after_primary_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            source_head = _git_rev_parse(repo, "HEAD")
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-001", write_scope=["generated/"])],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                integrate_accepted_patch=True,
+                integration_verification_command=[
+                    sys.executable,
+                    "-c",
+                    "import pathlib; assert pathlib.Path('generated/two_phase_commit.json').exists()",
+                ],
+                commit_verified_integration=True,
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            worktree_path = Path(inflight["worktree_path"])
+            target = worktree_path / "generated" / "two_phase_commit.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps({"attempt_id": inflight["attempt_id"], "ok": True}),
+                encoding="utf-8",
+            )
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                ["generated/two_phase_commit.json"],
+                {
+                    "operator_summary": {
+                        "what_changed": ["写入了可由新增测试验证的集成文件。"],
+                        "measured_result": ["新增验证命令应在集成 worktree 中通过。"],
+                        "verification_summary": ["worker 建议运行新增的结构化验证。"],
+                        "merge_recommendation": "如果固定验证和新增验证均通过，可以合并。",
+                        "next_steps": ["无需额外处理。"],
+                    },
+                    "verification_additions": [
+                        {
+                            "label": "worker-added-json-check",
+                            "command": [
+                                sys.executable,
+                                "-c",
+                                "import json, pathlib; assert json.loads(pathlib.Path('generated/two_phase_commit.json').read_text())['ok'] is True",
+                            ],
+                            "reason": "确认 worker 生成文件的语义内容。",
+                        }
+                    ],
+                },
+            )
+
+            collected = scheduler.collect_ready_results()
+            result = collected["results"][0]
+            report = _operator_task_report({"task_id": "TASK-001"}, result)
+            integration_worktree = Path(result["integration_worktree_path"])
+            snapshot = replay_events(output_dir / "events.jsonl")
+            snapshot_item = snapshot["integration_queue"][
+                "TASK-001:TASK-001-ATTEMPT-001"
+            ]
+
+            self.assertEqual(result["integration_verification_status"], "passed")
+            self.assertEqual(result["integration_verification_additions_status"], "passed")
+            self.assertEqual(
+                result["integration_verification_additions"][0]["label"],
+                "worker-added-json-check",
+            )
+            self.assertEqual(
+                result["integration_verification_additions"][0][
+                    "verification_addition_status"
+                ],
+                "passed",
+            )
+            self.assertEqual(
+                report["integration"],
+                "passed with 1 worker verification addition(s)",
+            )
+            self.assertEqual(result["integration_commit_status"], "committed")
+            self.assertNotEqual(result["integration_commit_sha"], None)
+            self.assertEqual(snapshot_item["queue_status"], "committed")
+            self.assertTrue(
+                (integration_worktree / "generated" / "two_phase_commit.json").exists()
+            )
+            self.assertEqual(_git_rev_parse(repo, "HEAD"), source_head)
+
+    def test_two_phase_worker_verification_addition_failure_blocks_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            source_head = _git_rev_parse(repo, "HEAD")
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-001", write_scope=["generated/"])],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                integrate_accepted_patch=True,
+                integration_verification_command=[
+                    sys.executable,
+                    "-c",
+                    "import pathlib; assert pathlib.Path('generated/failing_added_check.json').exists()",
+                ],
+                commit_verified_integration=True,
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            worktree_path = Path(inflight["worktree_path"])
+            target = worktree_path / "generated" / "failing_added_check.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"ok": False}), encoding="utf-8")
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                ["generated/failing_added_check.json"],
+                {
+                    "operator_summary": {
+                        "what_changed": ["写入了一个会被新增验证拦截的文件。"],
+                        "measured_result": ["新增验证命令应失败。"],
+                        "verification_summary": ["固定验证通过，新增验证失败。"],
+                        "merge_recommendation": "新增验证失败时不应合并。",
+                        "next_steps": ["修复新增验证覆盖的问题。"],
+                    },
+                    "verification_additions": [
+                        {
+                            "label": "worker-added-failing-check",
+                            "command": [
+                                sys.executable,
+                                "-c",
+                                "import sys; sys.exit(9)",
+                            ],
+                            "reason": "模拟 worker 新增测试失败。",
+                        }
+                    ],
+                },
+            )
+
+            collected = scheduler.collect_ready_results()
+            result = collected["results"][0]
+            report = _operator_task_report({"task_id": "TASK-001"}, result)
+            baseline_worktree = Path(result["integration_baseline_worktree_path"])
+            blocked = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                if json.loads(line)["event_type"] == "integration_blocked"
+            ]
+
+            self.assertEqual(result["integration_verification_status"], "failed")
+            self.assertEqual(
+                result["integration_verification_failure_reason"],
+                "verification_addition_failed",
+            )
+            self.assertEqual(result["integration_verification_additions_status"], "failed")
+            self.assertEqual(
+                result["integration_verification_additions"][0][
+                    "verification_addition_exit_code"
+                ],
+                9,
+            )
+            self.assertEqual(
+                report["integration"],
+                "failed: failed verification addition worker-added-failing-check",
+            )
+            self.assertEqual(result["integration_baseline_commit_status"], "skipped")
+            self.assertEqual(result["integration_baseline_commit_reason"], "verification_failed")
+            self.assertEqual(_git_rev_parse(repo, "agentteam/run/run/integration"), source_head)
+            self.assertEqual(_git_rev_parse(baseline_worktree, "HEAD"), source_head)
+            self.assertFalse((baseline_worktree / "generated" / "failing_added_check.json").exists())
+            self.assertEqual(result["integration_commit_status"], "skipped")
+            self.assertEqual(blocked[0]["payload"]["block_reason"], "verification_failed")
+
+    def test_two_phase_worker_verification_addition_rejects_unallowed_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            source_head = _git_rev_parse(repo, "HEAD")
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-001", write_scope=["generated/"])],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                integrate_accepted_patch=True,
+                integration_verification_command=[
+                    sys.executable,
+                    "-c",
+                    "import pathlib; assert pathlib.Path('generated/rejected_added_check.json').exists()",
+                ],
+                commit_verified_integration=True,
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            worktree_path = Path(inflight["worktree_path"])
+            target = worktree_path / "generated" / "rejected_added_check.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"ok": True}), encoding="utf-8")
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                ["generated/rejected_added_check.json"],
+                {
+                    "operator_summary": {
+                        "what_changed": ["写入了一个带非法新增验证命令的文件。"],
+                        "measured_result": ["调度器应拒绝 shell 命令。"],
+                        "verification_summary": ["固定验证通过，新增验证被拒绝。"],
+                        "merge_recommendation": "新增验证命令被拒绝时不应合并。",
+                        "next_steps": ["改为结构化 Python 测试命令。"],
+                    },
+                    "verification_additions": [
+                        {
+                            "label": "worker-added-shell-check",
+                            "command": ["bash", "-lc", "exit 0"],
+                            "reason": "模拟不允许的 shell 命令。",
+                        }
+                    ],
+                },
+            )
+
+            collected = scheduler.collect_ready_results()
+            result = collected["results"][0]
+            report = _operator_task_report({"task_id": "TASK-001"}, result)
+            baseline_worktree = Path(result["integration_baseline_worktree_path"])
+
+            self.assertEqual(result["integration_verification_status"], "failed")
+            self.assertEqual(
+                result["integration_verification_failure_reason"],
+                "verification_addition_rejected",
+            )
+            self.assertEqual(result["integration_verification_additions_status"], "rejected")
+            self.assertEqual(
+                result["integration_verification_additions"][0][
+                    "verification_addition_status"
+                ],
+                "rejected",
+            )
+            self.assertIn(
+                "not allowed",
+                result["integration_verification_additions"][0][
+                    "verification_addition_rejection_reason"
+                ],
+            )
+            self.assertEqual(
+                report["integration"],
+                "failed: rejected verification addition worker-added-shell-check",
+            )
+            self.assertEqual(result["integration_baseline_commit_status"], "skipped")
+            self.assertEqual(_git_rev_parse(repo, "agentteam/run/run/integration"), source_head)
+            self.assertEqual(_git_rev_parse(baseline_worktree, "HEAD"), source_head)
+
     def test_two_phase_scheduler_blocks_l2_integration_when_evidence_is_incomplete(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -9859,6 +10155,40 @@ class M0RuntimeTests(unittest.TestCase):
 
             self.assertEqual(result["integration_verification_status"], "passed")
             self.assertEqual(result["integration_verification_exit_code"], 0)
+
+    def test_integration_verification_addition_missing_executable_is_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp) / "repo"
+            worktree.mkdir()
+
+            result = run_integration_verification_additions(
+                [
+                    {
+                        "label": "missing-python",
+                        "command": [
+                            "python3.999",
+                            "-c",
+                            "print('never runs')",
+                        ],
+                        "reason": "exercise missing executable handling",
+                    }
+                ],
+                worktree,
+            )
+
+            self.assertEqual(result["integration_verification_additions_status"], "failed")
+            self.assertEqual(
+                result["integration_verification_additions"][0][
+                    "verification_addition_status"
+                ],
+                "failed",
+            )
+            self.assertIn(
+                "python3.999",
+                result["integration_verification_additions"][0][
+                    "verification_addition_stderr"
+                ],
+            )
 
     def test_integration_verification_command_failure_is_recorded_without_rejecting_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:

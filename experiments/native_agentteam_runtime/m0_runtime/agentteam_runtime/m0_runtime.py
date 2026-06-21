@@ -386,6 +386,9 @@ class CodexRuntimeAdapter:
                 "For completed or failed work, output must include operator_summary for the human operator.",
                 "operator_summary must be natural language, not a patch dump: include what_changed, measured_result, verification_summary, merge_recommendation, and next_steps.",
                 "operator_summary natural-language fields must be written in Chinese (zh-CN); keep code symbols, file paths, commands, and metric names literal.",
+                "If you add or modify tests, include output.verification_additions as a list of objects with label, command, and reason.",
+                "Each verification_additions command must be a JSON list such as [\"python3\",\"-m\",\"unittest\",\"tests.test_example\"], not a shell string.",
+                "Allowed verification_additions executables are python, python3, python3.x, and pytest.",
                 "If mailbox payload has required_deliverables, operator_summary.deliverables must be a list of objects.",
                 "Each deliverables item must use the exact required deliverable string in its deliverable field and include summary plus evidence.",
                 "All changed_files entries must be relative paths inside the declared write_scope.",
@@ -3114,19 +3117,10 @@ def _git_apply_reverse_check(worktree, patch_path):
 
 
 def run_integration_verification(command, integration_worktree_path):
-    env = os.environ.copy()
-    native_runtime_path = _native_runtime_pythonpath(integration_worktree_path)
-    if native_runtime_path:
-        existing = env.get("PYTHONPATH")
-        env["PYTHONPATH"] = (
-            native_runtime_path
-            if not existing
-            else native_runtime_path + os.pathsep + existing
-        )
     completed = subprocess.run(
         list(command),
         cwd=integration_worktree_path,
-        env=env,
+        env=_integration_verification_env(integration_worktree_path),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -3138,6 +3132,142 @@ def run_integration_verification(command, integration_worktree_path):
         "integration_verification_stdout": completed.stdout,
         "integration_verification_stderr": completed.stderr,
     }
+
+
+def run_integration_verification_additions(additions, integration_worktree_path):
+    normalized = _normalize_verification_additions(additions)
+    results = []
+    for index, addition in enumerate(normalized):
+        rejection = _verification_addition_rejection(addition)
+        if rejection:
+            results.append(
+                _verification_addition_result(
+                    addition,
+                    index,
+                    "rejected",
+                    rejection_reason=rejection,
+                )
+            )
+            continue
+        command = addition["command"]
+        try:
+            completed = subprocess.run(
+                list(command),
+                cwd=integration_worktree_path,
+                env=_integration_verification_env(integration_worktree_path),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            results.append(
+                _verification_addition_result(
+                    addition,
+                    index,
+                    "failed",
+                    stderr=str(exc),
+                )
+            )
+            continue
+        results.append(
+            _verification_addition_result(
+                addition,
+                index,
+                "passed" if completed.returncode == 0 else "failed",
+                exit_code=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+            )
+        )
+    return {
+        "integration_verification_additions_status": (
+            _verification_additions_status(results)
+        ),
+        "integration_verification_additions": results,
+    }
+
+
+def _integration_verification_env(integration_worktree_path):
+    env = os.environ.copy()
+    native_runtime_path = _native_runtime_pythonpath(integration_worktree_path)
+    if native_runtime_path:
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            native_runtime_path
+            if not existing
+            else native_runtime_path + os.pathsep + existing
+        )
+    return env
+
+
+def _normalize_verification_additions(additions):
+    if additions in (None, []):
+        return []
+    if not isinstance(additions, list):
+        return [{"label": "invalid-verification-additions", "command": [], "reason": ""}]
+    return additions
+
+
+def _verification_addition_rejection(addition):
+    if not isinstance(addition, dict):
+        return "verification addition must be an object"
+    command = addition.get("command")
+    if not isinstance(command, list) or not command:
+        return "verification addition command must be a non-empty list"
+    if not all(isinstance(part, str) and part for part in command):
+        return "verification addition command entries must be non-empty strings"
+    executable = Path(command[0]).name
+    if not _allowed_verification_addition_executable(executable):
+        return f"verification addition command is not allowed: {command[0]}"
+    return None
+
+
+def _allowed_verification_addition_executable(executable):
+    if executable in {"python", "python3", "pytest"}:
+        return True
+    if not executable.startswith("python3."):
+        return False
+    return all(part.isdigit() for part in executable.removeprefix("python").split("."))
+
+
+def _verification_addition_result(
+    addition,
+    index,
+    status,
+    exit_code=None,
+    stdout="",
+    stderr="",
+    rejection_reason=None,
+):
+    label = addition.get("label") if isinstance(addition, dict) else None
+    command = addition.get("command") if isinstance(addition, dict) else []
+    reason = addition.get("reason") if isinstance(addition, dict) else ""
+    return {
+        "label": (
+            label
+            if isinstance(label, str) and label
+            else f"verification-addition-{index + 1}"
+        ),
+        "reason": reason if isinstance(reason, str) else "",
+        "command": command if isinstance(command, list) else [],
+        "verification_addition_status": status,
+        "verification_addition_exit_code": exit_code,
+        "verification_addition_stdout": stdout,
+        "verification_addition_stderr": stderr,
+        "verification_addition_rejection_reason": rejection_reason,
+    }
+
+
+def _verification_additions_status(results):
+    if not results:
+        return "not_requested"
+    statuses = {result["verification_addition_status"] for result in results}
+    if "failed" in statuses:
+        return "failed"
+    if "rejected" in statuses:
+        return "rejected"
+    return "passed"
 
 
 def _native_runtime_pythonpath(integration_worktree_path):
