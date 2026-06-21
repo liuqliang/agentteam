@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agentteam_runtime.operator_report import build_run_completion_report
+from agentteam_runtime.operator_report import build_run_completion_report, render_run_completion_report
 from agentteam_runtime.profile import build_project_profile
 from agentteam_runtime.projection_db import rebuild_project_projection_db
 
@@ -167,7 +167,11 @@ class ProjectionDbOperatorPathTests(unittest.TestCase):
             )
             _write_authoritative_recap(work_root, run_id, memory_path)
 
-            report = build_run_completion_report(run_dir, project="agentteam", write_files=False)
+            report = build_run_completion_report(
+                run_dir,
+                project="agentteam",
+                write_files=False,
+            )
 
         recap = report["pursue_recap"]
         self.assertNotIn("projection_source", recap)
@@ -209,6 +213,44 @@ class ProjectionDbOperatorPathTests(unittest.TestCase):
         self.assertEqual(
             recap["latest_follow_up_queue"]["next_goal"],
             "projection DB selected next goal",
+        )
+
+    def test_completion_report_exposes_structured_pursue_evidence_for_selected_queue_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp) / "agentteam-work"
+            run_id = "operator-path-run"
+            run_dir = _write_operator_run(work_root, run_id)
+            _write_goal_memory(
+                work_root,
+                run_id,
+                objective="projection DB selected next goal",
+                next_step="projection DB next step",
+            )
+            rebuild_project_projection_db(work_root)
+
+            report = build_run_completion_report(run_dir, project="agentteam", write_files=False)
+
+        recap = report["pursue_recap"]
+        structured = recap["structured_evidence"]
+        self.assertEqual(structured["schema_version"], "pursue_structured_evidence.v1")
+        self.assertEqual(structured["source_report_path"], recap["latest_report_path"])
+        self.assertEqual(structured["goal_memory_path"], recap["goal_memory_path"])
+        self.assertEqual(structured["selected_next_goal"], "projection DB selected next goal")
+        self.assertEqual(structured["previous_result_status"], "completed")
+        self.assertEqual(
+            structured["previous_run_outcome"],
+            "completed_with_review_required",
+        )
+        self.assertEqual(structured["previous_blockers"], ["operator review required"])
+        self.assertEqual(
+            structured["previous_evidence_paths"],
+            [{"path": recap["latest_report_path"], "type": "report"}],
+        )
+        rendered = render_run_completion_report(report)
+        self.assertIn("Structured evidence:", rendered)
+        self.assertIn(
+            "selected_next_goal=projection DB selected next goal",
+            rendered,
         )
 
     def test_completion_report_falls_back_to_authoritative_recap_when_projection_is_stale(self):

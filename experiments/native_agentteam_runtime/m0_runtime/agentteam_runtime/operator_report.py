@@ -57,6 +57,7 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         _projected_pursue_recap_for_run(run_dir)
         or find_pursue_recap_for_run(run_dir)
     )
+    pursue_recap = _augment_pursue_recap_with_structured_evidence(pursue_recap)
 
     report = {
         "report_status": "ready",
@@ -138,6 +139,11 @@ def render_run_completion_report(report):
             lines.append(f"- Next action: {pursue_recap['operator_next_action']}")
         _extend_pursue_round_recap_lines(lines, pursue_recap.get("latest_round_recap"))
         _extend_projected_handoff_lines(lines, pursue_recap)
+        lines.extend(
+            _structured_pursue_evidence_report_lines(
+                pursue_recap.get("structured_evidence")
+            )
+        )
     summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
     if summary or pursue_recap:
         _extend_chinese_work_report_lines(lines, report, summary, pursue_recap)
@@ -277,6 +283,11 @@ def concise_report_lines(report, max_tasks=3):
             lines.append(f"pursue_next_action: {pursue_recap['operator_next_action']}")
         lines.extend(_concise_pursue_round_recap_lines(pursue_recap.get("latest_round_recap")))
         lines.extend(_concise_projected_handoff_lines(pursue_recap))
+        lines.extend(
+            _concise_structured_pursue_evidence_lines(
+                pursue_recap.get("structured_evidence")
+            )
+        )
     summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
     for brief_line in _text_items(summary.get("chinese_operator_brief"))[:3]:
         lines.append(f"中文简报: {brief_line}")
@@ -544,6 +555,133 @@ def _concise_projected_handoff_lines(pursue_recap):
     return lines
 
 
+def _augment_pursue_recap_with_structured_evidence(pursue_recap):
+    if not isinstance(pursue_recap, dict) or not pursue_recap:
+        return pursue_recap
+    structured_evidence = _structured_pursue_evidence(pursue_recap)
+    if not structured_evidence:
+        return pursue_recap
+    enriched = dict(pursue_recap)
+    enriched["structured_evidence"] = structured_evidence
+    return enriched
+
+
+def _structured_pursue_evidence(pursue_recap):
+    latest_round = pursue_recap.get("latest_round_recap")
+    if not isinstance(latest_round, dict):
+        latest_round = {}
+    queue = pursue_recap.get("latest_follow_up_queue")
+    if not isinstance(queue, dict):
+        queue = {}
+    handoff = pursue_recap.get("projection_review_handoff")
+    if not isinstance(handoff, dict):
+        handoff = {}
+    evidence_paths = _evidence_path_items(
+        latest_round.get("evidence_paths") or handoff.get("evidence_paths")
+    )
+    return _compact_dict(
+        {
+            "schema_version": "pursue_structured_evidence.v1",
+            "projection_source": pursue_recap.get("projection_source"),
+            "projection_status": pursue_recap.get("projection_status"),
+            "projection_db_path": pursue_recap.get("projection_db_path"),
+            "latest_taskpack_id": pursue_recap.get("latest_taskpack_id")
+            or latest_round.get("taskpack_id"),
+            "source_report_path": pursue_recap.get("latest_report_path")
+            or handoff.get("source_report_path")
+            or latest_round.get("report_path"),
+            "goal_memory_path": pursue_recap.get("goal_memory_path"),
+            "previous_result_status": latest_round.get("result_status"),
+            "previous_run_outcome": latest_round.get("run_outcome"),
+            "stop_reason": pursue_recap.get("stop_reason")
+            or latest_round.get("stop_reason"),
+            "previous_blockers": _text_items(latest_round.get("blockers")),
+            "previous_evidence_paths": evidence_paths,
+            "selected_next_goal": queue.get("next_goal"),
+            "queue_status": queue.get("queue_status"),
+            "queue_item_count": queue.get("item_count"),
+            "recommended_next_step": latest_round.get("recommended_next_step"),
+            "suggested_verification": latest_round.get("suggested_verification"),
+            "worker_result_status": handoff.get("worker_result_status"),
+            "worker_evidence_status": handoff.get("worker_evidence_status"),
+            "integration_status": handoff.get("integration_status"),
+            "integration_verification_status": handoff.get(
+                "integration_verification_status"
+            ),
+            "verification_additions": (
+                handoff.get("verification_additions")
+                if isinstance(handoff.get("verification_additions"), list)
+                else None
+            ),
+        }
+    )
+
+
+def _structured_pursue_evidence_report_lines(structured_evidence):
+    if not isinstance(structured_evidence, dict) or not structured_evidence:
+        return []
+    parts = []
+    for key in [
+        "previous_result_status",
+        "previous_run_outcome",
+        "stop_reason",
+        "queue_status",
+        "queue_item_count",
+        "selected_next_goal",
+    ]:
+        value = structured_evidence.get(key)
+        if value not in (None, "", [], {}):
+            parts.append(f"{key}={value}")
+    lines = []
+    if parts:
+        lines.append(f"- Structured evidence: {', '.join(parts)}")
+    path_parts = []
+    for label, key in [
+        ("source_report", "source_report_path"),
+        ("goal_memory", "goal_memory_path"),
+    ]:
+        value = structured_evidence.get(key)
+        if value:
+            path_parts.append(f"{label}={value}")
+    evidence_paths = _evidence_path_texts(
+        structured_evidence.get("previous_evidence_paths")
+    )
+    if evidence_paths:
+        path_parts.append(f"evidence={evidence_paths[0]}")
+    if path_parts:
+        lines.append(f"- Structured evidence paths: {', '.join(path_parts)}")
+    verification_parts = []
+    for key in [
+        "suggested_verification",
+        "worker_evidence_status",
+        "integration_verification_status",
+    ]:
+        value = structured_evidence.get(key)
+        if value:
+            verification_parts.append(f"{key}={value}")
+    addition_text = _verification_additions_text(
+        structured_evidence.get("verification_additions")
+    )
+    if addition_text:
+        verification_parts.append(f"verification_additions={addition_text}")
+    if verification_parts:
+        lines.append(f"- Structured verification: {', '.join(verification_parts)}")
+    return lines
+
+
+def _concise_structured_pursue_evidence_lines(structured_evidence):
+    if not isinstance(structured_evidence, dict) or not structured_evidence:
+        return []
+    parts = []
+    for key in ["previous_result_status", "stop_reason", "selected_next_goal"]:
+        value = structured_evidence.get(key)
+        if value:
+            parts.append(f"{key}={value}")
+    if not parts:
+        return []
+    return [f"pursue_structured_evidence: {', '.join(parts)}"]
+
+
 def _extend_worker_diagnostic_lines(lines, worker_diagnostics):
     if not isinstance(worker_diagnostics, dict) or not worker_diagnostics:
         return
@@ -641,6 +779,29 @@ def _diagnostic_counts_text(counts):
     )
     parts.extend(f"{state}={counts[state]}" for state in extra_states)
     return ", ".join(parts)
+
+
+def _evidence_path_items(values):
+    items = []
+    seen = set()
+    for item in values or []:
+        if isinstance(item, dict):
+            path = str(item.get("path") or "").strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            compact_item = {"path": path}
+            item_type = str(item.get("type") or "").strip()
+            if item_type:
+                compact_item["type"] = item_type
+            items.append(compact_item)
+            continue
+        path = str(item or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        items.append({"path": path})
+    return items
 
 
 def _evidence_path_texts(values):
