@@ -726,6 +726,42 @@ class M0RuntimeTests(unittest.TestCase):
             summary["operator_digest"],
         )
 
+    def test_completion_summary_operator_digest_includes_integration_details(self):
+        from agentteam_runtime.completion_summary import build_completion_summary
+
+        summary = build_completion_summary(
+            run_id="RUN-INTEGRATION-DETAILS",
+            run_status="completed",
+            task_count=1,
+            blocked_count=1,
+            task_reports=[
+                {
+                    "task_id": "TASK-INTEGRATION-DETAILS",
+                    "status": "implementation completed, integration blocked",
+                    "what_changed": ["补充 worker 新增验证执行链路。"],
+                    "changed_files": ["agentteam_runtime/two_phase_scheduler.py"],
+                    "verification": ["test_m0_runtime: passed"],
+                    "integration": (
+                        "failed: rejected verification addition "
+                        "worker-added-shell-check"
+                    ),
+                }
+            ],
+        )
+
+        self.assertEqual(summary["integration"], "blocked")
+        self.assertEqual(
+            summary["integration_details"],
+            ["failed: rejected verification addition worker-added-shell-check"],
+        )
+        self.assertIn(
+            (
+                "集成状态：failed: rejected verification addition "
+                "worker-added-shell-check"
+            ),
+            summary["operator_digest"],
+        )
+
     def test_completion_summary_operator_digest_derives_review_gate_risk(self):
         from agentteam_runtime.completion_summary import build_completion_summary
 

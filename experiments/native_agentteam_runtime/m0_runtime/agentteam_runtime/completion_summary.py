@@ -71,6 +71,7 @@ def build_completion_summary(
     if not what_changed and not task_reports:
         what_changed = ["No task-level operator report was found in this run."]
     integration = _completion_integration(task_reports)
+    integration_details = _completion_integration_details(task_reports)
     changed_files_note = _changed_files_note(task_reports, changed_files)
     evidence_gaps = _completion_evidence_gaps(
         what_changed=what_changed,
@@ -91,6 +92,7 @@ def build_completion_summary(
         "why": why,
         "risks": risks,
         "integration": integration,
+        "integration_details": integration_details,
         "evidence_status_counts": evidence_status_counts,
         "integration_recommendation": _integration_recommendation(
             run_id,
@@ -176,6 +178,11 @@ def _completion_operator_digest(summary):
         ),
     )
     _append_digest_item(digest, "验证结果", summary.get("verification"))
+    _append_digest_item(
+        digest,
+        "集成状态",
+        _integration_digest_values(summary),
+    )
     _append_digest_item(digest, "实际结果", summary.get("measured_results"))
     _append_digest_item(digest, "风险", summary.get("risks"))
     merge = summary.get("merge_recommendations") or summary.get("integration_recommendation")
@@ -419,6 +426,26 @@ def _completion_integration(task_reports):
     if integrations == ["passed"]:
         return "passed"
     return "; ".join(integrations)
+
+
+def _completion_integration_details(task_reports):
+    return _unique_limited(
+        task.get("integration")
+        for task in task_reports
+        if task.get("integration")
+    )
+
+
+def _integration_digest_values(summary):
+    details = _text_items(summary.get("integration_details"))
+    informative = [
+        detail
+        for detail in details
+        if detail not in {"passed", "not requested", "not recorded"}
+    ]
+    if informative:
+        return informative
+    return None
 
 
 def _integration_recommendation(run_id, blocked_count, integration_baseline, merge_recommendations):
