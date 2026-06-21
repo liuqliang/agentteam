@@ -137,6 +137,7 @@ def render_run_completion_report(report):
         if pursue_recap.get("operator_next_action"):
             lines.append(f"- Next action: {pursue_recap['operator_next_action']}")
         _extend_pursue_round_recap_lines(lines, pursue_recap.get("latest_round_recap"))
+        _extend_projected_handoff_lines(lines, pursue_recap)
     summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
     if summary or pursue_recap:
         _extend_chinese_work_report_lines(lines, report, summary, pursue_recap)
@@ -275,6 +276,7 @@ def concise_report_lines(report, max_tasks=3):
         if pursue_recap.get("operator_next_action"):
             lines.append(f"pursue_next_action: {pursue_recap['operator_next_action']}")
         lines.extend(_concise_pursue_round_recap_lines(pursue_recap.get("latest_round_recap")))
+        lines.extend(_concise_projected_handoff_lines(pursue_recap))
     summary = report.get("completion_summary") if isinstance(report.get("completion_summary"), dict) else {}
     for brief_line in _text_items(summary.get("chinese_operator_brief"))[:3]:
         lines.append(f"中文简报: {brief_line}")
@@ -424,6 +426,14 @@ def _extend_chinese_work_report_lines(lines, report, summary, pursue_recap):
         next_step = _pursue_recap_next_step(pursue_recap)
         if next_step:
             lines.append(f"- 下一步：{next_step}")
+        queue = pursue_recap.get("latest_follow_up_queue")
+        if isinstance(queue, dict) and queue.get("item_count"):
+            queue_status = queue.get("queue_status") or "unknown"
+            lines.append(
+                f"- 投影队列：{queue_status}，{queue['item_count']} 个 follow-up"
+            )
+            if queue.get("next_goal"):
+                lines.append(f"- 投影下一项：{queue['next_goal']}")
     lines.extend(f"- {item}" for item in digest)
     lines.append(f"- {format_token_usage(report.get('token_usage'))}")
 
@@ -462,6 +472,39 @@ def _extend_pursue_round_recap_lines(lines, latest_round_recap):
         lines.append(f"- Recommended next step: {latest_round_recap['recommended_next_step']}")
 
 
+def _extend_projected_handoff_lines(lines, pursue_recap):
+    queue = pursue_recap.get("latest_follow_up_queue")
+    if isinstance(queue, dict) and queue.get("item_count"):
+        status = queue.get("queue_status") or "unknown"
+        lines.append(f"- Follow-up queue: {status}, items={queue['item_count']}")
+        if queue.get("next_goal"):
+            lines.append(f"- Next queued goal: {queue['next_goal']}")
+    handoff = pursue_recap.get("projection_review_handoff")
+    if not isinstance(handoff, dict) or not handoff:
+        return
+    if handoff.get("source_report_path"):
+        lines.append(f"- Source report: {handoff['source_report_path']}")
+    evidence_paths = _evidence_path_texts(handoff.get("evidence_paths"))
+    if evidence_paths:
+        lines.append(f"- Handoff evidence: {evidence_paths[0]}")
+    result_parts = []
+    if handoff.get("worker_result_status"):
+        result_parts.append(f"worker={handoff['worker_result_status']}")
+    if handoff.get("worker_evidence_status"):
+        result_parts.append(f"evidence={handoff['worker_evidence_status']}")
+    if handoff.get("integration_status"):
+        result_parts.append(f"integration={handoff['integration_status']}")
+    if handoff.get("integration_verification_status"):
+        result_parts.append(
+            f"integration_verification={handoff['integration_verification_status']}"
+        )
+    if result_parts:
+        lines.append(f"- Handoff status: {', '.join(result_parts)}")
+    addition_text = _verification_additions_text(handoff.get("verification_additions"))
+    if addition_text:
+        lines.append(f"- Verification additions: {addition_text}")
+
+
 def _concise_pursue_round_recap_lines(latest_round_recap):
     if not isinstance(latest_round_recap, dict) or not latest_round_recap:
         return []
@@ -477,6 +520,27 @@ def _concise_pursue_round_recap_lines(latest_round_recap):
         lines.append(format_token_usage(token_usage, label="pursue_token_usage"))
     if latest_round_recap.get("recommended_next_step"):
         lines.append(f"pursue_next_step: {latest_round_recap['recommended_next_step']}")
+    return lines
+
+
+def _concise_projected_handoff_lines(pursue_recap):
+    lines = []
+    queue = pursue_recap.get("latest_follow_up_queue")
+    if isinstance(queue, dict) and queue.get("item_count"):
+        lines.append(
+            "pursue_queue: "
+            f"{queue.get('queue_status') or 'unknown'} items={queue['item_count']}"
+        )
+        if queue.get("next_goal"):
+            lines.append(f"pursue_queue_next_goal: {queue['next_goal']}")
+    handoff = pursue_recap.get("projection_review_handoff")
+    if not isinstance(handoff, dict) or not handoff:
+        return lines
+    if handoff.get("source_report_path"):
+        lines.append(f"pursue_source_report: {handoff['source_report_path']}")
+    addition_text = _verification_additions_text(handoff.get("verification_additions"))
+    if addition_text:
+        lines.append(f"pursue_verification_additions: {addition_text}")
     return lines
 
 
@@ -590,6 +654,28 @@ def _evidence_path_texts(values):
         seen.add(text)
         paths.append(text)
     return paths
+
+
+def _verification_additions_text(values):
+    parts = []
+    seen = set()
+    for item in values or []:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or item.get("verification_addition_id") or "").strip()
+        if not label:
+            continue
+        status = str(
+            item.get("verification_addition_status")
+            or item.get("status")
+            or "unknown"
+        ).strip()
+        text = f"{label}={status}"
+        if text in seen:
+            continue
+        seen.add(text)
+        parts.append(text)
+    return ", ".join(parts)
 
 
 def _write_report_files(report):
@@ -725,6 +811,11 @@ def _projected_pursue_recap_from_follow_up_item(lineage, items, item, run_id):
             ),
             "latest_round_recap": _projected_round_recap(item, taskpack_id),
             "latest_follow_up_queue": _projected_follow_up_queue(items, item),
+            "projection_review_handoff": _projected_review_handoff(
+                lineage,
+                item,
+                taskpack_id,
+            ),
         }
     )
     return recap
@@ -792,6 +883,85 @@ def _projected_follow_up_queue_item(item):
             "token_usage": item.get("token_usage"),
         }
     )
+
+
+def _projected_review_handoff(lineage, item, taskpack_id):
+    worker_result = _latest_projected_worker_result(lineage, taskpack_id)
+    integration_outcome = _latest_projected_integration_outcome(lineage, taskpack_id)
+    verification_additions = []
+    if isinstance(worker_result, dict):
+        verification_additions.extend(worker_result.get("verification_additions") or [])
+    if isinstance(integration_outcome, dict):
+        verification_additions.extend(integration_outcome.get("verification_additions") or [])
+    return _compact_dict(
+        {
+            "source_report_path": item.get("source_report_path"),
+            "evidence_paths": item.get("source_evidence_paths"),
+            "worker_result_status": (
+                worker_result.get("result_status")
+                if isinstance(worker_result, dict)
+                else None
+            ),
+            "worker_evidence_status": (
+                worker_result.get("evidence_status")
+                if isinstance(worker_result, dict)
+                else None
+            ),
+            "integration_status": (
+                integration_outcome.get("integration_status")
+                if isinstance(integration_outcome, dict)
+                else None
+            ),
+            "integration_verification_status": (
+                integration_outcome.get("integration_verification_status")
+                if isinstance(integration_outcome, dict)
+                else None
+            ),
+            "verification_additions": verification_additions[:5],
+        }
+    )
+
+
+def _latest_projected_worker_result(lineage, taskpack_id):
+    return _latest_projected_lineage_row(
+        lineage.get("worker_results"),
+        taskpack_id,
+        "result_status",
+    )
+
+
+def _latest_projected_integration_outcome(lineage, taskpack_id):
+    return _latest_projected_lineage_row(
+        lineage.get("integration_outcomes"),
+        taskpack_id,
+        "integration_status",
+    )
+
+
+def _latest_projected_lineage_row(rows, taskpack_id, status_key):
+    if not isinstance(rows, list) or not taskpack_id:
+        return {}
+    candidates = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and (
+            row.get("run_id") == taskpack_id
+            or row.get("task_id") == taskpack_id
+            or row.get("attempt_id") == taskpack_id
+        )
+    ]
+    if not candidates:
+        return {}
+    return sorted(
+        candidates,
+        key=lambda row: (
+            row.get(status_key) or "",
+            row.get("attempt_id") or "",
+            row.get("task_id") or "",
+            row.get("run_id") or "",
+        ),
+    )[-1]
 
 
 def _pursue_id_from_goal_memory_path(goal_memory_path):
