@@ -1387,6 +1387,10 @@ missing selected item in compact pursue recaps, and lets `status` recompute a
 stale saved pursue queue before recommending the next operator action. When a
 historical `pursue_next_action` is superseded by integration-baseline review,
 status marks it as superseded instead of presenting two competing actions.
+Operator integration acknowledgement is now explicit: `agentteam integrate
+--record-only` marks a baseline as `acknowledged` without merging or rebasing,
+so manually handled integration baselines stop appearing as the primary status
+action.
 
 ## Longer-Term Route
 

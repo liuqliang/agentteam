@@ -4016,6 +4016,94 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["after_head"], baseline_head)
             self.assertEqual((repo / "README.md").read_text(encoding="utf-8"), "# fixture\n\nintegrated\n")
 
+    def test_agentteam_cli_integrate_record_only_marks_baseline_acknowledged_without_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            _init_agentteam_profile_for_test(repo, work_root, "record-integrate-project")
+            _start_fake_agentteam_run_for_test(
+                repo,
+                "Create a run for record-only integration.",
+                "record-integrate-run",
+            )
+            baseline_worktree = work_root / "runs" / "record-integrate-run" / "integration-baseline"
+            (baseline_worktree / "README.md").write_text("# fixture\n\nmanual-only\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=baseline_worktree, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "agentteam record-only fixture"],
+                cwd=baseline_worktree,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "integrate",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "record-integrate-run",
+                    "--record-only",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["integrate_status"], "acknowledged")
+            self.assertEqual(summary["merge_status"], "record_only")
+            self.assertEqual((repo / "README.md").read_text(encoding="utf-8"), "# fixture\n")
+            state = json.loads(
+                (
+                    work_root
+                    / "runs"
+                    / "record-integrate-run"
+                    / "state"
+                    / "two_phase_scheduler_state.json"
+                ).read_text(encoding="utf-8")
+            )
+            baseline = state["integration_baseline"]
+            self.assertEqual(baseline["integration_baseline_status"], "acknowledged")
+            self.assertEqual(baseline["integration_acknowledged_by"], "operator")
+            self.assertTrue(baseline["integration_acknowledged_head_sha"])
+
+            status_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(work_root / "runs" / "record-integrate-run"),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(status_completed.returncode, 0, status_completed.stderr)
+            status = json.loads(status_completed.stdout)
+            self.assertEqual(status["integration_baseline"]["status"], "acknowledged")
+            self.assertNotIn("agentteam integrate", status.get("next_action") or "")
+            self.assertNotIn("review integration baseline", status.get("next_action") or "")
+
     def test_agentteam_cli_integrate_rebases_diverged_baseline_before_merge(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

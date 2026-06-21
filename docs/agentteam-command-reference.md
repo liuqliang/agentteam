@@ -825,12 +825,13 @@ Examples:
 ```bash
 agentteam integrate --taskpack <taskpack-id>
 agentteam integrate --taskpack <taskpack-id> --rebase
+agentteam integrate --taskpack <taskpack-id> --record-only
 agentteam integrate --run-dir <run-dir> --json
 ```
 
 Requirements:
 
-- The target repository must be clean.
+- The target repository must be clean for merge/rebase integration.
 - The selected run must be idle or completed.
 - The integration baseline branch must exist.
 
@@ -839,6 +840,9 @@ Behavior:
 - Without `--rebase`, only a fast-forward merge is allowed.
 - With `--rebase`, AgentTeam rebases the integration baseline onto current
   target `HEAD`, then fast-forwards if the rebase succeeds.
+- With `--record-only`, AgentTeam does not merge or rebase. It records the
+  baseline as `acknowledged` in the run state so `status` stops recommending
+  the same integration review after the operator has handled it manually.
 - On conflict, it aborts the rebase, reports conflicted files, and leaves the
   target repository unchanged.
 

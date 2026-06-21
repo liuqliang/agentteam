@@ -1216,6 +1216,11 @@ def _add_integrate_parser(subcommands):
         action="store_true",
         help="Rebase the integration baseline onto the current target HEAD before merging.",
     )
+    parser.add_argument(
+        "--record-only",
+        action="store_true",
+        help="Record that the operator handled this baseline without merging it.",
+    )
     parser.add_argument("--json", action="store_true", help="Print integration result as JSON instead of human text.")
     parser.set_defaults(handler=_handle_integrate)
 
@@ -2859,7 +2864,13 @@ def _handle_integrate(args):
     project_root = Path(args.project_root or ".").resolve()
     profile = load_project_profile(project_root)
     run_dir = _selected_run_dir(args, profile, command_name="integrate")
-    summary = _integrate_run_baseline(project_root, profile, run_dir, rebase=args.rebase)
+    summary = _integrate_run_baseline(
+        project_root,
+        profile,
+        run_dir,
+        rebase=args.rebase,
+        record_only=args.record_only,
+    )
     if args.json:
         return summary
     _write_integrate_text(summary)
@@ -4651,7 +4662,7 @@ def _status_operator_guidance(summary):
             "operator_hint": "Use the pursue or follow-up queue guidance before projection DB maintenance.",
         }
     baseline = summary.get("integration_baseline") if isinstance(summary.get("integration_baseline"), dict) else {}
-    if baseline.get("branch"):
+    if baseline.get("branch") and not _integration_baseline_is_handled(baseline):
         commands = _review_commands_for_run(run_id, baseline)
         action_parts = [
             commands.get("report") or f"agentteam report --taskpack {run_id}",
@@ -4684,6 +4695,11 @@ def _status_operator_guidance(summary):
             ),
         }
     return None
+
+
+def _integration_baseline_is_handled(baseline):
+    status = str((baseline or {}).get("status") or "").strip().lower()
+    return status in {"acknowledged", "integrated"}
 
 
 def _effective_pursue_queue_for_status(summary, pursue_recap, pursue_action):
@@ -4817,6 +4833,10 @@ def _paths_integration_baseline(run_dir, state):
         "branch": branch,
         "worktree_path": worktree_path,
         "worktree_exists": Path(worktree_path).exists() if worktree_path else False,
+        "status": baseline.get("integration_baseline_status"),
+        "handled_at": baseline.get("integration_handled_at"),
+        "handled_by": baseline.get("integration_handled_by"),
+        "handled_head_sha": baseline.get("integration_handled_head_sha"),
         "base_sha": _paths_integration_base_sha(state),
         "head_sha": baseline.get("integration_baseline_head_sha"),
     }
@@ -4880,7 +4900,7 @@ def _review_commands_for_run(run_id, baseline):
     return commands
 
 
-def _integrate_run_baseline(project_root, profile, run_dir, rebase=False):
+def _integrate_run_baseline(project_root, profile, run_dir, rebase=False, record_only=False):
     run_dir = Path(run_dir).resolve()
     run_status = _build_run_status_summary(profile, run_dir)
     if run_status.get("status") not in {"idle", "completed"}:
@@ -4889,14 +4909,6 @@ def _integrate_run_baseline(project_root, profile, run_dir, rebase=False):
             run_dir=str(run_dir),
             run_status=run_status.get("status") or "unknown",
         )
-    dirty_status = _git_stdout(project_root, ["status", "--porcelain=v1", "--untracked-files=all"])
-    if dirty_status:
-        raise AgentTeamCliError(
-            "target repository must be clean before integrate",
-            project_root=str(project_root),
-            dirty_status=dirty_status,
-        )
-
     state = _paths_run_state(run_dir)
     baseline = _paths_integration_baseline(run_dir, state)
     branch = baseline.get("branch")
@@ -4904,7 +4916,39 @@ def _integrate_run_baseline(project_root, profile, run_dir, rebase=False):
         raise AgentTeamCliError("integration baseline branch not found", run_dir=str(run_dir))
     branch_head = _git_stdout(project_root, ["rev-parse", "--verify", f"{branch}^{{commit}}"])
     current_head = _git_stdout(project_root, ["rev-parse", "HEAD"])
+    if record_only:
+        baseline = _mark_integration_baseline_status(
+            run_dir,
+            "acknowledged",
+            target_head=current_head,
+            baseline_head=branch_head,
+        )
+        return {
+            "integrate_status": "acknowledged",
+            "merge_status": "record_only",
+            "rebase_status": "not_requested",
+            "project": profile.get("project_key") or "unknown",
+            "taskpack_id": run_dir.name,
+            "project_root": str(project_root),
+            "run_dir": str(run_dir),
+            "integration_baseline": {**baseline, "head_sha": branch_head},
+            "before_head": current_head,
+            "after_head": current_head,
+        }
+    dirty_status = _git_stdout(project_root, ["status", "--porcelain=v1", "--untracked-files=all"])
+    if dirty_status:
+        raise AgentTeamCliError(
+            "target repository must be clean before integrate",
+            project_root=str(project_root),
+            dirty_status=dirty_status,
+        )
     if branch_head == current_head:
+        baseline = _mark_integration_baseline_status(
+            run_dir,
+            "integrated",
+            target_head=current_head,
+            baseline_head=branch_head,
+        )
         return {
             "integrate_status": "up_to_date",
             "merge_status": "up_to_date",
@@ -4953,6 +4997,12 @@ def _integrate_run_baseline(project_root, profile, run_dir, rebase=False):
             )
     merge = _git_completed(project_root, ["merge", "--ff-only", branch])
     after_head = _git_stdout(project_root, ["rev-parse", "HEAD"])
+    baseline = _mark_integration_baseline_status(
+        run_dir,
+        "integrated",
+        target_head=after_head,
+        baseline_head=branch_head,
+    )
     return {
         "integrate_status": "merged",
         "merge_status": merge_status,
@@ -5023,6 +5073,36 @@ def _update_integration_baseline_head(run_dir, head_sha):
     baseline["integration_baseline_head_sha"] = head_sha
     state["integration_baseline"] = baseline
     _write_json(state_path, state)
+
+
+def _mark_integration_baseline_status(run_dir, status, *, target_head, baseline_head=None):
+    state_path = run_dir / "state" / "two_phase_scheduler_state.json"
+    if not state_path.exists():
+        state_path = run_dir / "state" / "scheduler_state.json"
+    if not state_path.exists():
+        return {"status": status, "head_sha": baseline_head}
+    state = _read_json_if_exists(state_path)
+    baseline = state.get("integration_baseline") if isinstance(state.get("integration_baseline"), dict) else {}
+    baseline = dict(baseline)
+    timestamp = _format_utc_timestamp(datetime.now(UTC))
+    baseline["integration_baseline_status"] = status
+    baseline["integration_handled_at"] = timestamp
+    baseline["integration_handled_by"] = "operator"
+    baseline["integration_handled_head_sha"] = target_head
+    if baseline_head:
+        baseline["integration_handled_baseline_head_sha"] = baseline_head
+        baseline.setdefault("integration_baseline_head_sha", baseline_head)
+    if status == "acknowledged":
+        baseline["integration_acknowledged_at"] = timestamp
+        baseline["integration_acknowledged_by"] = "operator"
+        baseline["integration_acknowledged_head_sha"] = target_head
+    if status == "integrated":
+        baseline["integration_integrated_at"] = timestamp
+        baseline["integration_integrated_by"] = "operator"
+        baseline["integration_integrated_head_sha"] = target_head
+    state["integration_baseline"] = baseline
+    _write_json(state_path, state)
+    return _paths_integration_baseline(run_dir, state)
 
 
 def _write_integrate_text(summary):
@@ -5123,6 +5203,7 @@ def _write_status_text(summary):
         f"integration: {summary['integration']['blocked']} blocked",
         *_status_evidence_lines(summary.get("evidence")),
         f"integration_baseline_branch: {summary['integration_baseline'].get('branch') or 'none'}",
+        f"integration_baseline_status: {summary['integration_baseline'].get('status') or 'unknown'}",
         f"integration_baseline_head: {summary['integration_baseline'].get('head_sha') or 'unknown'}",
         format_token_usage(summary.get("token_usage"), label="tokens"),
         f"inflight: {summary['inflight']['total']}",
