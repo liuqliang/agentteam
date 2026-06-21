@@ -66,6 +66,18 @@ REVIEW_ONLY_NEXT_STEP_MARKERS = {
     "操作员审阅",
     "审阅",
 }
+PROCESS_ONLY_NEXT_STEP_MARKERS = {
+    "agentteam queue next",
+    "goal_memory",
+    "latest_follow_up_queue",
+    "operator gate",
+    "pursue_recap",
+    "queue-selected",
+    "report 摘要",
+    "release activation",
+    "semantic authority",
+    "source merge",
+}
 STRONG_REVIEW_ONLY_NEXT_STEP_MARKERS = {
     "decide whether to integrate",
     "operator review and decide",
@@ -118,11 +130,11 @@ def build_follow_up_queue_summary(
     if not source_report_path and projected_items:
         source_report_path = projected_items[0].get("source_report_path")
     items = _dedupe_items(items, limit=max(0, int(limit or 0)))
-    next_item = items[0] if items else None
+    next_item = _selected_queue_item(items)
     next_goal = next_item.get("objective") if isinstance(next_item, dict) else None
     summary = {
         "queue_schema_version": FOLLOW_UP_QUEUE_SCHEMA_VERSION,
-        "queue_status": "ready" if items else "empty",
+        "queue_status": _queue_status(items, next_item),
         "source_taskpack_id": source_taskpack_id,
         "source_run_dir": source_run_dir,
         "source_report_path": source_report_path,
@@ -136,6 +148,11 @@ def build_follow_up_queue_summary(
     }
     if not items:
         summary["operator_hint"] = "No follow-up queue items were found; inspect the report before continuing."
+    elif not next_item:
+        summary["operator_hint"] = (
+            "Only operator-review or process-maintenance follow-up items were found; "
+            "do not auto-dispatch a worker without a concrete implementation or validation goal."
+        )
     return summary
 
 
@@ -405,6 +422,21 @@ def _dedupe_items(items, limit):
     return deduped
 
 
+def _selected_queue_item(items):
+    for item in items:
+        if _queue_item_priority(item) < 2:
+            return item
+    return None
+
+
+def _queue_status(items, selected_item):
+    if selected_item:
+        return "ready"
+    if items:
+        return "no_auto_dispatchable_items"
+    return "empty"
+
+
 def _prioritized_items(items):
     return [
         item
@@ -422,7 +454,7 @@ def _queue_item_priority(item):
         if isinstance(item, dict)
         else "ready"
     )
-    if _is_review_only_next_step(objective):
+    if _is_review_only_next_step(objective) or _is_process_only_next_step(objective):
         return 2
     if readiness == "ready" and _is_actionable_next_step(objective):
         return 0
@@ -483,6 +515,11 @@ def _is_review_only_next_step(value):
     if not text or _is_actionable_next_step(text):
         return False
     return any(marker in text for marker in REVIEW_ONLY_NEXT_STEP_MARKERS)
+
+
+def _is_process_only_next_step(value):
+    text = _normalized_next_step_text(value)
+    return any(marker in text for marker in PROCESS_ONLY_NEXT_STEP_MARKERS)
 
 
 def _normalized_next_step_text(value):

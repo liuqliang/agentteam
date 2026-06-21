@@ -8590,7 +8590,7 @@ class TaskpackTests(unittest.TestCase):
             )
         )
 
-    def test_follow_up_queue_downgrades_operator_review_decision_even_when_text_mentions_tests(self):
+    def test_follow_up_queue_has_no_next_goal_for_review_and_process_only_items(self):
         from agentteam_runtime.follow_up_queue import build_follow_up_queue_summary
 
         summary = build_follow_up_queue_summary(
@@ -8607,6 +8607,7 @@ class TaskpackTests(unittest.TestCase):
                             "后续可继续用 `pursue_recap.structured_evidence` "
                             "驱动 `agentteam queue next` 或 report 摘要的跨轮检查。"
                         ),
+                        "继续保持 semantic authority、source merge、push、release activation 由 operator gate 控制。",
                     ],
                     "follow_up_recommendation": {
                         "action": "integrate_then_next",
@@ -8621,14 +8622,12 @@ class TaskpackTests(unittest.TestCase):
             limit=5,
         )
 
-        self.assertEqual(
-            summary["next_goal"],
-            (
-                "后续可继续用 `pursue_recap.structured_evidence` "
-                "驱动 `agentteam queue next` 或 report 摘要的跨轮检查。"
-            ),
-        )
-        self.assertEqual(summary["items"][-1]["objective"], "由 operator 审阅并决定是否集成本测试变更。")
+        self.assertEqual(summary["queue_status"], "no_auto_dispatchable_items")
+        self.assertIsNone(summary["selected_item"])
+        self.assertIsNone(summary["next_goal"])
+        self.assertIsNone(summary["next_command"])
+        self.assertEqual(summary["items"][0]["objective"], "由 operator 审阅并决定是否集成本测试变更。")
+        self.assertIn("operator_hint", summary)
 
     def test_follow_up_queue_summary_enriches_generic_next_step_with_report_evidence(self):
         from agentteam_runtime.follow_up_queue import build_follow_up_queue_summary
