@@ -87,14 +87,28 @@ def build_follow_up_queue_summary(
         source_report_path=source_report_path,
         text_limit=text_limit,
     )
-    items.extend(
-        _queue_items_from_goal_memory(
-            goal_memory,
+    projected_items, projected_goal_memory_path, projection_metadata = (
+        _queue_items_from_projected_pursue_recap(
+            source_report,
             fallback_source_taskpack_id=source_taskpack_id,
             fallback_source_report_path=source_report_path,
             text_limit=text_limit,
         )
     )
+    if projected_items:
+        items.extend(projected_items)
+    else:
+        items.extend(
+            _queue_items_from_goal_memory(
+                goal_memory,
+                fallback_source_taskpack_id=source_taskpack_id,
+                fallback_source_report_path=source_report_path,
+                text_limit=text_limit,
+            )
+        )
+    goal_memory_path = goal_memory.get("memory_path") or projected_goal_memory_path
+    if not source_report_path and projected_items:
+        source_report_path = projected_items[0].get("source_report_path")
     items = _dedupe_items(items, limit=max(0, int(limit or 0)))
     next_item = items[0] if items else None
     next_goal = next_item.get("objective") if isinstance(next_item, dict) else None
@@ -104,16 +118,70 @@ def build_follow_up_queue_summary(
         "source_taskpack_id": source_taskpack_id,
         "source_run_dir": source_run_dir,
         "source_report_path": source_report_path,
-        "goal_memory_path": goal_memory.get("memory_path"),
+        "goal_memory_path": goal_memory_path,
         "item_count": len(items),
         "items": items,
         "selected_item": next_item,
         "next_goal": next_goal,
         "next_command": _next_command(source_taskpack_id, next_goal),
+        **projection_metadata,
     }
     if not items:
         summary["operator_hint"] = "No follow-up queue items were found; inspect the report before continuing."
     return summary
+
+
+def _queue_items_from_projected_pursue_recap(
+    source_report,
+    *,
+    fallback_source_taskpack_id,
+    fallback_source_report_path,
+    text_limit,
+):
+    pursue_recap = source_report.get("pursue_recap") if isinstance(source_report, dict) else {}
+    if not isinstance(pursue_recap, dict):
+        return [], None, {}
+    latest_queue = pursue_recap.get("latest_follow_up_queue")
+    if not isinstance(latest_queue, dict):
+        return [], None, _projection_metadata_from_pursue_recap(pursue_recap)
+    raw_items = latest_queue.get("items") if isinstance(latest_queue.get("items"), list) else []
+    items = []
+    goal_memory_path = None
+    for item in raw_items:
+        if not isinstance(item, dict) or not item.get("objective"):
+            continue
+        if not goal_memory_path and item.get("goal_memory_path"):
+            goal_memory_path = item.get("goal_memory_path")
+        items.append(
+            {
+                "objective": _bounded_text(item.get("objective"), text_limit),
+                "source": item.get("source") or "goal_memory.follow_up_queue",
+                "source_taskpack_id": item.get("source_taskpack_id")
+                or fallback_source_taskpack_id,
+                "source_report_path": item.get("source_report_path")
+                or fallback_source_report_path,
+                "goal_memory_path": item.get("goal_memory_path"),
+                **_goal_memory_item_readiness(item),
+                **_goal_memory_recap_metadata(item, text_limit),
+            }
+        )
+    return items, goal_memory_path, _projection_metadata_from_pursue_recap(pursue_recap)
+
+
+def _projection_metadata_from_pursue_recap(pursue_recap):
+    metadata = {}
+    for source_key, target_key in [
+        ("projection_source", "projection_source"),
+        ("projection_status", "projection_status"),
+        ("projection_db_path", "projection_db_path"),
+        ("projection_warning", "projection_warning"),
+        ("next_action", "projection_next_action"),
+        ("operator_hint", "projection_operator_hint"),
+    ]:
+        value = pursue_recap.get(source_key)
+        if value:
+            metadata[target_key] = value
+    return metadata
 
 
 def render_follow_up_queue_text(summary, *, next_only=False):
@@ -122,6 +190,14 @@ def render_follow_up_queue_text(summary, *, next_only=False):
         f"queue_status: {summary.get('queue_status') or 'unknown'}",
         f"source_taskpack_id: {summary.get('source_taskpack_id') or 'unknown'}",
     ]
+    if summary.get("projection_source"):
+        lines.append(f"projection_source: {summary['projection_source']}")
+    if summary.get("projection_status"):
+        lines.append(f"projection_status: {summary['projection_status']}")
+    if summary.get("projection_warning"):
+        lines.append(f"projection_warning: {summary['projection_warning']}")
+    if summary.get("projection_next_action"):
+        lines.append(f"projection_next_action: {summary['projection_next_action']}")
     if summary.get("source_report_path"):
         lines.append(f"source_report: {summary['source_report_path']}")
     if summary.get("goal_memory_path"):

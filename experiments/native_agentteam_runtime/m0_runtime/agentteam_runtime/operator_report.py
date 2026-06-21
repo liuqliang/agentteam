@@ -767,6 +767,29 @@ def _projected_follow_up_queue(items, selected_item):
             "queue_status": "ready",
             "item_count": len(queue_items),
             "next_goal": queue_items[0].get("objective"),
+            "items": [_projected_follow_up_queue_item(item) for item in queue_items],
+        }
+    )
+
+
+def _projected_follow_up_queue_item(item):
+    return _compact_dict(
+        {
+            "follow_up_id": item.get("follow_up_id"),
+            "objective": item.get("objective"),
+            "source": item.get("queue_source") or "goal_memory.follow_up_queue",
+            "source_taskpack_id": item.get("source_taskpack_id"),
+            "source_report_path": item.get("source_report_path"),
+            "goal_memory_path": item.get("goal_memory_path"),
+            "readiness": item.get("readiness"),
+            "source_result_status": item.get("source_result_status"),
+            "source_run_outcome": item.get("source_run_outcome"),
+            "stop_reason": item.get("stop_reason"),
+            "recommended_next_step": item.get("recommended_next_step"),
+            "suggested_verification": item.get("suggested_verification"),
+            "source_evidence_paths": item.get("source_evidence_paths"),
+            "blockers": item.get("blockers"),
+            "token_usage": item.get("token_usage"),
         }
     )
 
