@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from .completion_summary import build_completion_summary, compact_text_items
+from .projection_db import project_projection_db_path, read_projected_follow_up_lineage
 from .two_phase_scheduler import _operator_report_from_state
 from .token_usage import aggregate_token_usage, format_token_usage
 
@@ -52,6 +53,11 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
     scheduler_status = _scheduler_status(payload, state)
     run_outcome = _run_outcome(run_status, blocked_count)
 
+    pursue_recap = (
+        _projected_pursue_recap_for_run(run_dir)
+        or find_pursue_recap_for_run(run_dir)
+    )
+
     report = {
         "report_status": "ready",
         "project": project or "unknown",
@@ -72,7 +78,7 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
             task_reports=task_reports,
             integration_baseline=integration_baseline,
         ),
-        "pursue_recap": find_pursue_recap_for_run(run_dir),
+        "pursue_recap": pursue_recap,
         "integration_baseline": integration_baseline,
         "worker_diagnostics": worker_diagnostics,
         "operator_report": operator_report,
@@ -117,6 +123,8 @@ def render_run_completion_report(report):
     if pursue_recap:
         lines.extend(["", "## Pursue Recap"])
         lines.append(f"- Pursue: {pursue_recap.get('pursue_id') or 'unknown'}")
+        if pursue_recap.get("projection_source"):
+            lines.append(f"- Projection source: {pursue_recap['projection_source']}")
         lines.append(f"- Stop reason: {pursue_recap.get('stop_reason') or 'unknown'}")
         lines.append(
             "- Rounds: "
@@ -648,6 +656,150 @@ def find_pursue_recap_for_run(run_dir):
     if not candidates:
         return {}
     return sorted(candidates, key=lambda item: (item[0], item[1]))[-1][2]
+
+
+def _projected_pursue_recap_for_run(run_dir):
+    run_dir = Path(run_dir).resolve()
+    work_root = _work_root_for_run(run_dir)
+    if not project_projection_db_path(work_root).exists():
+        return {}
+    lineage = read_projected_follow_up_lineage(
+        work_root,
+        include_fallback_status=True,
+    )
+    if not isinstance(lineage, dict) or lineage.get("projection_source") != "db":
+        return {}
+    items = lineage.get("follow_up_items")
+    if not isinstance(items, list) or not items:
+        return {}
+    item = _projected_follow_up_item_for_run(items, run_dir.name)
+    if not item:
+        return {}
+    return _projected_pursue_recap_from_follow_up_item(
+        lineage,
+        items,
+        item,
+        run_dir.name,
+    )
+
+
+def _projected_follow_up_item_for_run(items, run_id):
+    candidates = [
+        item
+        for item in items
+        if isinstance(item, dict)
+        and (
+            item.get("source_run_id") == run_id
+            or item.get("source_taskpack_id") == run_id
+        )
+    ]
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda item: (
+            not bool(item.get("selected_next_goal")),
+            _int_or_zero(item.get("item_index")),
+            item.get("follow_up_id") or "",
+        ),
+    )[0]
+
+
+def _projected_pursue_recap_from_follow_up_item(lineage, items, item, run_id):
+    taskpack_id = item.get("source_taskpack_id") or item.get("source_run_id") or run_id
+    goal_memory_path = item.get("goal_memory_path")
+    recap = _compact_dict(
+        {
+            "projection_source": "db",
+            "projection_status": lineage.get("projection_status"),
+            "projection_db_path": (
+                lineage.get("projection_db_path") or lineage.get("db_path")
+            ),
+            "pursue_id": _pursue_id_from_goal_memory_path(goal_memory_path) or taskpack_id,
+            "latest_taskpack_id": taskpack_id,
+            "latest_report_path": item.get("source_report_path"),
+            "goal_memory_path": goal_memory_path,
+            "stop_reason": item.get("stop_reason"),
+            "operator_next_action": (
+                f"agentteam report --taskpack {taskpack_id}" if taskpack_id else None
+            ),
+            "latest_round_recap": _projected_round_recap(item, taskpack_id),
+            "latest_follow_up_queue": _projected_follow_up_queue(items, item),
+        }
+    )
+    return recap
+
+
+def _projected_round_recap(item, taskpack_id):
+    return _compact_dict(
+        {
+            "taskpack_id": taskpack_id,
+            "result_status": item.get("source_result_status"),
+            "run_outcome": item.get("source_run_outcome"),
+            "stop_reason": item.get("stop_reason"),
+            "recommended_next_step": item.get("recommended_next_step") or item.get("objective"),
+            "suggested_verification": item.get("suggested_verification"),
+            "evidence_paths": item.get("source_evidence_paths"),
+            "blockers": item.get("blockers"),
+            "token_usage": item.get("token_usage"),
+        }
+    )
+
+
+def _projected_follow_up_queue(items, selected_item):
+    goal_memory_path = selected_item.get("goal_memory_path")
+    queue_items = [
+        item
+        for item in items
+        if isinstance(item, dict) and item.get("goal_memory_path") == goal_memory_path
+    ]
+    if not queue_items:
+        return {}
+    queue_items = sorted(
+        queue_items,
+        key=lambda item: (
+            _int_or_zero(item.get("item_index")),
+            item.get("follow_up_id") or "",
+        ),
+    )
+    return _compact_dict(
+        {
+            "queue_status": "ready",
+            "item_count": len(queue_items),
+            "next_goal": queue_items[0].get("objective"),
+        }
+    )
+
+
+def _pursue_id_from_goal_memory_path(goal_memory_path):
+    if not goal_memory_path:
+        return None
+    stem = Path(goal_memory_path).stem
+    suffix = "-goal-memory"
+    if stem.endswith(suffix):
+        return stem[: -len(suffix)]
+    return stem
+
+
+def _work_root_for_run(run_dir):
+    if run_dir.parent.name == "runs":
+        return run_dir.parent.parent
+    return run_dir.parent
+
+
+def _int_or_zero(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _compact_dict(payload):
+    return {
+        key: value
+        for key, value in payload.items()
+        if value is not None and value != "" and value != [] and value != {}
+    }
 
 
 def _augment_pursue_recap_with_goal_memory(recap):
