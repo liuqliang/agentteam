@@ -66,6 +66,14 @@ REVIEW_ONLY_NEXT_STEP_MARKERS = {
     "操作员审阅",
     "审阅",
 }
+STRONG_REVIEW_ONLY_NEXT_STEP_MARKERS = {
+    "decide whether to integrate",
+    "operator review and decide",
+    "review and decide",
+    "决定是否集成",
+    "审阅并决定",
+    "审阅并决定是否集成",
+}
 
 
 def build_follow_up_queue_summary(
@@ -414,10 +422,10 @@ def _queue_item_priority(item):
         if isinstance(item, dict)
         else "ready"
     )
-    if readiness == "ready" and _is_actionable_next_step(objective):
-        return 0
     if _is_review_only_next_step(objective):
         return 2
+    if readiness == "ready" and _is_actionable_next_step(objective):
+        return 0
     return 1
 
 
@@ -470,6 +478,8 @@ def _is_actionable_next_step(value):
 
 def _is_review_only_next_step(value):
     text = _normalized_next_step_text(value)
+    if any(marker in text for marker in STRONG_REVIEW_ONLY_NEXT_STEP_MARKERS):
+        return True
     if not text or _is_actionable_next_step(text):
         return False
     return any(marker in text for marker in REVIEW_ONLY_NEXT_STEP_MARKERS)

@@ -8590,6 +8590,46 @@ class TaskpackTests(unittest.TestCase):
             )
         )
 
+    def test_follow_up_queue_downgrades_operator_review_decision_even_when_text_mentions_tests(self):
+        from agentteam_runtime.follow_up_queue import build_follow_up_queue_summary
+
+        summary = build_follow_up_queue_summary(
+            source_report={
+                "run_id": "db-longrun-observability-r5-r2",
+                "report_path": (
+                    "/tmp/agentteam-long-run-reliability/runs/"
+                    "db-longrun-observability-r5-r2/reports/final_report.md"
+                ),
+                "completion_summary": {
+                    "next_steps": [
+                        "由 operator 审阅并决定是否集成本测试变更。",
+                        (
+                            "后续可继续用 `pursue_recap.structured_evidence` "
+                            "驱动 `agentteam queue next` 或 report 摘要的跨轮检查。"
+                        ),
+                    ],
+                    "follow_up_recommendation": {
+                        "action": "integrate_then_next",
+                        "next_command": (
+                            "agentteam next --from-taskpack db-longrun-observability-r5-r2 "
+                            '--goal "由 operator 审阅并决定是否集成本测试变更。"'
+                        ),
+                    },
+                },
+            },
+            source_taskpack_id="db-longrun-observability-r5-r2",
+            limit=5,
+        )
+
+        self.assertEqual(
+            summary["next_goal"],
+            (
+                "后续可继续用 `pursue_recap.structured_evidence` "
+                "驱动 `agentteam queue next` 或 report 摘要的跨轮检查。"
+            ),
+        )
+        self.assertEqual(summary["items"][-1]["objective"], "由 operator 审阅并决定是否集成本测试变更。")
+
     def test_follow_up_queue_summary_enriches_generic_next_step_with_report_evidence(self):
         from agentteam_runtime.follow_up_queue import build_follow_up_queue_summary
 
