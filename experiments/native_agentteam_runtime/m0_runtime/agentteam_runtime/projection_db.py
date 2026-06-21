@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .token_usage import normalize_token_usage, token_usage_from_state
 
-PROJECTION_SCHEMA_VERSION = "agentteam_projection.v3"
+PROJECTION_SCHEMA_VERSION = "agentteam_projection.v4"
 PROJECTION_WARNING_UNAVAILABLE = "projection_db_unavailable"
 PROJECTION_REBUILD_NEXT_ACTION = "run agentteam db rebuild"
 PROJECTION_REBUILD_HINT = "agentteam db rebuild"
@@ -76,6 +76,10 @@ def check_project_projection_db(work_root):
         "artifact_bytes",
         "artifact_digest",
         "run_stats",
+        "follow_up_items",
+        "worker_results",
+        "integration_outcomes",
+        "worker_verification_additions",
     ]
     mismatches = [
         key
@@ -231,6 +235,203 @@ def read_projected_run_events(work_root, run_id, *, include_fallback_status=Fals
         **_projection_reader_db_metadata(check, db_path),
         "events": events,
     }
+
+
+def read_projected_follow_up_lineage(work_root, *, include_fallback_status=False):
+    check = check_project_projection_db(work_root)
+    if check["check_status"] != "passed":
+        return _projection_reader_fallback(check, include_fallback_status)
+    db_path = project_projection_db_path(work_root)
+    try:
+        with sqlite3.connect(db_path) as connection:
+            follow_up_rows = connection.execute(
+                """
+                select follow_up_id, source_run_id, source_taskpack_id, item_index,
+                       objective, queue_source, readiness, source_report_path,
+                       goal_memory_path, source_result_status, source_run_outcome,
+                       stop_reason, recommended_next_step, suggested_verification,
+                       source_evidence_paths_json, blockers_json, token_usage_json,
+                       selected_next_goal
+                from follow_up_items
+                order by goal_memory_path, item_index, follow_up_id
+                """
+            ).fetchall()
+            worker_rows = connection.execute(
+                """
+                select run_id, task_id, attempt_id, result_status,
+                       validation_status, failure_category, patch_path,
+                       changed_files_json, operator_summary_json,
+                       verification_additions_json, verification_additions_count,
+                       evidence_level, evidence_status, trace_carrier_json,
+                       missing_evidence_json, source_path, content_size_bytes,
+                       content_sha256
+                from worker_results
+                order by run_id, task_id, attempt_id
+                """
+            ).fetchall()
+            integration_rows = connection.execute(
+                """
+                select integration_outcome_id, run_id, task_id, attempt_id,
+                       queue_item_id, queue_status, integration_status,
+                       integration_branch, integration_worktree_path,
+                       integration_verification_status,
+                       integration_verification_exit_code,
+                       integration_verification_additions_status,
+                       integration_verification_additions_json,
+                       integration_verification_additions_count,
+                       integration_commit_status, integration_commit_sha,
+                       patch_path, batch_id, source_kinds_json,
+                       content_size_bytes, content_sha256
+                from integration_outcomes
+                order by run_id, task_id, attempt_id, batch_id
+                """
+            ).fetchall()
+            addition_rows = connection.execute(
+                """
+                select verification_addition_id, run_id, task_id, attempt_id,
+                       source_kind, label, command_json, reason,
+                       verification_addition_status,
+                       verification_addition_exit_code,
+                       verification_addition_rejection_reason
+                from worker_verification_additions
+                order by run_id, task_id, attempt_id, source_kind, label
+                """
+            ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        return _projection_reader_fallback(
+            _projection_query_failed_status(check, exc),
+            include_fallback_status,
+        )
+
+    additions = [_verification_addition_payload(row) for row in addition_rows]
+    worker_additions = _verification_additions_by_attempt(additions, "worker_output")
+    integration_additions = _verification_additions_by_attempt(
+        additions,
+        "integration_verification",
+    )
+    return {
+        **_projection_reader_db_metadata(check, db_path),
+        "follow_up_items": [_follow_up_item_payload(row) for row in follow_up_rows],
+        "worker_results": [
+            {
+                **_worker_result_payload(row),
+                "verification_additions": worker_additions.get(
+                    (row[0], row[1], row[2]),
+                    [],
+                ),
+            }
+            for row in worker_rows
+        ],
+        "integration_outcomes": [
+            {
+                **_integration_outcome_payload(row),
+                "verification_additions": integration_additions.get(
+                    (row[1], row[2], row[3]),
+                    [],
+                ),
+            }
+            for row in integration_rows
+        ],
+        "worker_verification_additions": additions,
+    }
+
+
+def _follow_up_item_payload(row):
+    return {
+        "follow_up_id": row[0],
+        "source_run_id": row[1],
+        "source_taskpack_id": row[2],
+        "item_index": row[3],
+        "objective": row[4],
+        "queue_source": row[5],
+        "readiness": row[6],
+        "source_report_path": row[7],
+        "goal_memory_path": row[8],
+        "source_result_status": row[9],
+        "source_run_outcome": row[10],
+        "stop_reason": row[11],
+        "recommended_next_step": row[12],
+        "suggested_verification": row[13],
+        "source_evidence_paths": _json_value(row[14], []),
+        "blockers": _json_value(row[15], []),
+        "token_usage": _json_value(row[16], {}),
+        "selected_next_goal": bool(row[17]),
+    }
+
+
+def _worker_result_payload(row):
+    return {
+        "run_id": row[0],
+        "task_id": row[1],
+        "attempt_id": row[2],
+        "result_status": row[3],
+        "validation_status": row[4],
+        "failure_category": row[5],
+        "patch_path": row[6],
+        "changed_files": _json_value(row[7], []),
+        "operator_summary": _json_value(row[8], {}),
+        "declared_verification_additions": _json_value(row[9], []),
+        "verification_additions_count": row[10],
+        "evidence_level": row[11],
+        "evidence_status": row[12],
+        "trace_carrier": _json_value(row[13], []),
+        "missing_evidence": _json_value(row[14], []),
+        "source_path": row[15],
+        "content_size_bytes": row[16],
+        "content_sha256": row[17],
+    }
+
+
+def _integration_outcome_payload(row):
+    return {
+        "integration_outcome_id": row[0],
+        "run_id": row[1],
+        "task_id": row[2],
+        "attempt_id": row[3],
+        "queue_item_id": row[4],
+        "queue_status": row[5],
+        "integration_status": row[6],
+        "integration_branch": row[7],
+        "integration_worktree_path": row[8],
+        "integration_verification_status": row[9],
+        "integration_verification_exit_code": row[10],
+        "integration_verification_additions_status": row[11],
+        "declared_verification_additions": _json_value(row[12], []),
+        "integration_verification_additions_count": row[13],
+        "integration_commit_status": row[14],
+        "integration_commit_sha": row[15],
+        "patch_path": row[16],
+        "batch_id": row[17],
+        "source_kinds": _json_value(row[18], []),
+        "content_size_bytes": row[19],
+        "content_sha256": row[20],
+    }
+
+
+def _verification_addition_payload(row):
+    return {
+        "verification_addition_id": row[0],
+        "run_id": row[1],
+        "task_id": row[2],
+        "attempt_id": row[3],
+        "source_kind": row[4],
+        "label": row[5],
+        "command": _json_value(row[6], []),
+        "reason": row[7],
+        "verification_addition_status": row[8],
+        "verification_addition_exit_code": row[9],
+        "verification_addition_rejection_reason": row[10],
+    }
+
+
+def _verification_additions_by_attempt(additions, source_kind):
+    grouped = {}
+    for addition in additions:
+        if addition.get("source_kind") != source_kind:
+            continue
+        key = (addition.get("run_id"), addition.get("task_id"), addition.get("attempt_id"))
+        grouped.setdefault(key, []).append(addition)
+    return grouped
 
 
 def read_projected_run_metadata(work_root, run_id):
@@ -504,11 +705,20 @@ def _scan_work_root(work_root):
     runs = _scan_runs(work_root / "runs")
     taskpacks = _scan_taskpacks(work_root / "frozen")
     artifacts = _scan_artifacts(work_root, runs, taskpacks)
+    worker_results = _scan_worker_results(runs)
+    integration_outcomes = _scan_integration_outcomes(runs)
     return {
         "runs": runs,
         "taskpacks": taskpacks,
         "artifacts": artifacts,
         "run_stats": _run_stats(runs, artifacts),
+        "follow_up_items": _scan_follow_up_items(work_root, runs),
+        "worker_results": worker_results,
+        "integration_outcomes": integration_outcomes,
+        "worker_verification_additions": _scan_worker_verification_additions(
+            worker_results,
+            integration_outcomes,
+        ),
     }
 
 
@@ -539,6 +749,8 @@ def _scan_runs(runs_root):
                     _event_projection(run_dir.name, event)
                     for event in events
                 ],
+                "raw_events": events,
+                "state": state,
                 "tasks": _task_projections(run_dir.name, state, events),
                 "evidence_summaries": _evidence_projections(run_dir.name, state, state_path),
                 "token_usage": _run_token_usage(events, state),
@@ -568,6 +780,393 @@ def _scan_taskpacks(frozen_root):
             }
         )
     return taskpacks
+
+
+def _scan_follow_up_items(work_root, runs):
+    run_ids = {run["run_id"] for run in runs}
+    items = []
+    for memory_path in _iter_files(Path(work_root) / "pursue", suffixes={".json"}):
+        memory = _read_json_if_exists(memory_path)
+        if not isinstance(memory, dict):
+            continue
+        queue = memory.get("follow_up_queue") if isinstance(memory.get("follow_up_queue"), list) else []
+        for index, item in enumerate(queue):
+            if not isinstance(item, dict):
+                continue
+            objective = _text_or_none(item.get("objective"))
+            if not objective:
+                continue
+            source_taskpack_id = (
+                _text_or_none(item.get("source_taskpack_id"))
+                or _text_or_none(memory.get("latest_taskpack_id"))
+            )
+            source_run_id = _source_run_id_for_follow_up(
+                source_taskpack_id,
+                memory,
+                run_ids,
+            )
+            resolved_memory_path = str(memory_path.resolve())
+            items.append(
+                {
+                    "follow_up_id": _stable_id(
+                        "follow-up",
+                        resolved_memory_path,
+                        index,
+                        source_taskpack_id,
+                        objective,
+                    ),
+                    "source_run_id": source_run_id,
+                    "source_taskpack_id": source_taskpack_id,
+                    "item_index": index,
+                    "objective": objective,
+                    "queue_source": _text_or_none(item.get("source")) or "goal_memory.follow_up_queue",
+                    "readiness": _text_or_none(item.get("readiness")),
+                    "source_report_path": _text_or_none(item.get("source_report_path")),
+                    "goal_memory_path": resolved_memory_path,
+                    "source_result_status": _text_or_none(item.get("source_result_status")),
+                    "source_run_outcome": _text_or_none(item.get("source_run_outcome")),
+                    "stop_reason": _text_or_none(item.get("stop_reason")),
+                    "recommended_next_step": _text_or_none(item.get("recommended_next_step")),
+                    "suggested_verification": _text_or_none(item.get("suggested_verification")),
+                    "source_evidence_paths": _list_value(item.get("source_evidence_paths")),
+                    "blockers": _list_value(item.get("blockers")),
+                    "token_usage": _dict_value(item.get("token_usage")),
+                    "selected_next_goal": index == 0,
+                }
+            )
+    return sorted(
+        items,
+        key=lambda item: (
+            item.get("goal_memory_path") or "",
+            item.get("item_index", 0),
+            item.get("objective") or "",
+        ),
+    )
+
+
+def _source_run_id_for_follow_up(source_taskpack_id, memory, run_ids):
+    if source_taskpack_id in run_ids:
+        return source_taskpack_id
+    latest = _text_or_none(memory.get("latest_taskpack_id"))
+    if latest in run_ids:
+        return latest
+    for run_id in memory.get("latest_run_ids") or []:
+        if run_id in run_ids:
+            return run_id
+    return source_taskpack_id
+
+
+def _scan_worker_results(runs):
+    rows = []
+    for run in runs:
+        run_dir = Path(run["run_dir"])
+        codex_results = _codex_results_by_attempt(run_dir)
+        seen_attempts = set()
+        for index, step in enumerate(run.get("state", {}).get("steps", [])):
+            if not isinstance(step, dict):
+                continue
+            result = step.get("result") if isinstance(step.get("result"), dict) else {}
+            attempt_id = (
+                _text_or_none(result.get("attempt_id"))
+                or _text_or_none(step.get("attempt_id"))
+                or f"{_text_or_none(step.get('step_id')) or 'step'}-{index}"
+            )
+            seen_attempts.add(attempt_id)
+            rows.append(
+                _worker_result_row(
+                    run,
+                    step,
+                    result,
+                    codex_results.get(attempt_id, {}),
+                    attempt_id,
+                )
+            )
+        for attempt_id, codex in codex_results.items():
+            if attempt_id in seen_attempts:
+                continue
+            rows.append(
+                _worker_result_row(
+                    run,
+                    {},
+                    {},
+                    codex,
+                    attempt_id,
+                )
+            )
+    return sorted(rows, key=lambda item: (item["run_id"], item.get("task_id") or "", item["attempt_id"]))
+
+
+def _worker_result_row(run, step, result, codex_result, attempt_id):
+    codex_payload = codex_result.get("payload") if isinstance(codex_result, dict) else {}
+    if not isinstance(codex_payload, dict):
+        codex_payload = {}
+    runtime_output = result.get("runtime_output") if isinstance(result.get("runtime_output"), dict) else {}
+    if not runtime_output:
+        runtime_output = codex_payload.get("output") if isinstance(codex_payload.get("output"), dict) else {}
+    operator_summary = (
+        runtime_output.get("operator_summary")
+        if isinstance(runtime_output.get("operator_summary"), dict)
+        else {}
+    )
+    verification_additions = _list_value(runtime_output.get("verification_additions"))
+    task_id = (
+        _text_or_none(result.get("task_id"))
+        or _text_or_none(step.get("task_id"))
+        or _task_id_from_attempt_id(attempt_id)
+    )
+    row_payload = {
+        "run_id": run["run_id"],
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "result_status": (
+            _text_or_none(codex_payload.get("result_status"))
+            or _text_or_none(result.get("result_status"))
+            or _text_or_none(result.get("runtime_result_status"))
+        ),
+        "validation_status": _text_or_none(result.get("validation_status")),
+        "failure_category": _text_or_none(result.get("failure_category")),
+        "patch_path": _text_or_none(result.get("patch_path")),
+        "changed_files": _list_value(result.get("changed_files"))
+        or _list_value(codex_payload.get("changed_files")),
+        "operator_summary": operator_summary,
+        "verification_additions": verification_additions,
+        "verification_additions_count": len(verification_additions),
+        "evidence_level": _text_or_none(result.get("evidence_level")),
+        "evidence_status": _text_or_none(result.get("evidence_status")),
+        "trace_carrier": _list_value(result.get("trace_carrier")),
+        "missing_evidence": _list_value(result.get("missing_evidence")),
+        "source_path": codex_result.get("path") or run.get("state_path"),
+    }
+    content = _row_content_metadata(row_payload)
+    return {**row_payload, **content}
+
+
+def _codex_results_by_attempt(run_dir):
+    results = {}
+    for path in _iter_files(Path(run_dir) / "codex_results", suffixes={".json"}):
+        payload = _read_json_if_exists(path)
+        if not isinstance(payload, dict):
+            continue
+        attempt_id = _attempt_id_from_codex_result_path(path)
+        if not attempt_id:
+            continue
+        results[attempt_id] = {
+            "path": str(path.resolve()),
+            "payload": payload,
+        }
+    return results
+
+
+def _scan_integration_outcomes(runs):
+    records = {}
+    for run in runs:
+        run_dir = Path(run["run_dir"])
+        for step in run.get("state", {}).get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            result = step.get("result") if isinstance(step.get("result"), dict) else {}
+            if _has_integration_fields(result):
+                _merge_integration_record(
+                    records,
+                    run["run_id"],
+                    result,
+                    "state_step_result",
+                )
+        integration_queue = _read_json_if_exists(run_dir / "state" / "integration_queue.json")
+        for item in (
+            integration_queue.get("items", []) if isinstance(integration_queue, dict) else []
+        ):
+            if isinstance(item, dict):
+                _merge_integration_record(records, run["run_id"], item, "integration_queue")
+        integration_batches = _read_json_if_exists(run_dir / "state" / "integration_batches.json")
+        for batch in (
+            integration_batches.get("items", [])
+            if isinstance(integration_batches, dict)
+            else []
+        ):
+            if isinstance(batch, dict):
+                _merge_integration_batch_records(records, run["run_id"], batch)
+        for event in run.get("raw_events", []):
+            if not isinstance(event, dict) or not str(event.get("event_type", "")).startswith("integration_"):
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            _merge_integration_record(records, run["run_id"], payload, f"event:{event.get('event_type')}")
+    rows = []
+    for record in records.values():
+        record["source_kinds"] = sorted(record.get("source_kinds", set()))
+        record["integration_verification_additions"] = _list_value(
+            record.get("integration_verification_additions")
+        )
+        record["integration_verification_additions_count"] = len(
+            record["integration_verification_additions"]
+        )
+        record["integration_outcome_id"] = _stable_id(
+            "integration",
+            record.get("run_id"),
+            record.get("task_id"),
+            record.get("attempt_id"),
+            record.get("batch_id"),
+        )
+        content = _row_content_metadata(record)
+        rows.append({**record, **content})
+    return sorted(
+        rows,
+        key=lambda item: (
+            item["run_id"],
+            item.get("task_id") or "",
+            item.get("attempt_id") or "",
+            item.get("batch_id") or "",
+        ),
+    )
+
+
+def _merge_integration_batch_records(records, run_id, batch):
+    queue_item_ids = batch.get("applied_queue_item_ids") or batch.get("queue_item_ids") or []
+    if not queue_item_ids:
+        _merge_integration_record(records, run_id, batch, "integration_batch")
+        return
+    for queue_item_id in queue_item_ids:
+        task_id, attempt_id = _task_attempt_from_queue_item_id(queue_item_id)
+        payload = {
+            **batch,
+            "queue_item_id": queue_item_id,
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "batch_id": batch.get("batch_id"),
+            "integration_verification_status": batch.get("verification_status"),
+            "integration_verification_exit_code": batch.get("verification_exit_code"),
+            "integration_commit_status": batch.get("batch_commit_status"),
+            "integration_commit_sha": batch.get("batch_commit_sha"),
+        }
+        _merge_integration_record(records, run_id, payload, "integration_batch")
+
+
+def _merge_integration_record(records, run_id, payload, source_kind):
+    if not isinstance(payload, dict):
+        return
+    queue_item_id = _text_or_none(payload.get("queue_item_id"))
+    task_id = _text_or_none(payload.get("task_id"))
+    attempt_id = _text_or_none(payload.get("attempt_id"))
+    if (not task_id or not attempt_id) and queue_item_id:
+        parsed_task_id, parsed_attempt_id = _task_attempt_from_queue_item_id(queue_item_id)
+        task_id = task_id or parsed_task_id
+        attempt_id = attempt_id or parsed_attempt_id
+    attempt_id = attempt_id or _text_or_none(payload.get("batch_id")) or "unknown"
+    key = (run_id, task_id, attempt_id, _text_or_none(payload.get("batch_id")))
+    record = records.setdefault(
+        key,
+        {
+            "run_id": run_id,
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "batch_id": _text_or_none(payload.get("batch_id")),
+            "source_kinds": set(),
+            "integration_verification_additions": [],
+        },
+    )
+    record["source_kinds"].add(source_kind)
+    for target, source in [
+        ("queue_item_id", "queue_item_id"),
+        ("queue_status", "queue_status"),
+        ("queue_status", "integration_queue_status"),
+        ("integration_status", "integration_status"),
+        ("integration_branch", "integration_branch"),
+        ("integration_worktree_path", "integration_worktree_path"),
+        ("integration_verification_status", "integration_verification_status"),
+        ("integration_verification_exit_code", "integration_verification_exit_code"),
+        (
+            "integration_verification_additions_status",
+            "integration_verification_additions_status",
+        ),
+        ("integration_commit_status", "integration_commit_status"),
+        ("integration_commit_sha", "integration_commit_sha"),
+        ("patch_path", "patch_path"),
+    ]:
+        value = payload.get(source)
+        if value not in (None, "", []):
+            record[target] = value
+    additions = _list_value(payload.get("integration_verification_additions"))
+    if additions:
+        record["integration_verification_additions"] = additions
+
+
+def _has_integration_fields(payload):
+    return any(
+        payload.get(key) not in (None, "", [], "not_requested", "not_queued")
+        for key in [
+            "integration_queue_status",
+            "integration_status",
+            "integration_verification_status",
+            "integration_verification_additions_status",
+            "integration_commit_status",
+        ]
+    )
+
+
+def _scan_worker_verification_additions(worker_results, integration_outcomes):
+    rows = []
+    for result in worker_results:
+        for index, addition in enumerate(result.get("verification_additions", [])):
+            rows.append(
+                _verification_addition_row(
+                    result,
+                    addition,
+                    index,
+                    source_kind="worker_output",
+                )
+            )
+    for outcome in integration_outcomes:
+        for index, addition in enumerate(outcome.get("integration_verification_additions", [])):
+            rows.append(
+                _verification_addition_row(
+                    outcome,
+                    addition,
+                    index,
+                    source_kind="integration_verification",
+                )
+            )
+    return sorted(
+        rows,
+        key=lambda item: (
+            item["run_id"],
+            item.get("task_id") or "",
+            item.get("attempt_id") or "",
+            item["source_kind"],
+            item.get("label") or "",
+        ),
+    )
+
+
+def _verification_addition_row(source, addition, index, *, source_kind):
+    addition = addition if isinstance(addition, dict) else {}
+    command = addition.get("command") if isinstance(addition.get("command"), list) else []
+    label = _text_or_none(addition.get("label")) or f"verification-addition-{index + 1}"
+    return {
+        "verification_addition_id": _stable_id(
+            "verification-addition",
+            source_kind,
+            source.get("run_id"),
+            source.get("task_id"),
+            source.get("attempt_id"),
+            index,
+            label,
+            command,
+        ),
+        "run_id": source["run_id"],
+        "task_id": source.get("task_id"),
+        "attempt_id": source.get("attempt_id"),
+        "source_kind": source_kind,
+        "label": label,
+        "command": command,
+        "reason": _text_or_none(addition.get("reason")),
+        "verification_addition_status": _text_or_none(
+            addition.get("verification_addition_status")
+        ),
+        "verification_addition_exit_code": addition.get("verification_addition_exit_code"),
+        "verification_addition_rejection_reason": _text_or_none(
+            addition.get("verification_addition_rejection_reason")
+        ),
+    }
 
 
 def _create_projection_schema(connection):
@@ -689,6 +1288,99 @@ def _create_projection_schema(connection):
             total_tokens integer,
             cached_input_tokens integer,
             reasoning_tokens integer
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table if not exists follow_up_items(
+            follow_up_id text primary key,
+            source_run_id text,
+            source_taskpack_id text,
+            item_index integer not null,
+            objective text not null,
+            queue_source text,
+            readiness text,
+            source_report_path text,
+            goal_memory_path text,
+            source_result_status text,
+            source_run_outcome text,
+            stop_reason text,
+            recommended_next_step text,
+            suggested_verification text,
+            source_evidence_paths_json text,
+            blockers_json text,
+            token_usage_json text,
+            selected_next_goal integer not null
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table if not exists worker_results(
+            run_id text not null,
+            task_id text,
+            attempt_id text not null,
+            result_status text,
+            validation_status text,
+            failure_category text,
+            patch_path text,
+            changed_files_json text,
+            operator_summary_json text,
+            verification_additions_json text,
+            verification_additions_count integer not null,
+            evidence_level text,
+            evidence_status text,
+            trace_carrier_json text,
+            missing_evidence_json text,
+            source_path text,
+            content_size_bytes integer,
+            content_sha256 text,
+            primary key(run_id, attempt_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table if not exists integration_outcomes(
+            integration_outcome_id text primary key,
+            run_id text not null,
+            task_id text,
+            attempt_id text,
+            queue_item_id text,
+            queue_status text,
+            integration_status text,
+            integration_branch text,
+            integration_worktree_path text,
+            integration_verification_status text,
+            integration_verification_exit_code integer,
+            integration_verification_additions_status text,
+            integration_verification_additions_json text,
+            integration_verification_additions_count integer not null,
+            integration_commit_status text,
+            integration_commit_sha text,
+            patch_path text,
+            batch_id text,
+            source_kinds_json text,
+            content_size_bytes integer,
+            content_sha256 text
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table if not exists worker_verification_additions(
+            verification_addition_id text primary key,
+            run_id text not null,
+            task_id text,
+            attempt_id text,
+            source_kind text not null,
+            label text,
+            command_json text,
+            reason text,
+            verification_addition_status text,
+            verification_addition_exit_code integer,
+            verification_addition_rejection_reason text
         )
         """
     )
@@ -850,6 +1542,186 @@ def _write_projection_rows(connection, projection):
         """,
         [stats for stats in run_stats],
     )
+    connection.executemany(
+        """
+        insert into follow_up_items(
+            follow_up_id,
+            source_run_id,
+            source_taskpack_id,
+            item_index,
+            objective,
+            queue_source,
+            readiness,
+            source_report_path,
+            goal_memory_path,
+            source_result_status,
+            source_run_outcome,
+            stop_reason,
+            recommended_next_step,
+            suggested_verification,
+            source_evidence_paths_json,
+            blockers_json,
+            token_usage_json,
+            selected_next_goal
+        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                item["follow_up_id"],
+                item.get("source_run_id"),
+                item.get("source_taskpack_id"),
+                item["item_index"],
+                item["objective"],
+                item.get("queue_source"),
+                item.get("readiness"),
+                item.get("source_report_path"),
+                item.get("goal_memory_path"),
+                item.get("source_result_status"),
+                item.get("source_run_outcome"),
+                item.get("stop_reason"),
+                item.get("recommended_next_step"),
+                item.get("suggested_verification"),
+                _json_dumps(item.get("source_evidence_paths", [])),
+                _json_dumps(item.get("blockers", [])),
+                _json_dumps(item.get("token_usage", {})),
+                1 if item.get("selected_next_goal") else 0,
+            )
+            for item in projection["follow_up_items"]
+        ],
+    )
+    connection.executemany(
+        """
+        insert into worker_results(
+            run_id,
+            task_id,
+            attempt_id,
+            result_status,
+            validation_status,
+            failure_category,
+            patch_path,
+            changed_files_json,
+            operator_summary_json,
+            verification_additions_json,
+            verification_additions_count,
+            evidence_level,
+            evidence_status,
+            trace_carrier_json,
+            missing_evidence_json,
+            source_path,
+            content_size_bytes,
+            content_sha256
+        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                item["run_id"],
+                item.get("task_id"),
+                item["attempt_id"],
+                item.get("result_status"),
+                item.get("validation_status"),
+                item.get("failure_category"),
+                item.get("patch_path"),
+                _json_dumps(item.get("changed_files", [])),
+                _json_dumps(item.get("operator_summary", {})),
+                _json_dumps(item.get("verification_additions", [])),
+                item.get("verification_additions_count", 0),
+                item.get("evidence_level"),
+                item.get("evidence_status"),
+                _json_dumps(item.get("trace_carrier", [])),
+                _json_dumps(item.get("missing_evidence", [])),
+                item.get("source_path"),
+                item.get("content_size_bytes"),
+                item.get("content_sha256"),
+            )
+            for item in projection["worker_results"]
+        ],
+    )
+    connection.executemany(
+        """
+        insert into integration_outcomes(
+            integration_outcome_id,
+            run_id,
+            task_id,
+            attempt_id,
+            queue_item_id,
+            queue_status,
+            integration_status,
+            integration_branch,
+            integration_worktree_path,
+            integration_verification_status,
+            integration_verification_exit_code,
+            integration_verification_additions_status,
+            integration_verification_additions_json,
+            integration_verification_additions_count,
+            integration_commit_status,
+            integration_commit_sha,
+            patch_path,
+            batch_id,
+            source_kinds_json,
+            content_size_bytes,
+            content_sha256
+        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                item["integration_outcome_id"],
+                item["run_id"],
+                item.get("task_id"),
+                item.get("attempt_id"),
+                item.get("queue_item_id"),
+                item.get("queue_status"),
+                item.get("integration_status"),
+                item.get("integration_branch"),
+                item.get("integration_worktree_path"),
+                item.get("integration_verification_status"),
+                item.get("integration_verification_exit_code"),
+                item.get("integration_verification_additions_status"),
+                _json_dumps(item.get("integration_verification_additions", [])),
+                item.get("integration_verification_additions_count", 0),
+                item.get("integration_commit_status"),
+                item.get("integration_commit_sha"),
+                item.get("patch_path"),
+                item.get("batch_id"),
+                _json_dumps(item.get("source_kinds", [])),
+                item.get("content_size_bytes"),
+                item.get("content_sha256"),
+            )
+            for item in projection["integration_outcomes"]
+        ],
+    )
+    connection.executemany(
+        """
+        insert into worker_verification_additions(
+            verification_addition_id,
+            run_id,
+            task_id,
+            attempt_id,
+            source_kind,
+            label,
+            command_json,
+            reason,
+            verification_addition_status,
+            verification_addition_exit_code,
+            verification_addition_rejection_reason
+        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                item["verification_addition_id"],
+                item["run_id"],
+                item.get("task_id"),
+                item.get("attempt_id"),
+                item["source_kind"],
+                item.get("label"),
+                _json_dumps(item.get("command", [])),
+                item.get("reason"),
+                item.get("verification_addition_status"),
+                item.get("verification_addition_exit_code"),
+                item.get("verification_addition_rejection_reason"),
+            )
+            for item in projection["worker_verification_additions"]
+        ],
+    )
 
 
 def _projection_counts(projection):
@@ -872,6 +1744,12 @@ def _projection_counts(projection):
         "artifact_bytes": sum(artifact[7] for artifact in projection["artifacts"]),
         "artifact_digest": _artifact_digest(projection["artifacts"]),
         "run_stats": len(projection["run_stats"]),
+        "follow_up_items": len(projection["follow_up_items"]),
+        "worker_results": len(projection["worker_results"]),
+        "integration_outcomes": len(projection["integration_outcomes"]),
+        "worker_verification_additions": len(
+            projection["worker_verification_additions"]
+        ),
         "evidence": evidence_counts,
     }
 
@@ -888,6 +1766,13 @@ def _database_counts(db_path):
             "artifact_bytes": _database_artifact_bytes(connection),
             "artifact_digest": _database_artifact_digest(connection),
             "run_stats": _table_count(connection, "run_stats"),
+            "follow_up_items": _table_count(connection, "follow_up_items"),
+            "worker_results": _table_count(connection, "worker_results"),
+            "integration_outcomes": _table_count(connection, "integration_outcomes"),
+            "worker_verification_additions": _table_count(
+                connection,
+                "worker_verification_additions",
+            ),
             "evidence": _database_evidence_counts(connection),
         }
 
@@ -901,7 +1786,12 @@ def _database_schema_version(db_path):
 
 
 def _table_count(connection, table_name):
-    return connection.execute(f"select count(*) from {table_name}").fetchone()[0]
+    try:
+        return connection.execute(f"select count(*) from {table_name}").fetchone()[0]
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return 0
+        raise
 
 
 def _database_evidence_counts(connection):
@@ -1055,6 +1945,13 @@ def _project_stats_payload(
         "events": counts.get("events", 0),
         "tasks": counts.get("tasks", 0),
         "evidence_summaries": counts.get("evidence_summaries", 0),
+        "follow_up_items": counts.get("follow_up_items", 0),
+        "worker_results": counts.get("worker_results", 0),
+        "integration_outcomes": counts.get("integration_outcomes", 0),
+        "worker_verification_additions": counts.get(
+            "worker_verification_additions",
+            0,
+        ),
         "evidence": counts.get("evidence", {}),
         "artifacts": {
             "total_count": counts.get("artifacts", 0),
@@ -1160,6 +2057,48 @@ def _read_jsonl(path):
             except json.JSONDecodeError:
                 continue
     return records
+
+
+def _json_dumps(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _json_value(value, default):
+    if value in (None, ""):
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def _text_or_none(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _list_value(value):
+    return value if isinstance(value, list) else []
+
+
+def _dict_value(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _stable_id(*parts):
+    return hashlib.sha256(
+        _json_dumps([str(part) for part in parts]).encode("utf-8")
+    ).hexdigest()
+
+
+def _row_content_metadata(payload):
+    content = _json_dumps(payload).encode("utf-8")
+    return {
+        "content_size_bytes": len(content),
+        "content_sha256": hashlib.sha256(content).hexdigest(),
+    }
 
 
 def _latest_event(events):
@@ -1331,6 +2270,30 @@ def _scan_artifacts(work_root, runs, taskpacks):
                 authority="derived",
                 source="run",
             )
+        for path in _iter_files(run_dir / "codex_results", suffixes={".json"}):
+            task_id, attempt_id = _task_attempt_from_codex_result_path(path)
+            _append_artifact(
+                artifacts,
+                seen,
+                path,
+                "worker_result",
+                run_id=run_id,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                retention_policy="authoritative",
+                authority="file",
+                source="run",
+            )
+    for path in _iter_files(work_root / "pursue", suffixes={".json"}):
+        _append_artifact(
+            artifacts,
+            seen,
+            path,
+            "goal_memory",
+            retention_policy="authoritative",
+            authority="file",
+            source="pursue",
+        )
     for taskpack in taskpacks:
         taskpack_dir = Path(taskpack["taskpack_dir"])
         for path in _iter_files(taskpack_dir):
@@ -1438,6 +2401,28 @@ def _task_attempt_from_context_path(path):
     stem = Path(path).stem
     attempt_id = stem.rsplit("-", 1)[0] if "-" in stem else None
     return _task_id_from_attempt_id(attempt_id), attempt_id
+
+
+def _task_attempt_from_codex_result_path(path):
+    attempt_id = _attempt_id_from_codex_result_path(path)
+    return _task_id_from_attempt_id(attempt_id), attempt_id
+
+
+def _attempt_id_from_codex_result_path(path):
+    stem = Path(path).stem
+    prefix = "codex_result_"
+    if stem.startswith(prefix):
+        return stem[len(prefix):]
+    return stem or None
+
+
+def _task_attempt_from_queue_item_id(queue_item_id):
+    text = str(queue_item_id or "")
+    if ":" not in text:
+        attempt_id = text or None
+        return _task_id_from_attempt_id(attempt_id), attempt_id
+    task_id, attempt_id = text.split(":", 1)
+    return task_id or _task_id_from_attempt_id(attempt_id), attempt_id or None
 
 
 def _task_attempt_from_patch_path(path):

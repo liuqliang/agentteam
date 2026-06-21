@@ -875,6 +875,196 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(len(evidence_row[1]), 64)
             self.assertEqual(evidence_row[2], str(state_path.resolve()))
 
+    def test_project_projection_db_projects_follow_up_lineage_and_outcomes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            run_dir = _write_completed_operator_run(work_root / "runs" / "projection-run")
+            attempt_id = "optimize-pipeline-ATTEMPT-001"
+            patch_path = run_dir / "steps" / "STEP-0001-optimize-pipeline" / "result.patch"
+            patch_path.parent.mkdir(parents=True, exist_ok=True)
+            patch_path.write_text("diff --git a/a b/a\n", encoding="utf-8")
+            verification_addition = {
+                "label": "projection-readthrough",
+                "command": ["python3", "-m", "unittest", "tests.test_projection"],
+                "reason": "cover the DB projection query surface",
+            }
+            verification_addition_result = {
+                **verification_addition,
+                "verification_addition_status": "passed",
+                "verification_addition_exit_code": 0,
+                "verification_addition_stdout": "ok\n",
+                "verification_addition_stderr": "",
+                "verification_addition_rejection_reason": None,
+            }
+            runtime_output = {
+                "operator_summary": {
+                    "what_changed": "投影 follow-up lineage。",
+                    "verification_summary": "focused projection test passed",
+                    "measured_result": "worker verification_additions preserved",
+                    "merge_recommendation": "人工审阅后合并。",
+                    "next_steps": ["补充 DB 投影 readthrough 测试。"],
+                },
+                "verification_additions": [verification_addition],
+            }
+            state_path = run_dir / "state" / "two_phase_scheduler_state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["steps"] = [
+                {
+                    "step_id": "STEP-0001-optimize-pipeline",
+                    "task_id": "optimize-pipeline",
+                    "result": {
+                        "task_id": "optimize-pipeline",
+                        "attempt_id": attempt_id,
+                        "lease_id": "LEASE-001",
+                        "changed_files": ["agentteam_runtime/projection_db.py"],
+                        "runtime_output": runtime_output,
+                        "validation_status": "accepted",
+                        "failure_category": None,
+                        "patch_path": str(patch_path),
+                        "integration_queue_status": "verified",
+                        "integration_queue_item_id": f"optimize-pipeline:{attempt_id}",
+                        "integration_status": "applied",
+                        "integration_worktree_path": str(run_dir / "integration" / "optimize-pipeline"),
+                        "integration_verification_status": "passed",
+                        "integration_verification_exit_code": 0,
+                        "integration_verification_stdout": "primary ok\n",
+                        "integration_verification_stderr": "",
+                        "integration_verification_additions_status": "passed",
+                        "integration_verification_additions": [verification_addition_result],
+                        "integration_commit_status": "not_requested",
+                        "evidence_level": "L2",
+                        "evidence_status": "complete",
+                        "trace_carrier": [{"type": "command", "command": "focused", "result": "passed"}],
+                        "missing_evidence": [],
+                    },
+                }
+            ]
+            _write_json(state_path, state)
+            _write_json(
+                run_dir / "codex_results" / f"codex_result_{attempt_id}.json",
+                {
+                    "result_status": "completed",
+                    "changed_files": ["agentteam_runtime/projection_db.py"],
+                    "output": runtime_output,
+                },
+            )
+            _write_json(
+                run_dir / "state" / "integration_queue.json",
+                {
+                    "queue_schema_version": "integration_queue.v1",
+                    "items": [
+                        {
+                            "queue_item_id": f"optimize-pipeline:{attempt_id}",
+                            "queue_status": "verified",
+                            "task_id": "optimize-pipeline",
+                            "attempt_id": attempt_id,
+                            "lease_id": "LEASE-001",
+                            "patch_path": str(patch_path),
+                            "integration_status": "applied",
+                            "integration_verification_status": "passed",
+                            "integration_verification_exit_code": 0,
+                            "integration_verification_additions_status": "passed",
+                            "integration_verification_additions": [verification_addition_result],
+                            "integration_commit_status": "not_requested",
+                        }
+                    ],
+                },
+            )
+            events = _read_jsonl(run_dir / "events.jsonl")
+            events.append(
+                {
+                    "event_id": "EVT-0002",
+                    "event_type": "integration_verified",
+                    "sequence": 2,
+                    "payload": {
+                        "task_id": "optimize-pipeline",
+                        "attempt_id": attempt_id,
+                        "lease_id": "LEASE-001",
+                        "integration_verification_status": "passed",
+                        "integration_verification_exit_code": 0,
+                        "integration_verification_stdout": "primary ok\n",
+                        "integration_verification_stderr": "",
+                        "integration_verification_additions_status": "passed",
+                        "integration_verification_additions": [verification_addition_result],
+                    },
+                }
+            )
+            _write_jsonl(run_dir / "events.jsonl", events)
+            goal_memory_path = work_root / "pursue" / "projection-goal-memory.json"
+            _write_json(
+                goal_memory_path,
+                {
+                    "memory_schema_version": "goal_memory.v1",
+                    "memory_path": str(goal_memory_path),
+                    "latest_taskpack_id": "projection-run",
+                    "latest_run_ids": ["projection-run"],
+                    "follow_up_queue": [
+                        {
+                            "objective": "补充 DB 投影 readthrough 测试。",
+                            "source_taskpack_id": "projection-run",
+                            "source_report_path": str(run_dir / "reports" / "final_report.md"),
+                            "source_result_status": "completed",
+                            "source_run_outcome": "completed_with_review_required",
+                            "source_evidence_paths": [
+                                {"type": "report", "path": str(run_dir / "reports" / "final_report.md")}
+                            ],
+                            "stop_reason": "review_gate_required",
+                            "suggested_verification": "python3 -m unittest tests.test_projection",
+                        }
+                    ],
+                },
+            )
+
+            summary = rebuild_project_projection_db(work_root)
+            lineage = projection_db.read_projected_follow_up_lineage(work_root)
+
+            self.assertEqual(summary["follow_up_items"], 1)
+            self.assertEqual(summary["worker_results"], 1)
+            self.assertEqual(summary["integration_outcomes"], 1)
+            self.assertEqual(summary["worker_verification_additions"], 2)
+            self.assertEqual(lineage["projection_source"], "db")
+            self.assertEqual(lineage["projection_status"], "fresh")
+            self.assertEqual(
+                lineage["follow_up_items"][0]["objective"],
+                "补充 DB 投影 readthrough 测试。",
+            )
+            self.assertTrue(lineage["follow_up_items"][0]["selected_next_goal"])
+            self.assertEqual(
+                lineage["follow_up_items"][0]["goal_memory_path"],
+                str(goal_memory_path.resolve()),
+            )
+            self.assertEqual(lineage["worker_results"][0]["result_status"], "completed")
+            self.assertEqual(
+                lineage["worker_results"][0]["verification_additions"][0]["command"],
+                ["python3", "-m", "unittest", "tests.test_projection"],
+            )
+            self.assertEqual(
+                lineage["integration_outcomes"][0]["integration_verification_status"],
+                "passed",
+            )
+            self.assertEqual(
+                lineage["integration_outcomes"][0]["verification_additions"][0][
+                    "verification_addition_status"
+                ],
+                "passed",
+            )
+            with sqlite3.connect(summary["db_path"]) as connection:
+                table_names = {
+                    row[0]
+                    for row in connection.execute(
+                        "select name from sqlite_master where type='table'"
+                    )
+                }
+            self.assertTrue(
+                {
+                    "follow_up_items",
+                    "worker_results",
+                    "integration_outcomes",
+                    "worker_verification_additions",
+                }.issubset(table_names)
+            )
+
     def test_project_projection_db_check_detects_artifact_content_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
