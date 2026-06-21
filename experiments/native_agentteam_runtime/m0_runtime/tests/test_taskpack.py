@@ -33,6 +33,7 @@ from agentteam_runtime.agentteam import (
     _handle_run,
     _run_paths_for_frozen_taskpack,
     _pursue_next_goal,
+    _pursue_next_integration_base_ref,
     _pursue_stop_reason,
     _set_taskpack_runtime_backend,
     _submit_args_from_profile,
@@ -52,6 +53,7 @@ from agentteam_runtime.goal_memory import build_goal_memory, render_goal_memory_
 from agentteam_runtime.notifications import FeishuWebhookNotifier, _permission_request_text
 from agentteam_runtime.operator_report import concise_report_lines
 from agentteam_runtime.profile import build_project_profile, write_project_profile
+import agentteam_runtime.agentteam as agentteam_module
 import agentteam_runtime.projection_db as projection_db
 from agentteam_runtime.projection_db import (
     check_project_projection_db,
@@ -8162,6 +8164,124 @@ class TaskpackTests(unittest.TestCase):
             "stopped",
         )
 
+    def test_pursue_loop_passes_previous_baseline_head_to_next_round(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp) / "agentteam-work"
+            captured_submit_args = []
+            source_reports = [
+                {
+                    "run_id": "pursue-loop",
+                    "integration_baseline": {
+                        "head_sha": "verified-head",
+                        "branch": "agentteam/run/pursue-loop/integration",
+                    },
+                    "completion_summary": {
+                        "next_steps": ["Continue with the next optimization task."]
+                    },
+                },
+                {
+                    "run_id": "pursue-loop-r2",
+                    "integration_baseline": {
+                        "head_sha": "round-two-head",
+                        "branch": "agentteam/run/pursue-loop-r2/integration",
+                    },
+                    "completion_summary": {},
+                },
+            ]
+            originals = {
+                "_submit_args_from_profile": agentteam_module._submit_args_from_profile,
+                "_handle_submit": agentteam_module._handle_submit,
+                "build_run_completion_report": agentteam_module.build_run_completion_report,
+                "build_goal_memory": agentteam_module.build_goal_memory,
+                "write_goal_memory": agentteam_module.write_goal_memory,
+                "_pursue_follow_up_queue_summary": agentteam_module._pursue_follow_up_queue_summary,
+            }
+
+            def fake_submit_args_from_profile(args, project_root, profile):
+                return SimpleNamespace(
+                    goal=args.goal,
+                    taskpack_id=args.taskpack_id,
+                    initial_integration_base_ref=None,
+                )
+
+            def fake_handle_submit(submit_args):
+                captured_submit_args.append(
+                    {
+                        "taskpack_id": submit_args.taskpack_id,
+                        "initial_integration_base_ref": getattr(
+                            submit_args,
+                            "initial_integration_base_ref",
+                            None,
+                        ),
+                    }
+                )
+                action = "continue" if len(captured_submit_args) == 1 else "integrate"
+                return {
+                    "status": "completed",
+                    "taskpack_id": submit_args.taskpack_id,
+                    "report": {
+                        "run_status": "completed",
+                        "blocked_count": 0,
+                        "completion_summary": {
+                            "follow_up_recommendation": {"action": action}
+                        },
+                    },
+                }
+
+            def fake_build_run_completion_report(*args, **kwargs):
+                return source_reports[len(captured_submit_args) - 1]
+
+            def fake_build_goal_memory(**kwargs):
+                return {}
+
+            def fake_write_goal_memory(work_root_arg, goal_memory):
+                memory_path = Path(work_root_arg) / "pursue" / "goal-memory.json"
+                memory_path.parent.mkdir(parents=True, exist_ok=True)
+                memory_path.write_text(json.dumps(goal_memory, sort_keys=True), encoding="utf-8")
+                return memory_path
+
+            def fake_queue_summary(**kwargs):
+                return {
+                    "queue_status": "ready",
+                    "next_goal": "Continue with the next optimization task.",
+                }
+
+            try:
+                agentteam_module._submit_args_from_profile = fake_submit_args_from_profile
+                agentteam_module._handle_submit = fake_handle_submit
+                agentteam_module.build_run_completion_report = fake_build_run_completion_report
+                agentteam_module.build_goal_memory = fake_build_goal_memory
+                agentteam_module.write_goal_memory = fake_write_goal_memory
+                agentteam_module._pursue_follow_up_queue_summary = fake_queue_summary
+
+                result = agentteam_module._run_pursue_loop(
+                    SimpleNamespace(
+                        work_root=str(work_root),
+                        taskpack_id="pursue-loop",
+                        goal="Improve the project.",
+                        json=True,
+                        allow_review_gate_follow_up=False,
+                    ),
+                    project_root=Path(tmp) / "repo",
+                    profile={"work_root": str(work_root), "project_key": "pursue-project"},
+                    goal="Improve the project.",
+                    max_rounds=2,
+                )
+            finally:
+                for name, value in originals.items():
+                    setattr(agentteam_module, name, value)
+
+            self.assertEqual(len(captured_submit_args), 2)
+            self.assertIsNone(captured_submit_args[0]["initial_integration_base_ref"])
+            self.assertEqual(
+                captured_submit_args[1]["initial_integration_base_ref"],
+                "verified-head",
+            )
+            self.assertEqual(
+                result["runs"][1]["initial_integration_base_ref"],
+                "verified-head",
+            )
+
     def test_pursue_next_goal_uses_report_next_step(self):
         self.assertEqual(
             _pursue_next_goal(
@@ -14000,6 +14120,54 @@ class TaskpackTests(unittest.TestCase):
             self.assertNotIn("--daemon-two-phase-worker-pool", args)
             self.assertIn("--commit-verified-integration", args)
             self.assertEqual(_arg_value(args, "--runtime"), "codex")
+
+    def test_build_taskpack_runtime_args_passes_initial_integration_base_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Build runtime args with inherited integration baseline.",
+                draft_root=drafts,
+                taskpack_id="runtime-args-inherited-baseline",
+                write_scope=["src/"],
+            )
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+
+            args = build_taskpack_runtime_args(
+                frozen["frozen_taskpack_dir"],
+                run_root=run_root,
+                initial_integration_base_ref="abc123",
+            )
+
+            self.assertEqual(_arg_value(args, "--initial-integration-base-ref"), "abc123")
+
+    def test_pursue_next_integration_base_ref_prefers_latest_baseline_head(self):
+        report = {
+            "integration_baseline": {
+                "head_sha": "verified-head",
+                "branch": "agentteam/run/previous/integration",
+            }
+        }
+
+        self.assertEqual(_pursue_next_integration_base_ref(report), "verified-head")
+
+    def test_pursue_next_integration_base_ref_falls_back_to_branch(self):
+        report = {
+            "integration_baseline": {
+                "head_sha": None,
+                "branch": "agentteam/run/previous/integration",
+            }
+        }
+
+        self.assertEqual(
+            _pursue_next_integration_base_ref(report),
+            "agentteam/run/previous/integration",
+        )
 
     def test_build_taskpack_runtime_args_rejects_draft_without_run_dir(self):
         with tempfile.TemporaryDirectory() as tmp:

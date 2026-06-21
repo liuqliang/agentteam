@@ -2901,10 +2901,11 @@ def write_patch_artifact(worktree_path, artifact_dir, actual_changed_files):
     return patch_path
 
 
-def ensure_integration_baseline_worktree(project_root, output_dir):
+def ensure_integration_baseline_worktree(project_root, output_dir, base_ref=None):
     integration_branch = _integration_baseline_branch_name(output_dir)
     integration_worktree = Path(output_dir) / "integration-baseline"
     integration_worktree.parent.mkdir(parents=True, exist_ok=True)
+    base_ref = str(base_ref).strip() if base_ref else "HEAD"
     recovery_status = "created"
     if integration_worktree.exists():
         recovery_status = "reused_existing"
@@ -2936,7 +2937,7 @@ def ensure_integration_baseline_worktree(project_root, output_dir):
                 "-b",
                 integration_branch,
                 str(integration_worktree),
-                "HEAD",
+                base_ref,
             ],
             check=True,
             stdout=subprocess.PIPE,

@@ -1872,15 +1872,19 @@ def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
     goal_memory_path = None
     stop_reason = None
     for round_index in range(1, max_rounds + 1):
+        initial_integration_base_ref = _pursue_next_integration_base_ref(source_report)
         if source_report is not None:
             current_goal = _build_followup_goal(current_goal, source_report, goal_memory=goal_memory)
         taskpack_id = _pursue_taskpack_id(args.taskpack_id, round_index)
         submit_args = _submit_args_from_profile(args, project_root, profile)
         submit_args.goal = current_goal
         submit_args.taskpack_id = taskpack_id
+        submit_args.initial_integration_base_ref = initial_integration_base_ref
         submit_args.progress = not bool(args.json)
         run_result = _handle_submit(submit_args)
         round_record = _pursue_round_record(round_index, run_result, work_root)
+        if initial_integration_base_ref:
+            round_record["initial_integration_base_ref"] = initial_integration_base_ref
         rounds.append(round_record)
         stop_reason = _pursue_stop_reason(
             round_record,
@@ -2087,6 +2091,22 @@ def _pursue_next_goal(original_goal, source_report):
     if next_step:
         return next_step
     return f"Continue pursuing the long-running goal using the previous report: {original_goal}"
+
+
+def _pursue_next_integration_base_ref(source_report):
+    if not isinstance(source_report, dict):
+        return None
+    baseline = source_report.get("integration_baseline")
+    if not isinstance(baseline, dict):
+        return None
+    for key in ("head_sha", "branch"):
+        value = baseline.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
 
 
 def _pursue_follow_up_queue_summary(*, source_report, goal_memory=None, source_run_dir=None, limit=5):
@@ -2459,6 +2479,7 @@ def _handle_submit(args):
         feishu_webhook_env=args.feishu_webhook_env,
         feishu_signing_secret_env=args.feishu_signing_secret_env,
         progress=progress,
+        initial_integration_base_ref=getattr(args, "initial_integration_base_ref", None),
     )
     if completed.returncode != 0:
         raise AgentTeamCliError(
@@ -5978,6 +5999,7 @@ def _submit_args_from_profile(args, project_root, profile):
         if args.feishu_signing_secret_env is not None
         else (feishu.get("signing_secret_env") if feishu_enabled else None),
         codex_command=args.codex_command,
+        initial_integration_base_ref=getattr(args, "initial_integration_base_ref", None),
         verification_profile=effective_project_verification_profile(
             project_root,
             profile.get("verification_profile"),
@@ -6095,6 +6117,7 @@ def _run_frozen_taskpack(
     feishu_signing_secret_env=None,
     progress=False,
     progress_interval_seconds=2.0,
+    initial_integration_base_ref=None,
 ):
     run_paths = _run_paths_for_frozen_taskpack(frozen_taskpack_dir, run_root)
     runtime_args = build_taskpack_runtime_args(
@@ -6104,6 +6127,7 @@ def _run_frozen_taskpack(
         max_inflight=max_inflight,
         max_attempts=max_attempts,
         commit_verified_integration=commit_verified_integration,
+        initial_integration_base_ref=initial_integration_base_ref,
     )
     if notification_project:
         runtime_args.extend(["--notification-project", notification_project])

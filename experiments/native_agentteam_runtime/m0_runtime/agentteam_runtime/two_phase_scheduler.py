@@ -55,6 +55,7 @@ class TwoPhaseFileScheduler:
         lease_timeout_seconds=900,
         integrate_accepted_patch=False,
         integration_verification_command=None,
+        initial_integration_base_ref=None,
         commit_verified_integration=False,
         state_path=None,
         auto_decompose=False,
@@ -89,6 +90,7 @@ class TwoPhaseFileScheduler:
         self.lease_timeout_seconds = lease_timeout_seconds
         self.integrate_accepted_patch = integrate_accepted_patch
         self.integration_verification_command = integration_verification_command
+        self.initial_integration_base_ref = initial_integration_base_ref
         self.commit_verified_integration = commit_verified_integration
         self.auto_decompose = auto_decompose
         self.decomposition_milestone_id = decomposition_milestone_id
@@ -990,6 +992,7 @@ class TwoPhaseFileScheduler:
         baseline = ensure_integration_baseline_worktree(
             self.project_root,
             self.output_dir,
+            base_ref=self.initial_integration_base_ref,
         )
         self.state["integration_baseline"] = baseline
         return baseline

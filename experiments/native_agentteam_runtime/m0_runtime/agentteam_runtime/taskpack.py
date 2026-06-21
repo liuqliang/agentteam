@@ -1311,6 +1311,7 @@ def build_taskpack_runtime_args(
     max_attempts=1,
     max_steps=DEFAULT_DAEMON_MAX_STEPS,
     commit_verified_integration=False,
+    initial_integration_base_ref=None,
 ):
     taskpack_dir = Path(frozen_taskpack_dir).resolve()
     loaded = load_taskpack(taskpack_dir)
@@ -1379,6 +1380,8 @@ def build_taskpack_runtime_args(
         args.extend(["--codex-timeout-seconds", str(codex_timeout_seconds)])
     args.append("--integrate-accepted-patch")
     args.extend(["--integration-verification-command-json", command_json])
+    if daemon and initial_integration_base_ref:
+        args.extend(["--initial-integration-base-ref", str(initial_integration_base_ref)])
     if commit_verified_integration:
         args.append("--commit-verified-integration")
     return args

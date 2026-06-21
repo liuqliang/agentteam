@@ -136,6 +136,10 @@ def main(argv=None):
         help="JSON array command to run in the integration worktree after patch application.",
     )
     parser.add_argument(
+        "--initial-integration-base-ref",
+        help="Optional git ref used when first creating the integration baseline worktree.",
+    )
+    parser.add_argument(
         "--commit-verified-integration",
         action="store_true",
         help="Commit the integration worktree only after the verification command passes.",
@@ -470,6 +474,7 @@ def _run_supervised_two_phase_scheduler(
         lease_timeout_seconds=args.lease_timeout_seconds,
         integrate_accepted_patch=args.integrate_accepted_patch,
         integration_verification_command=integration_verification_command,
+        initial_integration_base_ref=getattr(args, "initial_integration_base_ref", None),
         commit_verified_integration=args.commit_verified_integration,
         auto_decompose=args.auto_decompose_backlog,
         decomposition_milestone_id=args.decomposition_milestone_id,

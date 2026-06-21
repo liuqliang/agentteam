@@ -46,6 +46,7 @@ from agentteam_runtime.agentteam import _run_runtime_command_with_progress
 from agentteam_runtime.cli import _run_supervised_two_phase_scheduler
 from agentteam_runtime.m0_runtime import (
     apply_patch_to_integration_worktree,
+    ensure_integration_baseline_worktree,
     run_integration_verification,
     run_integration_verification_additions,
 )
@@ -7004,6 +7005,52 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(second["integration_base_sha"], baseline_commit)
             self.assertEqual(_git_rev_parse(second_worktree, "HEAD"), baseline_commit)
             self.assertTrue((second_worktree / "generated" / "baseline_one.json").exists())
+
+    def test_integration_baseline_worktree_can_start_from_initial_base_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "next-run"
+            _init_git_repo(repo)
+            source_head = _git_rev_parse(repo, "HEAD")
+            generated = repo / "generated" / "previous_round.json"
+            generated.parent.mkdir(parents=True, exist_ok=True)
+            generated.write_text(json.dumps({"round": 1}), encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "generated/previous_round.json"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "previous integration baseline"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            previous_baseline_head = _git_rev_parse(repo, "HEAD")
+            subprocess.run(
+                ["git", "checkout", source_head],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            result = ensure_integration_baseline_worktree(
+                repo,
+                output_dir,
+                base_ref=previous_baseline_head,
+            )
+
+            baseline_worktree = Path(result["integration_baseline_worktree_path"])
+            self.assertEqual(
+                result["integration_baseline_head_sha"],
+                previous_baseline_head,
+            )
+            self.assertEqual(_git_rev_parse(baseline_worktree, "HEAD"), previous_baseline_head)
+            self.assertTrue((baseline_worktree / "generated" / "previous_round.json").exists())
+            self.assertEqual(_git_rev_parse(repo, "HEAD"), source_head)
 
     def test_two_phase_failed_integration_verification_does_not_advance_baseline(self):
         class RecordingNotificationSink:
