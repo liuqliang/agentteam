@@ -42,7 +42,7 @@ def _token_usage():
     }
 
 
-def _write_operator_run(work_root, run_id="operator-path-run"):
+def _write_operator_run(work_root, run_id="operator-path-run", steps=None):
     run_dir = work_root / "runs" / run_id
     _write_jsonl(
         run_dir / "events.jsonl",
@@ -73,7 +73,7 @@ def _write_operator_run(work_root, run_id="operator-path-run"):
     )
     _write_json(
         run_dir / "state" / "two_phase_scheduler_state.json",
-        {"scheduler_status": "idle", "steps": []},
+        {"scheduler_status": "idle", "steps": steps or []},
     )
     return run_dir
 
@@ -252,6 +252,73 @@ class ProjectionDbOperatorPathTests(unittest.TestCase):
             "selected_next_goal=projection DB selected next goal",
             rendered,
         )
+
+    def test_completion_report_structures_projected_handoff_verification_evidence(self):
+        worker_addition = {
+            "label": "worker focused check",
+            "command": ["python3", "-m", "unittest", "tests.worker_focus"],
+            "reason": "worker requested focused verification",
+        }
+        integration_addition = {
+            "label": "integration focused check",
+            "command": ["python3", "-m", "unittest", "tests.integration_focus"],
+            "reason": "integration requested focused verification",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp) / "agentteam-work"
+            run_id = "operator-path-run"
+            run_dir = _write_operator_run(
+                work_root,
+                run_id,
+                steps=[
+                    {
+                        "step_id": "STEP-0001",
+                        "task_id": "TASK-001",
+                        "attempt_id": "ATTEMPT-001",
+                        "result": {
+                            "task_id": "TASK-001",
+                            "attempt_id": "ATTEMPT-001",
+                            "result_status": "completed",
+                            "runtime_output": {
+                                "verification_additions": [worker_addition],
+                            },
+                            "evidence_status": "complete",
+                            "integration_status": "passed",
+                            "integration_verification_status": "passed",
+                            "integration_verification_additions_status": "passed",
+                            "integration_verification_additions": [integration_addition],
+                        },
+                    }
+                ],
+            )
+            _write_goal_memory(
+                work_root,
+                run_id,
+                objective="projection DB selected next goal",
+                next_step="projection DB next step",
+            )
+            rebuild_project_projection_db(work_root)
+
+            report = build_run_completion_report(run_dir, project="agentteam", write_files=False)
+
+        structured = report["pursue_recap"]["structured_evidence"]
+        self.assertEqual(structured["worker_evidence_status"], "complete")
+        self.assertEqual(structured["integration_status"], "passed")
+        self.assertEqual(structured["integration_verification_status"], "passed")
+        self.assertEqual(
+            [
+                item["label"]
+                for item in structured["verification_additions"]
+            ],
+            ["worker focused check", "integration focused check"],
+        )
+        rendered = render_run_completion_report(report)
+        self.assertIn(
+            "integration_verification_status=passed",
+            rendered,
+        )
+        self.assertIn("verification_additions=worker focused check=unknown", rendered)
+        self.assertIn("integration focused check=unknown", rendered)
 
     def test_completion_report_falls_back_to_authoritative_recap_when_projection_is_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
