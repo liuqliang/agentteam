@@ -8104,6 +8104,160 @@ class TaskpackTests(unittest.TestCase):
                 output = buffer.getvalue()
                 self.assertIn(f"pursue: pursue-loop stopped because {stop_reason}", output)
 
+    def test_status_guidance_skips_pursue_queue_action_when_queue_has_no_auto_goal(self):
+        summary = {
+            "project": "pursue-project",
+            "latest_run": "pursue-loop-r2",
+            "status": "completed",
+            "overall_status": "completed",
+            "run_status": "completed",
+            "liveness_status": "idle",
+            "tasks": {"done": 1, "blocked": 0},
+            "integration": {"blocked": 0},
+            "integration_baseline": {
+                "branch": "agentteam/run/pursue-loop-r2/integration",
+                "head": "abc123",
+                "worktree_exists": True,
+                "worktree": "/tmp/agentteam-work/runs/pursue-loop-r2/integration/pursue-loop-r2",
+            },
+            "manual_gates": 0,
+            "permission_requests": 0,
+            "pursue_recap": {
+                "pursue_id": "pursue-loop",
+                "latest_taskpack_id": "pursue-loop-r2",
+                "operator_next_action": "agentteam queue next --taskpack pursue-loop-r2",
+                "latest_follow_up_queue": {
+                    "queue_status": "no_auto_dispatchable_items",
+                    "item_count": 3,
+                },
+            },
+            "run_dir": "/tmp/agentteam-work/runs/pursue-loop-r2",
+        }
+
+        guidance = agentteam_module._status_operator_guidance(summary)
+
+        self.assertNotIn("agentteam queue next", guidance["next_action"])
+        self.assertIn("agentteam report --taskpack pursue-loop-r2", guidance["next_action"])
+        self.assertIn("integration baseline", guidance["operator_hint"])
+
+    def test_status_guidance_recomputes_stale_pursue_queue_before_recommending_next(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "agentteam-work"
+            run_dir = work_root / "runs" / "pursue-loop-r2"
+            report_path = run_dir / "reports" / "final_report.md"
+            operator_report = {
+                "report_schema_version": "operator_run_report.v1",
+                "task_count": 1,
+                "blocked_count": 0,
+                "task_reports": [
+                    {
+                        "task_id": "queue-quality",
+                        "attempt_id": "queue-quality-ATTEMPT-001",
+                        "status": "implementation completed",
+                        "what_changed": ["Added a narrow queue test."],
+                        "changed_files": ["tests/test_taskpack.py"],
+                        "verification": ["focused queue test passed"],
+                        "integration": "passed",
+                        "merge_recommendation": "Review before merging.",
+                        "next_steps": [
+                            "由 operator 审阅并决定是否集成本测试变更。",
+                            (
+                                "后续可继续用 `pursue_recap.structured_evidence` "
+                                "驱动 `agentteam queue next` 或 report 摘要的跨轮检查。"
+                            ),
+                        ],
+                    }
+                ],
+            }
+            _write_json(
+                run_dir / "state" / "two_phase_scheduler_state.json",
+                {
+                    "scheduler_status": "idle",
+                    "integration_baseline": {
+                        "integration_baseline_status": "ready",
+                        "integration_baseline_branch": "agentteam/run/pursue-loop-r2/integration",
+                        "integration_baseline_worktree_path": str(
+                            (run_dir / "integration-baseline").resolve()
+                        ),
+                        "integration_baseline_head_sha": "abc123",
+                    },
+                    "backlog": {"items": [{"task_id": "queue-quality", "backlog_status": "done"}]},
+                    "steps": [],
+                },
+            )
+            _write_jsonl(
+                run_dir / "events.jsonl",
+                [
+                    {
+                        "event_id": "EVT-0001",
+                        "event_type": "run_completed",
+                        "sequence": 1,
+                        "payload": {
+                            "run_status": "completed",
+                            "scheduler_status": "idle",
+                            "operator_report": operator_report,
+                        },
+                    }
+                ],
+            )
+            goal_memory_path = work_root / "pursue" / "pursue-loop-goal-memory.json"
+            _write_json(
+                goal_memory_path,
+                {
+                    "pursue_id": "pursue-loop",
+                    "work_root": str(work_root),
+                    "latest_taskpack_id": "pursue-loop-r2",
+                    "latest_run_ids": ["pursue-loop-r2"],
+                    "follow_up_queue": [
+                        {
+                            "objective": (
+                                "用新的 `pursue_recap.structured_evidence` "
+                                "驱动后续 `agentteam queue next` 或 report 摘要的跨轮检查。"
+                            ),
+                            "source_taskpack_id": "pursue-loop",
+                            "source_report_path": str(report_path),
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                work_root / "pursue" / "pursue-loop.json",
+                {
+                    "pursue_id": "pursue-loop",
+                    "pursue_status": "stopped",
+                    "rounds_completed": 2,
+                    "max_rounds": 2,
+                    "stop_reason": "max_rounds_reached",
+                    "latest_taskpack_id": "pursue-loop-r2",
+                    "latest_report_path": str(report_path),
+                    "goal_memory_path": str(goal_memory_path),
+                    "operator_next_action": "agentteam queue next --taskpack pursue-loop-r2",
+                    "latest_follow_up_queue": {
+                        "queue_status": "ready",
+                        "next_goal": "由 operator 审阅并决定是否集成本测试变更。",
+                    },
+                    "runs": [{"taskpack_id": "pursue-loop-r2"}],
+                },
+            )
+
+            summary = _build_run_status_summary(
+                {"project_key": "pursue-project", "work_root": str(work_root)},
+                run_dir,
+            )
+
+            self.assertNotIn("agentteam queue next", summary["next_action"])
+            self.assertIn("agentteam report --taskpack pursue-loop-r2", summary["next_action"])
+            self.assertIn("integration baseline", summary["operator_hint"])
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                _write_status_text(summary)
+            status_text = buffer.getvalue()
+            self.assertIn(
+                "pursue_next_action: agentteam queue next --taskpack pursue-loop-r2 (superseded by next_action)",
+                status_text,
+            )
+
     def test_pursue_stop_reason_blocks_operator_gates(self):
         self.assertEqual(
             _pursue_stop_reason({"status": "manual_gate_required"}),
@@ -8628,6 +8782,28 @@ class TaskpackTests(unittest.TestCase):
         self.assertIsNone(summary["next_command"])
         self.assertEqual(summary["items"][0]["objective"], "由 operator 审阅并决定是否集成本测试变更。")
         self.assertIn("operator_hint", summary)
+
+    def test_compact_pursue_queue_summary_preserves_missing_selected_item(self):
+        compact = agentteam_module._compact_pursue_queue_summary(
+            {
+                "queue_status": "no_auto_dispatchable_items",
+                "source_taskpack_id": "pursue-loop-r2",
+                "item_count": 1,
+                "next_goal": None,
+                "next_command": None,
+                "selected_item": None,
+                "items": [
+                    {
+                        "objective": "由 operator 审阅并决定是否集成本测试变更。",
+                        "source": "report.next_steps",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(compact["queue_status"], "no_auto_dispatchable_items")
+        self.assertIsNone(compact["next_goal"])
+        self.assertNotIn("selected_item", compact)
 
     def test_follow_up_queue_summary_enriches_generic_next_step_with_report_evidence(self):
         from agentteam_runtime.follow_up_queue import build_follow_up_queue_summary

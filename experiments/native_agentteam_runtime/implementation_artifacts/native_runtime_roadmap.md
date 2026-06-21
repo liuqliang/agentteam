@@ -1380,6 +1380,14 @@ converts a skeleton plus explicit semantic completion JSON into an executable
 taskpack, clears the semantic blocker, re-validates the result, and optionally
 freezes it for the normal run path.
 
+Post-dogfood queue correction status: queue selection now downgrades
+operator-review and process-maintenance next steps, reports
+`no_auto_dispatchable_items` when no concrete worker goal remains, preserves a
+missing selected item in compact pursue recaps, and lets `status` recompute a
+stale saved pursue queue before recommending the next operator action. When a
+historical `pursue_next_action` is superseded by integration-baseline review,
+status marks it as superseded instead of presenting two competing actions.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:

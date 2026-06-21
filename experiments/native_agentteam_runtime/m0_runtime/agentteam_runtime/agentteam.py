@@ -2004,7 +2004,7 @@ def _build_pursue_recap(*, pursue_id, goal, max_rounds, rounds, stop_reason, wor
         "updated_at": _format_utc_timestamp(datetime.now(UTC)),
     }
     if isinstance(latest.get("follow_up_queue"), dict):
-        recap["latest_follow_up_queue"] = latest["follow_up_queue"]
+        recap["latest_follow_up_queue"] = _compact_pursue_queue_summary(latest["follow_up_queue"])
     if latest.get("selected_next_goal"):
         recap["latest_selected_next_goal"] = latest["selected_next_goal"]
     return recap
@@ -2133,13 +2133,13 @@ def _compact_pursue_queue_summary(summary):
         "next_goal": summary.get("next_goal"),
         "next_command": summary.get("next_command"),
     }
-    items = summary.get("items") if isinstance(summary.get("items"), list) else []
-    if items and isinstance(items[0], dict):
+    selected_item = summary.get("selected_item")
+    if isinstance(selected_item, dict):
         compact["selected_item"] = {
-            "objective": items[0].get("objective"),
-            "source": items[0].get("source"),
-            "source_taskpack_id": items[0].get("source_taskpack_id"),
-            "source_report_path": items[0].get("source_report_path"),
+            "objective": selected_item.get("objective"),
+            "source": selected_item.get("source"),
+            "source_taskpack_id": selected_item.get("source_taskpack_id"),
+            "source_report_path": selected_item.get("source_report_path"),
         }
     if summary.get("operator_hint"):
         compact["operator_hint"] = summary["operator_hint"]
@@ -4643,7 +4643,9 @@ def _status_operator_guidance(summary):
         }
     pursue_recap = summary.get("pursue_recap") if isinstance(summary.get("pursue_recap"), dict) else {}
     pursue_action = _first_non_empty_text(pursue_recap.get("operator_next_action"))
-    if pursue_action:
+    pursue_queue = _effective_pursue_queue_for_status(summary, pursue_recap, pursue_action)
+    pursue_queue_has_no_goal = _pursue_queue_has_no_auto_dispatchable_item(pursue_queue)
+    if pursue_action and not pursue_queue_has_no_goal:
         return {
             "next_action": pursue_action,
             "operator_hint": "Use the pursue or follow-up queue guidance before projection DB maintenance.",
@@ -4673,7 +4675,63 @@ def _status_operator_guidance(summary):
             "next_action": f"agentteam report --taskpack {run_id}",
             "operator_hint": "Review blocked task or integration evidence before continuing.",
         }
+    if pursue_action and pursue_queue_has_no_goal:
+        return {
+            "next_action": f"agentteam report --taskpack {run_id}",
+            "operator_hint": (
+                "The latest follow-up queue has no auto-dispatchable item; "
+                "review the report or provide a new concrete goal."
+            ),
+        }
     return None
+
+
+def _effective_pursue_queue_for_status(summary, pursue_recap, pursue_action):
+    latest_queue = pursue_recap.get("latest_follow_up_queue") if isinstance(pursue_recap, dict) else None
+    if "agentteam queue next" not in str(pursue_action or ""):
+        return latest_queue
+    refreshed = _recompute_pursue_queue_for_status(summary, pursue_recap)
+    return refreshed if isinstance(refreshed, dict) else latest_queue
+
+
+def _recompute_pursue_queue_for_status(summary, pursue_recap):
+    try:
+        run_dir_text = _first_non_empty_text(summary.get("run_dir"))
+        if not run_dir_text:
+            return None
+        run_dir = Path(run_dir_text).resolve()
+        work_root = _infer_work_root_from_run_dir(run_dir)
+        latest_taskpack_id = (
+            _first_non_empty_text(pursue_recap.get("latest_taskpack_id"))
+            or _first_non_empty_text(summary.get("latest_run"))
+            or run_dir.name
+        )
+        source_run_dir = run_dir
+        if latest_taskpack_id and run_dir.name != latest_taskpack_id:
+            source_run_dir = (work_root / "runs" / latest_taskpack_id).resolve()
+        source_report = build_run_completion_report(
+            source_run_dir,
+            project=summary.get("project"),
+            write_files=False,
+        )
+        goal_memory = _latest_goal_memory_for_run(work_root, source_run_dir, source_report)
+        queue_summary = _pursue_follow_up_queue_summary(
+            source_report=source_report,
+            goal_memory=goal_memory,
+            source_run_dir=source_run_dir,
+        )
+    except Exception:
+        return None
+    return _compact_pursue_queue_summary(queue_summary)
+
+
+def _pursue_queue_has_no_auto_dispatchable_item(latest_queue):
+    if not isinstance(latest_queue, dict):
+        return False
+    return str(latest_queue.get("queue_status") or "").strip().lower() in {
+        "empty",
+        "no_auto_dispatchable_items",
+    }
 
 
 def _status_summary_is_active(summary):
@@ -5071,7 +5129,10 @@ def _write_status_text(summary):
         *_inactive_inflight_status_lines(summary.get("inactive_inflight")),
         f"manual_gates: {summary['manual_gates']}",
         f"permission_requests: {summary['permission_requests']}",
-        *_pursue_recap_status_lines(summary.get("pursue_recap")),
+        *_pursue_recap_status_lines(
+            summary.get("pursue_recap"),
+            effective_next_action=summary.get("next_action"),
+        ),
     ]
     for request in summary.get("permission_request_details") or []:
         lines.append(
@@ -5121,7 +5182,7 @@ def _write_status_text(summary):
     sys.stdout.flush()
 
 
-def _pursue_recap_status_lines(recap):
+def _pursue_recap_status_lines(recap, *, effective_next_action=None):
     if not isinstance(recap, dict) or not recap:
         return []
     lines = [
@@ -5137,7 +5198,15 @@ def _pursue_recap_status_lines(recap):
     if recap.get("latest_report_path"):
         lines.append(f"pursue_latest_report: {recap['latest_report_path']}")
     if recap.get("operator_next_action"):
-        lines.append(f"pursue_next_action: {recap['operator_next_action']}")
+        action = recap["operator_next_action"]
+        if (
+            "agentteam queue next" in str(action)
+            and effective_next_action
+            and str(action) not in str(effective_next_action)
+        ):
+            lines.append(f"pursue_next_action: {action} (superseded by next_action)")
+        else:
+            lines.append(f"pursue_next_action: {action}")
     return lines
 
 

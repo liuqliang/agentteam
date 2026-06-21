@@ -435,6 +435,10 @@ Notes:
   verification line that should guide the next task. Run the printed
   `agentteam next --from-taskpack ... --goal ...` command when you want to
   launch the next taskpack.
+- If the queue contains only operator-review or process-maintenance items,
+  `queue_status` is `no_auto_dispatchable_items`, `next_goal` and
+  `next_command` are omitted, and the output includes an `operator_hint`
+  instead of fabricating a worker task.
 - JSON output includes the same selected item as `selected_item`; it is derived
   from existing report or goal-memory fields and does not mutate the run.
 
@@ -636,6 +640,13 @@ stale, corrupt, or unreadable, status falls back to `events.jsonl` and reports
 `projection_source` set to `files`, `projection_warning` set to
 `projection_db_unavailable`, and `next_action` set to
 `run agentteam db rebuild`.
+
+For completed pursue loops, `status` recomputes the latest follow-up queue
+before prioritizing a saved `agentteam queue next` action. If the refreshed
+queue has no auto-dispatchable item, status falls back to integration-baseline
+review or report guidance. The raw pursue action is still shown as
+`pursue_next_action`, marked `(superseded by next_action)` when it is no longer
+the recommended operator action.
 
 ### `agentteam explain-status`
 
