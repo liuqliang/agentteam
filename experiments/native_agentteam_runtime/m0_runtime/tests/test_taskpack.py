@@ -8136,6 +8136,32 @@ class TaskpackTests(unittest.TestCase):
             )
         )
 
+    def test_pursue_stop_reason_blocks_stopped_runs_even_when_followup_is_allowed(self):
+        self.assertEqual(
+            _pursue_stop_reason(
+                {
+                    "status": "completed",
+                    "run_status": "stopped",
+                    "blocked_count": 0,
+                    "follow_up_recommendation": {"action": "integrate_then_next"},
+                },
+                allow_review_gate_follow_up=True,
+            ),
+            "stopped",
+        )
+        self.assertEqual(
+            _pursue_stop_reason(
+                {
+                    "status": "stopped",
+                    "run_status": "running",
+                    "blocked_count": 0,
+                    "follow_up_recommendation": {"action": "next"},
+                },
+                allow_review_gate_follow_up=True,
+            ),
+            "stopped",
+        )
+
     def test_pursue_next_goal_uses_report_next_step(self):
         self.assertEqual(
             _pursue_next_goal(

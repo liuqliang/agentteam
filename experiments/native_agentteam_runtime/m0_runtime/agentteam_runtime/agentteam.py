@@ -2067,6 +2067,9 @@ def _pursue_round_record(round_index, run_result, work_root):
 
 def _pursue_stop_reason(round_record, *, allow_review_gate_follow_up=False):
     status = round_record.get("status")
+    run_status = round_record.get("run_status")
+    if status == "stopped" or run_status == "stopped":
+        return "stopped"
     if status in {"manual_gate_required", "permission_request_required", "blocked", "failed"}:
         return status
     if int(round_record.get("blocked_count") or 0) > 0:
