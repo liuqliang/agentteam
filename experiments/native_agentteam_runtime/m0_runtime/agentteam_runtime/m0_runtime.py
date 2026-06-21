@@ -3,6 +3,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+import time
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -159,6 +160,73 @@ class ShellRuntimeAdapter:
         return _normalize_runtime_result(result, adapter="shell", stderr=completed.stderr)
 
 
+def _run_subprocess_with_progress(
+    command,
+    *,
+    cwd,
+    input_text,
+    timeout_seconds,
+    progress_callback=None,
+    progress_interval_seconds=30.0,
+):
+    if progress_callback is None:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            input=input_text,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+
+    interval = max(float(progress_interval_seconds or 0), 0.05)
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    pending_input = input_text
+    while True:
+        communicate_timeout = interval
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process.kill()
+                stdout, stderr = process.communicate()
+                raise subprocess.TimeoutExpired(
+                    command,
+                    timeout_seconds,
+                    output=stdout,
+                    stderr=stderr,
+                )
+            communicate_timeout = min(interval, remaining)
+        try:
+            stdout, stderr = process.communicate(
+                input=pending_input,
+                timeout=communicate_timeout,
+            )
+            return subprocess.CompletedProcess(
+                command,
+                process.returncode,
+                stdout,
+                stderr,
+            )
+        except subprocess.TimeoutExpired:
+            pending_input = None
+            try:
+                progress_callback()
+            except Exception:
+                process.kill()
+                process.communicate()
+                raise
+
+
 class CodexRuntimeAdapter:
     def __init__(
         self,
@@ -169,6 +237,7 @@ class CodexRuntimeAdapter:
         extra_args=None,
         fallback_worktree_path=None,
         output_dir=None,
+        progress_interval_seconds=30.0,
     ):
         self.command = list(command or ["codex", "exec"])
         self.model = model
@@ -179,6 +248,7 @@ class CodexRuntimeAdapter:
             str(fallback_worktree_path) if fallback_worktree_path else None
         )
         self.output_dir = Path(output_dir) if output_dir else None
+        self.progress_interval_seconds = max(float(progress_interval_seconds), 0.05)
 
     def bind_output_dir(self, output_dir):
         return CodexRuntimeAdapter(
@@ -189,9 +259,10 @@ class CodexRuntimeAdapter:
             extra_args=self.extra_args,
             fallback_worktree_path=self.fallback_worktree_path,
             output_dir=output_dir,
+            progress_interval_seconds=self.progress_interval_seconds,
         )
 
-    def run(self, message, worktree_path=None):
+    def run(self, message, worktree_path=None, progress_callback=None):
         runtime_worktree_path = worktree_path or self.fallback_worktree_path
         using_fallback = worktree_path is None and self.fallback_worktree_path is not None
         if not runtime_worktree_path:
@@ -224,15 +295,13 @@ class CodexRuntimeAdapter:
             command = self._build_command(runtime_worktree_path, result_path)
             prompt = self._build_prompt(message)
             try:
-                completed = subprocess.run(
+                completed = _run_subprocess_with_progress(
                     command,
                     cwd=runtime_worktree_path,
-                    input=prompt,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=self.timeout_seconds,
-                    check=False,
+                    input_text=prompt,
+                    timeout_seconds=self.timeout_seconds,
+                    progress_callback=progress_callback,
+                    progress_interval_seconds=self.progress_interval_seconds,
                 )
             except subprocess.TimeoutExpired as exc:
                 return {

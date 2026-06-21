@@ -3153,6 +3153,66 @@ class M0RuntimeTests(unittest.TestCase):
                 "processed TASK-MAILBOX result=completed changed_files=1",
             )
 
+    def test_file_mailbox_worker_runtime_progress_callback_refreshes_processing_heartbeat(self):
+        class ProgressHeartbeatRuntimeAdapter:
+            def __init__(self, heartbeat_path):
+                self.heartbeat_path = heartbeat_path
+                self.before_callback = None
+                self.after_callback = None
+
+            def run(self, message, worktree_path=None, progress_callback=None):
+                del message, worktree_path
+                if progress_callback is None:
+                    raise AssertionError("missing progress callback")
+                self.before_callback = json.loads(
+                    self.heartbeat_path.read_text(encoding="utf-8")
+                )
+                progress_callback()
+                self.after_callback = json.loads(
+                    self.heartbeat_path.read_text(encoding="utf-8")
+                )
+                return {
+                    "result_status": "completed",
+                    "changed_files": [],
+                    "output": {"summary": "done"},
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            inbox = output_dir / "mailboxes" / "agent-repo-map" / "inbox.jsonl"
+            heartbeat_path = (
+                output_dir / "state" / "workers" / "agent-repo-map.heartbeat.json"
+            )
+            message = _mailbox_dispatch_message(
+                message_id="MSG-MAILBOX-HEARTBEAT-PROGRESS-001",
+                agent_id="agent-repo-map",
+                write_scope=["generated/"],
+            )
+            _append_test_jsonl(inbox, [message])
+            runtime_adapter = ProgressHeartbeatRuntimeAdapter(heartbeat_path)
+
+            worker = FileMailboxWorker(
+                FIXTURES / "sample_agent_pool.json",
+                output_dir,
+                "agent-repo-map",
+                runtime_adapter=runtime_adapter,
+                clock=FixedClock(),
+            )
+            summary = worker.poll_once()
+
+            self.assertEqual(summary["poll_status"], "processed")
+            self.assertEqual(runtime_adapter.before_callback["activity"], "processing")
+            self.assertEqual(runtime_adapter.after_callback["activity"], "processing")
+            self.assertNotEqual(
+                runtime_adapter.after_callback["updated_at"],
+                runtime_adapter.before_callback["updated_at"],
+            )
+            self.assertEqual(
+                runtime_adapter.after_callback["source_message_id"],
+                "MSG-MAILBOX-HEARTBEAT-PROGRESS-001",
+            )
+
     def test_file_mailbox_worker_throttles_idle_heartbeat_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -10668,6 +10728,60 @@ class M0RuntimeTests(unittest.TestCase):
                     "usage_source": "codex_jsonl",
                 },
             )
+
+    def test_codex_runtime_adapter_calls_progress_callback_while_subprocess_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            fake_codex = tmp_path / "fake_codex_slow.py"
+            _init_git_repo(repo)
+            fake_codex.write_text(
+                "\n".join(
+                    [
+                        "import json",
+                        "import pathlib",
+                        "import sys",
+                        "import time",
+                        "args = sys.argv[1:]",
+                        "sys.stdin.read()",
+                        "time.sleep(0.2)",
+                        "output_path = pathlib.Path(args[args.index('--output-last-message') + 1])",
+                        "worktree = pathlib.Path(args[args.index('-C') + 1])",
+                        "target = worktree / 'generated' / 'codex_progress_result.json'",
+                        "target.parent.mkdir(parents=True, exist_ok=True)",
+                        "target.write_text('{}', encoding='utf-8')",
+                        "output_path.parent.mkdir(parents=True, exist_ok=True)",
+                        "output_path.write_text(json.dumps({",
+                        "    'result_status': 'completed',",
+                        "    'changed_files': ['generated/codex_progress_result.json'],",
+                        "    'output': {'adapter': 'codex'},",
+                        "}), encoding='utf-8')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            message = {
+                "payload": {
+                    "task_id": "TASK-001",
+                    "attempt_id": "ATTEMPT-001",
+                    "objective": "Exercise Codex progress callback.",
+                    "read_scope": ["."],
+                    "write_scope": ["generated/"],
+                }
+            }
+            progress_calls = []
+
+            result = CodexRuntimeAdapter(
+                command=[sys.executable, str(fake_codex)],
+                progress_interval_seconds=0.05,
+            ).run(
+                message,
+                worktree_path=repo,
+                progress_callback=lambda: progress_calls.append(time.monotonic()),
+            )
+
+            self.assertEqual(result["result_status"], "completed")
+            self.assertGreaterEqual(len(progress_calls), 1)
 
     def test_codex_runtime_adapter_converts_sandbox_failure_to_permission_request(self):
         with tempfile.TemporaryDirectory() as tmp:

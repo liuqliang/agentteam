@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import json
 import os
 import signal
@@ -55,7 +56,21 @@ class FileMailboxWorker:
             message=message,
             worktree_path=worktree_path,
         )
-        runtime_result = self.runtime_adapter.run(message, worktree_path=worktree_path)
+
+        def progress_callback():
+            self._write_heartbeat(
+                activity="processing",
+                poll_status="processing",
+                message=message,
+                worktree_path=worktree_path,
+            )
+
+        runtime_result = _run_runtime_adapter(
+            self.runtime_adapter,
+            message,
+            worktree_path=worktree_path,
+            progress_callback=progress_callback,
+        )
         result_message = self._result_message(message, runtime_result)
         _append_jsonl(self.outbox_path, [result_message])
         self._write_heartbeat(
@@ -838,6 +853,28 @@ def _write_json_best_effort(path, payload):
             except OSError:
                 pass
         return
+
+
+def _run_runtime_adapter(runtime_adapter, message, *, worktree_path, progress_callback):
+    if _runtime_adapter_accepts_progress_callback(runtime_adapter):
+        return runtime_adapter.run(
+            message,
+            worktree_path=worktree_path,
+            progress_callback=progress_callback,
+        )
+    return runtime_adapter.run(message, worktree_path=worktree_path)
+
+
+def _runtime_adapter_accepts_progress_callback(runtime_adapter):
+    try:
+        signature = inspect.signature(runtime_adapter.run)
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        or parameter.name == "progress_callback"
+        for parameter in signature.parameters.values()
+    )
 
 
 def _read_jsonl_if_exists(path):
