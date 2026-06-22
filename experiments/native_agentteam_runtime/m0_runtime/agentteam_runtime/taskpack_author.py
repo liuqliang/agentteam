@@ -554,6 +554,7 @@ def _draft_with_codex(
     author_context_dir.mkdir(parents=True, exist_ok=False)
 
     repo_map = build_repository_map(project_root, author_context_dir)
+    repo_grounding = build_repo_grounding(project_root)
 
     template_bundle_path = _write_author_template_bundle(
         author_context_dir=author_context_dir,
@@ -561,6 +562,7 @@ def _draft_with_codex(
         project_root=project_root,
         goal=goal,
         verification_profile=verification_profile,
+        repo_grounding=repo_grounding,
     )
 
     prompt = _author_prompt(
@@ -570,6 +572,7 @@ def _draft_with_codex(
         taskpack_dir=taskpack_dir,
         author_context_dir=author_context_dir,
         repo_map=repo_map,
+        repo_grounding=repo_grounding,
         verification_profile=verification_profile,
         template_bundle_path=template_bundle_path,
     )
@@ -841,6 +844,7 @@ def _write_author_template_bundle(
     project_root,
     goal,
     verification_profile=None,
+    repo_grounding=None,
 ):
     author_context_dir = Path(author_context_dir)
     project_root = Path(project_root).resolve()
@@ -938,10 +942,83 @@ def _write_author_template_bundle(
                 "Use these templates as structural scaffolds only; replace placeholder "
                 "values with task-specific content before writing files into taskpack_dir."
             ),
+            "repo_grounding_context": _compact_repo_grounding_context(repo_grounding),
             "templates": templates,
         },
     )
     return path
+
+
+def _compact_repo_grounding_context(repo_grounding):
+    if not isinstance(repo_grounding, dict):
+        return {}
+    structure = (
+        repo_grounding.get("repository_structure")
+        if isinstance(repo_grounding.get("repository_structure"), dict)
+        else {}
+    )
+    budget = (
+        structure.get("top_level_entry_budget")
+        if isinstance(structure.get("top_level_entry_budget"), dict)
+        else {}
+    )
+    return {
+        "repo_grounding_schema_version": repo_grounding.get("grounding_schema_version")
+        or "repo_grounding.v1",
+        "repo_grounding_scan_status": repo_grounding.get("scan_status") or "unknown",
+        "repo_grounding_tracked_file_count": repo_grounding.get("tracked_file_count", 0),
+        "repo_grounding_languages": [
+            {
+                "language": item.get("language"),
+                "file_count": item.get("file_count"),
+            }
+            for item in (repo_grounding.get("languages") or [])[:8]
+            if isinstance(item, dict) and item.get("language")
+        ],
+        "repo_grounding_project_tools": [
+            {
+                "tool_id": item.get("tool_id"),
+                "tool_type": item.get("tool_type"),
+                "path": item.get("path"),
+            }
+            for item in (repo_grounding.get("project_tools") or [])[:8]
+            if isinstance(item, dict) and item.get("tool_id") and item.get("path")
+        ],
+        "repo_grounding_test_entrypoints": [
+            {
+                "path": item.get("path"),
+                "language": item.get("language"),
+                "test_framework_hint": item.get("test_framework_hint"),
+            }
+            for item in (repo_grounding.get("test_entrypoints") or [])[:12]
+            if isinstance(item, dict) and item.get("path")
+        ],
+        "repo_grounding_candidate_verification_commands": [
+            {
+                "command": item.get("command"),
+                "reason": item.get("reason") or "deterministic repo grounding",
+            }
+            for item in (repo_grounding.get("candidate_verification_commands") or [])[:8]
+            if isinstance(item, dict) and item.get("command")
+        ],
+        "repo_structure_schema_version": structure.get("structure_schema_version")
+        or "repo_structure.v1",
+        "repo_structure_top_level_entries": [
+            {
+                "path": item.get("path"),
+                "entry_type": item.get("entry_type"),
+                "file_count": item.get("file_count"),
+            }
+            for item in (structure.get("top_level_entries") or [])[:12]
+            if isinstance(item, dict) and item.get("path")
+        ],
+        "repo_structure_budget": {
+            "max_entries": budget.get("max_entries", 0),
+            "total_entry_count": budget.get("total_entry_count", 0),
+            "included_count": budget.get("included_count", 0),
+            "omitted_count": budget.get("omitted_count", 0),
+        },
+    }
 
 
 def _author_prompt(
@@ -951,10 +1028,12 @@ def _author_prompt(
     taskpack_dir,
     author_context_dir,
     repo_map,
+    repo_grounding=None,
     verification_profile=None,
     template_bundle_path=None,
 ):
     repo_paths = repo_map["paths"]
+    repo_grounding_context = _compact_repo_grounding_context(repo_grounding)
     verification_profile_json = json.dumps(verification_profile or {}, sort_keys=True)
     lines = [
         "You are the AgentTeam taskpack author.",
@@ -985,6 +1064,22 @@ def _author_prompt(
         f"- inventory: {repo_paths['inventory_path']}",
         f"- symbols: {repo_paths['symbols_path']}",
         "",
+        *(
+            [
+                "Compact repo_grounding.v1 author context:",
+                (
+                    "- required_file_templates.json repo_grounding_context carries "
+                    "language, tool, test-entrypoint, and candidate verification-command signals."
+                ),
+                (
+                    "- Use repo_grounding_context to choose narrow read_scope, write_scope, "
+                    "and verification guidance before broad source exploration."
+                ),
+                "",
+            ]
+            if repo_grounding_context
+            else []
+        ),
         "Project verification profile:",
         verification_profile_json,
         "",

@@ -11127,6 +11127,120 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn(str(template_path), prompt)
             self.assertIn("replace placeholder values", prompt)
 
+    def test_codex_taskpack_author_bundle_carries_compact_repo_grounding_context_for_followups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            author_context_dir = tmp_path / "drafts" / ".m67-followup-author"
+            taskpack_dir = tmp_path / "drafts" / "m67-followup"
+            _init_repo(repo)
+            author_context_dir.mkdir(parents=True)
+            grounding = {
+                "grounding_schema_version": "repo_grounding.v1",
+                "scan_status": "ok",
+                "tracked_file_count": 42,
+                "languages": [
+                    {
+                        "language": "python",
+                        "file_count": 11,
+                        "sample_files": ["experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py"],
+                    }
+                ],
+                "project_tools": [
+                    {
+                        "tool_id": "python-pyproject",
+                        "tool_type": "python",
+                        "path": "pyproject.toml",
+                    }
+                ],
+                "test_entrypoints": [
+                    {
+                        "path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+                        "language": "python",
+                        "test_framework_hint": "python",
+                    }
+                ],
+                "candidate_verification_commands": [
+                    {
+                        "command": ["python3", "-m", "unittest", "discover"],
+                        "reason": "detected python test files",
+                    }
+                ],
+                "repository_structure": {
+                    "structure_schema_version": "repo_structure.v1",
+                    "top_level_entry_budget": {
+                        "max_entries": 12,
+                        "total_entry_count": 3,
+                        "included_count": 3,
+                        "omitted_count": 0,
+                    },
+                    "top_level_entries": [
+                        {
+                            "path": "experiments/",
+                            "entry_type": "directory",
+                            "file_count": 40,
+                        }
+                    ],
+                },
+            }
+
+            template_path = _write_author_template_bundle(
+                author_context_dir=author_context_dir,
+                taskpack_id="m67-followup",
+                project_root=repo,
+                goal=(
+                    "Follow-up goal: Continue the roadmap-derived implementation route. "
+                    "Previous taskpack context: source_report_path=/tmp/work/report.md"
+                ),
+                repo_grounding=grounding,
+            )
+            prompt = _author_prompt(
+                project_root=repo,
+                goal=(
+                    "Follow-up goal: Continue the roadmap-derived implementation route. "
+                    "Previous taskpack context: source_report_path=/tmp/work/report.md"
+                ),
+                taskpack_id="m67-followup",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                repo_map={
+                    "paths": {
+                        "manifest_path": "manifest.json",
+                        "inventory_path": "inventory.json",
+                        "symbols_path": "symbols.json",
+                    }
+                },
+                verification_profile=None,
+                template_bundle_path=template_path,
+                repo_grounding=grounding,
+            )
+            bundle = json.loads(template_path.read_text(encoding="utf-8"))
+
+            context = bundle["repo_grounding_context"]
+            self.assertEqual(context["repo_grounding_schema_version"], "repo_grounding.v1")
+            self.assertEqual(context["repo_grounding_scan_status"], "ok")
+            self.assertEqual(context["repo_grounding_tracked_file_count"], 42)
+            self.assertEqual(
+                context["repo_grounding_languages"],
+                [{"language": "python", "file_count": 11}],
+            )
+            self.assertEqual(
+                context["repo_grounding_candidate_verification_commands"],
+                [
+                    {
+                        "command": ["python3", "-m", "unittest", "discover"],
+                        "reason": "detected python test files",
+                    }
+                ],
+            )
+            self.assertEqual(context["repo_structure_schema_version"], "repo_structure.v1")
+            self.assertEqual(
+                context["repo_structure_top_level_entries"],
+                [{"path": "experiments/", "entry_type": "directory", "file_count": 40}],
+            )
+            self.assertIn("repo_grounding_context", prompt)
+            self.assertIn("language, tool, test-entrypoint, and candidate verification-command", prompt)
+
     def test_codex_taskpack_author_timeout_result_includes_file_diagnostic(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
