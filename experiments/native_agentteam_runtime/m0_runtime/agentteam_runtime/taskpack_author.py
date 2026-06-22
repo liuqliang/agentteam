@@ -671,6 +671,10 @@ def _run_codex_author_command(
     started_at = _utc_now()
     started_monotonic = time.monotonic()
     interval = max(float(progress_interval_seconds or 0), 0.5)
+    input_metrics = _codex_author_input_metrics(
+        prompt=prompt,
+        author_context_dir=author_context_dir,
+    )
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file:
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
             with subprocess.Popen(
@@ -692,6 +696,7 @@ def _run_codex_author_command(
                     "prompt_path": str(prompt_path),
                     "result_path": str(result_path),
                     "timeout_seconds": timeout_seconds,
+                    "input_metrics": input_metrics,
                 }
                 _write_author_state(state_path, base_state, started_monotonic, progress_callback)
                 if process.stdin:
@@ -733,6 +738,7 @@ def _run_codex_author_command(
                         "status": status,
                         "exit_code": returncode,
                         "timeout_seconds": timeout_seconds,
+                        "input_metrics": input_metrics,
                         "output": output,
                         "diagnostic": diagnostic,
                     },
@@ -749,6 +755,39 @@ def _run_codex_author_command(
                 }
                 _write_author_state(state_path, final_state, started_monotonic, progress_callback)
                 return completed
+
+
+def _codex_author_input_metrics(*, prompt, author_context_dir):
+    prompt_text = str(prompt or "")
+    prompt_bytes = len(prompt_text.encode("utf-8"))
+    author_context_bytes = 0
+    author_context_file_count = 0
+    for path in sorted(Path(author_context_dir).rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            author_context_bytes += path.stat().st_size
+        except OSError:
+            continue
+        author_context_file_count += 1
+    return {
+        "metrics_schema_version": "codex_author_input_metrics.v1",
+        "prompt_chars": len(prompt_text),
+        "prompt_bytes": prompt_bytes,
+        "prompt_line_count": len(prompt_text.splitlines()),
+        "prompt_estimated_tokens": _estimated_tokens_from_count(len(prompt_text)),
+        "author_context_file_count": author_context_file_count,
+        "author_context_bytes": author_context_bytes,
+        "author_context_estimated_tokens": _estimated_tokens_from_count(author_context_bytes),
+        "estimation_method": "ceil(count/4)",
+    }
+
+
+def _estimated_tokens_from_count(count):
+    count = max(int(count or 0), 0)
+    if count <= 0:
+        return 0
+    return (count + 3) // 4
 
 
 def _salvage_timed_out_codex_taskpack(*, taskpack_dir, verification_profile=None):

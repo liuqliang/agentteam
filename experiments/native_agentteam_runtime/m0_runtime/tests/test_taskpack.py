@@ -11338,6 +11338,62 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(state["output"]["stdout_path"], output["stdout_path"])
             self.assertEqual(state["output"]["stderr_path"], output["stderr_path"])
 
+    def test_codex_taskpack_author_records_prompt_and_context_input_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            draft_root = tmp_path / "drafts"
+            taskpack_dir = draft_root / "measured-author"
+            author_context_dir = draft_root / ".measured-author-author"
+            taskpack_dir.mkdir(parents=True)
+            author_context_dir.mkdir(parents=True)
+            result_path = author_context_dir / "author_result.json"
+            state_path = author_context_dir / "author_state.json"
+            prompt_path = author_context_dir / "author_prompt.md"
+            prompt = "line one\nline two\n"
+            prompt_path.write_text(prompt, encoding="utf-8")
+            template_text = json.dumps(
+                {"repo_grounding_context": {"repo_grounding_schema_version": "repo_grounding.v1"}},
+                sort_keys=True,
+            )
+            (author_context_dir / "required_file_templates.json").write_text(
+                template_text,
+                encoding="utf-8",
+            )
+
+            completed = _run_codex_author_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdin.read(); sys.exit(0)",
+                ],
+                draft_root=draft_root,
+                prompt=prompt,
+                timeout_seconds=5,
+                state_path=state_path,
+                result_path=result_path,
+                taskpack_id="measured-author",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                prompt_path=prompt_path,
+            )
+
+            self.assertEqual(completed.returncode, 0)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertIn("input_metrics", result)
+            self.assertIn("input_metrics", state)
+            metrics = result["input_metrics"]
+            self.assertEqual(state["input_metrics"], metrics)
+            self.assertEqual(metrics["prompt_bytes"], len(prompt.encode("utf-8")))
+            self.assertEqual(metrics["prompt_chars"], len(prompt))
+            self.assertEqual(metrics["prompt_line_count"], 2)
+            self.assertEqual(metrics["prompt_estimated_tokens"], 5)
+            self.assertEqual(metrics["author_context_file_count"], 2)
+            self.assertEqual(
+                metrics["author_context_bytes"],
+                len(prompt.encode("utf-8")) + len(template_text.encode("utf-8")),
+            )
+
     def test_codex_taskpack_author_failure_message_includes_compact_diagnostic(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
