@@ -238,7 +238,11 @@ class CodexRuntimeAdapter:
         fallback_worktree_path=None,
         output_dir=None,
         progress_interval_seconds=30.0,
+        resume_session_id=None,
+        resume_last=False,
     ):
+        if resume_session_id and resume_last:
+            raise ValueError("resume_session_id and resume_last are mutually exclusive")
         self.command = list(command or ["codex", "exec"])
         self.model = model
         self.sandbox = sandbox
@@ -249,6 +253,8 @@ class CodexRuntimeAdapter:
         )
         self.output_dir = Path(output_dir) if output_dir else None
         self.progress_interval_seconds = max(float(progress_interval_seconds), 0.05)
+        self.resume_session_id = resume_session_id
+        self.resume_last = bool(resume_last)
 
     def bind_output_dir(self, output_dir):
         return CodexRuntimeAdapter(
@@ -260,6 +266,8 @@ class CodexRuntimeAdapter:
             fallback_worktree_path=self.fallback_worktree_path,
             output_dir=output_dir,
             progress_interval_seconds=self.progress_interval_seconds,
+            resume_session_id=self.resume_session_id,
+            resume_last=self.resume_last,
         )
 
     def run(self, message, worktree_path=None, progress_callback=None):
@@ -423,6 +431,19 @@ class CodexRuntimeAdapter:
         }
 
     def _build_command(self, worktree_path, result_path):
+        if self.resume_session_id or self.resume_last:
+            command = [*self.command, "resume"]
+            if self.resume_last:
+                command.append("--last")
+            else:
+                command.append(str(self.resume_session_id))
+            if self.model:
+                command.extend(["-m", self.model])
+            command.extend(self.extra_args)
+            if "--json" not in command:
+                command.append("--json")
+            command.extend(["--output-last-message", str(result_path), "-"])
+            return command
         command = [
             *self.command,
             "-C",
@@ -448,6 +469,7 @@ class CodexRuntimeAdapter:
                 *self._role_prompt_contract_lines(message),
                 *self._role_context_package_lines(message),
                 *self._repo_context_package_lines(message),
+                *self._task_artifact_contract_lines(message),
                 *self._evidence_policy_lines(message),
                 "Return exactly one JSON object as the final response.",
                 "The JSON object must have this shape:",
@@ -491,6 +513,8 @@ class CodexRuntimeAdapter:
                             "read_scope": ["."],
                             "write_scope": ["generated/"],
                             "required_role": payload.get("default_worker_role"),
+                            "input_artifacts": [],
+                            "expected_output_artifacts": [],
                             "risk_target": "L0",
                             "depends_on": [],
                             "blockers": [],
@@ -536,6 +560,25 @@ class CodexRuntimeAdapter:
             "Role context package:",
             str(role_context_path),
             "Read role_context_path before using role-specific context.",
+        ]
+
+    def _task_artifact_contract_lines(self, message):
+        payload = message["payload"]
+        input_artifacts = payload.get("input_artifacts") or []
+        expected_output_artifacts = payload.get("expected_output_artifacts") or []
+        if not input_artifacts and not expected_output_artifacts:
+            return []
+        return [
+            "Task artifact contract:",
+            json.dumps(
+                {
+                    "input_artifacts": input_artifacts,
+                    "expected_output_artifacts": expected_output_artifacts,
+                },
+                sort_keys=True,
+            ),
+            "Read each input_artifacts path before relying on repo context.",
+            "Write each expected_output_artifacts path when it is part of the task deliverables.",
         ]
 
     def _repo_context_package_lines(self, message):
@@ -695,6 +738,8 @@ def run_simulation(
                 "required_deliverables": task.get("required_deliverables", []),
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
+                "input_artifacts": task.get("input_artifacts", []),
+                "expected_output_artifacts": task.get("expected_output_artifacts", []),
                 **_role_prompt_fields(agent_pool, agent, task),
                 **_role_context_fields(
                     agent_pool,
@@ -2625,6 +2670,11 @@ def _runtime_adapter_from_profile(profile, defaults=None, project_root=None):
         )
         if not isinstance(timeout_seconds, int) or timeout_seconds < 1:
             raise ValueError("codex runtime_profile timeout_seconds must be an integer >= 1")
+        resume_session_id = profile.get(
+            "resume_session_id",
+            defaults.get("resume_session_id"),
+        )
+        resume_last = bool(profile.get("resume_last", defaults.get("resume_last", False)))
         return CodexRuntimeAdapter(
             command=command or None,
             model=profile.get("model", defaults.get("model")),
@@ -2634,6 +2684,8 @@ def _runtime_adapter_from_profile(profile, defaults=None, project_root=None):
                 "fallback_worktree_path",
                 defaults.get("fallback_worktree_path", project_root),
             ),
+            resume_session_id=resume_session_id,
+            resume_last=resume_last,
         )
     raise ValueError(f"unsupported runtime_profile adapter: {adapter}")
 

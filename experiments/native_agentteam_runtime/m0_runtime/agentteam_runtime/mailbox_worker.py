@@ -491,7 +491,11 @@ class FileMailboxWorkerProcessSupervisor:
         codex_sandbox="workspace-write",
         codex_timeout_seconds=300,
         codex_fallback_worktree_path=None,
+        codex_resume_session_id=None,
+        codex_resume_last=False,
     ):
+        if codex_resume_session_id and codex_resume_last:
+            raise ValueError("codex_resume_session_id and codex_resume_last are mutually exclusive")
         if runtime not in {"fake", "codex"}:
             raise ValueError(f"unsupported mailbox worker runtime: {runtime}")
         self.agent_pool_path = Path(agent_pool_path)
@@ -506,6 +510,8 @@ class FileMailboxWorkerProcessSupervisor:
         self.codex_sandbox = codex_sandbox
         self.codex_timeout_seconds = codex_timeout_seconds
         self.codex_fallback_worktree_path = codex_fallback_worktree_path
+        self.codex_resume_session_id = codex_resume_session_id
+        self.codex_resume_last = bool(codex_resume_last)
         self.stop_file = self.output_dir / "state" / "workers" / f"{agent_id}.stop"
         self.process = None
         self.attached_pid = None
@@ -559,6 +565,10 @@ class FileMailboxWorkerProcessSupervisor:
                         str(self.codex_fallback_worktree_path),
                     ]
                 )
+            if self.codex_resume_session_id:
+                command.extend(["--codex-resume-session-id", self.codex_resume_session_id])
+            if self.codex_resume_last:
+                command.append("--codex-resume-last")
         self.process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -985,6 +995,15 @@ def main(argv=None):
         "--codex-fallback-worktree-path",
         help="Fallback worktree path for Codex tasks without writable worktrees.",
     )
+    parser.add_argument(
+        "--codex-resume-session-id",
+        help="Explicit Codex session id to resume for this worker. Experimental.",
+    )
+    parser.add_argument(
+        "--codex-resume-last",
+        action="store_true",
+        help="Resume the most recent Codex session for this worker process. Experimental.",
+    )
     args = parser.parse_args(argv)
     runtime_adapter = _runtime_adapter_from_args(parser, args)
 
@@ -1038,12 +1057,16 @@ def _runtime_adapter_from_args(parser, args):
             or args.codex_model
             or args.codex_sandbox != "workspace-write"
             or args.codex_timeout_seconds != 300
+            or args.codex_resume_session_id
+            or args.codex_resume_last
         ):
             parser.error("Codex runtime options require --runtime codex")
         return FakeRuntimeAdapter()
     if args.runtime == "codex":
         if args.codex_timeout_seconds < 1:
             parser.error("--codex-timeout-seconds must be at least 1")
+        if args.codex_resume_session_id and args.codex_resume_last:
+            parser.error("--codex-resume-session-id and --codex-resume-last are mutually exclusive")
         return CodexRuntimeAdapter(
             command=_parse_command_json(parser, args.codex_command_json),
             model=args.codex_model,
@@ -1051,6 +1074,8 @@ def _runtime_adapter_from_args(parser, args):
             timeout_seconds=args.codex_timeout_seconds,
             fallback_worktree_path=args.codex_fallback_worktree_path,
             output_dir=args.output_dir,
+            resume_session_id=args.codex_resume_session_id,
+            resume_last=args.codex_resume_last,
         )
     raise ValueError(f"unsupported mailbox worker runtime: {args.runtime}")
 

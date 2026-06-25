@@ -194,6 +194,13 @@ class FileMailboxWorkerPoolSupervisor:
                 "fallback_worktree_path",
                 defaults.get("fallback_worktree_path"),
             ),
+            codex_resume_session_id=profile.get(
+                "resume_session_id",
+                defaults.get("resume_session_id"),
+            ),
+            codex_resume_last=bool(
+                profile.get("resume_last", defaults.get("resume_last", False))
+            ),
         )
 
     def _worker_health(self, worker):

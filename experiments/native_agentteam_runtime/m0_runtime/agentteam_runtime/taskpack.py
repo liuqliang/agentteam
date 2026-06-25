@@ -12,6 +12,12 @@ TASKPACK_SCHEMA_VERSION = "taskpack.v1"
 TASKPACK_SEMANTIC_CONTRACT_VERSION = "task_semantics.v1"
 TASKPACK_VERIFICATION_PROFILE_SCHEMA_VERSION = "agentteam_verification_profile.v1"
 DEFAULT_WORKER_ROLE = "implementation_worker"
+REPO_MAP_ROLE = "repo_map_agent"
+REPO_MAP_HANDOFF_PATH = ".agentteam/generated/repo_map_handoff.json"
+TASK_RISK_TARGETS = {"L0", "L1", "L2", "L3"}
+DIRECT_IMPLEMENTATION_RISK_TARGETS = {"L0", "L1"}
+REPO_MAP_REQUIRED_RISK_TARGETS = {"L2"}
+SEMANTIC_GATE_RISK_TARGETS = {"L3"}
 DEFAULT_DAEMON_MAX_STEPS = 45000
 DEFAULT_CODEX_RUNTIME_TIMEOUT_SECONDS = 3600
 DEFAULT_LEASE_TIMEOUT_GRACE_SECONDS = 60
@@ -223,6 +229,9 @@ def draft_taskpack_files(
     verification_profile=None,
     allow_merge=False,
     codex_timeout_seconds=1800,
+    codex_model=None,
+    role_routing=True,
+    risk_target=None,
 ):
     project_root = Path(project_root).resolve()
     draft_root = Path(draft_root).resolve()
@@ -242,11 +251,32 @@ def draft_taskpack_files(
         verification_command,
         project_root,
     )
+    codex_model = _optional_non_empty_string(codex_model, "codex_model")
     goal_kind = classify_goal_kind(goal)
+    implementation_risk_target = _default_implementation_risk_target(
+        goal_kind,
+        role_routing=role_routing,
+        risk_target=risk_target,
+    )
 
     taskpack_dir.mkdir(parents=True, exist_ok=False)
 
     task_id = f"TASK-{taskpack_id.upper().replace('-', '_')}-001"
+    repo_map_task_id = f"TASK-{taskpack_id.upper().replace('-', '_')}-REPO-MAP"
+    runtime_codex = {
+        "sandbox": "workspace-write",
+        "timeout_seconds": codex_timeout_seconds,
+    }
+    if codex_model:
+        runtime_codex["model"] = codex_model
+    worker_runtime_profile = {
+        "adapter": "codex",
+        "sandbox": "workspace-write",
+        "timeout_seconds": codex_timeout_seconds,
+    }
+    if codex_model:
+        worker_runtime_profile["model"] = codex_model
+
     taskpack = {
         "taskpack_schema_version": TASKPACK_SCHEMA_VERSION,
         "taskpack_id": taskpack_id,
@@ -258,10 +288,7 @@ def draft_taskpack_files(
         "goal_kind": goal_kind,
         "runtime": {
             "default_backend": "codex",
-            "codex": {
-                "sandbox": "workspace-write",
-                "timeout_seconds": codex_timeout_seconds,
-            },
+            "codex": runtime_codex,
         },
         "policy": {
             "allow_merge": bool(allow_merge),
@@ -275,42 +302,30 @@ def draft_taskpack_files(
     }
     agent_pool = {
         "scheduler_agent_id": "agent-scheduler",
-        "role_runtime_profiles": {
-            DEFAULT_WORKER_ROLE: {
-                "adapter": "codex",
-                "sandbox": "workspace-write",
-                "timeout_seconds": codex_timeout_seconds,
-            }
-        },
-        "agents": [
-            {
-                "agent_id": "agent-implementation-worker-1",
-                "role": DEFAULT_WORKER_ROLE,
-                "status": "idle",
-                "inbox_path": "mailboxes/agent-implementation-worker-1/inbox.jsonl",
-                "outbox_path": "mailboxes/agent-implementation-worker-1/outbox.jsonl",
-            }
-        ],
+        "role_runtime_profiles": _default_role_runtime_profiles(
+            worker_runtime_profile,
+            goal_kind=goal_kind,
+            role_routing=role_routing,
+            implementation_risk_target=implementation_risk_target,
+        ),
+        "agents": _default_agent_pool_agents(
+            goal_kind=goal_kind,
+            role_routing=role_routing,
+            implementation_risk_target=implementation_risk_target,
+        ),
     }
     backlog = {
         "backlog_id": f"BL-{taskpack_id}",
-        "items": [
-            {
-                "task_id": task_id,
-                "milestone_id": "TASKPACK-M0",
-                "objective": _default_task_objective(goal, goal_kind),
-                "work_type": _default_work_type(goal_kind),
-                "goal_alignment": _default_goal_alignment(goal),
-                "required_deliverables": _default_required_deliverables(goal),
-                "backlog_status": "ready",
-                "risk_target": "L1",
-                "depends_on": [],
-                "read_scope": read_scope,
-                "write_scope": write_scope,
-                "required_role": DEFAULT_WORKER_ROLE,
-                "blockers": [],
-            }
-        ],
+        "items": _default_backlog_items(
+            goal=goal,
+            goal_kind=goal_kind,
+            task_id=task_id,
+            repo_map_task_id=repo_map_task_id,
+            read_scope=read_scope,
+            write_scope=write_scope,
+            role_routing=role_routing,
+            implementation_risk_target=implementation_risk_target,
+        ),
     }
     verification = {
         "verification_schema_version": "taskpack_verification.v1",
@@ -333,6 +348,78 @@ def draft_taskpack_files(
     _write_json(taskpack_dir / "verification.json", verification)
     (taskpack_dir / "README.md").write_text(_render_readme(taskpack, backlog, verification), encoding="utf-8")
     return {"taskpack_dir": str(taskpack_dir), "taskpack_id": taskpack_id}
+
+
+def reuse_repo_map_handoff_in_taskpack(taskpack_dir, handoff_path=REPO_MAP_HANDOFF_PATH):
+    taskpack_dir = Path(taskpack_dir).resolve()
+    handoff_path = _normalize_repo_relative_artifact_path(
+        handoff_path,
+        "repo_map_handoff_path",
+    )
+    loaded = load_taskpack(taskpack_dir)
+    taskpack = loaded["taskpack"]
+    agent_pool = loaded["agent_pool"]
+    backlog = loaded["backlog"]
+    verification = loaded["verification"]
+    items = backlog.get("items")
+    if not isinstance(items, list):
+        raise TaskpackValidationError("backlog.items must be a list")
+
+    repo_map_task_ids = {
+        item.get("task_id")
+        for item in items
+        if isinstance(item, dict) and _is_repo_map_backlog_item(item)
+    }
+    repo_map_task_ids.discard(None)
+    retained_items = [
+        item
+        for item in items
+        if not (isinstance(item, dict) and item.get("task_id") in repo_map_task_ids)
+    ]
+    implementation_count = 0
+    for item in retained_items:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("depends_on"), list):
+            item["depends_on"] = [
+                dependency
+                for dependency in item["depends_on"]
+                if dependency not in repo_map_task_ids
+            ]
+        if item.get("required_role") == DEFAULT_WORKER_ROLE:
+            implementation_count += 1
+            _append_unique_string(item, "input_artifacts", handoff_path)
+            _append_unique_string(item, "required_deliverables", "repo_map_handoff")
+
+    if not implementation_count:
+        raise TaskpackValidationError("repo_map_handoff reuse requires an implementation_worker task")
+
+    backlog["items"] = retained_items
+    used_roles = {
+        item.get("required_role")
+        for item in retained_items
+        if isinstance(item, dict) and _is_non_empty_string(item.get("required_role"))
+    }
+    if REPO_MAP_ROLE not in used_roles:
+        agents = agent_pool.get("agents")
+        if isinstance(agents, list):
+            agent_pool["agents"] = [
+                agent
+                for agent in agents
+                if not (isinstance(agent, dict) and agent.get("role") == REPO_MAP_ROLE)
+            ]
+        role_runtime_profiles = agent_pool.get("role_runtime_profiles")
+        if isinstance(role_runtime_profiles, dict):
+            role_runtime_profiles.pop(REPO_MAP_ROLE, None)
+
+    _write_json(taskpack_dir / "agent_pool.json", agent_pool)
+    _write_json(taskpack_dir / "backlog.json", backlog)
+    (taskpack_dir / "README.md").write_text(_render_readme(taskpack, backlog, verification), encoding="utf-8")
+    return {
+        "status": "applied" if repo_map_task_ids else "already_applied",
+        "handoff_path": handoff_path,
+        "removed_task_count": len(repo_map_task_ids),
+    }
 
 
 def draft_deterministic_taskpack_skeleton(
@@ -360,6 +447,7 @@ def draft_deterministic_taskpack_skeleton(
         verification_profile=verification_profile,
         allow_merge=False,
         codex_timeout_seconds=codex_timeout_seconds,
+        role_routing=False,
     )
     taskpack_dir = Path(result["taskpack_dir"])
     refs = _string_dict(context_refs, "context_refs")
@@ -742,6 +830,7 @@ def validate_taskpack(taskpack_dir):
     semantic_authoring_required = bool(taskpack.get("semantic_authoring_required"))
     has_followup_quality_item = False
     has_broad_framework_quality_item = False
+    repo_map_task_ids = _repo_map_task_ids(items)
     for item in items:
         if not isinstance(item, dict):
             errors.append("backlog.items entries must be objects")
@@ -827,6 +916,24 @@ def validate_taskpack(taskpack_dir):
             errors.append(f"{task_id_label} blockers must be a list")
         elif not all(isinstance(blocker, str) for blocker in blockers):
             errors.append(f"{task_id_label} blockers entries must be strings")
+        _validate_risk_target_repo_map_routing(
+            item,
+            task_id_label,
+            goal_kind=goal_kind,
+            repo_map_task_ids=repo_map_task_ids,
+            semantic_contract_enabled=semantic_contract_enabled,
+            errors=errors,
+        )
+        _validate_optional_artifact_paths(
+            item.get("input_artifacts"),
+            f"{task_id_label} input_artifacts",
+            errors,
+        )
+        _validate_optional_artifact_paths(
+            item.get("expected_output_artifacts"),
+            f"{task_id_label} expected_output_artifacts",
+            errors,
+        )
         write_scope = item.get("write_scope", [])
         if not isinstance(write_scope, list) or not write_scope:
             errors.append(f"{task_id_label} write_scope must be a non-empty list")
@@ -1108,6 +1215,232 @@ def _default_required_deliverables(goal):
     ]
 
 
+def _default_role_runtime_profiles(
+    worker_runtime_profile,
+    goal_kind,
+    role_routing=True,
+    implementation_risk_target=None,
+):
+    profiles = {DEFAULT_WORKER_ROLE: dict(worker_runtime_profile)}
+    if _should_route_through_repo_map(goal_kind, role_routing, implementation_risk_target):
+        profiles[REPO_MAP_ROLE] = dict(worker_runtime_profile)
+    return profiles
+
+
+def _default_agent_pool_agents(goal_kind, role_routing=True, implementation_risk_target=None):
+    agents = []
+    if _should_route_through_repo_map(goal_kind, role_routing, implementation_risk_target):
+        agents.append(
+            {
+                "agent_id": "agent-repo-map-1",
+                "role": REPO_MAP_ROLE,
+                "status": "idle",
+                "inbox_path": "mailboxes/agent-repo-map-1/inbox.jsonl",
+                "outbox_path": "mailboxes/agent-repo-map-1/outbox.jsonl",
+            }
+        )
+    agents.append(
+        {
+            "agent_id": "agent-implementation-worker-1",
+            "role": DEFAULT_WORKER_ROLE,
+            "status": "idle",
+            "inbox_path": "mailboxes/agent-implementation-worker-1/inbox.jsonl",
+            "outbox_path": "mailboxes/agent-implementation-worker-1/outbox.jsonl",
+        }
+    )
+    return agents
+
+
+def _default_backlog_items(
+    goal,
+    goal_kind,
+    task_id,
+    repo_map_task_id,
+    read_scope,
+    write_scope,
+    role_routing=True,
+    implementation_risk_target=None,
+):
+    implementation_risk_target = _default_implementation_risk_target(
+        goal_kind,
+        role_routing=role_routing,
+        risk_target=implementation_risk_target,
+    )
+    implementation_item = {
+        "task_id": task_id,
+        "milestone_id": "TASKPACK-M0",
+        "objective": _default_task_objective(goal, goal_kind),
+        "work_type": _default_work_type(goal_kind),
+        "goal_alignment": _default_goal_alignment(goal),
+        "required_deliverables": _implementation_required_deliverables(
+            goal,
+            goal_kind,
+            role_routing,
+            implementation_risk_target,
+        ),
+        "backlog_status": "ready",
+        "risk_target": implementation_risk_target,
+        "depends_on": [],
+        "read_scope": read_scope,
+        "write_scope": write_scope,
+        "required_role": DEFAULT_WORKER_ROLE,
+        "blockers": [],
+    }
+    if not _should_route_through_repo_map(goal_kind, role_routing, implementation_risk_target):
+        return [implementation_item]
+
+    repo_map_item = {
+        "task_id": repo_map_task_id,
+        "milestone_id": "TASKPACK-M0",
+        "objective": (
+            "Map repository structure, identify relevant files and entry points, "
+            f"and produce a compact repo_map_handoff for: {goal}"
+        ),
+        "work_type": "repository_mapping",
+        "goal_alignment": (
+            "This repo mapping task reduces downstream context load by locating "
+            "the files, symbols, tests, risks, and verification commands needed "
+            f"to implement the original goal: {goal}"
+        ),
+        "required_deliverables": [
+            "repository_understanding_summary",
+            "relevant_files_and_entry_points",
+            "repo_map_handoff",
+            "verification_candidates",
+            "implementation_risks",
+        ],
+        "backlog_status": "ready",
+        "risk_target": "L0",
+        "depends_on": [],
+        "read_scope": read_scope,
+        "write_scope": [".agentteam/generated/"],
+        "expected_output_artifacts": [REPO_MAP_HANDOFF_PATH],
+        "required_role": REPO_MAP_ROLE,
+        "blockers": [],
+    }
+    implementation_item["depends_on"] = [repo_map_task_id]
+    implementation_item["input_artifacts"] = [REPO_MAP_HANDOFF_PATH]
+    return [repo_map_item, implementation_item]
+
+
+def _implementation_required_deliverables(goal, goal_kind, role_routing=True, implementation_risk_target=None):
+    deliverables = list(_default_required_deliverables(goal))
+    if (
+        _should_route_through_repo_map(goal_kind, role_routing, implementation_risk_target)
+        and "repo_map_handoff" not in deliverables
+    ):
+        deliverables.insert(0, "repo_map_handoff")
+    return deliverables
+
+
+def _should_route_through_repo_map(goal_kind, role_routing=True, risk_target=None):
+    return bool(
+        role_routing
+        and goal_kind in {"implementation", "optimization"}
+        and _effective_task_risk_target({"risk_target": risk_target}) in REPO_MAP_REQUIRED_RISK_TARGETS
+    )
+
+
+def _default_implementation_risk_target(goal_kind, role_routing=True, risk_target=None):
+    if risk_target is not None:
+        return _effective_task_risk_target({"risk_target": risk_target})
+    if role_routing and goal_kind in {"implementation", "optimization"}:
+        return "L2"
+    return "L1"
+
+
+def _is_repo_map_backlog_item(item):
+    expected_output_artifacts = item.get("expected_output_artifacts")
+    if not isinstance(expected_output_artifacts, list):
+        expected_output_artifacts = []
+    return (
+        item.get("required_role") == REPO_MAP_ROLE
+        or item.get("work_type") == "repository_mapping"
+        or REPO_MAP_HANDOFF_PATH in expected_output_artifacts
+    )
+
+
+def _repo_map_task_ids(items):
+    if not isinstance(items, list):
+        return set()
+    return {
+        item.get("task_id")
+        for item in items
+        if isinstance(item, dict)
+        and _is_non_empty_string(item.get("task_id"))
+        and _is_repo_map_backlog_item(item)
+    }
+
+
+def _effective_task_risk_target(item):
+    value = item.get("risk_target") if isinstance(item, dict) else None
+    if isinstance(value, str) and value.strip() in TASK_RISK_TARGETS:
+        return value.strip()
+    return "L2"
+
+
+def _validate_risk_target_repo_map_routing(
+    item,
+    task_id_label,
+    *,
+    goal_kind,
+    repo_map_task_ids,
+    semantic_contract_enabled,
+    errors,
+):
+    if not semantic_contract_enabled or goal_kind not in {"implementation", "optimization"}:
+        return
+    if not _is_repo_map_policy_worker_item(item):
+        return
+    risk_target = _effective_task_risk_target(item)
+    if risk_target in DIRECT_IMPLEMENTATION_RISK_TARGETS:
+        if _has_repo_map_handoff_input(item) or _depends_on_repo_map_task(item, repo_map_task_ids):
+            errors.append(
+                f"{task_id_label} L0/L1 tasks must not require repo_map_handoff; "
+                "route directly to implementation_worker"
+            )
+        return
+    if risk_target in REPO_MAP_REQUIRED_RISK_TARGETS:
+        if not _has_repo_map_handoff_input(item):
+            errors.append(
+                f"{task_id_label} L2 tasks must consume repo_map_handoff "
+                "from a repo_map_agent task or a reused integration baseline artifact"
+            )
+        return
+    if risk_target in SEMANTIC_GATE_RISK_TARGETS and not _item_requires_semantic_authoring(item):
+        errors.append(
+            f"{task_id_label} L3 tasks require semantic_authoring_required "
+            "before implementation_worker execution"
+        )
+
+
+def _is_repo_map_policy_worker_item(item):
+    return (
+        isinstance(item, dict)
+        and item.get("required_role") == DEFAULT_WORKER_ROLE
+        and not _is_repo_map_backlog_item(item)
+    )
+
+
+def _has_repo_map_handoff_input(item):
+    input_artifacts = item.get("input_artifacts")
+    return isinstance(input_artifacts, list) and REPO_MAP_HANDOFF_PATH in input_artifacts
+
+
+def _depends_on_repo_map_task(item, repo_map_task_ids):
+    depends_on = item.get("depends_on")
+    return isinstance(depends_on, list) and any(dependency in repo_map_task_ids for dependency in depends_on)
+
+
+def _append_unique_string(mapping, key, value):
+    current = mapping.get(key)
+    if not isinstance(current, list):
+        current = []
+    if value not in current:
+        current.append(value)
+    mapping[key] = current
+
+
 def _default_task_objective(goal, goal_kind):
     if goal_kind == "implementation" and _is_long_running_followup_goal(goal):
         return (
@@ -1341,6 +1674,11 @@ def build_taskpack_runtime_args(
         if runtime_backend == "codex"
         else None
     )
+    codex_model = (
+        _taskpack_codex_model(taskpack)
+        if runtime_backend == "codex"
+        else None
+    )
     project_root = taskpack.get("project_root")
     if not isinstance(project_root, str) or not project_root:
         raise TaskpackValidationError("project_root must be a non-empty string")
@@ -1378,6 +1716,8 @@ def build_taskpack_runtime_args(
     args.extend(["--runtime", runtime_backend])
     if codex_timeout_seconds is not None:
         args.extend(["--codex-timeout-seconds", str(codex_timeout_seconds)])
+    if codex_model:
+        args.extend(["--codex-model", codex_model])
     args.append("--integrate-accepted-patch")
     args.extend(["--integration-verification-command-json", command_json])
     if daemon and initial_integration_base_ref:
@@ -1421,6 +1761,19 @@ def _taskpack_codex_timeout_seconds(taskpack):
     if not isinstance(timeout_seconds, int) or timeout_seconds < 1:
         raise TaskpackValidationError("runtime.codex.timeout_seconds must be an integer >= 1")
     return timeout_seconds
+
+
+def _taskpack_codex_model(taskpack):
+    runtime = taskpack.get("runtime")
+    codex = runtime.get("codex") if isinstance(runtime, dict) else None
+    if not isinstance(codex, dict):
+        return None
+    model = codex.get("model")
+    if model is None:
+        return None
+    if not isinstance(model, str) or not model.strip():
+        raise TaskpackValidationError("runtime.codex.model must be a non-empty string")
+    return model.strip()
 
 
 def _normalize_taskpack_id(taskpack_id, goal):
@@ -1494,6 +1847,18 @@ def _validate_taskpack_runtime_backend(runtime):
     backend = runtime.get("default_backend")
     if backend not in TASKPACK_TRANSLATABLE_RUNTIME_BACKENDS:
         raise TaskpackValidationError("runtime.default_backend must be fake or codex")
+    codex = runtime.get("codex")
+    if codex is not None:
+        if not isinstance(codex, dict):
+            raise TaskpackValidationError("runtime.codex must be an object")
+        timeout_seconds = codex.get("timeout_seconds")
+        if timeout_seconds is not None and (
+            not isinstance(timeout_seconds, int) or timeout_seconds < 1
+        ):
+            raise TaskpackValidationError("runtime.codex.timeout_seconds must be an integer >= 1")
+        model = codex.get("model")
+        if model is not None and (not isinstance(model, str) or not model.strip()):
+            raise TaskpackValidationError("runtime.codex.model must be a non-empty string")
     return backend
 
 
@@ -1893,6 +2258,14 @@ def _is_non_empty_string(value):
     return isinstance(value, str) and bool(value)
 
 
+def _optional_non_empty_string(value, field_name):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise TaskpackValidationError(f"{field_name} must be a non-empty string")
+    return value.strip()
+
+
 def _string_list(value, default, field_name):
     if value is None:
         return list(default)
@@ -2018,6 +2391,32 @@ def _validate_taskpack_runtime_profile(profile, label, errors):
     sandbox = profile.get("sandbox")
     if sandbox is not None and not _is_non_empty_string(sandbox):
         errors.append(f"{label}.sandbox must be a non-empty string")
+
+
+def _validate_optional_artifact_paths(value, field_name, errors):
+    if value is None:
+        return
+    if not isinstance(value, list):
+        errors.append(f"{field_name} must be a list")
+        return
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            errors.append(f"{field_name} entries must be non-empty strings")
+            continue
+        path = Path(item)
+        if path.is_absolute():
+            errors.append(f"{field_name} entries must be repository-relative: {item}")
+        elif _write_scope_escapes_repository(path):
+            errors.append(f"{field_name} entries must stay inside repository: {item}")
+
+
+def _normalize_repo_relative_artifact_path(value, field_name):
+    path = _optional_non_empty_string(value, field_name)
+    errors = []
+    _validate_optional_artifact_paths([path], field_name, errors)
+    if errors:
+        raise TaskpackValidationError("; ".join(errors))
+    return path
 
 
 def _validate_optional_role_object_map(value, field_name, errors):
@@ -2203,32 +2602,43 @@ def _read_json(path):
 
 
 def _render_readme(taskpack, backlog, verification):
-    task = backlog["items"][0]
-    return "\n".join(
+    lines = [
+        f"# {taskpack['taskpack_id']}",
+        "",
+        f"Goal: {taskpack['goal']}",
+        "",
+        f"Original goal: {taskpack.get('original_goal') or taskpack['goal']}",
+        "",
+        f"Goal kind: `{taskpack.get('goal_kind') or classify_goal_kind(taskpack.get('original_goal') or taskpack['goal'])}`",
+        "",
+        f"Project root: `{taskpack['project_root']}`",
+        "",
+    ]
+    for task in backlog["items"]:
+        lines.extend(
+            [
+                f"Task: `{task['task_id']}`",
+                "",
+                f"Role: `{task.get('required_role') or 'not specified'}`",
+                "",
+                f"Depends on: `{json.dumps(task.get('depends_on', []), sort_keys=True)}`",
+                "",
+                f"Work type: `{task.get('work_type') or 'not specified'}`",
+                "",
+                f"Goal alignment: {task.get('goal_alignment') or 'not specified'}",
+                "",
+                f"Required deliverables: `{json.dumps(task.get('required_deliverables', []), sort_keys=True)}`",
+                "",
+                f"Read scope: `{json.dumps(task['read_scope'], sort_keys=True)}`",
+                "",
+                f"Write scope: `{json.dumps(task['write_scope'], sort_keys=True)}`",
+                "",
+            ]
+        )
+    lines.extend(
         [
-            f"# {taskpack['taskpack_id']}",
-            "",
-            f"Goal: {taskpack['goal']}",
-            "",
-            f"Original goal: {taskpack.get('original_goal') or taskpack['goal']}",
-            "",
-            f"Goal kind: `{taskpack.get('goal_kind') or classify_goal_kind(taskpack.get('original_goal') or taskpack['goal'])}`",
-            "",
-            f"Project root: `{taskpack['project_root']}`",
-            "",
-            f"Task: `{task['task_id']}`",
-            "",
-            f"Work type: `{task.get('work_type') or 'not specified'}`",
-            "",
-            f"Goal alignment: {task.get('goal_alignment') or 'not specified'}",
-            "",
-            f"Required deliverables: `{json.dumps(task.get('required_deliverables', []), sort_keys=True)}`",
-            "",
-            f"Read scope: `{json.dumps(task['read_scope'], sort_keys=True)}`",
-            "",
-            f"Write scope: `{json.dumps(task['write_scope'], sort_keys=True)}`",
-            "",
             f"Verification: `{json.dumps(verification['command'])}`",
             "",
         ]
     )
+    return "\n".join(lines)

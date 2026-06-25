@@ -81,11 +81,13 @@ from .release_manager import (
 )
 from .notifications import FeishuWebhookNotifier, diagnose_feishu_webhook_delivery
 from .taskpack import (
+    REPO_MAP_HANDOFF_PATH,
     build_taskpack_runtime_args,
     draft_taskpack_files,
     freeze_taskpack,
     load_taskpack,
     materialize_semantic_taskpack,
+    reuse_repo_map_handoff_in_taskpack,
     validate_taskpack,
 )
 from .taskpack_author import draft_taskpack_from_goal
@@ -508,6 +510,7 @@ def _add_submit_parser(subcommands):
         default=600,
         help="Timeout for Codex taskpack authoring.",
     )
+    _add_codex_model_arg(parser)
     parser.add_argument(
         "--one-shot",
         action="store_true",
@@ -551,6 +554,7 @@ def _add_init_parser(subcommands):
         default="auto",
         help="Runtime backend used to execute taskpacks for this project.",
     )
+    _add_codex_model_arg(parser, help_text="Default Codex model used by worker runtimes.")
     parser.add_argument("--one-shot", action="store_true", help="Default to one-shot runtime execution.")
     parser.add_argument("--max-inflight", type=int, default=2, help="Default maximum daemon inflight attempts.")
     parser.add_argument("--max-attempts", type=int, default=1, help="Default maximum attempts per task.")
@@ -604,6 +608,7 @@ def _add_start_parser(subcommands):
         default=600,
         help="Timeout for Codex taskpack authoring.",
     )
+    _add_codex_model_arg(parser)
     parser.add_argument(
         "--one-shot",
         action="store_true",
@@ -652,6 +657,7 @@ def _add_next_parser(subcommands):
         default=600,
         help="Timeout for Codex taskpack authoring.",
     )
+    _add_codex_model_arg(parser)
     parser.add_argument(
         "--one-shot",
         action="store_true",
@@ -737,6 +743,7 @@ def _add_pursue_parser(subcommands):
         default=600,
         help="Timeout for Codex taskpack authoring.",
     )
+    _add_codex_model_arg(parser)
     parser.add_argument(
         "--one-shot",
         action="store_true",
@@ -829,6 +836,7 @@ def _add_taskpack_new_parser(subcommands):
         default=1800,
         help="Worker Codex timeout recorded in the taskpack runtime profile.",
     )
+    _add_codex_model_arg(parser)
     parser.add_argument("--freeze", action="store_true", help="Freeze the draft immediately after validation.")
     parser.add_argument("--json", action="store_true", help="Print result as JSON instead of human text.")
     parser.set_defaults(handler=_handle_taskpack_new)
@@ -858,6 +866,13 @@ def _add_taskpack_draft_parser(subcommands):
         help="Optional Codex command prefix. Must appear last.",
     )
     parser.set_defaults(handler=_handle_taskpack_draft)
+
+
+def _add_codex_model_arg(parser, help_text=None):
+    parser.add_argument(
+        "--codex-model",
+        help=help_text or "Codex model used by worker runtimes for newly generated taskpacks.",
+    )
 
 
 def _add_taskpack_validate_parser(subcommands):
@@ -1428,6 +1443,7 @@ def _handle_taskpack_new(args):
         verification_profile=verification_profile,
         allow_merge=args.allow_merge,
         codex_timeout_seconds=args.codex_timeout_seconds,
+        codex_model=getattr(args, "codex_model", None) or profile.get("codex_model"),
     )
     validation = validate_taskpack(draft["taskpack_dir"])
     frozen = None
@@ -1878,6 +1894,7 @@ def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
     stop_reason = None
     for round_index in range(1, max_rounds + 1):
         initial_integration_base_ref = _pursue_next_integration_base_ref(source_report)
+        reusable_repo_map_handoff = _reusable_repo_map_handoff_path(source_report)
         if source_report is not None:
             current_goal = _build_followup_goal(current_goal, source_report, goal_memory=goal_memory)
         taskpack_id = _pursue_taskpack_id(args.taskpack_id, round_index)
@@ -1885,11 +1902,14 @@ def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
         submit_args.goal = current_goal
         submit_args.taskpack_id = taskpack_id
         submit_args.initial_integration_base_ref = initial_integration_base_ref
+        submit_args.reuse_repo_map_handoff_path = reusable_repo_map_handoff
         submit_args.progress = not bool(args.json)
         run_result = _handle_submit(submit_args)
         round_record = _pursue_round_record(round_index, run_result, work_root)
         if initial_integration_base_ref:
             round_record["initial_integration_base_ref"] = initial_integration_base_ref
+        if reusable_repo_map_handoff:
+            round_record["repo_map_handoff_reuse"] = reusable_repo_map_handoff
         rounds.append(round_record)
         stop_reason = _pursue_stop_reason(
             round_record,
@@ -2210,18 +2230,21 @@ def _handle_next(args):
     )
     requested_goal = args.goal or _prompt_text("Follow-up goal", required=True)
     followup_goal = _build_followup_goal(requested_goal, source_report)
+    reusable_repo_map_handoff = _reusable_repo_map_handoff_path(source_report)
 
     _write_progress(f"profile loaded: {profile.get('project_key') or project_root.name}")
     _write_progress(f"follow-up source: {source_run_dir.name}")
     submit_args = _submit_args_from_profile(args, project_root, profile)
     submit_args.goal = followup_goal
     submit_args.progress = True
+    submit_args.reuse_repo_map_handoff_path = reusable_repo_map_handoff
     result = _handle_submit(submit_args)
     result["follow_up"] = {
         "source_taskpack_id": source_run_dir.name,
         "source_run_dir": str(source_run_dir),
         "source_report_path": source_report["report_path"],
         "requested_goal": requested_goal,
+        "repo_map_handoff_reuse": reusable_repo_map_handoff,
     }
     if args.json:
         return result
@@ -2408,6 +2431,29 @@ def _build_followup_goal(requested_goal, source_report, goal_memory=None):
     return "\n".join(lines)
 
 
+def _reusable_repo_map_handoff_path(source_report):
+    if not isinstance(source_report, dict):
+        return None
+    baseline = source_report.get("integration_baseline")
+    if not isinstance(baseline, dict):
+        return None
+    if baseline.get("worktree_exists") is False:
+        return None
+    worktree_path = baseline.get("worktree_path")
+    if not isinstance(worktree_path, str) or not worktree_path.strip():
+        return None
+    handoff_path = Path(worktree_path) / REPO_MAP_HANDOFF_PATH
+    if not handoff_path.is_file():
+        return None
+    try:
+        payload = json.loads(handoff_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return REPO_MAP_HANDOFF_PATH
+
+
 def _followup_task_summary_lines(source_report, limit=3):
     operator_report = source_report.get("operator_report")
     if not isinstance(operator_report, dict):
@@ -2469,6 +2515,23 @@ def _handle_submit(args):
     _progress(progress, f"draft accepted: {draft['taskpack_id']}")
     taskpack_dir = Path(draft["taskpack_dir"])
     _set_taskpack_runtime_backend(taskpack_dir, runtime_backend)
+    _set_taskpack_codex_model(
+        taskpack_dir,
+        getattr(args, "codex_model", None),
+        runtime_backend=runtime_backend,
+    )
+    repo_map_handoff_reuse = None
+    reuse_handoff_path = getattr(args, "reuse_repo_map_handoff_path", None)
+    if reuse_handoff_path:
+        repo_map_handoff_reuse = reuse_repo_map_handoff_in_taskpack(
+            taskpack_dir,
+            reuse_handoff_path,
+        )
+        _progress(
+            progress,
+            "repo_map_handoff reuse "
+            f"{repo_map_handoff_reuse['status']}: {repo_map_handoff_reuse['handoff_path']}",
+        )
     validation = validate_taskpack(taskpack_dir)
     frozen = freeze_taskpack(taskpack_dir, frozen_root)
     _progress(progress, f"frozen taskpack created: {frozen['manifest']['taskpack_id']}")
@@ -2514,7 +2577,7 @@ def _handle_submit(args):
     _progress(progress, _artifact_snapshot_progress(artifact_snapshot))
     _progress_completion_report(progress, report)
     _progress(progress, f"run {_run_progress_status(run)}")
-    return {
+    result = {
         "status": _submit_status_from_run(run),
         "taskpack_id": draft["taskpack_id"],
         "runtime": runtime_backend,
@@ -2540,6 +2603,9 @@ def _handle_submit(args):
             "run_root": str(run_root),
         },
     }
+    if repo_map_handoff_reuse is not None:
+        result["repo_map_handoff_reuse"] = repo_map_handoff_reuse
+    return result
 
 
 def _handle_run(args):
@@ -5336,6 +5402,22 @@ def _write_execution_result_text(result):
         lines.append(f"runtime: {result['runtime']}")
     if follow_up:
         lines.append(f"source_taskpack_id: {follow_up.get('source_taskpack_id') or 'unknown'}")
+    repo_map_handoff_reuse = (
+        result.get("repo_map_handoff_reuse")
+        if isinstance(result.get("repo_map_handoff_reuse"), dict)
+        else {}
+    )
+    if repo_map_handoff_reuse:
+        reuse_line = _compact_key_value_line(
+            "repo_map_handoff_reuse",
+            [
+                ("status", repo_map_handoff_reuse.get("status")),
+                ("path", repo_map_handoff_reuse.get("handoff_path")),
+                ("removed_repo_map_tasks", repo_map_handoff_reuse.get("removed_task_count")),
+            ],
+        )
+        if reuse_line:
+            lines.append(reuse_line)
     if report:
         lines.append(
             "summary: "
@@ -6047,6 +6129,7 @@ def _profile_from_args(args, project_root):
         work_root=args.work_root,
         author_runtime=args.author_runtime,
         default_runtime=args.runtime,
+        codex_model=getattr(args, "codex_model", None),
         one_shot=args.one_shot,
         max_inflight=args.max_inflight,
         max_attempts=args.max_attempts,
@@ -6080,6 +6163,12 @@ def _prompt_project_profile(args, project_root):
         choices=["auto", "fake", "codex"],
         default=args.runtime or "auto",
     )
+    codex_model = _prompt_text(
+        "Codex model",
+        default=getattr(args, "codex_model", None),
+        display_default="default",
+        required=False,
+    )
     one_shot = _prompt_bool("One shot", default=bool(args.one_shot))
     commit_verified_integration = _prompt_bool(
         "Commit verified integration",
@@ -6107,6 +6196,7 @@ def _prompt_project_profile(args, project_root):
         work_root=work_root,
         author_runtime=author_runtime,
         default_runtime=runtime,
+        codex_model=codex_model,
         one_shot=one_shot,
         max_inflight=args.max_inflight or 2,
         max_attempts=args.max_attempts or 1,
@@ -6131,6 +6221,7 @@ def _submit_args_from_profile(args, project_root, profile):
         author_runtime=args.author_runtime or profile.get("author_runtime", "codex"),
         runtime=args.runtime or profile.get("default_runtime", "auto"),
         codex_timeout_seconds=args.codex_timeout_seconds,
+        codex_model=getattr(args, "codex_model", None) or profile.get("codex_model"),
         one_shot=_override_or_profile(args.one_shot, profile.get("one_shot", False)),
         max_inflight=args.max_inflight or profile.get("max_inflight", 2),
         max_attempts=args.max_attempts or profile.get("max_attempts", 1),
@@ -6462,6 +6553,36 @@ def _set_taskpack_runtime_backend(taskpack_dir, runtime_backend):
                 if isinstance(item, dict):
                     item["write_scope"] = ["generated/"]
         _write_json(backlog_path, backlog)
+
+
+def _set_taskpack_codex_model(taskpack_dir, codex_model, runtime_backend="codex"):
+    if runtime_backend != "codex" or not codex_model:
+        return
+    if not isinstance(codex_model, str) or not codex_model.strip():
+        raise AgentTeamCliError("codex_model must be a non-empty string")
+    codex_model = codex_model.strip()
+    taskpack_dir = Path(taskpack_dir)
+    taskpack_path = taskpack_dir / "taskpack.yaml"
+    taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+    runtime = taskpack.get("runtime")
+    if not isinstance(runtime, dict):
+        runtime = {}
+    codex = runtime.get("codex")
+    if not isinstance(codex, dict):
+        codex = {}
+    codex["model"] = codex_model
+    runtime["codex"] = codex
+    taskpack["runtime"] = runtime
+    _write_json(taskpack_path, taskpack)
+
+    files = taskpack.get("files", {})
+    if not isinstance(files, dict):
+        files = {}
+    agent_pool_path = taskpack_dir / files.get("agent_pool", "agent_pool.json")
+    agent_pool = json.loads(agent_pool_path.read_text(encoding="utf-8"))
+    for profile in _runtime_profiles(agent_pool):
+        profile["model"] = codex_model
+    _write_json(agent_pool_path, agent_pool)
 
 
 def _runtime_profiles(agent_pool):

@@ -2275,6 +2275,47 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertEqual(normalized["tasks"][0]["backlog_status"], "ready")
         self.assertEqual(normalized["tasks"][0]["milestone_id"], "M21")
 
+    def test_task_proposal_preserves_task_artifact_contract(self):
+        handoff_path = ".agentteam/generated/repo_map_handoff.json"
+        proposal = {
+            "milestone_id": "M21",
+            "tasks": [
+                {
+                    "task_id": "TASK-M21-REPO-MAP",
+                    "objective": "Produce repo map handoff.",
+                    "read_scope": ["."],
+                    "write_scope": [".agentteam/generated/"],
+                    "required_role": "repo_map_agent",
+                    "risk_target": "L0",
+                    "depends_on": [],
+                    "blockers": [],
+                    "expected_output_artifacts": [handoff_path],
+                },
+                {
+                    "task_id": "TASK-M21-IMPLEMENT",
+                    "objective": "Consume repo map handoff.",
+                    "read_scope": ["src/"],
+                    "write_scope": ["src/"],
+                    "required_role": "implementation_worker",
+                    "risk_target": "L1",
+                    "depends_on": ["TASK-M21-REPO-MAP"],
+                    "blockers": [],
+                    "input_artifacts": [handoff_path],
+                },
+            ],
+        }
+
+        normalized = normalize_task_proposal(proposal)
+
+        self.assertEqual(
+            normalized["tasks"][0]["expected_output_artifacts"],
+            [handoff_path],
+        )
+        self.assertEqual(
+            normalized["tasks"][1]["input_artifacts"],
+            [handoff_path],
+        )
+
     def test_task_proposal_rejects_duplicate_existing_task_id(self):
         proposal = {
             "milestone_id": "M21",
@@ -2636,6 +2677,34 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(message["message_type"], "dispatch_task")
             self.assertEqual(message["payload"]["attempt_id"], "ATTEMPT-001")
             self.assertEqual(message["payload"]["worktree_id"], "WT-ATTEMPT-001")
+
+    def test_run_simulation_dispatch_preserves_task_artifact_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            handoff_path = ".agentteam/generated/repo_map_handoff.json"
+            task = _backlog_task("TASK-ARTIFACTS", write_scope=[".agentteam/generated/"])
+            task["input_artifacts"] = [handoff_path]
+            task["expected_output_artifacts"] = [handoff_path]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=[".agentteam/generated/"],
+                tasks=[task],
+            )
+
+            run_simulation(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+            )
+
+            message = _read_first_jsonl(
+                output_dir / "mailboxes" / "agent-repo-map" / "inbox.jsonl"
+            )
+
+            self.assertEqual(message["payload"]["input_artifacts"], [handoff_path])
+            self.assertEqual(message["payload"]["expected_output_artifacts"], [handoff_path])
 
     def test_run_simulation_dispatch_includes_role_prompt_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5256,6 +5325,7 @@ class M0RuntimeTests(unittest.TestCase):
                         "model": "worker-role-profile-model",
                         "sandbox": "read-only",
                         "timeout_seconds": 45,
+                        "resume_session_id": "SESSION-123",
                     }
                 },
             )
@@ -5279,6 +5349,8 @@ class M0RuntimeTests(unittest.TestCase):
                 self.assertEqual(pool.workers[0].codex_model, "worker-role-profile-model")
                 self.assertEqual(pool.workers[0].codex_sandbox, "read-only")
                 self.assertEqual(pool.workers[0].codex_timeout_seconds, 45)
+                self.assertEqual(pool.workers[0].codex_resume_session_id, "SESSION-123")
+                self.assertFalse(pool.workers[0].codex_resume_last)
             finally:
                 stop = pool.stop()
 
@@ -10895,6 +10967,35 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("what_changed", prompt)
         self.assertIn("operator_summary natural-language fields must be written in Chinese", prompt)
 
+    def test_codex_runtime_adapter_includes_task_artifact_contract(self):
+        handoff_path = ".agentteam/generated/repo_map_handoff.json"
+        message = {
+            "message_id": "MSG-0001",
+            "from_agent": "agent-scheduler",
+            "to_agent": "agent-implementation-worker-1",
+            "message_type": "dispatch_task",
+            "correlation_id": "TASK-001:ATTEMPT-001",
+            "created_at": "2026-06-03T00:00:00Z",
+            "lease_expires_at": "2026-06-03T00:15:00Z",
+            "payload": {
+                "task_id": "TASK-001",
+                "attempt_id": "ATTEMPT-001",
+                "lease_id": "LEASE-001",
+                "objective": "Implement using repo map handoff.",
+                "read_scope": ["src/"],
+                "write_scope": ["src/"],
+                "input_artifacts": [handoff_path],
+                "expected_output_artifacts": [handoff_path],
+            },
+        }
+
+        prompt = CodexRuntimeAdapter(command=["codex", "exec"])._build_prompt(message)
+
+        self.assertIn("Task artifact contract:", prompt)
+        self.assertIn("Read each input_artifacts path before relying on repo context.", prompt)
+        self.assertIn("Write each expected_output_artifacts path when it is part of the task deliverables.", prompt)
+        self.assertIn(handoff_path, prompt)
+
     def test_codex_runtime_adapter_includes_role_context_path(self):
         message = {
             "message_id": "MSG-0001",
@@ -11062,6 +11163,25 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertIn("--output-last-message", command)
         self.assertNotIn("-a", command)
         self.assertNotIn("--ask-for-approval", command)
+
+    def test_codex_runtime_adapter_can_build_explicit_resume_command(self):
+        command = CodexRuntimeAdapter(
+            command=["codex", "exec"],
+            model="medium",
+            resume_session_id="SESSION-123",
+        )._build_command(
+            "/tmp/worktree",
+            "/tmp/result.json",
+        )
+
+        self.assertEqual(command[0:3], ["codex", "exec", "resume"])
+        self.assertIn("SESSION-123", command)
+        self.assertEqual(_arg_value(command, "-m"), "medium")
+        self.assertIn("--json", command)
+        self.assertEqual(_arg_value(command, "--output-last-message"), "/tmp/result.json")
+        self.assertEqual(command[-1], "-")
+        self.assertNotIn("-C", command)
+        self.assertNotIn("-s", command)
 
     def test_cli_can_run_codex_runtime_adapter_command(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -11957,6 +12077,10 @@ def _write_fake_codex_planner_and_worker(path):
         ),
         encoding="utf-8",
     )
+
+
+def _arg_value(args, flag):
+    return args[args.index(flag) + 1]
 
 
 def _write_fake_codex_arg_recorder(path, changed_file):

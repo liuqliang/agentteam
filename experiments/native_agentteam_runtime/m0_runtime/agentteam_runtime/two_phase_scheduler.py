@@ -384,6 +384,8 @@ class TwoPhaseFileScheduler:
                 "required_deliverables": task.get("required_deliverables", []),
                 "read_scope": task["read_scope"],
                 "write_scope": task["write_scope"],
+                "input_artifacts": task.get("input_artifacts", []),
+                "expected_output_artifacts": task.get("expected_output_artifacts", []),
                 **_evidence_policy_fields(task),
                 **_operator_guidance_fields(task),
                 **_permission_grant_fields(task),

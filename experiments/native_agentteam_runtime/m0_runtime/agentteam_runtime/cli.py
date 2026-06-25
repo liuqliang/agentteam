@@ -218,6 +218,15 @@ def main(argv=None):
         help="Optional CodexRuntimeAdapter timeout in seconds. Defaults to 300.",
     )
     parser.add_argument(
+        "--codex-resume-session-id",
+        help="Explicit Codex session id to resume. Experimental and off by default.",
+    )
+    parser.add_argument(
+        "--codex-resume-last",
+        action="store_true",
+        help="Resume the latest Codex session. Experimental and off by default.",
+    )
+    parser.add_argument(
         "--shell-command",
         nargs=argparse.REMAINDER,
         help="Optional command to execute through ShellRuntimeAdapter. Must appear last.",
@@ -698,6 +707,8 @@ def _build_runtime_profile_defaults(parser, args):
             parser.error("--project-root is required when --runtime codex is set")
         if args.codex_timeout_seconds is not None and args.codex_timeout_seconds < 1:
             parser.error("--codex-timeout-seconds must be at least 1")
+        if args.codex_resume_session_id and args.codex_resume_last:
+            parser.error("--codex-resume-session-id and --codex-resume-last are mutually exclusive")
         profile = {
             "adapter": "codex",
             "sandbox": args.codex_sandbox or "workspace-write",
@@ -708,12 +719,22 @@ def _build_runtime_profile_defaults(parser, args):
             profile["command"] = args.codex_command
         if args.codex_model:
             profile["model"] = args.codex_model
+        if args.codex_resume_session_id:
+            profile["resume_session_id"] = args.codex_resume_session_id
+        if args.codex_resume_last:
+            profile["resume_last"] = True
         return profile
     raise AssertionError(f"unhandled runtime: {runtime}")
 
 
 def _has_codex_runtime_options(args):
-    return bool(args.codex_model or args.codex_sandbox or args.codex_timeout_seconds is not None)
+    return bool(
+        args.codex_model
+        or args.codex_sandbox
+        or args.codex_timeout_seconds is not None
+        or args.codex_resume_session_id
+        or args.codex_resume_last
+    )
 
 
 def _parse_command_json(parser, raw_command):

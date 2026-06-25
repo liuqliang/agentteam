@@ -125,6 +125,10 @@ def _normalize_task(
         "required_role": required_role,
         "blockers": blockers,
     }
+    for artifact_field in ("input_artifacts", "expected_output_artifacts"):
+        artifacts = _string_list(raw_task, artifact_field)
+        if artifacts:
+            task[artifact_field] = artifacts
     task.update(risk_fields)
     return task
 

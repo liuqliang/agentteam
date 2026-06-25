@@ -94,6 +94,14 @@ def _arg_value(args, flag):
     return args[index + 1]
 
 
+def _implementation_item(backlog):
+    items = backlog["items"] if isinstance(backlog, dict) else backlog
+    for item in items:
+        if item.get("required_role") == "implementation_worker":
+            return item
+    raise AssertionError("implementation_worker backlog item not found")
+
+
 def _write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
@@ -1846,6 +1854,35 @@ class TaskpackTests(unittest.TestCase):
         self.assertIn("recommendation: merge=Run `agentteam integrate --taskpack follow-up-run`.", output)
         self.assertIn("next=Run the full competition validation package.", output)
 
+    def test_execution_result_text_reports_repo_map_handoff_reuse(self):
+        result = {
+            "status": "completed",
+            "taskpack_id": "follow-up-run",
+            "follow_up": {"source_taskpack_id": "previous-run"},
+            "repo_map_handoff_reuse": {
+                "status": "applied",
+                "handoff_path": taskpack_module.REPO_MAP_HANDOFF_PATH,
+                "removed_task_count": 1,
+            },
+            "report": {
+                "run_status": "completed",
+                "task_count": 1,
+                "blocked_count": 0,
+                "completion_summary": {},
+            },
+        }
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            _write_execution_result_text(result)
+
+        output = stdout.getvalue()
+        self.assertIn(
+            "repo_map_handoff_reuse: status=applied; path=.agentteam/generated/repo_map_handoff.json",
+            output,
+        )
+        self.assertIn("removed_repo_map_tasks=1", output)
+
     def test_execution_result_text_aggregates_multiple_task_summary_fields(self):
         result = {
             "status": "completed",
@@ -2814,6 +2851,45 @@ class TaskpackTests(unittest.TestCase):
                     "experiments.native_agentteam_runtime.m0_runtime.tests.test_m0_runtime",
                 ],
             )
+
+    def test_submit_args_from_profile_propagates_worker_codex_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            args = SimpleNamespace(
+                goal="Use a lower cost worker model.",
+                work_root=None,
+                taskpack_id=None,
+                author_runtime=None,
+                runtime=None,
+                codex_timeout_seconds=600,
+                codex_model=None,
+                one_shot=None,
+                max_inflight=None,
+                max_attempts=None,
+                commit_verified_integration=None,
+                notification_project=None,
+                feishu_webhook_env=None,
+                feishu_signing_secret_env=None,
+                codex_command=None,
+            )
+            profile = {
+                "project_key": "model-profile",
+                "work_root": str(tmp_path / "work"),
+                "author_runtime": "codex",
+                "default_runtime": "codex",
+                "codex_model": "medium",
+            }
+
+            submit_args = _submit_args_from_profile(args, repo, profile)
+
+            self.assertEqual(submit_args.codex_model, "medium")
+
+            args.codex_model = "strong-review-model"
+            submit_args = _submit_args_from_profile(args, repo, profile)
+
+            self.assertEqual(submit_args.codex_model, "strong-review-model")
 
     def test_agentteam_cli_init_text_is_concise_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4728,7 +4804,7 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("latest_run: cli-status-run", status_completed.stdout)
             self.assertIn("overall_status: idle", status_completed.stdout)
             self.assertIn("run_status: idle", status_completed.stdout)
-            self.assertIn("tasks: 1 done, 0 blocked", status_completed.stdout)
+            self.assertIn("tasks: 2 done, 0 blocked", status_completed.stdout)
             self.assertIn("inflight: 0", status_completed.stdout)
             self.assertIn("manual_gates: 0", status_completed.stdout)
             self.assertIn("projection_source: files", status_completed.stdout)
@@ -8524,6 +8600,128 @@ class TaskpackTests(unittest.TestCase):
                 "verified-head",
             )
 
+    def test_pursue_loop_reuses_previous_repo_map_handoff_on_next_round(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "agentteam-work"
+            baseline = tmp_path / "integration-baseline"
+            _write_json(
+                baseline / taskpack_module.REPO_MAP_HANDOFF_PATH,
+                {"schema_version": "repo_map_handoff.v1"},
+            )
+            captured_submit_args = []
+            source_reports = [
+                {
+                    "run_id": "pursue-loop",
+                    "integration_baseline": {
+                        "head_sha": "verified-head",
+                        "worktree_path": str(baseline),
+                        "worktree_exists": True,
+                    },
+                    "completion_summary": {
+                        "next_steps": ["Continue with the next optimization task."]
+                    },
+                },
+                {
+                    "run_id": "pursue-loop-r2",
+                    "integration_baseline": {"head_sha": "round-two-head"},
+                    "completion_summary": {},
+                },
+            ]
+            originals = {
+                "_submit_args_from_profile": agentteam_module._submit_args_from_profile,
+                "_handle_submit": agentteam_module._handle_submit,
+                "build_run_completion_report": agentteam_module.build_run_completion_report,
+                "build_goal_memory": agentteam_module.build_goal_memory,
+                "write_goal_memory": agentteam_module.write_goal_memory,
+                "_pursue_follow_up_queue_summary": agentteam_module._pursue_follow_up_queue_summary,
+            }
+
+            def fake_submit_args_from_profile(args, project_root, profile):
+                return SimpleNamespace(
+                    goal=args.goal,
+                    taskpack_id=args.taskpack_id,
+                    initial_integration_base_ref=None,
+                    reuse_repo_map_handoff_path=None,
+                )
+
+            def fake_handle_submit(submit_args):
+                captured_submit_args.append(
+                    {
+                        "taskpack_id": submit_args.taskpack_id,
+                        "reuse_repo_map_handoff_path": getattr(
+                            submit_args,
+                            "reuse_repo_map_handoff_path",
+                            None,
+                        ),
+                    }
+                )
+                action = "continue" if len(captured_submit_args) == 1 else "integrate"
+                return {
+                    "status": "completed",
+                    "taskpack_id": submit_args.taskpack_id,
+                    "report": {
+                        "run_status": "completed",
+                        "blocked_count": 0,
+                        "completion_summary": {
+                            "follow_up_recommendation": {"action": action}
+                        },
+                    },
+                }
+
+            def fake_build_run_completion_report(*args, **kwargs):
+                return source_reports[len(captured_submit_args) - 1]
+
+            def fake_build_goal_memory(**kwargs):
+                return {}
+
+            def fake_write_goal_memory(work_root_arg, goal_memory):
+                memory_path = Path(work_root_arg) / "pursue" / "goal-memory.json"
+                memory_path.parent.mkdir(parents=True, exist_ok=True)
+                memory_path.write_text(json.dumps(goal_memory, sort_keys=True), encoding="utf-8")
+                return memory_path
+
+            def fake_queue_summary(**kwargs):
+                return {
+                    "queue_status": "ready",
+                    "next_goal": "Continue with the next optimization task.",
+                }
+
+            try:
+                agentteam_module._submit_args_from_profile = fake_submit_args_from_profile
+                agentteam_module._handle_submit = fake_handle_submit
+                agentteam_module.build_run_completion_report = fake_build_run_completion_report
+                agentteam_module.build_goal_memory = fake_build_goal_memory
+                agentteam_module.write_goal_memory = fake_write_goal_memory
+                agentteam_module._pursue_follow_up_queue_summary = fake_queue_summary
+
+                result = agentteam_module._run_pursue_loop(
+                    SimpleNamespace(
+                        work_root=str(work_root),
+                        taskpack_id="pursue-loop",
+                        goal="Improve the project.",
+                        json=True,
+                        allow_review_gate_follow_up=False,
+                    ),
+                    project_root=tmp_path / "repo",
+                    profile={"work_root": str(work_root), "project_key": "pursue-project"},
+                    goal="Improve the project.",
+                    max_rounds=2,
+                )
+            finally:
+                for name, value in originals.items():
+                    setattr(agentteam_module, name, value)
+
+            self.assertIsNone(captured_submit_args[0]["reuse_repo_map_handoff_path"])
+            self.assertEqual(
+                captured_submit_args[1]["reuse_repo_map_handoff_path"],
+                taskpack_module.REPO_MAP_HANDOFF_PATH,
+            )
+            self.assertEqual(
+                result["runs"][1]["repo_map_handoff_reuse"],
+                taskpack_module.REPO_MAP_HANDOFF_PATH,
+            )
+
     def test_pursue_next_goal_uses_report_next_step(self):
         self.assertEqual(
             _pursue_next_goal(
@@ -9590,6 +9788,75 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("source_taskpack_id: first-pass", drafted["goal"])
             self.assertIn("final_report.md", drafted["goal"])
 
+    def test_agentteam_cli_next_reuses_repo_map_handoff_from_previous_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            baseline = tmp_path / "integration-baseline"
+            _init_repo(repo)
+            profile = build_project_profile(
+                repo,
+                project_key="next-reuse-project",
+                work_root=work_root,
+                author_runtime="fake",
+                default_runtime="fake",
+                one_shot=True,
+            )
+            write_project_profile(repo, profile, force=True)
+            _write_json(
+                baseline / taskpack_module.REPO_MAP_HANDOFF_PATH,
+                {"schema_version": "repo_map_handoff.v1"},
+            )
+            _write_json(
+                work_root / "runs" / "first-pass" / "state" / "two_phase_scheduler_state.json",
+                {
+                    "scheduler_status": "idle",
+                    "integration_baseline": {
+                        "integration_baseline_branch": "agentteam/run/first-pass/integration",
+                        "integration_baseline_worktree_path": str(baseline),
+                        "integration_baseline_head_sha": "abc123",
+                    },
+                },
+            )
+
+            next_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "next",
+                    "--project-root",
+                    str(repo),
+                    "--from-taskpack",
+                    "first-pass",
+                    "--goal",
+                    "Implement the next optimization step using prior context.",
+                    "--taskpack-id",
+                    "second-pass",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(next_completed.returncode, 0, next_completed.stderr)
+            summary = json.loads(next_completed.stdout)
+            self.assertEqual(
+                summary["follow_up"]["repo_map_handoff_reuse"],
+                taskpack_module.REPO_MAP_HANDOFF_PATH,
+            )
+            self.assertEqual(summary["repo_map_handoff_reuse"]["status"], "applied")
+            loaded = load_taskpack(work_root / "drafts" / "second-pass")
+            items = loaded["backlog"]["items"]
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["required_role"], "implementation_worker")
+            self.assertEqual(items[0]["depends_on"], [])
+            self.assertEqual(items[0]["input_artifacts"], [taskpack_module.REPO_MAP_HANDOFF_PATH])
+
     def test_agentteam_cli_next_default_output_is_concise(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -10416,11 +10683,13 @@ class TaskpackTests(unittest.TestCase):
             taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
             agent_pool_path = taskpack_dir / "agent_pool.json"
             agent_pool = json.loads(agent_pool_path.read_text(encoding="utf-8"))
-            agent_pool["role_runtime_profiles"]["implementation_worker"]["adapter"] = "fake"
+            for profile in agent_pool["role_runtime_profiles"].values():
+                profile["adapter"] = "fake"
             agent_pool_path.write_text(json.dumps(agent_pool), encoding="utf-8")
             backlog_path = taskpack_dir / "backlog.json"
             backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
-            backlog["items"][0]["write_scope"] = ["generated/"]
+            for item in backlog["items"]:
+                item["write_scope"] = ["generated/"]
             backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
             frozen = freeze_taskpack(taskpack_dir, frozen_root)
 
@@ -10584,7 +10853,7 @@ class TaskpackTests(unittest.TestCase):
 
             loaded = load_taskpack(result["taskpack_dir"])
             self.assertEqual(loaded["taskpack"]["taskpack_id"], "fake-authored")
-            self.assertEqual(loaded["backlog"]["items"][0]["required_role"], "implementation_worker")
+            self.assertEqual(_implementation_item(loaded["backlog"])["required_role"], "implementation_worker")
             self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
 
     def test_fake_taskpack_author_marks_optimization_goals_code_facing(self):
@@ -10603,7 +10872,7 @@ class TaskpackTests(unittest.TestCase):
             )
 
             loaded = load_taskpack(result["taskpack_dir"])
-            task = loaded["backlog"]["items"][0]
+            task = _implementation_item(loaded["backlog"])
             self.assertEqual(loaded["taskpack"]["goal_kind"], "optimization")
             self.assertEqual(task["work_type"], "code_implementation")
             self.assertIn("baseline_or_current_behavior", task["required_deliverables"])
@@ -10977,6 +11246,39 @@ class TaskpackTests(unittest.TestCase):
                 prompt,
             )
             self.assertIn("avoid safe-but-trivial documentation-only changes unless the operator explicitly asked for documentation", prompt)
+
+    def test_codex_taskpack_author_prompt_requires_role_routed_repo_map_handoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "role-routing"
+            author_context_dir = tmp_path / "drafts" / ".role-routing-author"
+            _init_repo(repo)
+
+            prompt = _author_prompt(
+                project_root=repo,
+                goal="Implement a bounded repository feature.",
+                taskpack_id="role-routing",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                repo_map={
+                    "paths": {
+                        "manifest_path": "manifest.json",
+                        "inventory_path": "inventory.json",
+                        "symbols_path": "symbols.json",
+                    }
+                },
+                verification_profile=None,
+            )
+
+            self.assertIn("repo_map_agent", prompt)
+            self.assertIn("implementation_worker", prompt)
+            self.assertIn("repo_map_handoff", prompt)
+            self.assertIn("depends_on", prompt)
+            self.assertIn("risk_target in L0 or L1", prompt)
+            self.assertIn("risk_target L2", prompt)
+            self.assertIn("risk_target L3", prompt)
+            self.assertIn("missing or unclear risk_target as L2", prompt)
 
     def test_codex_taskpack_author_prompt_requires_broad_framework_quality_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -11515,7 +11817,7 @@ class TaskpackTests(unittest.TestCase):
             )
             backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
             backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
-            backlog["items"][0]["required_deliverables"] = [
+            _implementation_item(backlog)["required_deliverables"] = [
                 "goal_alignment_summary",
                 "verification_summary",
             ]
@@ -11546,7 +11848,7 @@ class TaskpackTests(unittest.TestCase):
             )
 
             loaded = load_taskpack(result["taskpack_dir"])
-            deliverables = loaded["backlog"]["items"][0]["required_deliverables"]
+            deliverables = _implementation_item(loaded["backlog"])["required_deliverables"]
             self.assertIn("roadmap_followup_route_template", deliverables)
             self.assertIn("candidate_changes_or_no_safe_change_rationale", deliverables)
             self.assertIn("non_goals", deliverables)
@@ -11673,8 +11975,9 @@ class TaskpackTests(unittest.TestCase):
             )
             backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
             backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
-            backlog["items"][0]["objective"] = "Audit repository completeness and fix concrete in-repo gaps."
-            backlog["items"][0]["goal_alignment"] = "Check whether the repository is ready to submit."
+            task = _implementation_item(backlog)
+            task["objective"] = "Audit repository completeness and fix concrete in-repo gaps."
+            task["goal_alignment"] = "Check whether the repository is ready to submit."
             backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
 
             with self.assertRaises(TaskpackValidationError) as raised:
@@ -11697,8 +12000,9 @@ class TaskpackTests(unittest.TestCase):
             )
             backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
             backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
-            backlog["items"][0]["objective"] = "Optimize the code."
-            backlog["items"][0]["goal_alignment"] = "This task improves latency."
+            task = _implementation_item(backlog)
+            task["objective"] = "Optimize the code."
+            task["goal_alignment"] = "This task improves latency."
             backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
 
             with self.assertRaises(TaskpackValidationError) as raised:
@@ -11732,8 +12036,9 @@ class TaskpackTests(unittest.TestCase):
             )
             backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
             backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
-            backlog["items"][0]["objective"] = "Make a small safe cleanup."
-            backlog["items"][0]["goal_alignment"] = "This is a low-risk follow-up task."
+            task = _implementation_item(backlog)
+            task["objective"] = "Make a small safe cleanup."
+            task["goal_alignment"] = "This is a low-risk follow-up task."
             backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
 
             with self.assertRaises(TaskpackValidationError) as raised:
@@ -11767,10 +12072,11 @@ class TaskpackTests(unittest.TestCase):
             )
             backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
             backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
-            backlog["items"][0]["objective"] = (
+            task = _implementation_item(backlog)
+            task["objective"] = (
                 "Implement the next step using previous report evidence."
             )
-            backlog["items"][0]["goal_alignment"] = (
+            task["goal_alignment"] = (
                 "This follows the selected next_goal but does not name the source report, "
                 "verification result, blocker, or goal memory that justified the choice."
             )
@@ -11984,19 +12290,25 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
             agent_pool = json.loads((taskpack_dir / "agent_pool.json").read_text(encoding="utf-8"))
             backlog = json.loads((taskpack_dir / "backlog.json").read_text(encoding="utf-8"))
+            implementation_agent = next(
+                agent
+                for agent in agent_pool["agents"]
+                if agent["role"] == "implementation_worker"
+            )
+            implementation_item = _implementation_item(backlog)
             self.assertEqual(agent_pool["scheduler_agent_id"], "agent-scheduler")
             self.assertEqual(
-                agent_pool["agents"][0]["inbox_path"],
+                implementation_agent["inbox_path"],
                 "mailboxes/implementation-worker-1/inbox.jsonl",
             )
             self.assertEqual(
-                agent_pool["agents"][0]["outbox_path"],
+                implementation_agent["outbox_path"],
                 "mailboxes/implementation-worker-1/outbox.jsonl",
             )
-            self.assertEqual(backlog["items"][0]["task_id"], "runtime-optimization-audit-001")
-            self.assertEqual(backlog["items"][0]["objective"], "Audit and optimize runtime path")
-            self.assertEqual(backlog["items"][0]["backlog_status"], "ready")
-            self.assertEqual(backlog["items"][0]["blockers"], [])
+            self.assertEqual(implementation_item["task_id"], "runtime-optimization-audit-001")
+            self.assertEqual(implementation_item["objective"], "Audit and optimize runtime path")
+            self.assertEqual(implementation_item["backlog_status"], "ready")
+            self.assertEqual(implementation_item["blockers"], [])
 
     def test_codex_taskpack_author_unwraps_nested_taskpack_object(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -12301,7 +12613,7 @@ class TaskpackTests(unittest.TestCase):
 
             taskpack = json.loads((taskpack_dir / "taskpack.yaml").read_text(encoding="utf-8"))
             backlog = json.loads((taskpack_dir / "backlog.json").read_text(encoding="utf-8"))
-            task = backlog["items"][0]
+            task = _implementation_item(backlog)
             self.assertEqual(taskpack["goal_kind"], "optimization")
             self.assertEqual(task["work_type"], "code_implementation")
             self.assertIn("baseline_or_current_behavior", task["required_deliverables"])
@@ -12380,7 +12692,7 @@ class TaskpackTests(unittest.TestCase):
             _canonicalize_codex_taskpack_files(taskpack_dir)
 
             backlog = json.loads((taskpack_dir / "backlog.json").read_text(encoding="utf-8"))
-            task = backlog["items"][0]
+            task = _implementation_item(backlog)
             self.assertEqual(task["work_type"], "code_investigation")
             self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
 
@@ -13138,6 +13450,7 @@ class TaskpackTests(unittest.TestCase):
                 work_root=work_root,
                 author_runtime="codex",
                 default_runtime="auto",
+                codex_model="medium",
                 verification_profile={
                     "verification_profile_schema_version": "agentteam_verification_profile.v1",
                     "correctness": {"command": ["python3", "tools/check.py"]},
@@ -13173,6 +13486,11 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(validation["status"], "accepted")
             loaded = load_taskpack(frozen_dir)
             self.assertEqual(loaded["verification"]["command"], ["python3", "tools/check.py"])
+            self.assertEqual(loaded["taskpack"]["runtime"]["codex"]["model"], "medium")
+            self.assertEqual(
+                loaded["agent_pool"]["role_runtime_profiles"]["implementation_worker"]["model"],
+                "medium",
+            )
             self.assertEqual(
                 loaded["verification"]["performance"]["command"],
                 ["python3", "tools/bench.py", "--json"],
@@ -13210,11 +13528,12 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(loaded["taskpack"]["semantic_contract_version"], "task_semantics.v1")
             self.assertEqual(loaded["taskpack"]["project_root"], str(repo.resolve()))
             self.assertEqual(loaded["taskpack"]["original_goal"], "Improve fixture behavior without broad writes.")
-            self.assertIn("goal_alignment", loaded["backlog"]["items"][0])
-            self.assertIn("required_deliverables", loaded["backlog"]["items"][0])
-            self.assertIn("verification_summary", loaded["backlog"]["items"][0]["required_deliverables"])
+            task = _implementation_item(loaded["backlog"])
+            self.assertIn("goal_alignment", task)
+            self.assertIn("required_deliverables", task)
+            self.assertIn("verification_summary", task["required_deliverables"])
             self.assertEqual(loaded["verification"]["command"], ["python3", "-m", "unittest", "discover"])
-            self.assertEqual(loaded["backlog"]["items"][0]["write_scope"], ["src/"])
+            self.assertEqual(task["write_scope"], ["src/"])
 
     def test_deterministic_taskpack_skeleton_keeps_uncertain_semantics_as_slots(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14088,6 +14407,34 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertIn("depends_on", str(raised.exception))
 
+    def test_validate_taskpack_rejects_invalid_artifact_fields_without_type_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject malformed task artifact fields.",
+                draft_root=drafts,
+                taskpack_id="malformed-artifact-fields",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            repo_map_item = backlog["items"][0]
+            implementation_item = _implementation_item(backlog)
+            repo_map_item["expected_output_artifacts"] = ["../outside.json"]
+            implementation_item["input_artifacts"] = ".agentteam/generated/repo_map_handoff.json"
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            message = str(raised.exception)
+            self.assertIn("expected_output_artifacts", message)
+            self.assertIn("input_artifacts", message)
+
     def test_validate_taskpack_rejects_non_string_dependency_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -14593,6 +14940,221 @@ class TaskpackTests(unittest.TestCase):
             self.assertNotIn("--daemon-two-phase-worker-pool", args)
             self.assertIn("--commit-verified-integration", args)
             self.assertEqual(_arg_value(args, "--runtime"), "codex")
+
+    def test_build_taskpack_runtime_args_passes_codex_model_from_runtime_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Build runtime args with a worker model.",
+                draft_root=drafts,
+                taskpack_id="codex-model-runtime-args",
+                write_scope=["src/"],
+                codex_timeout_seconds=123,
+                codex_model="medium",
+            )
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+
+            args = build_taskpack_runtime_args(frozen["frozen_taskpack_dir"], run_root=run_root)
+
+            self.assertEqual(_arg_value(args, "--codex-model"), "medium")
+            self.assertEqual(_arg_value(args, "--codex-timeout-seconds"), "123")
+
+    def test_draft_taskpack_routes_implementation_through_repo_map_then_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement a bounded feature in the repository.",
+                draft_root=drafts,
+                taskpack_id="role-routed-implementation",
+                write_scope=["src/"],
+            )
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            agent_roles = {
+                agent["role"]
+                for agent in loaded["agent_pool"]["agents"]
+            }
+            items = loaded["backlog"]["items"]
+            handoff_path = ".agentteam/generated/repo_map_handoff.json"
+
+            self.assertIn("repo_map_agent", agent_roles)
+            self.assertIn("implementation_worker", agent_roles)
+            self.assertEqual([item["required_role"] for item in items], [
+                "repo_map_agent",
+                "implementation_worker",
+            ])
+            self.assertEqual(items[0]["work_type"], "repository_mapping")
+            self.assertEqual(items[0]["write_scope"], [".agentteam/generated/"])
+            self.assertEqual(items[0]["expected_output_artifacts"], [handoff_path])
+            self.assertEqual(items[1]["depends_on"], [items[0]["task_id"]])
+            self.assertEqual(items[1]["input_artifacts"], [handoff_path])
+            self.assertEqual(items[1]["risk_target"], "L2")
+            self.assertIn("repo_map_handoff", items[0]["required_deliverables"])
+            self.assertIn("repo_map_handoff", items[1]["required_deliverables"])
+            self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
+
+    def test_draft_taskpack_skips_repo_map_for_l1_implementation_risk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement a bounded local code change.",
+                draft_root=drafts,
+                taskpack_id="l1-direct-implementation",
+                write_scope=["src/"],
+                risk_target="L1",
+            )
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            agent_roles = [agent["role"] for agent in loaded["agent_pool"]["agents"]]
+            items = loaded["backlog"]["items"]
+
+            self.assertEqual(agent_roles, ["implementation_worker"])
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["risk_target"], "L1")
+            self.assertEqual(items[0]["required_role"], "implementation_worker")
+            self.assertEqual(items[0].get("input_artifacts"), None)
+            self.assertEqual(items[0]["depends_on"], [])
+            self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
+
+    def test_validate_taskpack_rejects_l1_worker_that_uses_repo_map_handoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement a bounded repository feature.",
+                draft_root=drafts,
+                taskpack_id="l1-with-repo-map",
+                write_scope=["src/"],
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            implementation_item = _implementation_item(backlog)
+            implementation_item["risk_target"] = "L1"
+            _write_json(backlog_path, backlog)
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("L0/L1 tasks must not require repo_map_handoff", str(raised.exception))
+
+    def test_validate_taskpack_rejects_l2_worker_without_repo_map_handoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement a bounded local code change.",
+                draft_root=drafts,
+                taskpack_id="l2-missing-repo-map",
+                write_scope=["src/"],
+                risk_target="L1",
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            item = _implementation_item(backlog)
+            item["risk_target"] = "L2"
+            _write_json(backlog_path, backlog)
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("L2 tasks must consume repo_map_handoff", str(raised.exception))
+
+    def test_validate_taskpack_rejects_l3_worker_without_semantic_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement a bounded local code change.",
+                draft_root=drafts,
+                taskpack_id="l3-direct-implementation",
+                write_scope=["src/"],
+                risk_target="L1",
+            )
+            backlog_path = Path(result["taskpack_dir"]) / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            item = _implementation_item(backlog)
+            item["risk_target"] = "L3"
+            _write_json(backlog_path, backlog)
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(result["taskpack_dir"])
+
+            self.assertIn("L3 tasks require semantic_authoring_required", str(raised.exception))
+
+    def test_reuse_repo_map_handoff_in_taskpack_removes_repo_map_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement the next bounded feature in the repository.",
+                draft_root=drafts,
+                taskpack_id="reuse-repo-map-handoff",
+                write_scope=["src/"],
+            )
+
+            reuse = taskpack_module.reuse_repo_map_handoff_in_taskpack(result["taskpack_dir"])
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            roles = [agent["role"] for agent in loaded["agent_pool"]["agents"]]
+            items = loaded["backlog"]["items"]
+            handoff_path = taskpack_module.REPO_MAP_HANDOFF_PATH
+
+            self.assertEqual(reuse["status"], "applied")
+            self.assertEqual(reuse["handoff_path"], handoff_path)
+            self.assertEqual(reuse["removed_task_count"], 1)
+            self.assertNotIn("repo_map_agent", roles)
+            self.assertEqual(roles, ["implementation_worker"])
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["required_role"], "implementation_worker")
+            self.assertEqual(items[0]["depends_on"], [])
+            self.assertEqual(items[0]["input_artifacts"], [handoff_path])
+            self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
+
+    def test_followup_detects_reusable_repo_map_handoff_from_integration_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            baseline = tmp_path / "integration-baseline"
+            handoff = baseline / taskpack_module.REPO_MAP_HANDOFF_PATH
+            _write_json(handoff, {"schema_version": "repo_map_handoff.v1"})
+            source_report = {
+                "integration_baseline": {
+                    "worktree_path": str(baseline),
+                    "worktree_exists": True,
+                    "branch": "agentteam/run/first-pass/integration",
+                }
+            }
+
+            reuse = agentteam_module._reusable_repo_map_handoff_path(source_report)
+
+            self.assertEqual(reuse, taskpack_module.REPO_MAP_HANDOFF_PATH)
 
     def test_build_taskpack_runtime_args_passes_initial_integration_base_ref(self):
         with tempfile.TemporaryDirectory() as tmp:

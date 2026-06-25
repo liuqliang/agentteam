@@ -39,6 +39,7 @@ def build_project_profile(
     work_root=None,
     author_runtime="codex",
     default_runtime="auto",
+    codex_model=None,
     one_shot=False,
     max_inflight=2,
     max_attempts=1,
@@ -54,6 +55,7 @@ def build_project_profile(
         raise AgentTeamProfileError("author_runtime must be fake or codex")
     if default_runtime not in {"auto", "fake", "codex"}:
         raise AgentTeamProfileError("default_runtime must be auto, fake, or codex")
+    codex_model = _optional_non_empty_string(codex_model, "codex_model")
     if max_inflight < 1:
         raise AgentTeamProfileError("max_inflight must be at least 1")
     if max_attempts < 1:
@@ -67,6 +69,7 @@ def build_project_profile(
         "work_root": str(work_root_path),
         "author_runtime": author_runtime,
         "default_runtime": default_runtime,
+        "codex_model": codex_model,
         "one_shot": bool(one_shot),
         "max_inflight": max_inflight,
         "max_attempts": max_attempts,
@@ -152,6 +155,14 @@ def _command_or_default(command, default, field_name):
     if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
         raise AgentTeamProfileError(f"{field_name} must be a non-empty string array")
     return list(command)
+
+
+def _optional_non_empty_string(value, field_name):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise AgentTeamProfileError(f"{field_name} must be a non-empty string")
+    return value.strip()
 
 
 def write_project_profile(project_root, profile, force=False):

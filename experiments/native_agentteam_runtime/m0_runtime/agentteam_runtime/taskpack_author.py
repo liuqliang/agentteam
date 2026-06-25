@@ -12,6 +12,8 @@ from .taskpack import (
     BROAD_FRAMEWORK_REQUIRED_DELIVERABLES,
     DEFAULT_WORKER_ROLE,
     OPTIMIZATION_CODE_WORK_TYPES,
+    REPO_MAP_HANDOFF_PATH,
+    REPO_MAP_ROLE,
     TASKPACK_SEMANTIC_CONTRACT_VERSION,
     TaskpackValidationError,
     auto_materialize_semantic_taskpack,
@@ -889,11 +891,80 @@ def _write_author_template_bundle(
     project_root = Path(project_root).resolve()
     goal_kind = classify_goal_kind(goal)
     task_id = f"TASK-{taskpack_id.upper().replace('-', '_')}-001"
+    repo_map_task_id = f"TASK-{taskpack_id.upper().replace('-', '_')}-REPO-MAP"
+    role_routed = goal_kind in {"implementation", "optimization"}
     profile = _normalize_taskpack_verification_profile(
         verification_profile,
         project_root=project_root,
     )
     verification_command = profile["correctness"]["command"]
+    agents = []
+    role_runtime_profiles = {DEFAULT_WORKER_ROLE: {"adapter": "codex"}}
+    items = []
+    if role_routed:
+        role_runtime_profiles[REPO_MAP_ROLE] = {"adapter": "codex"}
+        agents.append(
+            {
+                "agent_id": "agent-repo-map-1",
+                "role": REPO_MAP_ROLE,
+                "status": "idle",
+                "inbox_path": "mailboxes/agent-repo-map-1/inbox.jsonl",
+                "outbox_path": "mailboxes/agent-repo-map-1/outbox.jsonl",
+            }
+        )
+        items.append(
+            {
+                "task_id": repo_map_task_id,
+                "objective": "map_repository_and_write_repo_map_handoff",
+                "goal_alignment": _default_goal_alignment(goal),
+                "work_type": "repository_mapping",
+                "required_deliverables": [
+                    "repository_understanding_summary",
+                    "relevant_files_and_entry_points",
+                    "repo_map_handoff",
+                    "verification_candidates",
+                    "implementation_risks",
+                ],
+                "read_scope": ["replace_with_narrow_read_scope"],
+                "write_scope": [".agentteam/generated/"],
+                "expected_output_artifacts": [REPO_MAP_HANDOFF_PATH],
+                "required_role": REPO_MAP_ROLE,
+                "backlog_status": "ready",
+                "risk_target": "L0",
+                "depends_on": [],
+                "blockers": [],
+            }
+        )
+    agents.append(
+        {
+            "agent_id": "agent-implementation-worker-1",
+            "role": DEFAULT_WORKER_ROLE,
+            "status": "idle",
+            "inbox_path": "mailboxes/agent-implementation-worker-1/inbox.jsonl",
+            "outbox_path": "mailboxes/agent-implementation-worker-1/outbox.jsonl",
+        }
+    )
+    implementation_deliverables = list(_default_required_deliverables(goal))
+    if role_routed and "repo_map_handoff" not in implementation_deliverables:
+        implementation_deliverables.insert(0, "repo_map_handoff")
+    items.append(
+        {
+            "task_id": task_id,
+            "objective": "replace_with_bounded_executable_objective",
+            "goal_alignment": _default_goal_alignment(goal),
+            "work_type": _default_work_type(goal_kind),
+            "required_deliverables": implementation_deliverables,
+            "read_scope": ["replace_with_narrow_read_scope"],
+            "write_scope": ["replace_with_narrow_write_scope"],
+            "required_role": DEFAULT_WORKER_ROLE,
+            "input_artifacts": [REPO_MAP_HANDOFF_PATH] if role_routed else [],
+            "backlog_status": "ready",
+            "risk_target": "L2" if role_routed else "L1",
+            "depends_on": [repo_map_task_id] if role_routed else [],
+            "blockers": [],
+        }
+    )
+
     templates = {
         "taskpack.yaml": {
             "taskpack_schema_version": "taskpack.v1",
@@ -923,37 +994,12 @@ def _write_author_template_bundle(
         },
         "agent_pool.json": {
             "scheduler_agent_id": "agent-scheduler",
-            "agents": [
-                {
-                    "agent_id": "agent-implementation-worker-1",
-                    "role": DEFAULT_WORKER_ROLE,
-                    "status": "idle",
-                    "inbox_path": "mailboxes/agent-implementation-worker-1/inbox.jsonl",
-                    "outbox_path": "mailboxes/agent-implementation-worker-1/outbox.jsonl",
-                }
-            ],
-            "role_runtime_profiles": {
-                DEFAULT_WORKER_ROLE: {"adapter": "codex"},
-            },
+            "agents": agents,
+            "role_runtime_profiles": role_runtime_profiles,
         },
         "backlog.json": {
             "backlog_id": f"BL-{taskpack_id}",
-            "items": [
-                {
-                    "task_id": task_id,
-                    "objective": "replace_with_bounded_executable_objective",
-                    "goal_alignment": _default_goal_alignment(goal),
-                    "work_type": _default_work_type(goal_kind),
-                    "required_deliverables": list(_default_required_deliverables(goal)),
-                    "read_scope": ["replace_with_narrow_read_scope"],
-                    "write_scope": ["replace_with_narrow_write_scope"],
-                    "required_role": DEFAULT_WORKER_ROLE,
-                    "backlog_status": "ready",
-                    "risk_target": "L1",
-                    "depends_on": [],
-                    "blockers": [],
-                }
-            ],
+            "items": items,
         },
         "verification.json": {
             "verification_schema_version": "taskpack_verification.v1",
@@ -1138,6 +1184,22 @@ def _author_prompt(
         "- taskpack.files maps agent_pool, backlog, and verification to the JSON filenames above",
         "- agent_pool contains at least one idle agent with role implementation_worker",
         "- backlog.items contains at least one ready item with required_role implementation_worker",
+        (
+            "- risk_target routing is mechanical: treat missing or unclear risk_target as L2; "
+            "risk_target in L0 or L1 means route directly to implementation_worker without "
+            "repo_map_agent, repo_map_handoff, or depends_on on a repo_map task"
+        ),
+        (
+            "- risk_target L2 means the implementation_worker item must consume "
+            "repo_map_handoff, either from a repository_mapping item with required_role "
+            "repo_map_agent or from a reused integration baseline artifact"
+        ),
+        (
+            "- risk_target L3 means do not dispatch a normal implementation_worker item; "
+            "mark semantic_authoring_required with a semantic_authoring_required blocker "
+            "so semantic or architecture review happens before implementation"
+        ),
+        f"- use {REPO_MAP_HANDOFF_PATH} as the repo_map_handoff artifact path",
         "- each backlog item must include work_type, for example code_implementation, code_investigation, or audit",
         "- each backlog item must include goal_alignment explaining how it advances taskpack.original_goal",
         "- each backlog item must include required_deliverables as a non-empty string array",
@@ -1434,6 +1496,186 @@ def _append_text_field(item, field, addition):
         item[field] = f"{text} {addition}"
 
 
+def _canonicalize_risk_target_repo_map_routing(
+    taskpack_data,
+    agent_pool,
+    backlog,
+    *,
+    goal_kind,
+    effective_goal,
+):
+    if goal_kind not in {"implementation", "optimization"}:
+        return
+    if not isinstance(agent_pool, dict) or not isinstance(backlog, dict):
+        return
+    items = backlog.get("items")
+    if not isinstance(items, list):
+        return
+    repo_map_item = _first_repo_map_item(items)
+    for item in items:
+        if not _is_implementation_worker_item(item):
+            continue
+        risk_target = _canonical_risk_target(item)
+        item["risk_target"] = risk_target
+        if risk_target in {"L0", "L1"}:
+            _remove_repo_map_handoff_dependency(item)
+            continue
+        if risk_target == "L2":
+            repo_map_item = repo_map_item or _insert_repo_map_item(
+                items,
+                taskpack_data,
+                effective_goal,
+                read_scope=item.get("read_scope"),
+            )
+            _ensure_repo_map_agent(agent_pool)
+            _ensure_string_list_contains(item, "input_artifacts", REPO_MAP_HANDOFF_PATH)
+            _ensure_string_list_contains(item, "depends_on", repo_map_item["task_id"])
+            _ensure_string_list_contains(item, "required_deliverables", "repo_map_handoff")
+            continue
+        if risk_target == "L3":
+            item["semantic_authoring_required"] = True
+            _ensure_string_list_contains(item, "blockers", "semantic_authoring_required")
+            item["backlog_status"] = "blocked"
+
+
+def _is_implementation_worker_item(item):
+    return (
+        isinstance(item, dict)
+        and item.get("required_role") == DEFAULT_WORKER_ROLE
+        and not _is_repo_map_author_item(item)
+    )
+
+
+def _is_repo_map_author_item(item):
+    if not isinstance(item, dict):
+        return False
+    expected = item.get("expected_output_artifacts")
+    if not isinstance(expected, list):
+        expected = []
+    return (
+        item.get("required_role") == REPO_MAP_ROLE
+        or item.get("work_type") == "repository_mapping"
+        or REPO_MAP_HANDOFF_PATH in expected
+    )
+
+
+def _canonical_risk_target(item):
+    value = item.get("risk_target")
+    if isinstance(value, str) and value.strip() in {"L0", "L1", "L2", "L3"}:
+        return value.strip()
+    return "L2"
+
+
+def _first_repo_map_item(items):
+    for item in items:
+        if _is_repo_map_author_item(item):
+            if not item.get("task_id"):
+                item["task_id"] = "TASK-REPO-MAP"
+            return item
+    return None
+
+
+def _insert_repo_map_item(items, taskpack_data, effective_goal, read_scope=None):
+    taskpack_id = taskpack_data.get("taskpack_id") if isinstance(taskpack_data, dict) else None
+    repo_map_task_id = _unique_repo_map_task_id(items, taskpack_id)
+    goal = effective_goal or taskpack_data.get("goal") or "repository task"
+    item = {
+        "task_id": repo_map_task_id,
+        "objective": "Map repository structure and write repo_map_handoff for the downstream L2 task.",
+        "goal_alignment": _default_goal_alignment(goal),
+        "work_type": "repository_mapping",
+        "required_deliverables": [
+            "repository_understanding_summary",
+            "relevant_files_and_entry_points",
+            "repo_map_handoff",
+            "verification_candidates",
+            "implementation_risks",
+        ],
+        "read_scope": _repo_map_read_scope(read_scope),
+        "write_scope": [".agentteam/generated/"],
+        "expected_output_artifacts": [REPO_MAP_HANDOFF_PATH],
+        "required_role": REPO_MAP_ROLE,
+        "backlog_status": "ready",
+        "risk_target": "L0",
+        "depends_on": [],
+        "blockers": [],
+    }
+    items.insert(0, item)
+    return item
+
+
+def _unique_repo_map_task_id(items, taskpack_id):
+    base = str(taskpack_id or "taskpack").upper()
+    base = re.sub(r"[^A-Z0-9]+", "_", base).strip("_") or "TASKPACK"
+    candidate = f"TASK-{base}-REPO-MAP"
+    existing = {
+        item.get("task_id")
+        for item in items
+        if isinstance(item, dict)
+    }
+    if candidate not in existing:
+        return candidate
+    index = 2
+    while f"{candidate}-{index}" in existing:
+        index += 1
+    return f"{candidate}-{index}"
+
+
+def _repo_map_read_scope(read_scope):
+    if isinstance(read_scope, list) and read_scope and all(isinstance(item, str) for item in read_scope):
+        return list(read_scope)
+    return ["."]
+
+
+def _ensure_repo_map_agent(agent_pool):
+    agents = agent_pool.get("agents")
+    if not isinstance(agents, list):
+        agent_pool["agents"] = []
+        agents = agent_pool["agents"]
+    for agent in agents:
+        if isinstance(agent, dict) and agent.get("role") == REPO_MAP_ROLE:
+            return
+    agents.insert(
+        0,
+        {
+            "agent_id": "agent-repo-map-1",
+            "role": REPO_MAP_ROLE,
+            "status": "idle",
+            "inbox_path": "mailboxes/agent-repo-map-1/inbox.jsonl",
+            "outbox_path": "mailboxes/agent-repo-map-1/outbox.jsonl",
+        },
+    )
+    role_runtime_profiles = agent_pool.get("role_runtime_profiles")
+    if isinstance(role_runtime_profiles, dict) and REPO_MAP_ROLE not in role_runtime_profiles:
+        role_runtime_profiles[REPO_MAP_ROLE] = {"adapter": "codex"}
+
+
+def _remove_repo_map_handoff_dependency(item):
+    input_artifacts = item.get("input_artifacts")
+    if isinstance(input_artifacts, list):
+        item["input_artifacts"] = [
+            artifact for artifact in input_artifacts if artifact != REPO_MAP_HANDOFF_PATH
+        ]
+        if not item["input_artifacts"]:
+            item.pop("input_artifacts", None)
+    depends_on = item.get("depends_on")
+    if isinstance(depends_on, list):
+        item["depends_on"] = [
+            dependency
+            for dependency in depends_on
+            if "REPO-MAP" not in str(dependency).upper()
+        ]
+
+
+def _ensure_string_list_contains(item, key, value):
+    current = item.get(key)
+    if not isinstance(current, list):
+        current = []
+    if value not in current:
+        current.append(value)
+    item[key] = current
+
+
 def _verify_required_taskpack_files(taskpack_dir):
     taskpack_dir = Path(taskpack_dir)
     required = set(REQUIRED_TASKPACK_FILES)
@@ -1559,6 +1801,15 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
                 item["backlog_status"] = item["status"]
             if "blockers" not in item:
                 item["blockers"] = []
+        _canonicalize_risk_target_repo_map_routing(
+            taskpack_data,
+            agent_pool,
+            backlog,
+            goal_kind=goal_kind,
+            effective_goal=effective_goal,
+        )
+        if isinstance(agent_pool, dict):
+            _write_json(agent_pool_path, agent_pool)
         _write_json(backlog_path, backlog)
 
     verification_path = taskpack_dir / files.get("verification", "verification.json")

@@ -70,6 +70,10 @@ _EXPORTS = {
         ".projection_db",
         "read_projected_taskpacks",
     ),
+    "reuse_repo_map_handoff_in_taskpack": (
+        ".taskpack",
+        "reuse_repo_map_handoff_in_taskpack",
+    ),
     "read_projected_run_events": (
         ".projection_db",
         "read_projected_run_events",
