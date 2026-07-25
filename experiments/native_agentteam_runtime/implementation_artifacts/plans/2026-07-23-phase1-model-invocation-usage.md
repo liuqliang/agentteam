@@ -1,8 +1,8 @@
 # Phase 1 Model Invocation Usage Attribution Taskpack
 
 Status: complete semantic taskpack specification. Runtime execution remains
-blocked until the operator approves the revised contract and execution
-preflight gates G0-G5 pass.
+blocked until P0-A is accepted, the operator approves the revised contract,
+and execution preflight gates G0-G5 pass.
 
 This taskpack implements Phase 1 of the operator-approved research positioning
 authority:
@@ -10,6 +10,7 @@ authority:
 - [`agentteam_research_positioning.md`](../../research/agentteam_research_positioning.md)
 - [`2026-07-11-cost-attribution-and-long-run-validation.md`](2026-07-11-cost-attribution-and-long-run-validation.md)
 - [`2026-07-24-phase1-execution-preflight.md`](2026-07-24-phase1-execution-preflight.md)
+- [`2026-07-25-p0a-experiment-readiness-guard.md`](2026-07-25-p0a-experiment-readiness-guard.md)
 - [`2026-07-23-phase1-model-invocation-usage.blueprint.json`](2026-07-23-phase1-model-invocation-usage.blueprint.json)
 
 It does not change the research claims or semantic authority. It turns the
@@ -687,6 +688,7 @@ grounding, and deterministic taskpack skeleton generation are not model calls.
 
 ```text
 PRE-00/PRE-01/PRE-02/PRE-03A-D/PRE-04 runtime prerequisites, operator merge, and active release
+  -> P0-A readiness contract and fail-closed pilot guard
   -> P1-00 contract review and operator approval (before freeze)
   -> clean tracked source commit and G0-G5 verification
   -> P1-01 schema and parser

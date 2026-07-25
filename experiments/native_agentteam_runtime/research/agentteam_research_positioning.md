@@ -55,7 +55,8 @@ schema 和设计文档的概念原型。它足以：
 - 运行有限轮次的长期 `pursue`；
 - 根据风险等级选择直接实现、repo-map handoff 或 semantic gate。
 
-但当前系统只能支持工程可行性测试和探索性运行；补齐 P0 测量能力后才能开始
+但当前系统只能支持工程可行性测试和探索性运行；补齐 P0 experiment readiness
+后才能开始
 受控先导实验，更不能直接支撑正式效果性结论。目前没有任何研究 claim 达到
 `EXPERIMENTALLY_SUPPORTED`。
 
@@ -281,7 +282,12 @@ experiment manifest 之前均视为 exploratory evidence。
 
 ## 8. 当前缺失项
 
-### 8.1 P0：开始正式先导实验前必须补齐
+### 8.1 P0 experiment readiness：开始正式先导实验前必须补齐
+
+这里的 `P0` 是七项实验就绪能力的优先级与完成里程碑，不是下文用于冻结研究
+主张的 `Phase 0`，也不是 Phase 1 execution preflight 中的 `PRE-00`。P0 跨越
+P0-A 前置治理、Phase 1 完整 usage attribution 和 P0-B experiment harness；
+因此 Phase 1 是完成 P0 的组成部分，而不是 P0 完成后才开始的工作。
 
 | 缺失能力 | 最低验收条件 | 原因 |
 | --- | --- | --- |

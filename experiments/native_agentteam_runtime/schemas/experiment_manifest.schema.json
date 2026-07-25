@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/experiment_manifest.schema.json",
+  "title": "AgentTeam immutable experiment manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "instance_id",
+    "repository",
+    "goal",
+    "acceptance",
+    "mode",
+    "runtime",
+    "seed",
+    "blind_gold",
+    "budgets",
+    "usage_contract_version",
+    "readiness_binding"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "agentteam_experiment_manifest.v1"
+    },
+    "experiment_id": {
+      "$ref": "#/$defs/safe_id"
+    },
+    "instance_id": {
+      "$ref": "#/$defs/safe_id"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "commit",
+        "git_object_format"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "git_object_format": {
+          "enum": [
+            "sha1",
+            "sha256"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "git_object_format": {
+                "const": "sha1"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "commit": {
+                "pattern": "^[0-9a-f]{40}$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "git_object_format": {
+                "const": "sha256"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "commit": {
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "goal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "constraints"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command"
+      ],
+      "properties": {
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "mode": {
+      "enum": [
+        "single_codex",
+        "agentteam_direct",
+        "agentteam_full"
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "model",
+        "sandbox_policy"
+      ],
+      "properties": {
+        "backend": {
+          "const": "codex"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sandbox_policy": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "blind_gold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy"
+      ],
+      "properties": {
+        "policy": {
+          "const": "unavailable_to_runtime"
+        }
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_total_tokens",
+        "max_wall_time_seconds",
+        "stop_boundary"
+      ],
+      "properties": {
+        "max_total_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_wall_time_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "stop_boundary": {
+          "const": "scheduler_safe"
+        }
+      }
+    },
+    "usage_contract_version": {
+      "const": "model_invocation_usage.v1"
+    },
+    "readiness_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "record_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "p0_experiment_readiness.v1"
+        },
+        "record_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    }
+  }
+}

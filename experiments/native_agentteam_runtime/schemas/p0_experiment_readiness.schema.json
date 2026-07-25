@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/p0_experiment_readiness.schema.json",
+  "title": "AgentTeam P0 experiment readiness record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_id",
+    "updated_at",
+    "overall_status",
+    "pilot_authorized",
+    "next_required_phase",
+    "capabilities"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "p0_experiment_readiness.v1"
+    },
+    "record_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "overall_status": {
+      "enum": [
+        "blocked",
+        "passed"
+      ]
+    },
+    "pilot_authorized": {
+      "type": "boolean"
+    },
+    "next_required_phase": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "capability_id",
+          "status",
+          "reason",
+          "evidence"
+        ],
+        "properties": {
+          "capability_id": {
+            "enum": [
+              "invocation_level_real_usage",
+              "three_mode_experiment_harness",
+              "immutable_experiment_manifest",
+              "clean_reset_and_blind_gold_isolation",
+              "actual_budget_enforcement",
+              "operator_action_ledger",
+              "machine_readable_result_bundle"
+            ]
+          },
+          "status": {
+            "enum": [
+              "missing",
+              "partial",
+              "passed"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    }
+  }
+}

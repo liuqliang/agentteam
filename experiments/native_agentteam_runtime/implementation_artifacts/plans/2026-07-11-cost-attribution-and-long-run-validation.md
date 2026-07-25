@@ -18,7 +18,8 @@ or artifact types before its net benefit is measurable.
 The next route is:
 
 ```text
-complete model-usage attribution
+complete P0-A readiness contract and pilot guard
+  -> complete model-usage attribution
   -> calibrate collection on short tasks
   -> compare single-Codex and AgentTeam paths on medium tasks
   -> validate crash recovery
@@ -154,6 +155,14 @@ Counting rules:
 The implementation-ready Phase 1 taskpack for Tasks 1 and 2 is:
 
 [`2026-07-23-phase1-model-invocation-usage.md`](2026-07-23-phase1-model-invocation-usage.md).
+
+Its precondition is the bounded P0-A task:
+
+[`2026-07-25-p0a-experiment-readiness-guard.md`](2026-07-25-p0a-experiment-readiness-guard.md).
+
+P0-A records the seven-capability experiment-readiness state, validates the
+future immutable experiment manifest, and fails closed before pilot execution.
+It does not implement usage attribution or an experiment runner.
 
 It freezes invocation identity, token counting, authority, stage routing,
 projection, verification, and integration gates. Execute its Phase 1A capture

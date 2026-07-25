@@ -1501,11 +1501,24 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is PRE-00 in
-`implementation_artifacts/plans/2026-07-24-phase1-execution-preflight.md`,
-followed by PRE-01, PRE-02A, PRE-02B, PRE-03A through PRE-03D, and PRE-04. After their
-reviewed runtime release is active, complete the Phase 1 contract approval,
-materialize the tracked blueprint, and execute its capture, replay, projection,
-controller, and query gates as one milestone. Do not begin the real
-long-running comparison until short calibration reaches the usage-coverage and
-reconciliation gates in the linked route note.
+PRE-00 through PRE-04 in
+`implementation_artifacts/plans/2026-07-24-phase1-execution-preflight.md`
+are complete in the reviewed `phase1-pre04-7f6121d` runtime release.
+
+The next ordered route is:
+
+1. complete P0-A from
+   `implementation_artifacts/plans/2026-07-25-p0a-experiment-readiness-guard.md`;
+2. complete the Phase 1 contract approval, materialize the tracked blueprint,
+   and execute its capture, replay, projection, controller, and query gates as
+   one milestone;
+3. implement P0-B experiment harness, reset/isolation, budgets, operator
+   ledger, and result bundle;
+4. begin short calibration only after the machine-readable readiness guard
+   reports all seven P0 experiment-readiness capabilities passed.
+
+`P0 experiment readiness`, research `Phase 0`, and execution-preflight
+`PRE-00` through `PRE-04` are distinct terms. Phase 1 usage attribution is a
+component of P0 closure, not work that starts after P0 is complete. Do not
+begin the real long-running comparison until short calibration reaches the
+usage-coverage and reconciliation gates in the linked route note.

@@ -1,0 +1,70 @@
+{
+  "schema_version": "p0_experiment_readiness.v1",
+  "record_id": "native-runtime-p0-readiness",
+  "updated_at": "2026-07-25T00:00:00Z",
+  "overall_status": "blocked",
+  "pilot_authorized": false,
+  "next_required_phase": "Phase 1 model invocation usage attribution",
+  "capabilities": [
+    {
+      "capability_id": "invocation_level_real_usage",
+      "status": "partial",
+      "reason": "Worker result usage is available, but author, planner, repo-map, review, follow-up, and semantic invocations are not yet completely attributed.",
+      "evidence": [
+        "agentteam_runtime/token_usage.py",
+        "implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
+      ]
+    },
+    {
+      "capability_id": "three_mode_experiment_harness",
+      "status": "missing",
+      "reason": "No common runner executes single_codex, agentteam_direct, and agentteam_full from one immutable manifest.",
+      "evidence": [
+        "research/agentteam_research_positioning.md#81-p0-experiment-readiness"
+      ]
+    },
+    {
+      "capability_id": "immutable_experiment_manifest",
+      "status": "partial",
+      "reason": "P0-A defines and validates the minimal manifest contract, but retained manifest publication and execution are deferred to P0-B.",
+      "evidence": [
+        "schemas/experiment_manifest.schema.json",
+        "implementation_artifacts/plans/2026-07-25-p0a-experiment-readiness-guard.md"
+      ]
+    },
+    {
+      "capability_id": "clean_reset_and_blind_gold_isolation",
+      "status": "missing",
+      "reason": "Attempt worktrees exist, but experiment-level clean reset and enforced gold-patch denial are not implemented.",
+      "evidence": [
+        "implementation_artifacts/plans/2026-07-11-cost-attribution-and-long-run-validation.md"
+      ]
+    },
+    {
+      "capability_id": "actual_budget_enforcement",
+      "status": "missing",
+      "reason": "Timeouts, retry limits, and round limits exist, but equal token and wall-time experiment budgets with resumable safe-boundary stops do not.",
+      "evidence": [
+        "implementation_artifacts/plans/2026-07-11-cost-attribution-and-long-run-validation.md#task-3-budget-and-stop-policy"
+      ]
+    },
+    {
+      "capability_id": "operator_action_ledger",
+      "status": "partial",
+      "reason": "Operator events exist, but expected actions, corrective interventions, and decision escalations are not normalized into an experiment ledger.",
+      "evidence": [
+        "agentteam_runtime/operator_control.py",
+        "agentteam_runtime/m0_runtime.py"
+      ]
+    },
+    {
+      "capability_id": "machine_readable_result_bundle",
+      "status": "partial",
+      "reason": "Events, reports, and rebuildable projections exist, but no immutable experiment result bundle reconciles acceptance, usage, time, attempts, interventions, and artifact bytes.",
+      "evidence": [
+        "agentteam_runtime/operator_report.py",
+        "agentteam_runtime/projection_db.py"
+      ]
+    }
+  ]
+}

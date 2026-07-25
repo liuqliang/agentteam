@@ -52,6 +52,12 @@ from .goal_memory import (
     write_goal_memory,
 )
 from .follow_up_queue import build_follow_up_queue_summary, render_follow_up_queue_text
+from .experiment_readiness import (
+    ExperimentReadinessError,
+    build_p0_readiness_summary,
+    check_pilot_authorization,
+    validate_experiment_manifest,
+)
 from .repo_grounding import build_repo_grounding, render_repo_grounding_text
 from .semantic_feedback import (
     list_semantic_feedback_proposals,
@@ -248,8 +254,22 @@ _HELP_COMMANDS = [
             "agentteam pursue --goal \"持续优化准确率和延迟\" --max-rounds 3 --json",
         ],
         "notes": [
-            "Stops at manual gates, permission requests, blockers, review gates, or budget limits.",
+            "Stops at the configured round limit, manual gates, permission requests, blockers, or review gates.",
+            "Token and wall-time experiment budget enforcement is not available until P0-B.",
             "Does not merge source changes or bypass operator review.",
+        ],
+    },
+    {
+        "name": "experiment",
+        "summary": "Inspect P0 experiment readiness and validate future pilot manifests.",
+        "examples": [
+            "agentteam experiment readiness --json",
+            "agentteam experiment validate-manifest --manifest <path> --json",
+            "agentteam experiment check-pilot --manifest <path> --json",
+        ],
+        "notes": [
+            "P0-A commands never launch a provider or mutate a target repository.",
+            "check-pilot fails closed until all seven readiness capabilities pass.",
         ],
     },
     {
@@ -551,6 +571,7 @@ def _build_parser():
     _add_report_parser(subcommands)
     _add_chat_parser(subcommands)
     _add_db_parser(subcommands)
+    _add_experiment_parser(subcommands)
     _add_doctor_parser(subcommands)
     _add_grounding_parser(subcommands)
     _add_logs_parser(subcommands)
@@ -1259,6 +1280,44 @@ def _add_db_parser(subcommands):
     check.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
     check.add_argument("--json", action="store_true", help="Print check summary as JSON.")
     check.set_defaults(handler=_handle_db)
+
+
+def _add_experiment_parser(subcommands):
+    parser = subcommands.add_parser(
+        "experiment",
+        help="Inspect P0 readiness and validate immutable experiment manifests.",
+    )
+    experiment_subcommands = parser.add_subparsers(
+        dest="experiment_command",
+        required=True,
+        parser_class=JsonArgumentParser,
+    )
+    readiness = experiment_subcommands.add_parser(
+        "readiness",
+        help="Validate and report the runtime-packaged P0 readiness record.",
+    )
+    readiness.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the complete readiness summary as JSON.",
+    )
+    readiness.set_defaults(handler=_handle_experiment)
+
+    validate = experiment_subcommands.add_parser(
+        "validate-manifest",
+        help="Validate a future experiment manifest without authorizing execution.",
+    )
+    validate.add_argument("--manifest", required=True, help="Experiment manifest JSON path.")
+    validate.add_argument("--json", action="store_true", help="Print validation details as JSON.")
+    validate.set_defaults(handler=_handle_experiment)
+
+    check = experiment_subcommands.add_parser(
+        "check-pilot",
+        help="Fail closed unless readiness and manifest binding authorize a pilot.",
+    )
+    check.add_argument("--manifest", required=True, help="Experiment manifest JSON path.")
+    check.add_argument("--json", action="store_true", help="Print authorization details as JSON.")
+    check.set_defaults(handler=_handle_experiment)
 
 
 def _add_doctor_parser(subcommands):
@@ -5247,6 +5306,48 @@ def _handle_db(args):
     return 0
 
 
+def _handle_experiment(args):
+    try:
+        if args.experiment_command == "readiness":
+            summary = build_p0_readiness_summary()
+            if args.json:
+                return summary
+            _write_experiment_readiness_text(summary)
+            return 0
+        if args.experiment_command == "validate-manifest":
+            summary = validate_experiment_manifest(args.manifest)
+            if args.json:
+                return {
+                    key: value
+                    for key, value in summary.items()
+                    if key != "manifest"
+                }
+            _write_experiment_manifest_text(summary)
+            return 0
+        if args.experiment_command == "check-pilot":
+            summary = check_pilot_authorization(args.manifest)
+            if not summary["pilot_authorized"]:
+                raise AgentTeamCliError(
+                    "P0 experiment readiness blocks pilot execution",
+                    pilot_authorized=False,
+                    blockers=summary["blockers"],
+                    readiness_record_sha256=summary["readiness"]["record_sha256"],
+                    manifest_sha256=summary["manifest"]["manifest_sha256"],
+                    provider_calls=0,
+                    target_mutations=0,
+                )
+            if args.json:
+                return summary
+            _write_experiment_pilot_text(summary)
+            return 0
+    except ExperimentReadinessError as exc:
+        raise AgentTeamCliError(str(exc)) from exc
+    raise AgentTeamCliError(
+        "unsupported experiment command",
+        experiment_command=args.experiment_command,
+    )
+
+
 def _handle_stats(args):
     project_root = Path(args.project_root or ".").resolve()
     profile = load_project_profile(project_root)
@@ -6236,6 +6337,56 @@ def _write_db_text(summary):
     mismatches = summary.get("mismatches")
     if mismatches:
         lines.append(f"mismatches: {', '.join(mismatches)}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _write_experiment_readiness_text(summary):
+    counts = summary["capability_counts"]
+    lines = [
+        f"p0_experiment_readiness: {summary['readiness_status']}",
+        f"pilot_authorized: {str(summary['pilot_authorized']).lower()}",
+        f"capabilities: {summary['capability_count']}",
+        (
+            "capability_status: "
+            f"{counts['passed']} passed, {counts['partial']} partial, "
+            f"{counts['missing']} missing"
+        ),
+        f"record_sha256: {summary['record_sha256']}",
+        f"next_required_phase: {summary['next_required_phase']}",
+    ]
+    for blocker in summary["blockers"]:
+        lines.append(
+            f"blocker: {blocker['capability_id']} "
+            f"status={blocker['status']} reason={blocker['reason']}"
+        )
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _write_experiment_manifest_text(summary):
+    lines = [
+        f"manifest_status: {summary['manifest_status']}",
+        f"experiment_id: {summary['experiment_id']}",
+        f"instance_id: {summary['instance_id']}",
+        f"mode: {summary['mode']}",
+        f"repository_commit: {summary['repository_commit']}",
+        f"manifest_sha256: {summary['manifest_sha256']}",
+        "pilot_authorized: not_evaluated",
+    ]
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _write_experiment_pilot_text(summary):
+    lines = [
+        "pilot_authorized: true",
+        f"experiment_id: {summary['manifest']['experiment_id']}",
+        f"manifest_sha256: {summary['manifest']['manifest_sha256']}",
+        f"readiness_record_sha256: {summary['readiness']['record_sha256']}",
+        "provider_calls: 0",
+        "target_mutations: 0",
+    ]
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 

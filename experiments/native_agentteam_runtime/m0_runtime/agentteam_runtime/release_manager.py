@@ -1277,13 +1277,29 @@ def _validate_release_root(release_root):
     launcher = release_root / "agentteam"
     runtime_package = release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
     schema_root = release_root / "experiments" / "native_agentteam_runtime" / "schemas"
+    readiness_record = (
+        runtime_package / "data" / "p0_experiment_readiness.v1.json"
+    )
     if not launcher.exists():
         raise AgentTeamReleaseError(f"release source is missing launcher: {launcher}")
     if not runtime_package.exists():
         raise AgentTeamReleaseError(f"release source is missing runtime package: {runtime_package}")
-    if not (schema_root / "taskpack_blueprint.schema.json").is_file():
+    required_schemas = (
+        "taskpack_blueprint.schema.json",
+        "p0_experiment_readiness.schema.json",
+        "experiment_manifest.schema.json",
+    )
+    missing_schemas = [
+        name for name in required_schemas if not (schema_root / name).is_file()
+    ]
+    if missing_schemas:
         raise AgentTeamReleaseError(
-            f"release source is missing runtime schemas: {schema_root}"
+            "release source is missing runtime schemas: "
+            + ", ".join(missing_schemas)
+        )
+    if not readiness_record.is_file():
+        raise AgentTeamReleaseError(
+            f"release source is missing P0 readiness data: {readiness_record}"
         )
 
 
