@@ -3586,7 +3586,10 @@ def _gate_approve(
             if completion is not None:
                 summary["run_completion"] = completion
             return summary
-        _require_clean_gate_schema_paths(_gate_integration_worktree(context), declaration)
+        _require_clean_gate_schema_paths(
+            _gate_integration_worktree(context, current["record"]),
+            declaration,
+        )
         diff_sha256 = _gate_review_diff_sha256(
             project_root,
             current["record"],
@@ -4204,16 +4207,84 @@ def _build_gate_guided_completion_report(
 def _apply_post_backlog_gate_report_guidance(report, gate_summary):
     report = dict(report)
     report["post_backlog_gates"] = gate_summary
-    report["review_hint"] = gate_summary.get("next_action")
-    if gate_summary.get("all_passed"):
-        return report
-    report["run_status"] = "awaiting_post_backlog_gates"
-    report["scheduler_status"] = "awaiting_post_backlog_gates"
+    operator_view = (
+        gate_summary.get("operator_view")
+        if isinstance(gate_summary.get("operator_view"), dict)
+        else {}
+    )
+    commands = dict(operator_view.get("review_commands") or {})
+    report["operator_review"] = operator_view
+    if isinstance(operator_view.get("integration_baseline"), dict):
+        report["integration_baseline"] = operator_view["integration_baseline"]
+    report["review_hint"] = (
+        gate_summary.get("next_action")
+        or commands.get("integrate")
+        or operator_view.get("repair_action")
+    )
     completion = (
         dict(report.get("completion_summary"))
         if isinstance(report.get("completion_summary"), dict)
         else {}
     )
+    review_gate = (
+        dict(completion.get("review_gate"))
+        if isinstance(completion.get("review_gate"), dict)
+        else {}
+    )
+    baseline = operator_view.get("integration_baseline") or {}
+    gate_review = operator_view.get("review_gate") or {}
+    review_gate.update(
+        {
+            "status": (
+                gate_review.get("state")
+                or (
+                    "passed"
+                    if gate_summary.get("all_passed")
+                    else gate_summary.get("state")
+                )
+            ),
+            "gate_epoch": operator_view.get("gate_epoch"),
+            "gate_id": gate_review.get("gate_id"),
+            "integration_branch": operator_view.get("integration_branch"),
+            "base_head": baseline.get("base_sha"),
+            "baseline_head": operator_view.get("integration_head_sha"),
+            "historical_scheduler_head": operator_view.get(
+                "historical_scheduler_head_sha"
+            ),
+            "integration_worktree": operator_view.get("integration_worktree"),
+            "integration_head_relation": gate_review.get(
+                "integration_head_relation"
+            ),
+            "commit_field": gate_review.get("commit_field"),
+            "report_paths": gate_review.get("changed_paths"),
+            "expected_report_paths": gate_review.get("expected_report_paths"),
+            "report_command": commands.get("report"),
+            "paths_command": commands.get("paths"),
+            "diff_command": commands.get("diff"),
+            "approval_command": commands.get("approve"),
+            "integrate_command": commands.get("integrate"),
+            "validated_approval_identity": (
+                (gate_review.get("validated_approval") or {}).get(
+                    "operator_identity"
+                )
+            ),
+            "repair_action": operator_view.get("repair_action"),
+        }
+    )
+    completion["review_gate"] = {
+        key: value for key, value in review_gate.items() if value is not None
+    }
+    report["completion_summary"] = completion
+    if gate_summary.get("all_passed"):
+        completion["integration_recommendation"] = (
+            "Review the fresh gate-bound report and diff, then run "
+            f"`{commands.get('integrate')}`."
+            if commands.get("integrate")
+            else "The gate-bound integration view is unavailable; fail closed."
+        )
+        return report
+    report["run_status"] = "awaiting_post_backlog_gates"
+    report["scheduler_status"] = "awaiting_post_backlog_gates"
     completion["integration_recommendation"] = (
         "Complete the declared post-backlog gates before integration: "
         f"{gate_summary.get('next_action') or 'review gate status'}."
@@ -4221,15 +4292,13 @@ def _apply_post_backlog_gate_report_guidance(report, gate_summary):
     completion["status_line"] = (
         "awaiting_post_backlog_gates: backlog verified idle; milestone incomplete"
     )
-    review_gate = (
-        dict(completion.get("review_gate"))
-        if isinstance(completion.get("review_gate"), dict)
-        else {}
+    completion["review_gate"]["status"] = (
+        "failed_closed"
+        if gate_summary.get("state") == "failed_closed"
+        else "post_backlog_gates_pending"
     )
-    review_gate["status"] = "post_backlog_gates_pending"
-    review_gate.pop("integrate_command", None)
-    review_gate["gate_command"] = gate_summary.get("next_action")
-    completion["review_gate"] = review_gate
+    completion["review_gate"].pop("integrate_command", None)
+    completion["review_gate"]["gate_command"] = gate_summary.get("next_action")
     report["completion_summary"] = completion
     return report
     return 0
@@ -6011,6 +6080,14 @@ def _build_run_status_summary(profile, run_dir):
     gate_summary = _post_backlog_gate_summary(profile, run_dir)
     if gate_summary is not None:
         summary["post_backlog_gates"] = gate_summary
+        operator_view = (
+            gate_summary.get("operator_view")
+            if isinstance(gate_summary.get("operator_view"), dict)
+            else {}
+        )
+        if isinstance(operator_view.get("integration_baseline"), dict):
+            summary["integration_baseline"] = operator_view["integration_baseline"]
+        summary["operator_review"] = operator_view
         if not gate_summary.get("all_passed") and not _status_summary_is_active(summary):
             summary.update(
                 {
@@ -6073,6 +6150,37 @@ def _status_operator_guidance(summary):
                 "Complete the declared post-backlog gates before integration is exposed."
             ),
         }
+    if gate_summary is not None and gate_summary.get("all_passed"):
+        operator_view = (
+            summary.get("operator_review")
+            if isinstance(summary.get("operator_review"), dict)
+            else {}
+        )
+        commands = operator_view.get("review_commands") or {}
+        baseline = (
+            summary.get("integration_baseline")
+            if isinstance(summary.get("integration_baseline"), dict)
+            else {}
+        )
+        if commands.get("integrate") and not _integration_baseline_is_handled(
+            baseline
+        ):
+            actions = [
+                commands.get("report") or f"agentteam report --taskpack {run_id}",
+                commands.get("paths") or f"agentteam paths --taskpack {run_id}",
+            ]
+            if commands.get("diff"):
+                actions.append(commands["diff"])
+            actions.append(
+                f"review the validated gate result before {commands['integrate']}"
+            )
+            return {
+                "next_action": "; ".join(actions),
+                "operator_hint": (
+                    "All post-backlog gates passed; review the fresh Git-bound "
+                    "integration head before source merge, push, or release activation."
+                ),
+            }
     pursue_recap = summary.get("pursue_recap") if isinstance(summary.get("pursue_recap"), dict) else {}
     pursue_action = _first_non_empty_text(pursue_recap.get("operator_next_action"))
     pursue_queue = _effective_pursue_queue_for_status(summary, pursue_recap, pursue_action)
@@ -6204,10 +6312,19 @@ def _build_paths_summary(args, profile, run_dir):
     state = _paths_run_state(run_dir)
     final_report = run_dir / "reports" / "final_report.md"
     integration_baseline = _paths_integration_baseline(run_dir, state)
-    review_commands = _review_commands_for_run(run_dir.name, integration_baseline)
     gate_summary = _post_backlog_gate_summary(profile, run_dir)
-    if gate_summary is not None and not gate_summary.get("all_passed"):
-        review_commands.pop("integrate", None)
+    operator_view = None
+    if gate_summary is not None:
+        operator_view = (
+            gate_summary.get("operator_view")
+            if isinstance(gate_summary.get("operator_view"), dict)
+            else {}
+        )
+        if isinstance(operator_view.get("integration_baseline"), dict):
+            integration_baseline = operator_view["integration_baseline"]
+        review_commands = dict(operator_view.get("review_commands") or {})
+    else:
+        review_commands = _review_commands_for_run(run_dir.name, integration_baseline)
     return {
         "project": profile.get("project_key") or "unknown",
         "project_root": str(project_root) if project_root else None,
@@ -6227,6 +6344,7 @@ def _build_paths_summary(args, profile, run_dir):
         "integration_baseline": integration_baseline,
         "review_commands": review_commands,
         "post_backlog_gates": gate_summary,
+        "operator_review": operator_view,
         "read_only_review_commands": {
             key: review_commands[key]
             for key in ["report", "paths", "diff"]
@@ -6283,6 +6401,8 @@ def _paths_integration_base_sha(state):
 def _write_paths_text(summary):
     baseline = summary.get("integration_baseline") or {}
     review_commands = summary.get("review_commands") or {}
+    operator_review = summary.get("operator_review") or {}
+    review_gate = operator_review.get("review_gate") or {}
     lines = [
         f"project: {summary['project']}",
         f"project_root: {summary.get('project_root') or 'unknown'}",
@@ -6295,9 +6415,33 @@ def _write_paths_text(summary):
         f"integration_baseline_worktree: {baseline.get('worktree_path') or 'none'}",
         f"integration_baseline_base: {baseline.get('base_sha') or 'unknown'}",
         f"integration_baseline_head: {baseline.get('head_sha') or 'unknown'}",
+        f"integration_authority: {baseline.get('authority') or 'scheduler_state'}",
     ]
+    if operator_review:
+        lines.extend(
+            [
+                f"gate_epoch: {operator_review.get('gate_epoch') or 'none'}",
+                f"gate_integration_head: {operator_review.get('integration_head_sha') or 'unknown'}",
+            ]
+        )
+    if review_gate:
+        lines.append(
+            "P1-06E_relation: "
+            f"{review_gate.get('commit_field') or 'commit'} "
+            f"{review_gate.get('integration_head_relation') or 'unknown'} "
+            "integration_head"
+        )
+        for path in review_gate.get("changed_paths") or []:
+            lines.append(f"P1-06E_changed_path: {path}")
+        approval = review_gate.get("validated_approval") or {}
+        if approval.get("operator_identity"):
+            lines.append(
+                f"P1-06E_validated_approval_identity: {approval['operator_identity']}"
+            )
+    if operator_review.get("repair_action"):
+        lines.append(f"repair_action: {operator_review['repair_action']}")
     if review_commands:
-        for key in ["report", "paths", "diff", "integrate"]:
+        for key in ["report", "paths", "diff", "approve", "integrate"]:
             command = review_commands.get(key)
             if command:
                 lines.append(f"review_{key}: {command}")
@@ -6681,15 +6825,83 @@ def _require_clean_gate_schema_paths(project_root, declaration):
         )
 
 
-def _gate_integration_worktree(context):
+def _git_worktree_for_branch(project_root, branch, expected_head):
+    full_ref = _git_stdout(
+        project_root,
+        ["rev-parse", "--symbolic-full-name", branch],
+    )
+    listing = _git_stdout(project_root, ["worktree", "list", "--porcelain"])
+    matches = []
+    for block in listing.split("\n\n"):
+        fields = {}
+        for line in block.splitlines():
+            key, separator, value = line.partition(" ")
+            if separator:
+                fields[key] = value
+            elif line:
+                fields[line] = True
+        if fields.get("branch") == full_ref:
+            matches.append(fields)
+    if len(matches) != 1:
+        raise AgentTeamCliError(
+            "current gate integration branch does not have exactly one attached worktree",
+            integration_branch=branch,
+            matching_worktree_count=len(matches),
+        )
+    record = matches[0]
+    worktree_text = record.get("worktree")
+    if not worktree_text or not Path(worktree_text).is_dir():
+        raise AgentTeamCliError(
+            "current gate integration worktree is missing",
+            integration_branch=branch,
+            worktree_path=worktree_text,
+        )
+    worktree = Path(worktree_text).resolve()
+    attached = _git_completed(
+        worktree,
+        ["symbolic-ref", "--quiet", "HEAD"],
+        check=False,
+    )
+    if attached.returncode != 0 or attached.stdout.strip() != full_ref:
+        raise AgentTeamCliError(
+            "current gate integration worktree is detached or attached to another branch",
+            integration_branch=branch,
+            worktree_path=str(worktree),
+            attached_ref=attached.stdout.strip() or None,
+        )
+    worktree_head = _git_stdout(worktree, ["rev-parse", "HEAD"])
+    listed_head = record.get("HEAD")
+    if worktree_head != expected_head or listed_head != expected_head:
+        raise AgentTeamCliError(
+            "current gate integration branch ref and worktree head do not match",
+            integration_branch=branch,
+            branch_head=expected_head,
+            worktree_head=worktree_head,
+            listed_worktree_head=listed_head,
+        )
+    return worktree
+
+
+def _gate_integration_worktree(context, epoch=None):
+    if isinstance(epoch, dict) and epoch.get("integration_branch"):
+        head = _resolved_epoch_integration_head(context["project_root"], epoch)
+        return _git_worktree_for_branch(
+            context["project_root"],
+            epoch["integration_branch"],
+            head,
+        )
     baseline = _paths_integration_baseline(
         context["run_dir"],
         _paths_run_state(context["run_dir"]),
     )
-    worktree = baseline.get("worktree_path")
-    if not worktree or not Path(worktree).is_dir():
-        raise AgentTeamCliError("integration baseline worktree is unavailable")
-    return Path(worktree).resolve()
+    branch = baseline.get("branch")
+    if not branch:
+        raise AgentTeamCliError("integration baseline branch is unavailable")
+    head = _git_stdout(
+        context["project_root"],
+        ["rev-parse", "--verify", f"{branch}^{{commit}}"],
+    )
+    return _git_worktree_for_branch(context["project_root"], branch, head)
 
 
 def _schema_from_git(project_root, head, schema_path):
@@ -6892,7 +7104,10 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
             != current["record"]["integration_head_sha"]
         ):
             reasons.append("receipt integration baseline binding is stale")
-        _require_clean_gate_schema_paths(_gate_integration_worktree(context), declaration)
+        _require_clean_gate_schema_paths(
+            _gate_integration_worktree(context, current["record"]),
+            declaration,
+        )
         relative_run = Path(receipt["evidence_run_relative_path"])
         if relative_run.is_absolute() or ".." in relative_run.parts:
             raise AgentTeamCliError("receipt evidence run path is unsafe")
@@ -7080,42 +7295,290 @@ def _post_backlog_gate_notification_sink(profile):
     )
 
 
+def _gate_operator_repair_action(context, current=None):
+    run_id = context["run_dir"].name
+    if current is None:
+        epochs_root = context["epochs_root"]
+        if not epochs_root.exists() or not any(epochs_root.iterdir()):
+            return (
+                f"agentteam gate seal-baseline --taskpack {run_id} "
+                "--expected-integration-head <fresh-integration-head> "
+                "--authorize-revalidation"
+            )
+        epoch_number = "<current-epoch>"
+        target_head = "<fresh-target-head>"
+    else:
+        record = current["record"]
+        epoch_number = record["epoch_number"]
+        completed = _git_completed(
+            context["project_root"],
+            ["rev-parse", "--verify", f"{record['target_branch']}^{{commit}}"],
+            check=False,
+        )
+        target_head = completed.stdout.strip() if completed.returncode == 0 else "<fresh-target-head>"
+    return (
+        f"agentteam gate refresh-baseline --taskpack {run_id} "
+        f"--expected-gate-epoch {epoch_number} "
+        f"--expected-target-head {target_head} --authorize-revalidation"
+    )
+
+
+def _historical_only_integration_baseline(run_dir):
+    cached = _paths_integration_baseline(
+        run_dir,
+        _paths_run_state(run_dir),
+    )
+    return {
+        "branch": None,
+        "worktree_path": None,
+        "worktree_exists": False,
+        "status": cached.get("status"),
+        "handled_at": cached.get("handled_at"),
+        "handled_by": cached.get("handled_by"),
+        "handled_head_sha": cached.get("handled_head_sha"),
+        "base_sha": None,
+        "head_sha": None,
+        "authority": "failed_closed",
+        "historical_scheduler_branch": cached.get("branch"),
+        "historical_scheduler_base_sha": cached.get("base_sha"),
+        "historical_scheduler_head_sha": cached.get("head_sha"),
+    }
+
+
+def _fresh_gate_operator_view(context, current, decision):
+    cached = _paths_integration_baseline(
+        context["run_dir"],
+        _paths_run_state(context["run_dir"]),
+    )
+    if current is None:
+        branch = cached.get("branch")
+        if not branch:
+            raise AgentTeamCliError("integration baseline branch is unavailable")
+        head = _git_stdout(
+            context["project_root"],
+            ["rev-parse", "--verify", f"{branch}^{{commit}}"],
+        )
+        worktree = _git_worktree_for_branch(context["project_root"], branch, head)
+        epoch_number = None
+        epoch_sha256 = None
+        validated_code_sha = cached.get("base_sha") or cached.get("head_sha")
+        recorded_epoch_head = None
+    else:
+        record = current["record"]
+        branch = record["integration_branch"]
+        head = _resolved_epoch_integration_head(context["project_root"], record)
+        worktree = _git_worktree_for_branch(context["project_root"], branch, head)
+        epoch_number = record["epoch_number"]
+        epoch_sha256 = current["digest"]
+        validated_code_sha = record["validated_code_sha"]
+        recorded_epoch_head = record["integration_head_sha"]
+        relation = _git_completed(
+            context["project_root"],
+            ["merge-base", "--is-ancestor", validated_code_sha, head],
+            check=False,
+        )
+        if relation.returncode != 0:
+            raise AgentTeamCliError(
+                "current integration branch no longer descends from its recorded gate baseline",
+                integration_branch=branch,
+                recorded_baseline_head=validated_code_sha,
+                current_branch_head=head,
+            )
+    reread_head = _git_stdout(
+        context["project_root"],
+        ["rev-parse", "--verify", f"{branch}^{{commit}}"],
+    )
+    if reread_head != head:
+        raise AgentTeamCliError(
+            "current integration branch changed during operator view resolution",
+            integration_branch=branch,
+            before_head=head,
+            after_head=reread_head,
+        )
+    if current is not None:
+        reread_epoch = _read_current_gate_epoch(context)
+        if reread_epoch is None or reread_epoch["digest"] != current["digest"]:
+            raise AgentTeamCliError("gate epoch changed during operator view resolution")
+    for gate in decision.get("gates") or []:
+        decision_head = gate.get("integration_head_sha")
+        if decision_head and decision_head != head:
+            raise AgentTeamCliError(
+                "gate decision and operator view resolved different integration heads",
+                gate_id=gate.get("gate_id"),
+                gate_head=decision_head,
+                operator_view_head=head,
+            )
+
+    base_sha = validated_code_sha or cached.get("base_sha")
+    changed_paths = []
+    if base_sha and base_sha != head:
+        changed_paths = _git_stdout(
+            context["project_root"],
+            ["diff", "--name-only", f"{base_sha}..{head}"],
+        ).splitlines()
+    declarations = context["declarations_by_id"]
+    review_declaration = declarations.get("P1-06E")
+    review_decision = next(
+        (
+            gate
+            for gate in decision.get("gates") or []
+            if gate.get("gate_id") == "P1-06E"
+        ),
+        None,
+    )
+    approval_command = None
+    validated_approval = None
+    if review_decision and review_decision.get("state") == "awaiting_operator_review":
+        approval_command = _post_backlog_gate_next_action(context, decision)
+    elif (
+        current is not None
+        and review_decision
+        and review_decision.get("state") == "passed"
+    ):
+        approval = _read_json_if_exists(
+            _gate_approval_path(context, current["record"], "P1-06E")
+        )
+        if approval:
+            validated_approval = {
+                "operator_identity": approval.get("operator_identity"),
+                "decision": approval.get("decision"),
+                "reviewed_at": approval.get("reviewed_at"),
+                "evidence_sha256": approval.get("evidence_sha256"),
+                "review_diff_sha256": approval.get("review_diff_sha256"),
+                "final_report_sha": approval.get("final_report_sha"),
+            }
+
+    baseline = {
+        "branch": branch,
+        "worktree_path": str(worktree),
+        "worktree_exists": True,
+        "status": cached.get("status"),
+        "handled_at": cached.get("handled_at"),
+        "handled_by": cached.get("handled_by"),
+        "handled_head_sha": cached.get("handled_head_sha"),
+        "base_sha": base_sha,
+        "head_sha": head,
+        "authority": "current_gate_epoch_git_ref",
+        "gate_epoch": epoch_number,
+        "gate_epoch_sha256": epoch_sha256,
+        "recorded_epoch_head_sha": recorded_epoch_head,
+        "historical_scheduler_branch": cached.get("branch"),
+        "historical_scheduler_base_sha": cached.get("base_sha"),
+        "historical_scheduler_head_sha": cached.get("head_sha"),
+    }
+    commands = _review_commands_for_run(context["run_dir"].name, baseline)
+    if not decision.get("all_passed"):
+        commands.pop("integrate", None)
+    if approval_command:
+        commands["approve"] = approval_command
+    review_gate = None
+    if review_declaration:
+        review_gate = {
+            "gate_id": "P1-06E",
+            "state": review_decision.get("state") if review_decision else "pending",
+            "integration_head_relation": review_declaration.get(
+                "integration_head_relation"
+            ),
+            "commit_field": review_declaration.get("commit_field"),
+            "validated_code_sha": validated_code_sha,
+            "final_report_sha": head if changed_paths else None,
+            "expected_report_paths": list(_PHASE1_REPORT_REVIEW_PATHS),
+            "changed_paths": changed_paths,
+            "approval_command": approval_command,
+            "validated_approval": validated_approval,
+        }
+    return {
+        "authority": "current_gate_epoch_git_ref",
+        "gate_epoch": epoch_number,
+        "gate_epoch_sha256": epoch_sha256,
+        "integration_branch": branch,
+        "integration_head_sha": head,
+        "validated_code_sha": validated_code_sha,
+        "integration_worktree": str(worktree),
+        "historical_scheduler_branch": cached.get("branch"),
+        "historical_scheduler_head_sha": cached.get("head_sha"),
+        "changed_paths": changed_paths,
+        "review_gate": review_gate,
+        "review_commands": commands,
+        "approval_command": approval_command,
+        "validated_approval": validated_approval,
+        "integration_baseline": baseline,
+        "repair_action": None,
+    }
+
+
 def _post_backlog_gate_summary(profile, run_dir):
     context = _post_backlog_gate_context(profile, run_dir)
     if context is None:
         return None
+    current = None
     try:
-        decision = _evaluate_post_backlog_gates(context)
+        current = _read_current_gate_epoch(context)
+        decision = _evaluate_post_backlog_gates(context, current=current)
+        decision["operator_view"] = _fresh_gate_operator_view(
+            context,
+            current,
+            decision,
+        )
     except AgentTeamCliError as exc:
+        repair_action = _gate_operator_repair_action(context, current)
         return {
-            "state": "failed",
+            "state": "failed_closed",
             "all_passed": False,
-            "epoch_number": None,
+            "epoch_number": (
+                current["record"]["epoch_number"] if current is not None else None
+            ),
             "gates": [],
             "error": str(exc),
-            "next_action": f"agentteam report --taskpack {context['run_dir'].name}",
+            "repair_action": repair_action,
+            "next_action": repair_action,
+            "operator_view": {
+                "authority": "failed_closed",
+                "gate_epoch": (
+                    current["record"]["epoch_number"]
+                    if current is not None
+                    else None
+                ),
+                "integration_branch": None,
+                "integration_head_sha": None,
+                "integration_worktree": None,
+                "review_commands": {},
+                "repair_action": repair_action,
+                "integration_baseline": _historical_only_integration_baseline(
+                    context["run_dir"]
+                ),
+            },
         }
     decision["active_controllers"] = _open_gate_controller_invocations(context)
-    decision["next_action"] = _post_backlog_gate_next_action(context, decision)
+    decision["next_action"] = _post_backlog_gate_next_action(
+        context,
+        decision,
+        operator_view=decision["operator_view"],
+    )
+    if decision["operator_view"].get("approval_command"):
+        decision["next_action"] = decision["operator_view"]["approval_command"]
     return decision
 
 
-def _post_backlog_gate_next_action(context, decision):
+def _post_backlog_gate_next_action(context, decision, operator_view=None):
     run_id = context["run_dir"].name
+    operator_view = operator_view if isinstance(operator_view, dict) else {}
     if decision.get("active_controllers"):
         return f"agentteam status --run-dir {context['run_dir']}"
     if decision.get("epoch_number") is None:
-        try:
-            baseline = _paths_integration_baseline(
-                context["run_dir"],
-                _paths_run_state(context["run_dir"]),
-            )
-            head = _git_stdout(
-                context["project_root"],
-                ["rev-parse", "--verify", f"{baseline['branch']}^{{commit}}"],
-            )
-        except Exception:
-            head = "<integration-head>"
+        head = operator_view.get("integration_head_sha")
+        if not head:
+            try:
+                baseline = _paths_integration_baseline(
+                    context["run_dir"],
+                    _paths_run_state(context["run_dir"]),
+                )
+                head = _git_stdout(
+                    context["project_root"],
+                    ["rev-parse", "--verify", f"{baseline['branch']}^{{commit}}"],
+                )
+            except Exception:
+                head = "<integration-head>"
         return (
             f"agentteam gate seal-baseline --taskpack {run_id} "
             f"--expected-integration-head {head} --authorize-revalidation"
@@ -7125,7 +7588,11 @@ def _post_backlog_gate_next_action(context, decision):
             continue
         gate_id = gate["gate_id"]
         epoch = decision["epoch_number"]
-        head = gate.get("integration_head_sha") or "<integration-head>"
+        head = (
+            gate.get("integration_head_sha")
+            or operator_view.get("integration_head_sha")
+            or "<integration-head>"
+        )
         if gate.get("state") == "awaiting_operator_review":
             evidence = gate.get("evidence_sha256") or "<evidence-sha256>"
             return (
@@ -7186,12 +7653,28 @@ def _integrate_run_baseline(project_root, profile, run_dir, rebase=False, record
     with _gate_mutation_locks(context, gate_ids):
         current = _read_current_gate_epoch(context)
         decision = _evaluate_post_backlog_gates(context, current=current)
+        try:
+            operator_view = _fresh_gate_operator_view(
+                context,
+                current,
+                decision,
+            )
+        except AgentTeamCliError as exc:
+            raise AgentTeamCliError(
+                "fresh gate integration view is unavailable",
+                reason=str(exc),
+                repair_action=_gate_operator_repair_action(context, current),
+            ) from exc
         if not decision.get("all_passed"):
             raise AgentTeamCliError(
                 "required post-backlog gates are not passed",
                 gate_epoch=decision.get("epoch_number"),
                 post_backlog_gates=decision.get("gates"),
-                next_action=_post_backlog_gate_next_action(context, decision),
+                next_action=_post_backlog_gate_next_action(
+                    context,
+                    decision,
+                    operator_view=operator_view,
+                ),
             )
         return _integrate_run_baseline_unchecked(
             project_root,
@@ -7199,10 +7682,18 @@ def _integrate_run_baseline(project_root, profile, run_dir, rebase=False, record
             run_dir,
             rebase=False,
             record_only=record_only,
+            resolved_baseline=operator_view["integration_baseline"],
         )
 
 
-def _integrate_run_baseline_unchecked(project_root, profile, run_dir, rebase=False, record_only=False):
+def _integrate_run_baseline_unchecked(
+    project_root,
+    profile,
+    run_dir,
+    rebase=False,
+    record_only=False,
+    resolved_baseline=None,
+):
     run_dir = Path(run_dir).resolve()
     run_status = _build_run_status_summary(profile, run_dir)
     if run_status.get("status") not in {"idle", "completed"}:
@@ -7212,11 +7703,27 @@ def _integrate_run_baseline_unchecked(project_root, profile, run_dir, rebase=Fal
             run_status=run_status.get("status") or "unknown",
         )
     state = _paths_run_state(run_dir)
-    baseline = _paths_integration_baseline(run_dir, state)
+    baseline = (
+        dict(resolved_baseline)
+        if isinstance(resolved_baseline, dict)
+        else _paths_integration_baseline(run_dir, state)
+    )
     branch = baseline.get("branch")
     if not branch:
         raise AgentTeamCliError("integration baseline branch not found", run_dir=str(run_dir))
     branch_head = _git_stdout(project_root, ["rev-parse", "--verify", f"{branch}^{{commit}}"])
+    expected_branch_head = (
+        baseline.get("head_sha")
+        if isinstance(resolved_baseline, dict)
+        else None
+    )
+    if expected_branch_head and branch_head != expected_branch_head:
+        raise AgentTeamCliError(
+            "integration branch changed after fresh operator view resolution",
+            integration_branch=branch,
+            expected_head=expected_branch_head,
+            actual_head=branch_head,
+        )
     current_head = _git_stdout(project_root, ["rev-parse", "HEAD"])
     if record_only:
         baseline = _mark_integration_baseline_status(

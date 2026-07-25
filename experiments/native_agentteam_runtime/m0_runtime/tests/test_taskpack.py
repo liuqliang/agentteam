@@ -5910,6 +5910,116 @@ class TaskpackTests(unittest.TestCase):
             )
             self.assertIn("gate approve", awaiting_payload["next_action"])
             evidence_sha256 = hashlib.sha256(final_artifact_path.read_bytes()).hexdigest()
+            self.assertEqual(
+                awaiting_payload["integration_baseline"]["head_sha"],
+                final_report_head,
+            )
+            self.assertEqual(
+                awaiting_payload["integration_baseline"][
+                    "historical_scheduler_head_sha"
+                ],
+                baseline_head,
+            )
+            self.assertEqual(
+                sorted(
+                    awaiting_payload["operator_review"]["review_gate"][
+                        "changed_paths"
+                    ],
+                ),
+                sorted(report_paths),
+            )
+            self.assertEqual(
+                awaiting_payload["operator_review"]["review_gate"][
+                    "integration_head_relation"
+                ],
+                "equals",
+            )
+            self.assertIn(
+                f"--expected-evidence-sha256 {evidence_sha256}",
+                awaiting_payload["operator_review"]["approval_command"],
+            )
+            self.assertIn(
+                f"--expected-integration-head {final_report_head}",
+                awaiting_payload["operator_review"]["approval_command"],
+            )
+
+            fresh_paths = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "paths",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            fresh_paths_payload = json.loads(fresh_paths.stdout)
+            self.assertEqual(
+                fresh_paths_payload["integration_baseline"]["head_sha"],
+                final_report_head,
+            )
+            self.assertIn(
+                f"{baseline_head}..{final_report_head}",
+                fresh_paths_payload["review_commands"]["diff"],
+            )
+            self.assertEqual(
+                sorted(
+                    fresh_paths_payload["operator_review"]["review_gate"][
+                        "changed_paths"
+                    ],
+                ),
+                sorted(report_paths),
+            )
+            self.assertNotIn(
+                "integrate",
+                fresh_paths_payload["review_commands"],
+            )
+
+            fresh_report = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "report",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            fresh_report_payload = json.loads(fresh_report.stdout)
+            fresh_review_gate = fresh_report_payload["completion_summary"][
+                "review_gate"
+            ]
+            self.assertEqual(
+                fresh_report_payload["integration_baseline"]["head_sha"],
+                final_report_head,
+            )
+            self.assertEqual(fresh_review_gate["baseline_head"], final_report_head)
+            self.assertEqual(
+                sorted(fresh_review_gate["report_paths"]),
+                sorted(report_paths),
+            )
+            self.assertEqual(fresh_review_gate["gate_id"], "P1-06E")
+            self.assertEqual(fresh_review_gate["integration_head_relation"], "equals")
+            self.assertEqual(
+                fresh_review_gate["approval_command"],
+                awaiting_payload["operator_review"]["approval_command"],
+            )
             profile = agentteam_module.load_project_profile(repo)
             confirmation = "approve gated-integrate-run P1-06E epoch 1\n"
             with mock.patch.object(
@@ -5937,6 +6047,35 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(
                 sum(event["event_type"] == "run_completed" for event in run_events),
                 1,
+            )
+            approved_status = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            approved_payload = json.loads(approved_status.stdout)
+            self.assertIn(
+                "(uid=",
+                approved_payload["operator_review"]["validated_approval"][
+                    "operator_identity"
+                ],
+            )
+            self.assertEqual(
+                approved_payload["operator_review"]["integration_head_sha"],
+                final_report_head,
             )
             with mock.patch.object(
                 agentteam_module,
@@ -6048,6 +6187,48 @@ class TaskpackTests(unittest.TestCase):
             )
             self.assertEqual(integrated.returncode, 0, integrated.stderr)
             self.assertEqual(json.loads(integrated.stdout)["integrate_status"], "acknowledged")
+
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(baseline_worktree)],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            missing_worktree_status = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            missing_worktree_payload = json.loads(missing_worktree_status.stdout)
+            self.assertEqual(
+                missing_worktree_payload["post_backlog_gates"]["state"],
+                "failed_closed",
+            )
+            self.assertIsNone(
+                missing_worktree_payload["integration_baseline"]["head_sha"]
+            )
+            repair_action = missing_worktree_payload["post_backlog_gates"][
+                "repair_action"
+            ]
+            self.assertEqual(
+                missing_worktree_payload["next_action"],
+                repair_action,
+            )
+            self.assertIn("gate refresh-baseline", repair_action)
 
     def test_post_backlog_gate_git_oid_format_and_operator_tty_fail_closed(self):
         self.assertTrue(agentteam_module._valid_git_oid("a" * 40, "sha1"))

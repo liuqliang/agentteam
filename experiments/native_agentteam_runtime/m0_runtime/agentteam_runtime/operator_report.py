@@ -176,19 +176,33 @@ def render_run_completion_report(report):
             lines.append("- Review gate:")
             for key in [
                 "status",
+                "gate_epoch",
+                "gate_id",
                 "integration_branch",
                 "base_head",
                 "baseline_head",
+                "historical_scheduler_head",
                 "integration_worktree",
+                "integration_head_relation",
+                "commit_field",
+                "report_paths",
+                "expected_report_paths",
                 "report_command",
                 "paths_command",
                 "diff_command",
+                "approval_command",
+                "validated_approval_identity",
                 "integrate_command",
+                "repair_action",
                 "operator_note",
             ]:
                 value = review_gate.get(key)
                 if value:
-                    lines.append(f"  - {key}: {value}")
+                    if isinstance(value, list):
+                        lines.append(f"  - {key}:")
+                        lines.extend(f"    - {item}" for item in value)
+                    else:
+                        lines.append(f"  - {key}: {value}")
         _extend_summary_item(lines, "Next", summary.get("next_steps"))
         _extend_summary_item(lines, "Evidence gaps", summary.get("evidence_gaps"))
 
