@@ -10,7 +10,7 @@ import threading
 import unittest
 import io
 import runpy
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,6 +57,7 @@ from agentteam_runtime.operator_report import concise_report_lines
 from agentteam_runtime.profile import build_project_profile, write_project_profile
 from agentteam_runtime.release_manager import (
     AgentTeamReleaseError,
+    adopt_legacy_implementation_run,
     publish_acceptance_run_identity,
     publish_implementation_run,
     prune_releases,
@@ -18303,3 +18304,172 @@ class TaskpackTests(unittest.TestCase):
             )
 
             self.assertEqual(explicit["identity"]["creation_sequence"], 1)
+
+    def test_pre04_15_legacy_run_can_be_adopted_without_blocking_new_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            release = _pre04_release_fixture(work_root, "release-1")
+            legacy = work_root / "runs" / "legacy-run"
+            legacy.mkdir(parents=True)
+            marker = legacy / "preserved.txt"
+            marker.write_text("legacy evidence\n", encoding="utf-8")
+
+            created = self._publish_pre04_run(work_root, release, "new-run")
+            with self.assertRaises(AgentTeamReleaseError):
+                select_latest_implementation_run(work_root, expected_project_key="pre04")
+
+            adopted = adopt_legacy_implementation_run(
+                work_root,
+                project_key="pre04",
+                run_id="legacy-run",
+                taskpack_id="legacy-run",
+                release_identity=release,
+            )
+
+            self.assertEqual(created["identity"]["creation_sequence"], 1)
+            self.assertEqual(adopted["identity"]["creation_sequence"], 2)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "legacy evidence\n")
+            self.assertEqual(
+                select_latest_implementation_run(
+                    work_root,
+                    expected_project_key="pre04",
+                )["run_dir"],
+                str(legacy.resolve()),
+            )
+
+    def test_pre04_16_update_command_adopts_only_with_explicit_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "work"
+            _init_repo(repo)
+            release = _pre04_release_fixture(work_root, "release-1")
+            _write_json(work_root / "releases" / "active.json", release)
+            write_project_profile(
+                repo,
+                build_project_profile(
+                    repo,
+                    project_key="pre04",
+                    work_root=work_root,
+                    author_runtime="fake",
+                    default_runtime="fake",
+                ),
+            )
+            (work_root / "runs" / "legacy-run").mkdir(parents=True)
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                rejected = agentteam_module.main(
+                    [
+                        "update",
+                        "--project-root",
+                        str(repo),
+                        "--adopt-run",
+                        "legacy-run",
+                        "--json",
+                    ]
+                )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                adopted = agentteam_module.main(
+                    [
+                        "update",
+                        "--project-root",
+                        str(repo),
+                        "--adopt-run",
+                        "legacy-run",
+                        "--force",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(rejected, 1)
+            self.assertIn("--force", stderr.getvalue())
+            self.assertEqual(adopted, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["update_status"], "legacy_run_adopted")
+            self.assertEqual(
+                payload["runtime_release_binding"]["release_id"],
+                "release-1",
+            )
+
+    def test_pre04_17_unsafe_or_incomplete_direct_children_fail_closed(self):
+        cases = ("regular-file", "state-symlink", "binding-without-identity")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                work_root = Path(tmp)
+                runs = work_root / "runs"
+                runs.mkdir(parents=True)
+                child = runs / "unsafe"
+                if case == "regular-file":
+                    child.write_text("not a run\n", encoding="utf-8")
+                elif case == "state-symlink":
+                    child.mkdir()
+                    external = work_root / "external-state"
+                    external.mkdir()
+                    (child / "state").symlink_to(external, target_is_directory=True)
+                else:
+                    (child / "state").mkdir(parents=True)
+                    _write_json(
+                        child / "state" / "runtime_release_binding.v1.json",
+                        {},
+                    )
+
+                with self.assertRaises(AgentTeamReleaseError):
+                    scan_run_identities(work_root, expected_project_key="pre04")
+
+    def test_pre04_18_launcher_rejects_schema_extras_before_runtime_import(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            release = _pre04_release_fixture(work_root, "release-1")
+            pair = self._publish_pre04_run(work_root, release, "run-1")
+            identity_path = Path(pair["run_dir"]) / "state" / "run_identity.v1.json"
+            identity = json.loads(identity_path.read_text(encoding="utf-8"))
+            identity["unexpected"] = True
+            _write_json(identity_path, identity)
+            launcher = runpy.run_path(str(Path(__file__).resolve().parents[4] / "agentteam"))
+
+            with self.assertRaises(launcher["LauncherError"]):
+                launcher["_validate_run_pair"](pair["run_dir"], "pre04")
+
+    def test_pre04_19_help_and_supervision_probe_do_not_select_a_run(self):
+        launcher = runpy.run_path(str(Path(__file__).resolve().parents[4] / "agentteam"))
+
+        self.assertIsNone(launcher["_launcher_selection"](["gate", "--help"]))
+        self.assertIsNone(
+            launcher["_launcher_selection"](
+                ["doctor", "--invocation-supervision-probe"]
+            )
+        )
+
+    def test_pre04_20_invalid_paired_identity_variants_fail_closed(self):
+        cases = ("duplicate-sequence", "wrong-project", "directory-mismatch", "missing-binding")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                work_root = Path(tmp)
+                release = _pre04_release_fixture(work_root, "release-1")
+                first = self._publish_pre04_run(work_root, release, "run-1")
+                second = self._publish_pre04_run(work_root, release, "run-2")
+                identity_path = Path(second["run_dir"]) / "state" / "run_identity.v1.json"
+                identity = json.loads(identity_path.read_text(encoding="utf-8"))
+                if case == "duplicate-sequence":
+                    identity["creation_sequence"] = first["identity"]["creation_sequence"]
+                    _write_json(identity_path, identity)
+                elif case == "wrong-project":
+                    identity["project_key"] = "another-project"
+                    _write_json(identity_path, identity)
+                elif case == "directory-mismatch":
+                    identity["run_id"] = "not-run-2"
+                    _write_json(identity_path, identity)
+                else:
+                    (
+                        Path(second["run_dir"])
+                        / "state"
+                        / "runtime_release_binding.v1.json"
+                    ).unlink()
+
+                with self.assertRaises(AgentTeamReleaseError):
+                    select_latest_implementation_run(
+                        work_root,
+                        expected_project_key="pre04",
+                    )

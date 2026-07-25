@@ -80,6 +80,8 @@ from .projection_db import (
 )
 from .release_manager import (
     activate_release,
+    active_release_identity,
+    adopt_legacy_implementation_run,
     install_release_from_git,
     install_release_from_checkout,
     publish_implementation_run,
@@ -87,6 +89,7 @@ from .release_manager import (
     prune_global_releases,
     prune_releases,
     update_status,
+    selected_release_identity,
     validate_acceptance_run_identity,
     validate_run_binding,
 )
@@ -467,6 +470,7 @@ _HELP_COMMANDS = [
         "examples": [
             "agentteam update --project-root <repo> --status",
             "agentteam update --project-root <repo> --from <checkout> --release-id <id>",
+            "agentteam update --project-root <repo> --adopt-run <id> --force",
             "agentteam update --project-root <repo> --prune",
             "agentteam update --project-root <repo> --rollback <release-id>",
         ],
@@ -1493,8 +1497,20 @@ def _add_update_parser(subcommands):
     action.add_argument("--activate", help="Activate an already installed release id.")
     action.add_argument("--rollback", help="Activate an older release id.")
     action.add_argument("--prune", action="store_true", help="Prune old installed releases, keeping the active/latest release.")
+    action.add_argument(
+        "--adopt-run",
+        help="Atomically bind an explicit unbound legacy run to a selected runtime release.",
+    )
     parser.add_argument("--ref", dest="source_ref", help="Git ref to use with --from-git.")
-    parser.add_argument("--release-id", help="Release id to use with --from or --from-git. Defaults to git commit/ref.")
+    parser.add_argument(
+        "--release-id",
+        help="Release id for install or legacy adoption. Adoption defaults to the active release.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Confirm the immutable legacy-run adoption operation.",
+    )
     parser.add_argument("--json", action="store_true", help="Print update result as JSON instead of human text.")
     parser.set_defaults(handler=_handle_update)
 
@@ -4495,6 +4511,45 @@ def _handle_update(args):
             "release_prune": prune_releases(work_root, keep_latest=1),
         }
         summary["known_releases"] = update_status(profile)["known_releases"]
+    elif args.adopt_run:
+        if not args.force:
+            raise AgentTeamCliError("--force is required for immutable legacy-run adoption")
+        frozen_taskpack = work_root / "frozen" / args.adopt_run / "taskpack.yaml"
+        if frozen_taskpack.is_file():
+            frozen = _read_json_if_exists(frozen_taskpack)
+            context = frozen.get("context") if isinstance(frozen, dict) else None
+            if isinstance(context, dict) and any(
+                context.get(key)
+                for key in (
+                    "runtime_release_id",
+                    "runtime_release_source_commit",
+                    "git_object_format",
+                )
+            ):
+                raise AgentTeamCliError(
+                    "approval-bound taskpack runs cannot use legacy adoption",
+                    taskpack_id=args.adopt_run,
+                )
+        release = (
+            selected_release_identity(work_root, args.release_id)
+            if args.release_id
+            else active_release_identity(work_root)
+        )
+        pair = adopt_legacy_implementation_run(
+            work_root,
+            project_key=profile.get("project_key") or project_root.name,
+            run_id=args.adopt_run,
+            taskpack_id=args.adopt_run,
+            release_identity=release,
+        )
+        summary = {
+            "update_status": "legacy_run_adopted",
+            "project": profile.get("project_key") or "unknown",
+            "run_id": args.adopt_run,
+            "run_dir": pair["run_dir"],
+            "creation_sequence": pair["identity"]["creation_sequence"],
+            "runtime_release_binding": pair["binding"],
+        }
     else:
         raise AgentTeamCliError("update action is required")
     summary = _attach_release_status_fields(summary, profile)
@@ -5283,6 +5338,16 @@ def _write_update_text(summary):
     lines.append(f"latest_installed_release: {latest.get('release_id') or 'unknown'}")
     if summary.get("active_is_latest") is not None:
         lines.append(f"active_is_latest: {str(bool(summary.get('active_is_latest'))).lower()}")
+    if summary.get("run_id"):
+        binding = summary.get("runtime_release_binding") or {}
+        lines.extend(
+            [
+                f"adopted_run: {summary['run_id']}",
+                f"creation_sequence: {summary.get('creation_sequence') or 'unknown'}",
+                f"bound_release: {binding.get('release_id') or 'unknown'}",
+                f"bound_source_commit: {binding.get('source_commit') or 'unknown'}",
+            ]
+        )
     known = summary.get("known_releases") or []
     lines.append("known_releases:")
     if known:

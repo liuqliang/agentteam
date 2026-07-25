@@ -361,6 +361,7 @@ def run_staging_status(work_root):
                     "owner_pid": owner_pid,
                     "owner_alive": _pid_alive(owner_pid) if owner_pid else None,
                     "safe_directory": bool(path.is_dir() and not path.is_symlink()),
+                    "recovery_required": path.name.startswith("adopt."),
                 }
             )
     return {
@@ -376,7 +377,11 @@ def cleanup_stale_run_staging(work_root, limit=20):
     for item in status["entries"]:
         if len(removed) >= max(0, int(limit)):
             break
-        if item["owner_alive"] is not False or not item["safe_directory"]:
+        if (
+            item["owner_alive"] is not False
+            or not item["safe_directory"]
+            or item["recovery_required"]
+        ):
             continue
         path = Path(item["path"])
         staging_root = Path(status["staging_root"])
@@ -605,7 +610,10 @@ def publish_implementation_run(
         path.mkdir(parents=True, exist_ok=True)
     with (state_root / "run_creation.lock").open("a+b") as lock_stream:
         fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
-        scan = scan_run_identities(work_root, expected_project_key=project_key)
+        scan = _scan_run_identities_for_creation(
+            work_root,
+            expected_project_key=project_key,
+        )
         sequence = max(
             (item["identity"]["creation_sequence"] for item in scan["implementation_runs"]),
             default=0,
@@ -689,7 +697,10 @@ def publish_acceptance_run_identity(
         path.mkdir(parents=True, exist_ok=True)
     with (state_root / "run_creation.lock").open("a+b") as lock_stream:
         fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
-        scan_run_identities(work_root, expected_project_key=project_key)
+        _scan_run_identities_for_creation(
+            work_root,
+            expected_project_key=project_key,
+        )
         target = run_root / run_id
         if target.exists() or target.is_symlink():
             raise AgentTeamReleaseError(f"run already exists: {target}")
@@ -722,6 +733,170 @@ def publish_acceptance_run_identity(
     return {"run_dir": str(target), "identity": identity}
 
 
+def adopt_legacy_implementation_run(
+    work_root,
+    *,
+    project_key,
+    run_id,
+    taskpack_id,
+    release_identity,
+):
+    """Atomically republish one explicit legacy run with immutable records."""
+    work_root = Path(work_root).resolve()
+    run_root = work_root / "runs"
+    staging_root = work_root / "run-staging"
+    state_root = work_root / "state"
+    for path in (run_root, staging_root, state_root):
+        path.mkdir(parents=True, exist_ok=True)
+    run_id = _required_slug(run_id, "run_id")
+    taskpack_id = _required_slug(taskpack_id, "taskpack_id")
+    project_key = _required_slug(project_key, "project_key")
+    target = run_root / run_id
+    with (state_root / "run_creation.lock").open("a+b") as lock_stream:
+        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
+        scan = _scan_run_identities_for_creation(
+            work_root,
+            expected_project_key=project_key,
+            legacy_run_id=run_id,
+        )
+        if target.is_symlink() or not target.is_dir():
+            raise AgentTeamReleaseError(f"legacy run directory is missing or unsafe: {target}")
+        state_dir = target / "state"
+        if state_dir.is_symlink():
+            raise AgentTeamReleaseError("legacy run state directory must not be a symlink")
+        identity_path = state_dir / "run_identity.v1.json"
+        binding_path = state_dir / "runtime_release_binding.v1.json"
+        if (
+            identity_path.exists()
+            or identity_path.is_symlink()
+            or binding_path.exists()
+            or binding_path.is_symlink()
+        ):
+            raise AgentTeamReleaseError("legacy run already has immutable binding records")
+        _validate_release_identity_files(release_identity)
+        sequence = max(
+            (item["identity"]["creation_sequence"] for item in scan["implementation_runs"]),
+            default=0,
+        ) + 1
+        now = _utc_now()
+        identity = {
+            "schema_version": RUN_IDENTITY_SCHEMA_VERSION,
+            "project_key": project_key,
+            "run_id": run_id,
+            "taskpack_id": taskpack_id,
+            "run_kind": "implementation",
+            "created_at": now,
+            "creation_sequence": sequence,
+        }
+        binding = {
+            "schema_version": RUNTIME_RELEASE_BINDING_SCHEMA_VERSION,
+            **{
+                key: release_identity[key]
+                for key in (
+                    "release_id",
+                    "release_root",
+                    "runtime_root",
+                    "release_manifest_sha256",
+                    "source_commit",
+                    "git_object_format",
+                )
+            },
+            "bound_at": now,
+            "approval_bound": False,
+            "expected_release": {},
+        }
+        staged = staging_root / f"adopt.{run_id}.{os.getpid()}.{os.urandom(8).hex()}"
+        moved = False
+        try:
+            _rename_noreplace(target, staged)
+            moved = True
+            _fsync_directory(run_root)
+            _fsync_directory(staging_root)
+            state_dir = staged / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            if state_dir.is_symlink():
+                raise AgentTeamReleaseError("legacy run state directory must not be a symlink")
+            _write_json_fsync(state_dir / "runtime_release_binding.v1.json", binding)
+            _write_json_fsync(state_dir / "run_identity.v1.json", identity)
+            _fsync_directory(state_dir)
+            _fsync_directory(staged)
+            _rename_noreplace(staged, target)
+            moved = False
+            _fsync_directory(run_root)
+            _fsync_directory(staging_root)
+        except Exception:
+            if moved and staged.exists() and not target.exists():
+                try:
+                    _rename_noreplace(staged, target)
+                    _fsync_directory(run_root)
+                    _fsync_directory(staging_root)
+                except Exception:
+                    pass
+            raise
+    return validate_run_binding(
+        target,
+        expected_project_key=project_key,
+    )
+
+
+def _scan_run_identities_for_creation(
+    work_root,
+    *,
+    expected_project_key,
+    legacy_run_id=None,
+):
+    """Scan valid identities while leaving unmarked legacy directories excluded."""
+    run_root = Path(work_root).resolve() / "runs"
+    if not run_root.exists():
+        return {"implementation_runs": [], "acceptance_evidence_runs": [], "legacy_runs": []}
+    implementations = []
+    evidence = []
+    legacy = []
+    sequences = {}
+    for child in sorted(run_root.iterdir(), key=lambda path: path.name):
+        if child.is_symlink() or not child.is_dir():
+            raise AgentTeamReleaseError(f"unsafe direct run child blocks creation: {child.name}")
+        state_dir = child / "state"
+        if state_dir.is_symlink():
+            raise AgentTeamReleaseError(f"symlink run state blocks creation: {child.name}")
+        identity_path = state_dir / "run_identity.v1.json"
+        binding_path = state_dir / "runtime_release_binding.v1.json"
+        if not identity_path.exists() and not identity_path.is_symlink():
+            if binding_path.exists() or binding_path.is_symlink():
+                raise AgentTeamReleaseError(
+                    f"run child has a binding without an identity: {child.name}"
+                )
+            legacy.append(child.name)
+            continue
+        if identity_path.is_symlink() or not identity_path.is_file():
+            raise AgentTeamReleaseError(f"run identity is missing or unsafe: {child.name}")
+        identity = _read_json_strict(identity_path, "run identity")
+        _validate_run_identity(identity, child.name, expected_project_key)
+        if identity["run_kind"] == "acceptance_evidence":
+            if binding_path.exists() or binding_path.is_symlink():
+                raise AgentTeamReleaseError(
+                    "acceptance evidence run must not contain a release binding"
+                )
+            evidence.append({"run_dir": str(child.resolve()), "identity": identity})
+            continue
+        pair = validate_run_binding(child, expected_project_key=expected_project_key)
+        sequence = identity["creation_sequence"]
+        if sequence in sequences:
+            raise AgentTeamReleaseError(
+                f"duplicate implementation creation_sequence {sequence}: "
+                f"{sequences[sequence]} and {child.name}"
+            )
+        sequences[sequence] = child.name
+        implementations.append(pair)
+    if legacy_run_id is not None and legacy_run_id not in legacy:
+        raise AgentTeamReleaseError(f"run is not an unbound legacy run: {legacy_run_id}")
+    return {
+        "implementation_runs": implementations,
+        "acceptance_evidence_runs": evidence,
+        "legacy_runs": legacy,
+    }
+
+
 def scan_run_identities(work_root, expected_project_key=None):
     """Strict direct-child scan used by both allocation and implicit selection."""
     run_root = Path(work_root).resolve() / "runs"
@@ -731,11 +906,14 @@ def scan_run_identities(work_root, expected_project_key=None):
     evidence = []
     sequences = {}
     for child in sorted(run_root.iterdir(), key=lambda path: path.name):
-        if child.is_symlink():
-            raise AgentTeamReleaseError(f"symlink run child blocks implicit selection: {child.name}")
-        if not child.is_dir():
-            continue
-        identity_path = child / "state" / "run_identity.v1.json"
+        if child.is_symlink() or not child.is_dir():
+            raise AgentTeamReleaseError(f"unsafe run child blocks implicit selection: {child.name}")
+        state_dir = child / "state"
+        if state_dir.is_symlink():
+            raise AgentTeamReleaseError(
+                f"symlink run state blocks implicit selection: {child.name}"
+            )
+        identity_path = state_dir / "run_identity.v1.json"
         if identity_path.is_symlink() or not identity_path.is_file():
             raise AgentTeamReleaseError(
                 f"run child lacks an immutable identity and blocks implicit selection: {child.name}"
@@ -785,8 +963,11 @@ def validate_run_binding(
     if run_dir.is_symlink() or not run_dir.is_dir():
         raise AgentTeamReleaseError(f"run directory is missing or unsafe: {run_dir}")
     run_dir = run_dir.resolve()
-    identity_path = run_dir / "state" / "run_identity.v1.json"
-    binding_path = run_dir / "state" / "runtime_release_binding.v1.json"
+    state_dir = run_dir / "state"
+    if state_dir.is_symlink() or not state_dir.is_dir():
+        raise AgentTeamReleaseError(f"run state directory is missing or unsafe: {state_dir}")
+    identity_path = state_dir / "run_identity.v1.json"
+    binding_path = state_dir / "runtime_release_binding.v1.json"
     for path, label in ((identity_path, "run identity"), (binding_path, "runtime release binding")):
         if path.is_symlink() or not path.is_file():
             raise AgentTeamReleaseError(f"{label} is missing or unsafe: {path}")
@@ -840,7 +1021,10 @@ def validate_acceptance_run_identity(
     if run_dir.is_symlink() or not run_dir.is_dir():
         raise AgentTeamReleaseError(f"acceptance run directory is missing or unsafe: {run_dir}")
     run_dir = run_dir.resolve()
-    identity_path = run_dir / "state" / "run_identity.v1.json"
+    state_dir = run_dir / "state"
+    if state_dir.is_symlink() or not state_dir.is_dir():
+        raise AgentTeamReleaseError("acceptance run state directory is missing or unsafe")
+    identity_path = state_dir / "run_identity.v1.json"
     if identity_path.is_symlink() or not identity_path.is_file():
         raise AgentTeamReleaseError("acceptance evidence run identity is missing or unsafe")
     identity = _read_json_strict(identity_path, "acceptance evidence run identity")
@@ -906,6 +1090,14 @@ def _validate_release_identity_files(identity):
 def _validate_run_identity(identity, directory_name, expected_project_key):
     if not isinstance(identity, dict) or identity.get("schema_version") != RUN_IDENTITY_SCHEMA_VERSION:
         raise AgentTeamReleaseError("invalid run identity schema version")
+    common = {
+        "schema_version",
+        "project_key",
+        "run_id",
+        "taskpack_id",
+        "run_kind",
+        "created_at",
+    }
     for key in ("project_key", "run_id", "taskpack_id", "created_at"):
         if not isinstance(identity.get(key), str) or not identity[key]:
             raise AgentTeamReleaseError(f"run identity {key} must be a non-empty string")
@@ -915,12 +1107,18 @@ def _validate_run_identity(identity, directory_name, expected_project_key):
     if expected_project_key and identity["project_key"] != expected_project_key:
         raise AgentTeamReleaseError("run identity project key does not match this project")
     if identity.get("run_kind") == "implementation":
+        if set(identity) - (common | {"creation_sequence", "implementation_run_id"}):
+            raise AgentTeamReleaseError("implementation run identity has unknown fields")
         sequence = identity.get("creation_sequence")
         if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence <= 0:
             raise AgentTeamReleaseError("implementation creation_sequence must be positive")
         if "gate_epoch" in identity:
             raise AgentTeamReleaseError("implementation identity must not contain gate_epoch")
+        if "implementation_run_id" in identity:
+            _required_slug(identity["implementation_run_id"], "implementation_run_id")
     elif identity.get("run_kind") == "acceptance_evidence":
+        if set(identity) - (common | {"implementation_run_id", "gate_epoch"}):
+            raise AgentTeamReleaseError("acceptance evidence identity has unknown fields")
         if identity.get("creation_sequence") is not None:
             raise AgentTeamReleaseError("acceptance evidence must not have creation_sequence")
         if not isinstance(identity.get("implementation_run_id"), str) or not identity["implementation_run_id"]:
@@ -935,6 +1133,20 @@ def _validate_run_identity(identity, directory_name, expected_project_key):
 def _validate_binding_shape(binding):
     if not isinstance(binding, dict) or binding.get("schema_version") != RUNTIME_RELEASE_BINDING_SCHEMA_VERSION:
         raise AgentTeamReleaseError("invalid runtime release binding schema version")
+    required = {
+        "schema_version",
+        "release_id",
+        "release_root",
+        "runtime_root",
+        "release_manifest_sha256",
+        "source_commit",
+        "git_object_format",
+        "bound_at",
+        "approval_bound",
+        "expected_release",
+    }
+    if set(binding) != required:
+        raise AgentTeamReleaseError("runtime release binding fields do not match the schema")
     for key in (
         "release_id",
         "release_root",
@@ -955,6 +1167,12 @@ def _validate_binding_shape(binding):
         raise AgentTeamReleaseError("runtime release binding approval_bound must be boolean")
     if not isinstance(binding.get("expected_release"), dict):
         raise AgentTeamReleaseError("runtime release binding expected_release must be an object")
+    if set(binding["expected_release"]) - {
+        "release_id",
+        "source_commit",
+        "git_object_format",
+    }:
+        raise AgentTeamReleaseError("runtime release binding expected fields are invalid")
     if binding["approval_bound"]:
         missing = {
             "release_id",

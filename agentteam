@@ -44,6 +44,7 @@ def main():
             runtime_root = Path(selection["release"]["runtime_root"])
             os.environ[SELECTION_ENV] = _canonical_json(selection)
         else:
+            os.environ.pop(SELECTION_ENV, None)
             runtime_root = _active_release_runtime_root(sys.argv[1:]) or _development_runtime_root()
         sys.path.insert(0, str(runtime_root))
         from agentteam_runtime.agentteam import main as agentteam_main
@@ -67,7 +68,11 @@ def main():
 
 
 def _launcher_selection(argv):
+    if "-h" in argv or "--help" in argv:
+        return None
     command = _command(argv)
+    if command == "doctor" and "--invocation-supervision-probe" in argv:
+        return None
     if command == "run":
         return _initial_run_selection(argv)
     if command in RUN_SELECTING_COMMANDS:
@@ -198,11 +203,12 @@ def _latest_bound_run(work_root, project_key):
     implementations = []
     sequences = {}
     for child in sorted(run_root.iterdir(), key=lambda path: path.name):
-        if child.is_symlink():
-            raise LauncherError(f"symlink run child blocks implicit selection: {child.name}")
-        if not child.is_dir():
-            continue
-        identity_path = child / "state" / "run_identity.v1.json"
+        if child.is_symlink() or not child.is_dir():
+            raise LauncherError(f"unsafe run child blocks implicit selection: {child.name}")
+        state_dir = child / "state"
+        if state_dir.is_symlink():
+            raise LauncherError(f"symlink run state blocks implicit selection: {child.name}")
+        identity_path = state_dir / "run_identity.v1.json"
         if identity_path.is_symlink() or not identity_path.is_file():
             raise LauncherError(
                 f"run child lacks an immutable identity and blocks implicit selection: {child.name}"
@@ -229,8 +235,11 @@ def _validate_run_pair(run_dir, project_key):
     if run_dir.is_symlink() or not run_dir.is_dir():
         raise LauncherError(f"run directory is missing or unsafe: {run_dir}")
     run_dir = run_dir.resolve()
-    identity_path = run_dir / "state" / "run_identity.v1.json"
-    binding_path = run_dir / "state" / "runtime_release_binding.v1.json"
+    state_dir = run_dir / "state"
+    if state_dir.is_symlink() or not state_dir.is_dir():
+        raise LauncherError("selected run state directory is missing or unsafe")
+    identity_path = state_dir / "run_identity.v1.json"
+    binding_path = state_dir / "runtime_release_binding.v1.json"
     if identity_path.is_symlink() or not identity_path.is_file():
         raise LauncherError("selected run has no immutable identity")
     if binding_path.is_symlink() or not binding_path.is_file():
@@ -253,18 +262,48 @@ def _validate_run_pair(run_dir, project_key):
 def _validate_identity(identity, directory_name, project_key):
     if identity.get("schema_version") != "run_identity.v1":
         raise LauncherError("invalid run identity schema")
+    common = {
+        "schema_version",
+        "project_key",
+        "run_id",
+        "taskpack_id",
+        "run_kind",
+        "created_at",
+    }
+    for key in ("project_key", "run_id", "taskpack_id"):
+        value = identity.get(key)
+        if not isinstance(value, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]*", value
+        ):
+            raise LauncherError(f"run identity {key} is invalid")
+    if not isinstance(identity.get("created_at"), str) or not identity["created_at"]:
+        raise LauncherError("run identity created_at is invalid")
     if identity.get("run_id") != directory_name:
         raise LauncherError("run identity does not match directory name")
     if project_key and identity.get("project_key") != project_key:
         raise LauncherError("run identity belongs to a different project")
     if identity.get("run_kind") == "implementation":
+        allowed = common | {"creation_sequence", "implementation_run_id"}
+        if set(identity) - allowed:
+            raise LauncherError("implementation run identity has unknown fields")
         sequence = identity.get("creation_sequence")
         if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence <= 0:
             raise LauncherError("implementation creation_sequence must be positive")
+        parent_run_id = identity.get("implementation_run_id")
+        if parent_run_id is not None and (
+            not isinstance(parent_run_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", parent_run_id)
+        ):
+            raise LauncherError("implementation parent run ID is invalid")
     elif identity.get("run_kind") == "acceptance_evidence":
+        allowed = common | {"implementation_run_id", "gate_epoch"}
+        if set(identity) - allowed:
+            raise LauncherError("acceptance evidence identity has unknown fields")
         if identity.get("creation_sequence") is not None:
             raise LauncherError("acceptance evidence must not have a creation_sequence")
-        if not identity.get("implementation_run_id"):
+        if not isinstance(identity.get("implementation_run_id"), str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]*", identity["implementation_run_id"]
+        ):
             raise LauncherError("acceptance evidence requires implementation_run_id")
         epoch = identity.get("gate_epoch")
         if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch <= 0:
@@ -276,6 +315,56 @@ def _validate_identity(identity, directory_name, project_key):
 def _validate_bound_release(binding):
     if binding.get("schema_version") != "runtime_release_binding.v1":
         raise LauncherError("invalid runtime release binding schema")
+    required = {
+        "schema_version",
+        "release_id",
+        "release_root",
+        "runtime_root",
+        "release_manifest_sha256",
+        "source_commit",
+        "git_object_format",
+        "bound_at",
+        "approval_bound",
+        "expected_release",
+    }
+    if set(binding) != required:
+        raise LauncherError("runtime release binding fields do not match the schema")
+    if not isinstance(binding.get("release_id"), str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.-]*", binding["release_id"]
+    ):
+        raise LauncherError("bound release ID is invalid")
+    if not isinstance(binding.get("bound_at"), str) or not binding["bound_at"]:
+        raise LauncherError("runtime release binding timestamp is invalid")
+    if not isinstance(binding.get("approval_bound"), bool):
+        raise LauncherError("runtime release binding approval flag is invalid")
+    expected = binding.get("expected_release")
+    if not isinstance(expected, dict) or set(expected) - {
+        "release_id",
+        "source_commit",
+        "git_object_format",
+    }:
+        raise LauncherError("runtime release expected fields are invalid")
+    if binding["approval_bound"] and set(expected) != {
+        "release_id",
+        "source_commit",
+        "git_object_format",
+    }:
+        raise LauncherError("approval-bound release expectation is incomplete")
+    if not binding["approval_bound"] and expected:
+        raise LauncherError("unapproved release binding must not contain expected fields")
+    if not isinstance(binding.get("release_manifest_sha256"), str) or not re.fullmatch(
+        r"[0-9a-f]{64}", binding["release_manifest_sha256"]
+    ):
+        raise LauncherError("bound release manifest digest is invalid")
+    object_format = binding.get("git_object_format")
+    oid_length = 40 if object_format == "sha1" else 64 if object_format == "sha256" else 0
+    if not oid_length or not isinstance(binding.get("source_commit"), str) or not re.fullmatch(
+        rf"[0-9a-f]{{{oid_length}}}", binding["source_commit"]
+    ):
+        raise LauncherError("bound release source commit is invalid")
+    for key in ("release_id", "source_commit", "git_object_format"):
+        if expected.get(key) is not None and expected[key] != binding[key]:
+            raise LauncherError(f"bound release {key} does not match frozen approval")
     release_root = Path(str(binding.get("release_root") or "")).expanduser().resolve()
     manifest_path = release_root / "manifest.json"
     if manifest_path.is_symlink() or not manifest_path.is_file():
