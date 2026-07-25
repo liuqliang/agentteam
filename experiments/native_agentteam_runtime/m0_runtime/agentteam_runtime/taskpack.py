@@ -5,6 +5,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -25,6 +26,12 @@ DEFAULT_VERIFICATION_COMMAND = ["python3", "-m", "unittest", "discover"]
 TASKPACK_TRANSLATABLE_RUNTIME_BACKENDS = {"fake", "codex"}
 TASKPACK_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 TASKPACK_GOAL_KINDS = {"implementation", "optimization", "audit"}
+TASKPACK_BLUEPRINT_SCHEMA_VERSION = "agentteam_taskpack_blueprint.v1"
+TASKPACK_BLUEPRINT_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2] / "schemas" / "taskpack_blueprint.schema.json"
+)
+TASKPACK_BLUEPRINT_CONTROL_AGENT_IDS = {"agent-scheduler", "agent-integrator"}
+TASKPACK_BLUEPRINT_CONTROL_ROLES = {"scheduler", "integrator"}
 OPTIMIZATION_CODE_WORK_TYPES = {"code_implementation", "code_investigation"}
 OPTIMIZATION_INTENT_MARKERS = [
     "optimize",
@@ -632,6 +639,818 @@ def materialize_semantic_taskpack(
         "source_taskpack_id": source_taskpack_id,
         "validation": validation,
     }
+
+
+def materialize_taskpack_blueprint(
+    project_root,
+    blueprint_path,
+    output_root,
+    taskpack_id=None,
+    dry_run=False,
+):
+    project_root = Path(project_root).resolve()
+    blueprint_path = Path(blueprint_path)
+    if not blueprint_path.is_absolute():
+        blueprint_path = project_root / blueprint_path
+    blueprint_path = blueprint_path.resolve()
+    output_root = Path(output_root).resolve()
+    _require_contained_path(blueprint_path, project_root, "blueprint_path")
+    if not project_root.is_dir() or not _is_git_repo(project_root):
+        raise TaskpackValidationError("project_root must be a git repository")
+
+    blueprint = _read_json(blueprint_path)
+    blueprint_relative_path = blueprint_path.relative_to(project_root).as_posix()
+    _validate_taskpack_blueprint_schema(blueprint)
+    _validate_taskpack_blueprint(
+        blueprint,
+        project_root=project_root,
+        blueprint_relative_path=blueprint_relative_path,
+    )
+    _require_git_tracked_path(
+        project_root,
+        blueprint_relative_path,
+        "blueprint_path",
+    )
+
+    declared_taskpack_id = _validate_existing_taskpack_id(
+        blueprint["taskpack"]["taskpack_id"]
+    )
+    if blueprint["blueprint_id"] != declared_taskpack_id:
+        raise TaskpackValidationError(
+            "blueprint_id must equal taskpack.taskpack_id"
+        )
+    if taskpack_id is not None and taskpack_id != declared_taskpack_id:
+        raise TaskpackValidationError(
+            "taskpack_id override must equal the approved blueprint taskpack_id"
+        )
+    taskpack_id = declared_taskpack_id
+
+    context = _taskpack_blueprint_context(
+        blueprint,
+        project_root=project_root,
+        blueprint_path=blueprint_path,
+        blueprint_relative_path=blueprint_relative_path,
+    )
+    approval_diagnostics = []
+    try:
+        approval_context = _validate_taskpack_blueprint_approval(
+            blueprint,
+            project_root=project_root,
+            context=context,
+        )
+    except TaskpackValidationError as exc:
+        if not dry_run:
+            raise
+        approval_context = {}
+        approval_diagnostics.append(str(exc))
+    context.update(approval_context)
+
+    if dry_run:
+        with tempfile.TemporaryDirectory(prefix="agentteam-blueprint-dry-run-") as temp_root:
+            taskpack_dir = Path(temp_root) / taskpack_id
+            manifest = _generate_taskpack_blueprint(
+                blueprint,
+                project_root=project_root,
+                blueprint_relative_path=blueprint_relative_path,
+                taskpack_dir=taskpack_dir,
+                context=context,
+                freeze_eligible=False,
+                approval_diagnostics=approval_diagnostics,
+            )
+        manifest["taskpack_dir"] = None
+        manifest["manifest_path"] = None
+        manifest["dry_run"] = True
+        return manifest
+
+    taskpack_dir = (output_root / taskpack_id).resolve()
+    _require_contained_path(taskpack_dir, output_root, "taskpack_dir")
+    manifest_path = output_root / "materialization_manifest.json"
+    if taskpack_dir.exists():
+        raise TaskpackValidationError(
+            f"materialized taskpack already exists: {taskpack_dir}"
+        )
+    if manifest_path.exists():
+        raise TaskpackValidationError(
+            f"materialization manifest already exists: {manifest_path}"
+        )
+
+    output_root_existed = output_root.exists()
+    output_root.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{taskpack_id}.materializing-",
+            dir=output_root,
+        )
+    )
+    staged_taskpack_dir = staging_dir / taskpack_id
+    staged_manifest_path = staging_dir / "materialization_manifest.json"
+    committed_taskpack = False
+    try:
+        manifest = _generate_taskpack_blueprint(
+            blueprint,
+            project_root=project_root,
+            blueprint_relative_path=blueprint_relative_path,
+            taskpack_dir=staged_taskpack_dir,
+            context=context,
+            freeze_eligible=True,
+            approval_diagnostics=[],
+        )
+        _write_json(staged_manifest_path, manifest)
+        staged_taskpack_dir.rename(taskpack_dir)
+        committed_taskpack = True
+        staged_manifest_path.rename(manifest_path)
+    except Exception:
+        if committed_taskpack and taskpack_dir.exists():
+            shutil.rmtree(taskpack_dir)
+        if manifest_path.exists():
+            manifest_path.unlink()
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        if not output_root_existed:
+            try:
+                output_root.rmdir()
+            except OSError:
+                pass
+        raise
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+
+    manifest["taskpack_dir"] = str(taskpack_dir)
+    manifest["manifest_path"] = str(manifest_path)
+    manifest["dry_run"] = False
+    return manifest
+
+
+def _validate_taskpack_blueprint_schema(blueprint):
+    if not isinstance(blueprint, dict):
+        raise TaskpackValidationError("blueprint must be an object")
+    try:
+        import jsonschema
+    except ImportError as exc:
+        raise TaskpackValidationError(
+            "jsonschema is required to validate taskpack blueprints"
+        ) from exc
+
+    schema = _read_json(TASKPACK_BLUEPRINT_SCHEMA_PATH)
+    try:
+        validator_class = jsonschema.validators.validator_for(schema)
+        validator_class.check_schema(schema)
+        validator = validator_class(schema, format_checker=jsonschema.FormatChecker())
+        errors = sorted(
+            validator.iter_errors(blueprint),
+            key=lambda error: tuple(str(part) for part in error.absolute_path),
+        )
+    except jsonschema.SchemaError as exc:
+        raise TaskpackValidationError(
+            f"invalid bundled taskpack blueprint schema: {exc.message}"
+        ) from exc
+    if not errors:
+        return
+    rendered = []
+    for error in errors:
+        path = ".".join(str(part) for part in error.absolute_path) or "<root>"
+        rendered.append(f"{path}: {error.message}")
+    raise TaskpackValidationError(
+        "taskpack blueprint schema validation failed: " + "; ".join(rendered)
+    )
+
+
+def _validate_taskpack_blueprint(
+    blueprint,
+    *,
+    project_root,
+    blueprint_relative_path,
+):
+    errors = []
+    agents = blueprint["agents"]
+    declared_roles = set()
+    seen_agent_ids = set()
+    for agent in agents:
+        agent_id = agent["agent_id"]
+        role = agent["role"]
+        if agent_id in seen_agent_ids:
+            errors.append(f"duplicate agent_id: {agent_id}")
+        seen_agent_ids.add(agent_id)
+        if agent_id in TASKPACK_BLUEPRINT_CONTROL_AGENT_IDS:
+            errors.append(
+                f"blueprint agents must not duplicate control-plane agent: {agent_id}"
+            )
+        if role in TASKPACK_BLUEPRINT_CONTROL_ROLES:
+            errors.append(
+                f"blueprint agents must declare execution roles, not control role: {role}"
+            )
+        declared_roles.add(role)
+
+    tasks = blueprint["tasks"]
+    task_id_set = set()
+    dependency_graph = {}
+    for task in tasks:
+        task_id = task["task_id"]
+        if task_id in task_id_set:
+            errors.append(f"duplicate task_id: {task_id}")
+        task_id_set.add(task_id)
+        dependency_graph[task_id] = list(task["depends_on"])
+        if task["required_role"] not in declared_roles:
+            errors.append(
+                f"{task_id} required_role is not declared by blueprint agents: "
+                f"{task['required_role']}"
+            )
+        for field_name in (
+            "read_scope",
+            "write_scope",
+            "input_artifacts",
+            "expected_output_artifacts",
+            "evidence_paths",
+        ):
+            for value in task.get(field_name, []):
+                _validate_blueprint_repository_path(
+                    value,
+                    f"{task_id} {field_name}",
+                    errors,
+                    allow_repository_root=field_name == "read_scope",
+                )
+                candidate_path = project_root / value
+                if candidate_path.exists():
+                    try:
+                        candidate_path.resolve().relative_to(project_root)
+                    except ValueError:
+                        errors.append(
+                            f"{task_id} {field_name} resolves outside repository: {value}"
+                        )
+                if field_name == "input_artifacts":
+                    input_path = project_root / value
+                    if not input_path.is_file():
+                        errors.append(
+                            f"{task_id} input_artifacts does not exist: {value}"
+                        )
+                    else:
+                        try:
+                            input_path.resolve().relative_to(project_root)
+                        except ValueError:
+                            errors.append(
+                                f"{task_id} input_artifacts resolves outside repository: "
+                                f"{value}"
+                            )
+        if blueprint_relative_path not in task["input_artifacts"]:
+            errors.append(
+                f"{task_id} input_artifacts must include tracked blueprint "
+                f"{blueprint_relative_path}"
+            )
+    _validate_dependency_graph(dependency_graph, task_id_set, errors)
+
+    for field_name in ("source_plan", "research_authority"):
+        value = blueprint.get(field_name)
+        if value is None:
+            continue
+        _validate_blueprint_repository_path(
+            value,
+            field_name,
+            errors,
+            allow_repository_root=False,
+        )
+        path = project_root / value
+        if not path.is_file():
+            errors.append(f"{field_name} does not exist: {value}")
+        else:
+            try:
+                path.resolve().relative_to(project_root)
+            except ValueError:
+                errors.append(f"{field_name} resolves outside repository: {value}")
+            try:
+                _require_git_tracked_path(project_root, value, field_name)
+            except TaskpackValidationError as exc:
+                errors.append(str(exc))
+
+    approval = blueprint["approval"]
+    for field_name in ("record_path", "schema_path"):
+        _validate_blueprint_repository_path(
+            approval[field_name],
+            f"approval.{field_name}",
+            errors,
+            allow_repository_root=False,
+        )
+    review_schema_path = project_root / approval["schema_path"]
+    if not review_schema_path.is_file():
+        errors.append(
+            f"approval.schema_path does not exist: {approval['schema_path']}"
+        )
+    else:
+        try:
+            _require_git_tracked_path(
+                project_root,
+                approval["schema_path"],
+                "approval.schema_path",
+            )
+        except TaskpackValidationError as exc:
+            errors.append(str(exc))
+
+    operator_review_required = blueprint["policy"].get(
+        "operator_review_required"
+    )
+    if operator_review_required is not None and not isinstance(
+        operator_review_required,
+        bool,
+    ):
+        errors.append("policy.operator_review_required must be a boolean")
+
+    gates = blueprint.get("post_backlog_gates", [])
+    gate_ids = set()
+    combined_graph = {key: list(value) for key, value in dependency_graph.items()}
+    for gate in gates:
+        gate_id = gate["gate_id"]
+        if gate_id in task_id_set or gate_id in gate_ids:
+            errors.append(f"duplicate task or gate ID: {gate_id}")
+        gate_ids.add(gate_id)
+        combined_graph[gate_id] = list(gate["depends_on"])
+        for field_name in (
+            "evidence_artifact",
+            "evidence_schema",
+            "operator_approval_schema",
+        ):
+            value = gate.get(field_name)
+            if value is not None:
+                _validate_blueprint_repository_path(
+                    value,
+                    f"{gate_id} {field_name}",
+                    errors,
+                    allow_repository_root=False,
+                )
+        if gate.get("operator_review_required"):
+            if not _is_non_empty_string(gate.get("operator_approval_schema")):
+                errors.append(
+                    f"{gate_id} operator_review_required requires operator_approval_schema"
+                )
+            if not _is_non_empty_string(
+                gate.get("operator_approval_required_decision")
+            ):
+                errors.append(
+                    f"{gate_id} operator_review_required requires "
+                    "operator_approval_required_decision"
+                )
+    _validate_dependency_graph(combined_graph, task_id_set | gate_ids, errors)
+    for gate in gates:
+        schema_path = gate["evidence_schema"]
+        if not (project_root / schema_path).is_file():
+            ancestors = _blueprint_gate_task_ancestors(
+                gate["gate_id"],
+                combined_graph,
+                task_id_set,
+            )
+            if not any(
+                _blueprint_path_in_write_scope(
+                    schema_path,
+                    next(
+                        task["write_scope"]
+                        for task in tasks
+                        if task["task_id"] == ancestor
+                    ),
+                )
+                for ancestor in ancestors
+            ):
+                errors.append(
+                    f"{gate['gate_id']} evidence_schema must exist or be inside "
+                    f"an ancestor task write_scope: {schema_path}"
+                )
+
+    if errors:
+        raise TaskpackValidationError("; ".join(errors))
+
+
+def _validate_blueprint_repository_path(
+    value,
+    field_name,
+    errors,
+    *,
+    allow_repository_root,
+):
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"{field_name} must contain non-empty repository-relative paths")
+        return
+    path = Path(value)
+    if path.is_absolute():
+        errors.append(f"{field_name} must be repository-relative: {value}")
+    elif _write_scope_escapes_repository(path):
+        errors.append(f"{field_name} must stay inside repository: {value}")
+    elif not allow_repository_root and _write_scope_is_repository_root(path):
+        errors.append(f"{field_name} must not name repository root")
+
+
+def _blueprint_gate_task_ancestors(gate_id, graph, task_ids):
+    ancestors = set()
+    pending = list(graph.get(gate_id, []))
+    while pending:
+        dependency = pending.pop()
+        if dependency in ancestors:
+            continue
+        if dependency in task_ids:
+            ancestors.add(dependency)
+        pending.extend(graph.get(dependency, []))
+    return ancestors
+
+
+def _blueprint_path_in_write_scope(path, write_scope):
+    candidate = Path(path)
+    for scope in write_scope:
+        scope_path = Path(scope)
+        if any(character in scope for character in "*?[]"):
+            if candidate.match(scope):
+                return True
+            continue
+        if candidate == scope_path:
+            return True
+        try:
+            candidate.relative_to(scope_path)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _taskpack_blueprint_context(
+    blueprint,
+    *,
+    project_root,
+    blueprint_path,
+    blueprint_relative_path,
+):
+    source_plan_path = project_root / blueprint["source_plan"]
+    context = {
+        "blueprint_path": blueprint_relative_path,
+        "blueprint_sha256": _sha256_file(blueprint_path),
+        "source_plan": blueprint["source_plan"],
+        "source_plan_sha256": _sha256_file(source_plan_path),
+        "project_source_commit": _git_output(project_root, "rev-parse", "HEAD"),
+        "git_object_format": _git_output(
+            project_root,
+            "rev-parse",
+            "--show-object-format",
+        ),
+    }
+    if blueprint.get("research_authority"):
+        context["research_authority"] = blueprint["research_authority"]
+        context["research_authority_sha256"] = _sha256_file(
+            project_root / blueprint["research_authority"]
+        )
+    return context
+
+
+def _validate_taskpack_blueprint_approval(
+    blueprint,
+    *,
+    project_root,
+    context,
+):
+    approval = blueprint["approval"]
+    record_path = project_root / approval["record_path"]
+    if not record_path.is_file():
+        raise TaskpackValidationError(
+            f"blueprint approval record is missing: {approval['record_path']}"
+        )
+    _require_git_tracked_path(
+        project_root,
+        approval["record_path"],
+        "approval.record_path",
+    )
+    record = _read_json(record_path)
+    review_schema_path = project_root / approval["schema_path"]
+    review_schema = _read_json(review_schema_path)
+    try:
+        import jsonschema
+
+        validator_class = jsonschema.validators.validator_for(review_schema)
+        validator_class.check_schema(review_schema)
+        validator = validator_class(
+            review_schema,
+            format_checker=jsonschema.FormatChecker(),
+        )
+        validation_errors = sorted(
+            validator.iter_errors(record),
+            key=lambda error: tuple(str(part) for part in error.absolute_path),
+        )
+    except (jsonschema.SchemaError, jsonschema.ValidationError) as exc:
+        raise TaskpackValidationError(
+            f"approval schema validation failed: {exc.message}"
+        ) from exc
+    if validation_errors:
+        details = "; ".join(error.message for error in validation_errors)
+        raise TaskpackValidationError(
+            f"blueprint approval record does not match review schema: {details}"
+        )
+    if record.get("decision") != approval["required_decision"]:
+        raise TaskpackValidationError(
+            "blueprint approval decision is not "
+            f"{approval['required_decision']}: {record.get('decision')}"
+        )
+    remaining_escalations = record.get("remaining_escalations")
+    if isinstance(remaining_escalations, list) and remaining_escalations:
+        raise TaskpackValidationError(
+            "blueprint approval has remaining escalations"
+        )
+
+    digest_values = {
+        "source_plan": context["source_plan_sha256"],
+        "blueprint": context["blueprint_sha256"],
+        "research_authority": context.get("research_authority_sha256"),
+        "review_schema": _sha256_file(review_schema_path),
+        "stage_vocabulary": _sha256_json(
+            (blueprint.get("contract") or {}).get("stage_vocabulary")
+        ),
+        "contract": _sha256_json(blueprint.get("contract")),
+    }
+    digest_record_fields = {
+        "source_plan": "plan_sha256",
+        "blueprint": "blueprint_sha256",
+        "research_authority": "research_authority_sha256",
+        "review_schema": "review_schema_sha256",
+        "stage_vocabulary": "stage_vocabulary_sha256",
+        "contract": "contract_decisions_sha256",
+    }
+    for binding in approval["digest_bindings"]:
+        expected = digest_values.get(binding)
+        actual = record.get(digest_record_fields[binding])
+        if expected is None or actual != expected:
+            raise TaskpackValidationError(
+                f"blueprint approval digest mismatch for {binding}"
+            )
+
+    git_object_format = context["git_object_format"]
+    if git_object_format not in {"sha1", "sha256"}:
+        raise TaskpackValidationError(
+            f"unsupported Git object format: {git_object_format}"
+        )
+    if approval.get("git_object_format_required"):
+        if record.get("git_object_format") != git_object_format:
+            raise TaskpackValidationError(
+                "blueprint approval Git object format does not match repository"
+            )
+    oid = record.get("preflight_release_source_commit")
+    oid_length = 40 if git_object_format == "sha1" else 64
+    if not isinstance(oid, str) or not re.fullmatch(
+        rf"[0-9a-f]{{{oid_length}}}",
+        oid,
+    ):
+        raise TaskpackValidationError(
+            f"approval release source commit must be a {git_object_format} Git OID"
+        )
+    completed = subprocess.run(
+        ["git", "cat-file", "-e", f"{oid}^{{commit}}"],
+        cwd=project_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise TaskpackValidationError(
+            "approval release source commit is not a commit in the target repository"
+        )
+
+    release_id = record.get("preflight_release_id")
+    release_source_commit = oid
+    if approval.get("runtime_release_binding_required"):
+        release = _active_taskpack_blueprint_release(project_root)
+        if release.get("release_id") != release_id:
+            raise TaskpackValidationError(
+                "active runtime release ID does not match blueprint approval"
+            )
+        manifest_source_commit = release.get("source_commit")
+        if manifest_source_commit != release_source_commit:
+            raise TaskpackValidationError(
+                "active runtime release source commit does not match blueprint approval"
+            )
+    return {
+        "approval_record": approval["record_path"],
+        "approval_record_sha256": _sha256_file(record_path),
+        "approval_decision": record["decision"],
+        "runtime_release_id": release_id,
+        "runtime_release_source_commit": release_source_commit,
+        "git_object_format": git_object_format,
+    }
+
+
+def _active_taskpack_blueprint_release(project_root):
+    profile_path = project_root / ".agentteam" / "profile.json"
+    if not profile_path.is_file():
+        raise TaskpackValidationError(
+            "project profile is required for runtime release approval binding"
+        )
+    profile = _read_json(profile_path)
+    work_root = profile.get("work_root") if isinstance(profile, dict) else None
+    if not _is_non_empty_string(work_root):
+        raise TaskpackValidationError(
+            "project profile work_root is required for runtime release approval binding"
+        )
+    from .release_manager import read_active_release, release_manifest
+
+    active = read_active_release(work_root)
+    release_id = active.get("release_id")
+    if not _is_non_empty_string(release_id):
+        raise TaskpackValidationError("an active runtime release is required")
+    manifest = release_manifest(work_root, release_id)
+    if not isinstance(manifest, dict) or not manifest:
+        raise TaskpackValidationError(
+            f"active runtime release manifest is missing: {release_id}"
+        )
+    return {
+        "release_id": release_id,
+        "source_commit": manifest.get("source_commit")
+        or active.get("source_commit"),
+    }
+
+
+def _generate_taskpack_blueprint(
+    blueprint,
+    *,
+    project_root,
+    blueprint_relative_path,
+    taskpack_dir,
+    context,
+    freeze_eligible,
+    approval_diagnostics,
+):
+    taskpack_dir.mkdir(parents=True, exist_ok=False)
+    taskpack_declaration = blueprint["taskpack"]
+    taskpack_id = taskpack_declaration["taskpack_id"]
+    taskpack = {
+        "taskpack_schema_version": TASKPACK_SCHEMA_VERSION,
+        "taskpack_id": taskpack_id,
+        "status": "draft",
+        "semantic_contract_version": TASKPACK_SEMANTIC_CONTRACT_VERSION,
+        "authoring_mode": "blueprint_materialized",
+        "project_root": str(project_root),
+        "goal": taskpack_declaration["goal"],
+        "original_goal": taskpack_declaration.get(
+            "original_goal",
+            taskpack_declaration["goal"],
+        ),
+        "goal_kind": taskpack_declaration["goal_kind"],
+        "risk_target": taskpack_declaration["overall_risk"],
+        "context": dict(context),
+        "runtime": {
+            "default_backend": "codex",
+            "codex": {},
+        },
+        "policy": dict(blueprint["policy"]),
+        "files": {
+            "agent_pool": "agent_pool.json",
+            "backlog": "backlog.json",
+            "verification": "verification.json",
+        },
+    }
+    for field_name in ("milestone", "integration_policy"):
+        if field_name in taskpack_declaration:
+            taskpack[field_name] = taskpack_declaration[field_name]
+    if "post_backlog_gates" in blueprint:
+        taskpack["post_backlog_gates"] = [
+            dict(gate) for gate in blueprint["post_backlog_gates"]
+        ]
+
+    role_runtime_profiles = {}
+    agents = []
+    for declared_agent in blueprint["agents"]:
+        role = declared_agent["role"]
+        runtime_profile = dict(declared_agent["runtime_profile"])
+        existing_profile = role_runtime_profiles.get(role)
+        if existing_profile is not None and existing_profile != runtime_profile:
+            raise TaskpackValidationError(
+                f"agents for role {role} must use one runtime_profile"
+            )
+        role_runtime_profiles[role] = runtime_profile
+        agents.append(
+            {
+                "agent_id": declared_agent["agent_id"],
+                "role": role,
+                "status": "idle",
+                "inbox_path": f"mailboxes/{declared_agent['agent_id']}/inbox.jsonl",
+                "outbox_path": f"mailboxes/{declared_agent['agent_id']}/outbox.jsonl",
+            }
+        )
+    agent_pool = {
+        "scheduler_agent_id": "agent-scheduler",
+        "role_runtime_profiles": role_runtime_profiles,
+        "agents": agents,
+    }
+
+    items = []
+    for blueprint_task in blueprint["tasks"]:
+        item = {key: value for key, value in blueprint_task.items()}
+        item["input_artifacts"] = list(blueprint_task["input_artifacts"])
+        if blueprint_relative_path not in item["input_artifacts"]:
+            item["input_artifacts"].append(blueprint_relative_path)
+        items.append(item)
+    backlog = {
+        "backlog_id": f"BL-{taskpack_id}",
+        "items": items,
+    }
+    verification = {
+        "verification_schema_version": "taskpack_verification.v1",
+        "command": list(blueprint["verification"]["command"]),
+        "success_criteria": list(
+            blueprint["verification"].get(
+                "success_criteria",
+                [
+                    "verification command exits with code 0",
+                    "runtime validation accepts changed files inside declared write_scope",
+                ],
+            )
+        ),
+    }
+
+    _write_json(taskpack_dir / "taskpack.yaml", taskpack)
+    _write_json(taskpack_dir / "agent_pool.json", agent_pool)
+    _write_json(taskpack_dir / "backlog.json", backlog)
+    _write_json(taskpack_dir / "verification.json", verification)
+    (taskpack_dir / "README.md").write_text(
+        _render_readme(taskpack, backlog, verification),
+        encoding="utf-8",
+    )
+    validation = validate_taskpack(taskpack_dir)
+
+    artifact_names = [
+        "taskpack.yaml",
+        "agent_pool.json",
+        "backlog.json",
+        "verification.json",
+        "README.md",
+    ]
+    artifact_digests = {
+        name: _sha256_file(taskpack_dir / name)
+        for name in artifact_names
+    }
+    dependency_edges = [
+        {
+            "task_id": task["task_id"],
+            "depends_on": dependency,
+        }
+        for task in blueprint["tasks"]
+        for dependency in task["depends_on"]
+    ]
+    return {
+        "manifest_schema_version": "taskpack_blueprint_materialization.v1",
+        "taskpack_id": taskpack_id,
+        "blueprint_sha256": context["blueprint_sha256"],
+        "source_plan_sha256": context["source_plan_sha256"],
+        "artifact_digests": artifact_digests,
+        "task_ids": [task["task_id"] for task in blueprint["tasks"]],
+        "task_count": len(blueprint["tasks"]),
+        "dependency_edges": dependency_edges,
+        "dependency_edge_count": len(dependency_edges),
+        "validation_status": validation["status"],
+        "freeze_eligible": bool(freeze_eligible),
+        "approval_diagnostics": list(approval_diagnostics),
+    }
+
+
+def _git_output(project_root, *arguments):
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=project_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise TaskpackValidationError(
+            f"git {' '.join(arguments)} failed: {detail or 'unknown error'}"
+        )
+    value = completed.stdout.strip()
+    if not value:
+        raise TaskpackValidationError(
+            f"git {' '.join(arguments)} returned an empty value"
+        )
+    return value
+
+
+def _require_git_tracked_path(project_root, relative_path, field_name):
+    completed = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", relative_path],
+        cwd=project_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise TaskpackValidationError(
+            f"{field_name} must be a tracked repository path: {relative_path}"
+        )
+
+
+def _sha256_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _sha256_json(value):
+    payload = json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def derive_semantic_task_from_skeleton(skeleton_taskpack_dir):
@@ -1605,6 +2424,8 @@ def _write_scope_is_document_path(scope):
 def freeze_taskpack(taskpack_dir, frozen_root):
     taskpack_dir = Path(taskpack_dir).resolve()
     validation = validate_taskpack(taskpack_dir)
+    loaded = load_taskpack(taskpack_dir)
+    _validate_blueprint_taskpack_freeze_approval(loaded)
     taskpack_id = validation["taskpack_id"]
     frozen_root = Path(frozen_root).resolve()
     frozen_dir = (frozen_root / taskpack_id).resolve()
@@ -1634,6 +2455,44 @@ def freeze_taskpack(taskpack_dir, frozen_root):
     }
     _write_json(frozen_dir / "manifest.json", manifest)
     return {"frozen_taskpack_dir": str(frozen_dir), "manifest": manifest}
+
+
+def _validate_blueprint_taskpack_freeze_approval(loaded):
+    taskpack = loaded.get("taskpack") if isinstance(loaded, dict) else None
+    if not isinstance(taskpack, dict) or taskpack.get("authoring_mode") != "blueprint_materialized":
+        return
+    project_root = Path(taskpack.get("project_root") or "").resolve()
+    context = taskpack.get("context")
+    if not isinstance(context, dict):
+        raise TaskpackValidationError(
+            "blueprint-materialized taskpack context is required before freeze"
+        )
+    blueprint_relative_path = context.get("blueprint_path")
+    if not _is_non_empty_string(blueprint_relative_path):
+        raise TaskpackValidationError(
+            "blueprint-materialized taskpack context.blueprint_path is required before freeze"
+        )
+    blueprint_path = (project_root / blueprint_relative_path).resolve()
+    _require_contained_path(blueprint_path, project_root, "context.blueprint_path")
+    blueprint = _read_json(blueprint_path)
+    _validate_taskpack_blueprint_schema(blueprint)
+    current_context = _taskpack_blueprint_context(
+        blueprint,
+        project_root=project_root,
+        blueprint_path=blueprint_path,
+        blueprint_relative_path=blueprint_relative_path,
+    )
+    approval_context = _validate_taskpack_blueprint_approval(
+        blueprint,
+        project_root=project_root,
+        context=current_context,
+    )
+    current_context.update(approval_context)
+    for field_name, value in current_context.items():
+        if context.get(field_name) != value:
+            raise TaskpackValidationError(
+                f"blueprint-materialized taskpack context changed before freeze: {field_name}"
+            )
 
 
 def build_taskpack_runtime_args(
@@ -2635,6 +3494,18 @@ def _render_readme(taskpack, backlog, verification):
                 "",
             ]
         )
+    post_backlog_gates = taskpack.get("post_backlog_gates")
+    if isinstance(post_backlog_gates, list) and post_backlog_gates:
+        lines.extend(["Post-backlog gates (declared, not yet passed):", ""])
+        for gate in post_backlog_gates:
+            lines.extend(
+                [
+                    f"Gate: `{gate.get('gate_id') or 'unknown'}`",
+                    "",
+                    f"Depends on: `{json.dumps(gate.get('depends_on', []), sort_keys=True)}`",
+                    "",
+                ]
+            )
     lines.extend(
         [
             f"Verification: `{json.dumps(verification['command'])}`",

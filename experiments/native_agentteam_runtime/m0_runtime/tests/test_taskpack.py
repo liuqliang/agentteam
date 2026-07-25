@@ -159,6 +159,138 @@ def _read_jsonl(path):
     return records
 
 
+def _blueprint_fixture(repo, task_count=3):
+    blueprint_relative = "plans/example.blueprint.json"
+    source_plan_relative = "plans/example.md"
+    review_schema_relative = "schemas/review.schema.json"
+    approval_relative = "reviews/approval.json"
+    (repo / source_plan_relative).parent.mkdir(parents=True, exist_ok=True)
+    (repo / source_plan_relative).write_text("# Example plan\n", encoding="utf-8")
+    _write_json(
+        repo / review_schema_relative,
+        {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+        },
+    )
+    tasks = []
+    for index in range(task_count):
+        task_id = f"T-{index + 1}"
+        tasks.append(
+            {
+                "task_id": task_id,
+                "objective": f"Implement task {index + 1}.",
+                "goal_alignment": f"Task {index + 1} advances the fixture.",
+                "work_type": "code_implementation",
+                "required_role": "implementation_worker",
+                "backlog_status": "ready",
+                "risk_target": "L1",
+                "depends_on": [] if index == 0 else [f"T-{index}"],
+                "blockers": [],
+                "read_scope": ["README.md"],
+                "write_scope": [f"src/task_{index + 1}.py"],
+                "required_deliverables": [f"task_{index + 1}_change"],
+                "acceptance_criteria": [f"Task {index + 1} passes."],
+                "stop_condition": f"Stop if task {index + 1} cannot be verified.",
+                "input_artifacts": [blueprint_relative],
+                "evidence_paths": ["tests"],
+            }
+        )
+    blueprint = {
+        "schema_version": "agentteam_taskpack_blueprint.v1",
+        "blueprint_id": "example-blueprint",
+        "source_plan": source_plan_relative,
+        "taskpack": {
+            "taskpack_id": "example-blueprint",
+            "goal_kind": "implementation",
+            "milestone": "fixture",
+            "goal": "Implement the complete fixture blueprint.",
+            "overall_risk": "L1",
+            "integration_policy": "verified integration",
+        },
+        "approval": {
+            "record_path": approval_relative,
+            "schema_path": review_schema_relative,
+            "required_decision": "approved",
+            "git_object_format_required": True,
+            "runtime_release_binding_required": False,
+            "digest_bindings": ["source_plan", "blueprint", "review_schema"],
+        },
+        "agents": [
+            {
+                "agent_id": "agent-implementation-worker-1",
+                "role": "implementation_worker",
+                "runtime_profile": {"adapter": "codex"},
+            }
+        ],
+        "verification": {
+            "command": ["python3", "-m", "unittest", "discover"],
+        },
+        "policy": {
+            "allow_merge": False,
+            "merge_requires_verified_integration": True,
+            "operator_review_required": True,
+        },
+        "tasks": tasks,
+        "post_backlog_gates": [
+            {
+                "gate_id": "FINAL",
+                "depends_on": [tasks[-1]["task_id"]],
+                "executor": "deterministic_controller",
+                "evidence_artifact": "acceptance/final.json",
+                "evidence_schema": "src/final.schema.json",
+                "required_status_field": "status",
+                "required_status_value": "passed",
+            }
+        ],
+    }
+    tasks[-1]["write_scope"].append("src/final.schema.json")
+    _write_json(repo / blueprint_relative, blueprint)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add blueprint fixture"],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _write_blueprint_approval(repo, blueprint)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "approve blueprint fixture"],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return blueprint_relative, blueprint
+
+
+def _write_blueprint_approval(repo, blueprint, decision="approved", escalations=None):
+    approval = blueprint["approval"]
+    blueprint_path = repo / "plans" / "example.blueprint.json"
+    source_plan_path = repo / blueprint["source_plan"]
+    review_schema_path = repo / approval["schema_path"]
+    record = {
+        "decision": decision,
+        "remaining_escalations": list(escalations or []),
+        "git_object_format": subprocess.run(
+            ["git", "rev-parse", "--show-object-format"],
+            cwd=repo,
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip(),
+        "preflight_release_id": "fixture-release",
+        "preflight_release_source_commit": _git_head(repo),
+        "plan_sha256": hashlib.sha256(source_plan_path.read_bytes()).hexdigest(),
+        "blueprint_sha256": hashlib.sha256(blueprint_path.read_bytes()).hexdigest(),
+        "review_schema_sha256": hashlib.sha256(review_schema_path.read_bytes()).hexdigest(),
+    }
+    _write_json(repo / approval["record_path"], record)
+    return record
+
+
 class _WebhookCaptureHandler(BaseHTTPRequestHandler):
     payloads = None
 
@@ -630,6 +762,342 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 class TaskpackTests(unittest.TestCase):
+    def test_blueprint_materializes_all_tasks_edges_and_five_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_root = tmp_path / "drafts"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+
+            result = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                output_root,
+            )
+
+            self.assertEqual(result["task_ids"], ["T-1", "T-2", "T-3"])
+            self.assertEqual(result["task_count"], 3)
+            self.assertEqual(result["dependency_edge_count"], 2)
+            self.assertEqual(result["validation_status"], "accepted")
+            self.assertTrue(result["freeze_eligible"])
+            taskpack_dir = Path(result["taskpack_dir"])
+            self.assertEqual(
+                {path.name for path in taskpack_dir.iterdir()},
+                {
+                    "taskpack.yaml",
+                    "agent_pool.json",
+                    "backlog.json",
+                    "verification.json",
+                    "README.md",
+                },
+            )
+            backlog = json.loads((taskpack_dir / "backlog.json").read_text(encoding="utf-8"))
+            self.assertEqual(backlog["items"], blueprint["tasks"])
+            generated_taskpack = json.loads(
+                (taskpack_dir / "taskpack.yaml").read_text(encoding="utf-8")
+            )
+            self.assertEqual(generated_taskpack["policy"], blueprint["policy"])
+            self.assertEqual(
+                generated_taskpack["post_backlog_gates"],
+                blueprint["post_backlog_gates"],
+            )
+            self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
+            self.assertTrue((output_root / "materialization_manifest.json").is_file())
+            frozen = freeze_taskpack(taskpack_dir, tmp_path / "frozen")
+            frozen_taskpack = load_taskpack(frozen["frozen_taskpack_dir"])["taskpack"]
+            self.assertEqual(
+                frozen_taskpack["context"],
+                generated_taskpack["context"],
+            )
+
+    def test_blueprint_freeze_revalidates_approval_and_cleans_failed_freeze(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            materialized = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "drafts",
+            )
+            _write_blueprint_approval(repo, blueprint, decision="rejected")
+
+            with self.assertRaises(TaskpackValidationError):
+                freeze_taskpack(materialized["taskpack_dir"], tmp_path / "frozen")
+
+            self.assertFalse((tmp_path / "frozen" / "example-blueprint").exists())
+
+    def test_blueprint_release_git_object_binding_and_generation_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "work"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            blueprint["approval"]["runtime_release_binding_required"] = True
+            _write_json(repo / blueprint_path, blueprint)
+            record = _write_blueprint_approval(repo, blueprint)
+            release_id = record["preflight_release_id"]
+            release_source_commit = record["preflight_release_source_commit"]
+            _write_json(
+                repo / ".agentteam" / "profile.json",
+                {"work_root": str(work_root)},
+            )
+            _write_json(
+                work_root / "releases" / "active.json",
+                {
+                    "release_id": release_id,
+                    "source_commit": release_source_commit,
+                },
+            )
+            _write_json(
+                work_root / "releases" / "refs" / f"{release_id}.json",
+                {
+                    "release_id": release_id,
+                    "source_commit": release_source_commit,
+                },
+            )
+            output_root = tmp_path / "drafts"
+
+            with mock.patch.object(
+                taskpack_module,
+                "validate_taskpack",
+                side_effect=TaskpackValidationError("injected generated-package failure"),
+            ):
+                with self.assertRaises(TaskpackValidationError):
+                    taskpack_module.materialize_taskpack_blueprint(
+                        repo,
+                        blueprint_path,
+                        output_root,
+                    )
+            self.assertFalse(output_root.exists())
+
+            record["preflight_release_source_commit"] = "0" * 64
+            _write_json(repo / blueprint["approval"]["record_path"], record)
+            dry_result = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "unused",
+                dry_run=True,
+            )
+            self.assertTrue(
+                any("Git OID" in detail for detail in dry_result["approval_diagnostics"])
+            )
+
+    def test_blueprint_preserves_order_while_edges_remain_explicit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            blueprint["tasks"] = [
+                blueprint["tasks"][2],
+                blueprint["tasks"][0],
+                blueprint["tasks"][1],
+            ]
+            _write_json(repo / blueprint_path, blueprint)
+
+            result = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "unused",
+                dry_run=True,
+            )
+
+            self.assertEqual(result["task_ids"], ["T-3", "T-1", "T-2"])
+            self.assertEqual(
+                result["dependency_edges"],
+                [
+                    {"task_id": "T-3", "depends_on": "T-2"},
+                    {"task_id": "T-2", "depends_on": "T-1"},
+                ],
+            )
+
+    def test_blueprint_negative_schema_dag_and_path_cases_fail_before_output(self):
+        cases = {
+            "unknown-dependency": lambda value: value["tasks"][0]["depends_on"].append("missing"),
+            "duplicate-id": lambda value: value["tasks"][1].update(task_id="T-1"),
+            "cycle": lambda value: value["tasks"][0]["depends_on"].append("T-3"),
+            "unknown-field": lambda value: value["tasks"][0].update(unknown=True),
+            "absolute-scope": lambda value: value["tasks"][0]["write_scope"].append("/tmp/out"),
+            "path-traversal": lambda value: value["tasks"][0]["read_scope"].append("../secret"),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    repo = tmp_path / "repo"
+                    output_root = tmp_path / "drafts"
+                    _init_repo(repo)
+                    blueprint_path, blueprint = _blueprint_fixture(repo)
+                    mutate(blueprint)
+                    _write_json(repo / blueprint_path, blueprint)
+
+                    with self.assertRaises(TaskpackValidationError):
+                        taskpack_module.materialize_taskpack_blueprint(
+                            repo,
+                            blueprint_path,
+                            output_root,
+                            dry_run=True,
+                        )
+
+                    self.assertFalse(output_root.exists())
+
+    def test_blueprint_manifest_exactly_matches_complete_backlog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, _blueprint = _blueprint_fixture(repo)
+
+            result = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "unused",
+                dry_run=True,
+            )
+
+            self.assertEqual(result["task_ids"], ["T-1", "T-2", "T-3"])
+            self.assertNotEqual(result["task_ids"], ["T-1"])
+            self.assertEqual(len(result["artifact_digests"]), 5)
+
+    def test_blueprint_repeated_dry_materialization_is_byte_stable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, _blueprint = _blueprint_fixture(repo)
+
+            first = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "unused-a",
+                dry_run=True,
+            )
+            second = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "unused-b",
+                dry_run=True,
+            )
+
+            self.assertEqual(first["artifact_digests"], second["artifact_digests"])
+            self.assertEqual(first["dependency_edges"], second["dependency_edges"])
+            self.assertFalse((tmp_path / "unused-a").exists())
+            self.assertFalse((tmp_path / "unused-b").exists())
+
+    def test_blueprint_addition_preserves_one_task_semantic_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            skeleton = draft_deterministic_taskpack_skeleton(
+                project_root=repo,
+                goal="Implement one bounded compatibility task.",
+                draft_root=tmp_path / "skeletons",
+                taskpack_id="one-task-compatibility",
+            )
+            semantic_task = taskpack_module.derive_semantic_task_from_skeleton(
+                skeleton["taskpack_dir"]
+            )
+
+            materialized = taskpack_module.materialize_semantic_taskpack(
+                skeleton["taskpack_dir"],
+                tmp_path / "materialized",
+                semantic_task,
+            )
+
+            backlog = load_taskpack(materialized["taskpack_dir"])["backlog"]
+            self.assertEqual(len(backlog["items"]), 1)
+            self.assertEqual(validate_taskpack(materialized["taskpack_dir"])["status"], "accepted")
+
+    def test_blueprint_approval_failures_are_dry_diagnostics_and_block_retention(self):
+        scenarios = [
+            ("missing", None, None),
+            ("pending", "pending", []),
+            ("rejected", "rejected", []),
+            ("escalated", "approved", ["operator decision required"]),
+            ("stale-digest", "approved", []),
+        ]
+        for label, decision, escalations in scenarios:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    repo = tmp_path / "repo"
+                    output_root = tmp_path / "drafts"
+                    _init_repo(repo)
+                    blueprint_path, blueprint = _blueprint_fixture(repo)
+                    approval_path = repo / blueprint["approval"]["record_path"]
+                    if label == "missing":
+                        approval_path.unlink()
+                    else:
+                        record = _write_blueprint_approval(
+                            repo,
+                            blueprint,
+                            decision=decision,
+                            escalations=escalations,
+                        )
+                        if label == "stale-digest":
+                            record["blueprint_sha256"] = "0" * 64
+                            _write_json(approval_path, record)
+
+                    dry_result = taskpack_module.materialize_taskpack_blueprint(
+                        repo,
+                        blueprint_path,
+                        tmp_path / "unused",
+                        dry_run=True,
+                    )
+                    self.assertFalse(dry_result["freeze_eligible"])
+                    self.assertTrue(dry_result["approval_diagnostics"])
+
+                    with self.assertRaises(TaskpackValidationError):
+                        taskpack_module.materialize_taskpack_blueprint(
+                            repo,
+                            blueprint_path,
+                            output_root,
+                        )
+                    self.assertFalse((output_root / "example-blueprint").exists())
+                    self.assertFalse(
+                        (output_root / "materialization_manifest.json").exists()
+                    )
+
+    def test_tracked_phase1_blueprint_dry_run_has_exact_task_and_edge_counts(self):
+        project_root = Path(__file__).resolve().parents[4]
+        blueprint_path = (
+            "experiments/native_agentteam_runtime/implementation_artifacts/plans/"
+            "2026-07-23-phase1-model-invocation-usage.blueprint.json"
+        )
+
+        result = taskpack_module.materialize_taskpack_blueprint(
+            project_root,
+            blueprint_path,
+            Path(tempfile.gettempdir()) / "unused-phase1-blueprint-output",
+            dry_run=True,
+        )
+
+        self.assertEqual(
+            result["task_ids"],
+            [
+                "P1-01",
+                "P1-02A",
+                "P1-02B",
+                "P1-03",
+                "P1-04A",
+                "P1-04B",
+                "P1-05",
+                "P1-06A",
+                "P1-06B",
+                "P1-06C",
+                "P1-06D",
+            ],
+        )
+        self.assertEqual(result["task_count"], 11)
+        self.assertEqual(result["dependency_edge_count"], 10)
+        self.assertEqual(result["validation_status"], "accepted")
+        self.assertFalse(result["freeze_eligible"])
+
     def _run_agentteam_json(self, *args):
         completed = subprocess.run(
             ["python3", "-m", "agentteam_runtime.agentteam", *args, "--json"],
