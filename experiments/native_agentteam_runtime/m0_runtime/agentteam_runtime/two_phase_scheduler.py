@@ -870,7 +870,7 @@ class TwoPhaseFileScheduler:
                                 "task_id": inflight["task_id"],
                                 "attempt_id": inflight["attempt_id"],
                                 "lease_id": inflight["lease_id"],
-                                "failure_category": outcome["failure_category"],
+                                "failure_category": result["failure_category"],
                                 "next_attempt_id": next_attempt_id,
                                 "recovery_action": "retry",
                             },
@@ -1074,9 +1074,9 @@ class TwoPhaseFileScheduler:
             }
         if not self.integrate_accepted_patch:
             return {
-                "task_status": "done",
-                "completion_policy": "worker_validation_without_integration",
-                "failure_category": None,
+                "task_status": "blocked",
+                "completion_policy": "verified_integration_required",
+                "failure_category": "integration_not_requested",
                 "retryable": False,
                 "verified_integration_head_sha": None,
             }

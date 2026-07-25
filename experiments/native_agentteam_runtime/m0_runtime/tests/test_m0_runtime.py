@@ -7368,6 +7368,14 @@ class M0RuntimeTests(unittest.TestCase):
                     for event in events
                 )
             )
+            recovery_events = [
+                event for event in events if event["event_type"] == "recovery_routed"
+            ]
+            self.assertEqual(len(recovery_events), 1)
+            self.assertEqual(
+                recovery_events[0]["payload"]["failure_category"],
+                "integration_verification_failed",
+            )
 
     def test_verified_dependency_dispatch_retry_success_completes_once_and_unblocks_dependent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7731,6 +7739,73 @@ class M0RuntimeTests(unittest.TestCase):
                 ],
                 ["integration_noop_verified"],
             )
+
+    def test_verified_dependency_dispatch_patch_requires_integration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[
+                    _backlog_task("TASK-SOURCE", write_scope=["generated/"]),
+                    _backlog_task(
+                        "TASK-DEPENDENT",
+                        write_scope=["generated/"],
+                        depends_on=["TASK-SOURCE"],
+                    ),
+                ],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                max_inflight=1,
+                max_attempts=1,
+                integrate_accepted_patch=False,
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            target = Path(inflight["worktree_path"]) / "generated" / "not-integrated.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"accepted": True}), encoding="utf-8")
+            _append_runtime_result(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                ["generated/not-integrated.json"],
+            )
+
+            result = scheduler.collect_ready_results()["results"][0]
+            dispatch = scheduler.dispatch_ready()
+            status_by_id = {
+                task["task_id"]: task["backlog_status"]
+                for task in scheduler.state["backlog"]["items"]
+            }
+
+            self.assertEqual(result["validation_status"], "accepted")
+            self.assertEqual(result["task_status"], "blocked")
+            self.assertEqual(
+                result["completion_policy"],
+                "verified_integration_required",
+            )
+            self.assertEqual(
+                result["failure_category"],
+                "integration_not_requested",
+            )
+            self.assertEqual(status_by_id["TASK-SOURCE"], "blocked")
+            self.assertEqual(status_by_id["TASK-DEPENDENT"], "ready")
+            self.assertEqual(dispatch["dispatch_count"], 0)
 
     def test_two_phase_scheduler_dispatches_multiple_tasks_before_collecting(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8418,6 +8493,19 @@ class M0RuntimeTests(unittest.TestCase):
                     "task_planner",
                     "--decomposition-default-worker-role",
                     "repo_map_agent",
+                    "--integrate-accepted-patch",
+                    "--integration-verification-command-json",
+                    json.dumps(
+                        [
+                            sys.executable,
+                            "-c",
+                            (
+                                "import pathlib; assert pathlib.Path("
+                                "'generated/codex_generated_worker.json').exists()"
+                            ),
+                        ]
+                    ),
+                    "--commit-verified-integration",
                     "--runtime",
                     "codex",
                     "--max-steps",
