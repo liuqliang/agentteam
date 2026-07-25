@@ -442,8 +442,9 @@ Schema rules:
 - `provider_turn_id` and `provider_predecessor_turn_id` retain provider-issued
   sequence/turn linkage when the provider exposes it; AgentTeam must not invent
   either value;
-- `lifecycle_owner_token` binds the invocation to its worker lease or author
-  process owner; terminal recovery must cite the revoked token;
+- `lifecycle_owner_token` binds the invocation to its worker lease, author
+  process owner, or durable controller claim/lease; terminal recovery must cite
+  the revoked token;
 - `terminal_writer` is `worker`, `taskpack_author`,
   `runtime_diagnostic_controller`, `development_smoke_controller`,
   `recovery_controller`, or `acceptance_controller`;
@@ -523,25 +524,14 @@ A timeout-only retry remains attributable through its new invocation and
 attempt metadata. It is not relabeled as semantic repair unless the scheduler
 records an explicit repair reason.
 
-The supported real-provider invocation inventory is closed for Phase 1:
-
-1. taskpack author calls made by ordinary `start`/`submit`, pursue, and `next`;
-2. worker calls made through mailbox, scheduler, simulation, and CLI routes;
-3. planner/task-slicer, repository-map, semantic-architecture, and explicit
-   review/repair worker roles;
-4. `agentteam chat --interactive`;
-5. the tracked standalone `live_codex_smoke`,
-   `live_codex_scheduler_smoke`, `live_codex_repo_context_smoke`,
-   `live_codex_pipeline_smoke`, `live_codex_multifile_pipeline_smoke`, and
-   `live_codex_cli_smoke` development entry points;
-6. the Phase 1 candidate-runtime acceptance controller.
-
-Each inventory entry must cross the shared lifecycle primitive with an
-explicit stage and non-empty runtime execution session identity. A new tracked
-real-provider entry point is unsupported until this inventory and its
-deterministic coverage fixture are updated. Test fakes using the same boundary
-remain `not_applicable_adapter`; an external Codex process launched outside
-AgentTeam is outside this contract.
+The sole closed real-provider inventory is the
+[Supported Invocation Inventory](#supported-invocation-inventory) below. Each
+inventory entry must cross the shared lifecycle primitive with an explicit
+stage and non-empty runtime execution session identity. A new tracked
+real-provider entry point is unsupported until that table and its deterministic
+coverage fixture are updated. Test fakes using the same boundary remain
+`not_applicable_adapter`; an external Codex process launched outside AgentTeam
+is outside this contract.
 
 ### Token Counting
 
@@ -671,7 +661,8 @@ Files remain authoritative; SQLite remains rebuildable.
 1. Per-invocation `started.json` and `terminal.json` lifecycle files are the
    primary capture authority. Their location is runtime-owned and outside the
    target source tree.
-2. The scheduler imports worker lifecycle files as canonical
+2. The scheduler imports worker and scheduler-owned development-smoke
+   lifecycle files as canonical
    `model_invocation_started` and `model_invocation_usage_recorded` events.
    Events are replayable run authority; duplicate imports preserve IDs and
    content.
@@ -694,20 +685,29 @@ Files remain authoritative; SQLite remains rebuildable.
 5. Author records use the planned `taskpack_id` as `run_id`, because the
    current runtime uses the frozen taskpack ID as the run directory ID. A
    failed author still remains queryable as a planned run that never started.
-6. Pursue context is passed explicitly when available. Projection may enrich
+6. Runtime-diagnostic and controller-owned development-smoke lifecycle files
+   live only below
+   `<run_dir>/state/controller_invocations/<stage>/<runtime_execution_session_id>/model_invocations/`.
+   The run identity and a durable controller claim register that fixed root
+   before provider launch. Normal completion imports the records through the
+   same locked, conflict-detecting append primitive into that run's canonical
+   event log; a crash may leave unresolved files for recovery and projection.
+   Arbitrary external directories are not authority.
+7. Pursue context is passed explicitly when available. Projection may enrich
    old or initially incomplete records from pursue recap files, but enrichment
    must not change record identity or token counts.
-7. Legacy `token_usage` summaries remain readable for compatibility, but they
+8. Legacy `token_usage` summaries remain readable for compatibility, but they
    are not benchmark-counted invocation records.
-8. Projection scans canonical lifecycle events, unresolved lifecycle files,
-   author lifecycle directories, and controller-owned acceptance artifacts. It
-   deduplicates starts by `invocation_id`, terminal records by
+9. Projection scans canonical lifecycle events, unresolved worker lifecycle
+   files, author lifecycle directories, registered unresolved diagnostic and
+   development-smoke controller roots, and controller-owned acceptance
+   artifacts. It deduplicates starts by `invocation_id`, terminal records by
    `usage_event_id`, and raises on conflicting content.
-9. The controller-owned live-smoke artifact is authoritative for its one
+10. The controller-owned live-smoke artifact is authoritative for its one
    acceptance invocation only after controller validation passes and the final
    artifact is atomically published. It is projected under a dedicated
    acceptance run ID.
-10. No prose trace file is created per invocation.
+11. No prose trace file is created per invocation.
 
 ## Supported Invocation Inventory
 
@@ -724,6 +724,13 @@ usage or failing validation.
 | Semantic architecture worker | Role-routed `CodexRuntimeAdapter` | Same event contract with semantic architecture stage. |
 | Review or repair attempt | Role/work-type/retry-routed adapter call | New invocation record with repair stage and original task lineage. |
 | Follow-up author | `_run_pursue_loop()` and follow-up submit path | Author result record with pursue and round correlation. |
+| Runtime diagnostic | `agentteam chat --interactive` / `run_runtime_diagnostic_chat()` | Registered controller lifecycle root, `runtime_diagnostic` stage, durable controller owner, and canonical import into the selected run; usage may be unavailable when the interactive provider surface emits no machine-readable total. |
+| Development smoke: basic | `live_codex_smoke.py` | Registered lifecycle plus canonical run events with `development_smoke` stage. |
+| Development smoke: scheduler | `live_codex_scheduler_smoke.py` | Registered lifecycle plus canonical run events with `development_smoke` stage. |
+| Development smoke: repo context | `live_codex_repo_context_smoke.py` | Registered lifecycle plus canonical run events with `development_smoke` stage. |
+| Development smoke: pipeline | `live_codex_pipeline_smoke.py` | Registered lifecycle plus canonical run events with `development_smoke` stage. |
+| Development smoke: multifile pipeline | `live_codex_multifile_pipeline_smoke.py` | Registered lifecycle plus canonical run events with `development_smoke` stage. |
+| Development smoke: CLI | `live_codex_cli_smoke.py` | Registered lifecycle plus canonical run events with `development_smoke` stage. |
 | Candidate-runtime live smoke | `usage_live_smoke.py` through `CodexRuntimeAdapter` | Controller artifact with `acceptance_live_smoke` stage and dedicated acceptance run ID. |
 | Fake/shell adapter at model boundary | Runtime adapter alternatives | `not_applicable`; excluded from coverage. |
 
@@ -850,8 +857,9 @@ not match the tracked source. The release source commit must match the OID
 length declared by `git_object_format`, which is read from
 `git rev-parse --show-object-format`; it is not a SHA-256 file digest. G1 also
 fails when the active release ID or `source_commit` differs from the bound
-preflight release, when `pre04_integration_commit` is not a valid commit, or
-when it is not an ancestor of the bound release source. A semantic
+preflight release, when the bound release source is not an ancestor of the
+materialization source commit, when `pre04_integration_commit` is not a valid
+commit, or when it is not an ancestor of the bound release source. A semantic
 architecture agent may prepare the review and proposed resolutions, but cannot
 approve its own contract.
 
@@ -1496,8 +1504,9 @@ timed-out processes.
 
 ### Task-Local Stop Condition
 
-Stop if the Codex author command cannot expose machine-readable provider usage
-without breaking the existing custom-command and timeout-salvage contracts.
+Stop if a supported non-worker provider entry point cannot cross the shared
+lifecycle boundary without breaking its interactive, custom-command, or
+timeout-salvage contract.
 
 ## P1-04A Canonical Lifecycle Events And Replay
 
@@ -1512,8 +1521,11 @@ as repeated model calls.
 
 ### Files
 
+- Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py`
 - Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py`
+- Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/diagnostic_chat.py`
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py`
+- Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py`
 
 ### Required Deliverables
 
@@ -1521,6 +1533,7 @@ as repeated model calls.
 - `canonical_usage_event`
 - `idempotent_replay_accounting`
 - `author_record_import_evidence`
+- `controller_record_import_evidence`
 - `authoritative_snapshot_lookup`
 - `verification_summary`
 
@@ -1535,6 +1548,10 @@ as repeated model calls.
   their original IDs.
 - [ ] Import worker start and terminal lifecycle files idempotently during
   normal collection and recovery.
+- [ ] Import registered runtime-diagnostic and development-smoke controller
+  lifecycle files into their run's canonical event log with the same
+  idempotency and content-conflict rules. Preserve unresolved controller files
+  after a crash for recovery and direct file projection.
 - [ ] Use `model-invocation-started:<invocation_id>` and
   `model-invocation-writer-revoked:<invocation_id>:<owner_token>` as explicit
   replay idempotency keys; terminal events remain keyed by `usage_event_id`.
@@ -1561,6 +1578,8 @@ as repeated model calls.
 - one duplicated event record reports one invocation;
 - a conflicting duplicate fails a deterministic integrity check;
 - importing an author result twice records one canonical event;
+- importing diagnostic or development-smoke controller records twice preserves
+  one invocation, and a conflicting duplicate fails deterministically;
 - author bootstrap replay is idempotent, and a path/digest mismatch fails
   before worker dispatch;
 - two resumed invocations use the prior canonical snapshot and replay derives
@@ -1600,8 +1619,9 @@ compact, compatible operator view.
 
 ### Steps
 
-- [ ] Include author plus worker usage in full-run summaries where author
-  context is available.
+- [ ] Include every supported author, worker, runtime-diagnostic,
+  development-smoke, and acceptance invocation in full-run summaries where
+  its run context is available.
 - [ ] Preserve reported, partial, unavailable, and not-applicable counts and
   compact reason summaries.
 - [ ] Sum exact reported tokens and known partial-token lower bounds into
@@ -1616,6 +1636,9 @@ compact, compatible operator view.
 ### Acceptance
 
 - completion reports distinguish full-run usage from legacy task-only usage;
+- diagnostic and development-smoke stages contribute to invocation counts,
+  lifecycle/token coverage, and stage breakdowns without being mislabeled as
+  workers;
 - a retrying task reports two invocations but one completed task;
 - partial and unavailable usage reduce token coverage, preserve lifecycle
   coverage after terminalization, and retain a bounded reason;
@@ -1719,7 +1742,8 @@ migrations because the DB is rebuildable.
 ### Steps
 
 - [ ] Scan canonical lifecycle events, unresolved worker/author lifecycle
-  directories, and controller-owned final live-smoke artifacts whose
+  directories, registered unresolved runtime-diagnostic and development-smoke
+  controller roots, and controller-owned final live-smoke artifacts whose
   `controller_validation_status` is `passed`.
 - [ ] Discover controller artifacts only below the configured project
   `work_root/runs/` tree; arbitrary external directories are not projection
@@ -1752,6 +1776,8 @@ migrations because the DB is rebuildable.
   measures, exact reported totals, and partial lower bounds;
 - a passed live-smoke artifact projects as one invocation in its dedicated
   acceptance run;
+- unresolved or canonically imported diagnostic and development-smoke records
+  project exactly once with their controller owner, runtime session, and stage;
 - acceptance rows retain their attempt-scoped run ID, logical implementation
   run ID, `run_kind: acceptance_evidence`, and gate epoch;
 - stale, missing, or corrupt DB falls back to files with an explicit warning;

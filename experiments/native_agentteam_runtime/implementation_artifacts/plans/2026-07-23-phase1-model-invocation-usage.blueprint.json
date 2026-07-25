@@ -31,8 +31,12 @@
     "resume_last_domain": "bound_project_backend_account_session_store_single_flight",
     "runtime_execution_session_allocation": "one_nonempty_controller_allocated_identity_per_real_provider_execution",
     "supported_invocation_inventory_policy": "closed_tracked_inventory_with_source_scan_and_deterministic_fixture",
+    "lifecycle_owner_policy": "worker_lease_author_process_or_durable_controller_claim",
+    "controller_lifecycle_authority": "fixed_registered_run_state_root_with_canonical_import_and_unresolved_file_projection",
+    "controller_report_projection_policy": "all_supported_stages_count_once_from_canonical_or_unresolved_file_authority",
     "profile_candidate_root_policy": "explicit_distinct_roots_same_git_common_directory",
     "runtime_release_policy": "immutable_prelaunch_run_binding",
+    "preflight_release_ancestry_policy": "pre04_ancestor_of_release_source_ancestor_of_materialization_source",
     "latest_implementation_run_policy": "launcher_selected_max_unique_creation_sequence",
     "acceptance_runtime_binding_policy": "candidate_commit_and_module_root_in_controller_claim",
     "acceptance_run_identity_policy": "attempt_scoped_evidence_run_with_logical_implementation_link",
@@ -345,25 +349,33 @@
       "blockers": [],
       "read_scope": [
         "experiments/native_agentteam_runtime/schemas/event.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/diagnostic_chat.py",
         "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
         "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
       ],
       "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py"
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/diagnostic_chat.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
       ],
       "required_deliverables": [
         "canonical_invocation_started_event",
         "canonical_usage_event",
         "idempotent_replay_accounting",
         "author_record_import_evidence",
+        "controller_record_import_evidence",
         "authoritative_snapshot_lookup",
         "verification_summary"
       ],
       "acceptance_criteria": [
         "Canonical start and terminal event imports are idempotent and preserve source IDs.",
         "The scheduler validates the author bootstrap path containment and record digests before worker dispatch; bootstrap replay does not duplicate cost.",
+        "Registered runtime-diagnostic and development-smoke controller lifecycle records import into their run canonical event log idempotently, while unresolved crash files remain projectable authority.",
         "Duplicate byte-equivalent records count once and conflicting records fail integrity checks.",
         "An open start remains visible through replay.",
         "Provider predecessor and snapshot reconstruction uses provider_session_id, never runtime execution order.",
@@ -408,7 +420,7 @@
         "verification_summary"
       ],
       "acceptance_criteria": [
-        "Reports include author and worker invocations and distinguish invocation count from completed task count.",
+        "Reports include every supported author, worker, runtime-diagnostic, development-smoke, and acceptance invocation and distinguish invocation count from completed task count.",
         "Reported, partial, unavailable, not-applicable, and open states remain distinct.",
         "Exact reported totals are labeled as subset totals when token coverage is below 100 percent, with only invocation-scoped partial fields shown as lower bounds and ambiguous session snapshots excluded.",
         "Open invocations block completion and 100 percent coverage.",
@@ -462,6 +474,7 @@
         "Fresh DB and authoritative file scan have identical counts, digests, coverage, and token totals.",
         "Deleting and rebuilding the DB is stable and corrupt or stale DB falls back to files with a warning.",
         "Controller acceptance artifacts are discovered only under the configured project work_root/runs tree.",
+        "Registered unresolved and canonically imported runtime-diagnostic and development-smoke records project exactly once with controller owner, runtime session, and stage.",
         "Acceptance evidence runs remain explicitly queryable and included in milestone aggregation but cannot replace the default latest implementation run.",
         "Open recovery changes lifecycle status without changing invocation count, and session-cumulative ambiguous snapshots never enter projected lower bounds.",
         "Stats filters preserve authority and legacy runs cannot silently pass benchmark coverage."

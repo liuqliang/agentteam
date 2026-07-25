@@ -1248,6 +1248,25 @@ def _validate_taskpack_blueprint_approval(
             raise TaskpackValidationError(
                 "active runtime release source commit does not match blueprint approval"
             )
+        completed = subprocess.run(
+            [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                release_source_commit,
+                context["project_source_commit"],
+            ],
+            cwd=project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise TaskpackValidationError(
+                "preflight release source commit is not an ancestor "
+                "of the blueprint source commit"
+            )
     pre04_integration_commit = record.get("pre04_integration_commit")
     if approval.get("pre04_ancestor_binding_required"):
         if not isinstance(pre04_integration_commit, str) or not re.fullmatch(

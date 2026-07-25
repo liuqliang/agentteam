@@ -1223,6 +1223,51 @@ class TaskpackTests(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 text=True,
             ).stdout.strip()
+
+            record["preflight_release_source_commit"] = unrelated_commit
+            _write_json(repo / blueprint["approval"]["record_path"], record)
+            _write_json(
+                work_root / "releases" / "active.json",
+                {
+                    "release_id": release_id,
+                    "source_git_commit": unrelated_commit,
+                },
+            )
+            _write_json(
+                work_root / "releases" / release_id / "manifest.json",
+                {
+                    "release_id": release_id,
+                    "source_git_commit": unrelated_commit,
+                },
+            )
+            dry_result = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "unrelated-release-unused",
+                dry_run=True,
+            )
+            self.assertTrue(
+                any(
+                    "not an ancestor of the blueprint source commit" in detail
+                    for detail in dry_result["approval_diagnostics"]
+                )
+            )
+
+            record["preflight_release_source_commit"] = release_source_commit
+            _write_json(
+                work_root / "releases" / "active.json",
+                {
+                    "release_id": release_id,
+                    "source_git_commit": release_source_commit,
+                },
+            )
+            _write_json(
+                work_root / "releases" / release_id / "manifest.json",
+                {
+                    "release_id": release_id,
+                    "source_git_commit": release_source_commit,
+                },
+            )
             record["pre04_integration_commit"] = unrelated_commit
             _write_json(repo / blueprint["approval"]["record_path"], record)
             dry_result = taskpack_module.materialize_taskpack_blueprint(
