@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/post_backlog_gate_epoch.schema.json",
+  "title": "AgentTeam post-backlog gate epoch",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "implementation_run_id",
+    "epoch_number",
+    "prior_epoch_sha256",
+    "gate_declaration_sha256",
+    "git_object_format",
+    "target_branch",
+    "target_head_sha",
+    "integration_branch",
+    "integration_head_sha",
+    "validated_code_sha",
+    "verification_command_sha256",
+    "verification_result_sha256",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "post_backlog_gate_epoch.v1"
+    },
+    "implementation_run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "epoch_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "prior_epoch_sha256": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/sha256"
+        }
+      ]
+    },
+    "gate_declaration_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "git_object_format": {
+      "enum": [
+        "sha1",
+        "sha256"
+      ]
+    },
+    "target_branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target_head_sha": {
+      "$ref": "#/$defs/gitOid"
+    },
+    "integration_branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "integration_head_sha": {
+      "$ref": "#/$defs/gitOid"
+    },
+    "validated_code_sha": {
+      "$ref": "#/$defs/gitOid"
+    },
+    "verification_command_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "verification_result_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "target_head_sha": {
+            "$ref": "#/$defs/sha1"
+          },
+          "integration_head_sha": {
+            "$ref": "#/$defs/sha1"
+          },
+          "validated_code_sha": {
+            "$ref": "#/$defs/sha1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha256"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "target_head_sha": {
+            "$ref": "#/$defs/sha256"
+          },
+          "integration_head_sha": {
+            "$ref": "#/$defs/sha256"
+          },
+          "validated_code_sha": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha1": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitOid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    }
+  }
+}

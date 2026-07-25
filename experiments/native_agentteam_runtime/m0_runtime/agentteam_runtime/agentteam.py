@@ -1,4 +1,9 @@
 import argparse
+import ctypes
+import errno
+import fcntl
+import getpass
+import hashlib
 import json
 import os
 import select
@@ -9,6 +14,7 @@ import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -98,6 +104,12 @@ from .token_usage import format_token_usage, token_usage_from_state
 
 
 AUTHOR_RUNTIME_CHOICES = ["fake", "codex", "deterministic"]
+_PHASE1_REPORT_REVIEW_PATHS = [
+    "experiments/native_agentteam_runtime/implementation_artifacts/reports/"
+    "phase1-model-invocation-usage.md",
+    "experiments/native_agentteam_runtime/implementation_artifacts/"
+    "native_runtime_roadmap.md",
+]
 
 
 class AgentTeamCliError(RuntimeError):
@@ -476,6 +488,7 @@ def _build_parser():
     _add_stop_parser(subcommands)
     _add_update_parser(subcommands)
     _add_paths_parser(subcommands)
+    _add_gate_parser(subcommands)
     _add_integrate_parser(subcommands)
     _add_notify_parser(subcommands)
     _add_stats_parser(subcommands)
@@ -1243,6 +1256,59 @@ def _add_paths_parser(subcommands):
     parser.add_argument("--run-dir", help="Existing run directory to inspect. Overrides --project-root selection.")
     parser.add_argument("--json", action="store_true", help="Print paths as JSON instead of human text.")
     parser.set_defaults(handler=_handle_paths)
+
+
+def _add_gate_parser(subcommands):
+    parser = subcommands.add_parser(
+        "gate",
+        help="Manage file-authoritative post-backlog integration gates.",
+    )
+    gate_commands = parser.add_subparsers(
+        dest="gate_command",
+        required=True,
+        parser_class=JsonArgumentParser,
+    )
+
+    seal = gate_commands.add_parser(
+        "seal-baseline",
+        help="Rerun frozen verification and publish the first gate epoch.",
+    )
+    _add_gate_run_selection_arguments(seal)
+    seal.add_argument("--expected-integration-head", required=True)
+    seal.add_argument("--authorize-revalidation", action="store_true", required=True)
+    seal.add_argument("--json", action="store_true")
+    seal.set_defaults(handler=_handle_gate)
+
+    register = gate_commands.add_parser(
+        "register",
+        help="Register the epoch-scoped evidence run for a gate.",
+    )
+    _add_gate_run_selection_arguments(register)
+    register.add_argument("--gate", required=True)
+    register.add_argument("--gate-epoch", required=True, type=int)
+    register.add_argument("--evidence-run", required=True)
+    register.add_argument("--expected-integration-head", required=True)
+    register.add_argument("--json", action="store_true")
+    register.set_defaults(handler=_handle_gate)
+
+    approve = gate_commands.add_parser(
+        "approve",
+        help="Interactively publish an immutable operator gate approval.",
+    )
+    _add_gate_run_selection_arguments(approve)
+    approve.add_argument("--gate", required=True)
+    approve.add_argument("--gate-epoch", required=True, type=int)
+    approve.add_argument("--expected-evidence-sha256", required=True)
+    approve.add_argument("--expected-integration-head", required=True)
+    approve.add_argument("--approve", action="store_true", required=True)
+    approve.add_argument("--json", action="store_true")
+    approve.set_defaults(handler=_handle_gate)
+
+
+def _add_gate_run_selection_arguments(parser):
+    parser.add_argument("--project-root", help="Git repository root. Defaults to cwd.")
+    parser.add_argument("--taskpack", help="Implementation run/taskpack id. Defaults to latest.")
+    parser.add_argument("--run-dir", help="Existing implementation run directory.")
 
 
 def _add_integrate_parser(subcommands):
@@ -2699,9 +2765,10 @@ def _handle_submit(args):
         run_dir,
         {"work_root": str(work_root)},
     )
-    report = build_run_completion_report(
+    report = _build_gate_guided_completion_report(
         run_dir,
         project=args.notification_project or "agentteam",
+        profile={"work_root": str(work_root)},
     )
     artifact_snapshot = snapshot_run_artifacts_safe(
         work_root,
@@ -2767,9 +2834,10 @@ def _handle_run(args):
     run = _json_or_output(completed.stdout)
     run_dir = run_paths["run_dir"]
     work_root = _infer_work_root_for_run(run_paths["run_root"], args.frozen_taskpack_dir)
-    report = build_run_completion_report(
+    report = _build_gate_guided_completion_report(
         run_dir,
         project=args.notification_project or "agentteam",
+        profile={"work_root": str(work_root)},
     )
     artifact_snapshot = snapshot_run_artifacts_safe(
         work_root,
@@ -2856,9 +2924,10 @@ def _handle_continue(args):
         )
     run = _json_or_output(completed.stdout)
     release_record = _record_run_release(run_dir, profile)
-    report = build_run_completion_report(
+    report = _build_gate_guided_completion_report(
         run_dir,
         project=profile.get("project_key") or "agentteam",
+        profile=profile,
     )
     artifact_snapshot = snapshot_run_artifacts_safe(
         work_root,
@@ -3078,6 +3147,469 @@ def _handle_integrate(args):
     return 0
 
 
+def _handle_gate(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    run_dir = _selected_run_dir(args, profile, command_name=f"gate {args.gate_command}")
+    if args.gate_command == "seal-baseline":
+        summary = _gate_seal_baseline(
+            project_root,
+            profile,
+            run_dir,
+            expected_integration_head=args.expected_integration_head,
+        )
+    elif args.gate_command == "register":
+        summary = _gate_register(
+            project_root,
+            profile,
+            run_dir,
+            gate_id=args.gate,
+            gate_epoch=args.gate_epoch,
+            evidence_run_id=args.evidence_run,
+            expected_integration_head=args.expected_integration_head,
+        )
+    elif args.gate_command == "approve":
+        summary = _gate_approve(
+            project_root,
+            profile,
+            run_dir,
+            gate_id=args.gate,
+            gate_epoch=args.gate_epoch,
+            expected_evidence_sha256=args.expected_evidence_sha256,
+            expected_integration_head=args.expected_integration_head,
+        )
+    else:
+        raise AgentTeamCliError("unsupported gate command", gate_command=args.gate_command)
+    if args.json:
+        return summary
+    _write_gate_text(summary)
+    return 0
+
+
+def _write_gate_text(summary):
+    lines = [
+        f"gate_action: {summary.get('gate_action') or 'unknown'}",
+        f"gate_status: {summary.get('gate_status') or 'unknown'}",
+        f"taskpack_id: {summary.get('taskpack_id') or 'unknown'}",
+        f"gate_epoch: {summary.get('gate_epoch') or 'none'}",
+    ]
+    if summary.get("gate_id"):
+        lines.append(f"gate_id: {summary['gate_id']}")
+    if summary.get("evidence_sha256"):
+        lines.append(f"evidence_sha256: {summary['evidence_sha256']}")
+    if summary.get("path"):
+        lines.append(f"path: {summary['path']}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _post_backlog_gate_context(profile, run_dir):
+    run_dir = Path(run_dir).resolve()
+    work_root = Path(profile.get("work_root") or run_dir.parent.parent).resolve()
+    frozen_dir = (work_root / "frozen" / run_dir.name).resolve()
+    if not (frozen_dir / "taskpack.yaml").is_file():
+        return None
+    taskpack = json.loads((frozen_dir / "taskpack.yaml").read_text(encoding="utf-8"))
+    declarations = taskpack.get("post_backlog_gates")
+    if not isinstance(declarations, list) or not declarations:
+        return None
+    project_root = Path(taskpack["project_root"]).resolve()
+    gate_root = run_dir / "state" / "post_backlog_gates"
+    return {
+        "profile": profile,
+        "work_root": work_root,
+        "project_root": project_root,
+        "run_dir": run_dir,
+        "frozen_dir": frozen_dir,
+        "taskpack": taskpack,
+        "declarations": [dict(gate) for gate in declarations],
+        "declarations_by_id": {gate["gate_id"]: dict(gate) for gate in declarations},
+        "gate_root": gate_root,
+        "epochs_root": gate_root / "epochs",
+        "locks_root": gate_root / "locks",
+    }
+
+
+def _initialize_post_backlog_gate_state(profile, run_dir):
+    context = _post_backlog_gate_context(profile, run_dir)
+    if context is None:
+        return None
+    state_path = context["gate_root"] / "gate_state.v1.json"
+    if state_path.exists():
+        return state_path
+    value = {
+        "schema_version": "post_backlog_gate_state.v1",
+        "implementation_run_id": context["run_dir"].name,
+        "state": "awaiting_validated_baseline",
+        "gate_declaration_sha256": _sha256_json(context["declarations"]),
+        "created_at": _format_utc_timestamp(datetime.now(UTC)),
+    }
+    _atomic_write_json(state_path, value, replace=False)
+    return state_path
+
+
+def _gate_seal_baseline(project_root, profile, run_dir, *, expected_integration_head):
+    context = _require_post_backlog_gate_context(profile, run_dir)
+    gate_ids = sorted(context["declarations_by_id"])
+    with _gate_mutation_locks(context, gate_ids):
+        if context["epochs_root"].exists() and any(context["epochs_root"].iterdir()):
+            # This also validates a staged/conflicting numeric epoch before rejecting reseal.
+            current = _read_current_gate_epoch(context)
+            raise AgentTeamCliError(
+                "post-backlog gate epoch already exists",
+                current_epoch=current["record"]["epoch_number"] if current else None,
+            )
+        run_status = _build_run_status_summary(profile, context["run_dir"])
+        if run_status.get("status") not in {"idle", "completed"}:
+            raise AgentTeamCliError(
+                "frozen backlog must be verified idle before sealing",
+                run_status=run_status.get("status") or "unknown",
+            )
+        task_counts = run_status.get("tasks") or {}
+        integration_counts = run_status.get("integration") or {}
+        if (
+            not int(task_counts.get("total") or 0)
+            or int(task_counts.get("done") or 0) != int(task_counts.get("total") or 0)
+            or int(task_counts.get("blocked") or 0)
+            or int(task_counts.get("ready") or 0)
+            or int(integration_counts.get("blocked") or 0)
+        ):
+            raise AgentTeamCliError(
+                "frozen backlog must be fully done with no current integration block",
+                tasks=task_counts,
+                integration=integration_counts,
+            )
+        baseline = _paths_integration_baseline(
+            context["run_dir"],
+            _paths_run_state(context["run_dir"]),
+        )
+        branch = baseline.get("branch")
+        worktree_path = baseline.get("worktree_path")
+        if not branch or not worktree_path:
+            raise AgentTeamCliError("integration baseline is unavailable for gate seal")
+        worktree = Path(worktree_path).resolve()
+        actual_head = _git_stdout(project_root, ["rev-parse", "--verify", f"{branch}^{{commit}}"])
+        _require_expected_git_oid(
+            project_root,
+            expected_integration_head,
+            actual_head,
+            field_name="expected integration head",
+        )
+        dirty = _git_stdout(worktree, ["status", "--porcelain=v1", "--untracked-files=all"])
+        if dirty:
+            raise AgentTeamCliError(
+                "integration worktree must be clean before gate seal",
+                dirty_status=dirty,
+            )
+        open_invocations = _open_gate_controller_invocations(context)
+        if open_invocations:
+            raise AgentTeamCliError(
+                "open gate controller invocation blocks baseline seal",
+                open_controller_invocations=open_invocations,
+            )
+        command = load_taskpack(context["frozen_dir"])["verification"].get("command")
+        if not isinstance(command, list) or not command or not all(
+            isinstance(part, str) and part for part in command
+        ):
+            raise AgentTeamCliError("frozen verification command is invalid")
+        verification = subprocess.run(
+            command,
+            cwd=worktree,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=3600,
+        )
+        result_authority = {
+            "command": command,
+            "returncode": verification.returncode,
+            "stdout_sha256": _sha256_bytes(verification.stdout.encode("utf-8")),
+            "stderr_sha256": _sha256_bytes(verification.stderr.encode("utf-8")),
+        }
+        if verification.returncode != 0:
+            raise AgentTeamCliError(
+                "frozen full verification failed; gate epoch was not published",
+                verification_result=result_authority,
+            )
+        verified_head = _git_stdout(
+            project_root,
+            ["rev-parse", "--verify", f"{branch}^{{commit}}"],
+        )
+        if verified_head != actual_head:
+            raise AgentTeamCliError(
+                "integration baseline changed during frozen verification",
+                before_head=actual_head,
+                after_head=verified_head,
+            )
+        dirty_after_verification = _git_stdout(
+            worktree,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+        )
+        if dirty_after_verification:
+            raise AgentTeamCliError(
+                "frozen verification changed the integration worktree",
+                dirty_status=dirty_after_verification,
+            )
+        target_branch = _git_stdout(project_root, ["symbolic-ref", "--short", "HEAD"])
+        target_head = _git_stdout(project_root, ["rev-parse", "HEAD"])
+        object_format = _git_object_format(project_root)
+        record = {
+            "schema_version": "post_backlog_gate_epoch.v1",
+            "implementation_run_id": context["run_dir"].name,
+            "epoch_number": 1,
+            "prior_epoch_sha256": None,
+            "gate_declaration_sha256": _sha256_json(context["declarations"]),
+            "git_object_format": object_format,
+            "target_branch": target_branch,
+            "target_head_sha": target_head,
+            "integration_branch": branch,
+            "integration_head_sha": actual_head,
+            "validated_code_sha": actual_head,
+            "verification_command_sha256": _sha256_json(command),
+            "verification_result_sha256": _sha256_json(result_authority),
+            "created_at": _format_utc_timestamp(datetime.now(UTC)),
+        }
+        _validate_gate_record_schema("post_backlog_gate_epoch.schema.json", record)
+        epoch_dir = _publish_gate_epoch(context, record)
+        state_path = context["gate_root"] / "gate_state.v1.json"
+        _atomic_write_json(
+            state_path,
+            {
+                "schema_version": "post_backlog_gate_state.v1",
+                "implementation_run_id": context["run_dir"].name,
+                "state": "gates_pending",
+                "gate_declaration_sha256": record["gate_declaration_sha256"],
+                "current_epoch": 1,
+                "current_epoch_sha256": _sha256_json(record),
+                "updated_at": _format_utc_timestamp(datetime.now(UTC)),
+            },
+        )
+        return {
+            "gate_action": "seal-baseline",
+            "gate_status": "pending",
+            "taskpack_id": context["run_dir"].name,
+            "gate_epoch": 1,
+            "epoch_sha256": _sha256_json(record),
+            "verification_result": result_authority,
+            "path": str(epoch_dir / "epoch.v1.json"),
+        }
+
+
+def _gate_register(
+    project_root,
+    profile,
+    run_dir,
+    *,
+    gate_id,
+    gate_epoch,
+    evidence_run_id,
+    expected_integration_head,
+):
+    context = _require_post_backlog_gate_context(profile, run_dir)
+    declaration = _require_gate_declaration(context, gate_id)
+    with _gate_mutation_locks(context, [gate_id]):
+        current = _require_current_gate_epoch(context, gate_epoch)
+        head = _resolved_epoch_integration_head(project_root, current["record"])
+        _require_expected_git_oid(
+            project_root,
+            expected_integration_head,
+            head,
+            field_name="expected integration head",
+        )
+        if head != current["record"]["integration_head_sha"]:
+            raise AgentTeamCliError(
+                "gate evidence must be registered before the integration baseline changes",
+                epoch_integration_head=current["record"]["integration_head_sha"],
+                current_integration_head=head,
+            )
+        if _open_gate_controller_invocations(context, gate_id=gate_id):
+            raise AgentTeamCliError(
+                "open gate controller invocation blocks evidence registration",
+                gate_id=gate_id,
+            )
+        evidence_run = (context["work_root"] / "runs" / evidence_run_id).resolve()
+        runs_root = (context["work_root"] / "runs").resolve()
+        _require_path_within(evidence_run, runs_root, "evidence run")
+        if not evidence_run.is_dir() or evidence_run.parent != runs_root:
+            raise AgentTeamCliError(
+                "evidence run must exist directly under the configured work root",
+                evidence_run=str(evidence_run),
+            )
+        artifact_relative = declaration["evidence_artifact"]
+        artifact_path = (evidence_run / artifact_relative).resolve()
+        _require_path_within(artifact_path, evidence_run, "evidence artifact")
+        receipt_path = _gate_receipt_path(context, current["record"], gate_id)
+        previous = _read_json_if_exists(receipt_path)
+        new_binding = {
+            "evidence_run_id": evidence_run_id,
+            "evidence_run_relative_path": evidence_run.relative_to(context["work_root"]).as_posix(),
+            "expected_integration_head_sha": head,
+        }
+        if previous:
+            previous_binding = {
+                key: previous.get(key) for key in new_binding
+            }
+            previous_decision = _evaluate_one_post_backlog_gate(
+                context,
+                current,
+                declaration,
+                prior_decisions={},
+            )
+            if previous_decision.get("state") == "passed":
+                if previous_binding == new_binding:
+                    return {
+                        "gate_action": "register",
+                        "gate_status": "passed",
+                        "taskpack_id": context["run_dir"].name,
+                        "gate_epoch": gate_epoch,
+                        "gate_id": gate_id,
+                        "path": str(receipt_path),
+                        "idempotent": True,
+                    }
+                raise AgentTeamCliError("a passed gate receipt cannot be replaced", gate_id=gate_id)
+        attempts = list(previous.get("attempt_history", [])) if previous else []
+        if previous:
+            attempts.append(
+                {
+                    "evidence_run_id": previous.get("evidence_run_id"),
+                    "evidence_run_relative_path": previous.get("evidence_run_relative_path"),
+                    "registered_at": previous.get("registered_at"),
+                    "superseded_at": _format_utc_timestamp(datetime.now(UTC)),
+                }
+            )
+        receipt = {
+            "schema_version": "post_backlog_gate_receipt.v1",
+            "implementation_run_id": context["run_dir"].name,
+            "epoch_number": gate_epoch,
+            "epoch_sha256": current["digest"],
+            "gate_id": gate_id,
+            **new_binding,
+            "git_object_format": current["record"]["git_object_format"],
+            "evidence_artifact": artifact_relative,
+            "evidence_schema": declaration["evidence_schema"],
+            "attempt_history": attempts[-20:],
+            "registered_at": _format_utc_timestamp(datetime.now(UTC)),
+        }
+        _validate_gate_record_schema("post_backlog_gate_receipt.schema.json", receipt)
+        _atomic_write_json(receipt_path, receipt)
+        return {
+            "gate_action": "register",
+            "gate_status": "pending",
+            "taskpack_id": context["run_dir"].name,
+            "gate_epoch": gate_epoch,
+            "gate_id": gate_id,
+            "path": str(receipt_path),
+            "artifact_path": str(artifact_path),
+            "attempt_count": len(attempts) + 1,
+        }
+
+
+def _gate_approve(
+    project_root,
+    profile,
+    run_dir,
+    *,
+    gate_id,
+    gate_epoch,
+    expected_evidence_sha256,
+    expected_integration_head,
+):
+    context = _require_post_backlog_gate_context(profile, run_dir)
+    declaration = _require_gate_declaration(context, gate_id)
+    if not declaration.get("operator_review_required"):
+        raise AgentTeamCliError("gate does not accept operator approval", gate_id=gate_id)
+    _require_operator_approval_context()
+    confirmation = f"approve {context['run_dir'].name} {gate_id} epoch {gate_epoch}"
+    with _gate_mutation_locks(context, [gate_id]):
+        sys.stderr.write(
+            "Review the final report, diff, coverage, evidence digests, and integration head.\n"
+            f"Type exactly `{confirmation}` to publish approval: "
+        )
+        sys.stderr.flush()
+        if sys.stdin.readline().strip() != confirmation:
+            raise AgentTeamCliError("literal operator approval confirmation did not match")
+        current = _require_current_gate_epoch(context, gate_epoch)
+        decisions = _evaluate_post_backlog_gates(context, current=current)
+        decision = next(item for item in decisions["gates"] if item["gate_id"] == gate_id)
+        if decision.get("state") != "awaiting_operator_review":
+            raise AgentTeamCliError(
+                "gate evidence is not ready for operator approval",
+                gate_id=gate_id,
+                derived_state=decision.get("state"),
+                reasons=decision.get("reasons"),
+            )
+        head = _resolved_epoch_integration_head(project_root, current["record"])
+        _require_expected_git_oid(
+            project_root,
+            expected_integration_head,
+            head,
+            field_name="expected integration head",
+        )
+        if decision.get("evidence_sha256") != expected_evidence_sha256:
+            raise AgentTeamCliError(
+                "expected evidence digest does not match current evidence",
+                expected_evidence_sha256=expected_evidence_sha256,
+                actual_evidence_sha256=decision.get("evidence_sha256"),
+            )
+        _require_clean_gate_schema_paths(_gate_integration_worktree(context), declaration)
+        diff_sha256 = _gate_review_diff_sha256(
+            project_root,
+            current["record"],
+            head,
+            expected_paths=(
+                _PHASE1_REPORT_REVIEW_PATHS if gate_id == "P1-06E" else None
+            ),
+        )
+        approval = {
+            "schema_version": "post_backlog_gate_approval.v1",
+            "implementation_run_id": context["run_dir"].name,
+            "epoch_number": gate_epoch,
+            "epoch_sha256": current["digest"],
+            "gate_id": gate_id,
+            "decision": "approved",
+            "evidence_sha256": expected_evidence_sha256,
+            "review_diff_sha256": diff_sha256,
+            "final_report_sha": head,
+            "git_object_format": current["record"]["git_object_format"],
+            "operator_identity": f"{getpass.getuser()} (uid={os.getuid()})",
+            "reviewed_at": _format_utc_timestamp(datetime.now(UTC)),
+        }
+        _validate_schema_from_git(
+            project_root,
+            head,
+            declaration["operator_approval_schema"],
+            approval,
+        )
+        approval_path = _gate_approval_path(context, current["record"], gate_id)
+        existing = _read_json_if_exists(approval_path)
+        if existing:
+            if _canonical_json_bytes(existing) == _canonical_json_bytes(approval):
+                idempotent = True
+            else:
+                raise AgentTeamCliError("conflicting operator approval cannot replace immutable record")
+        else:
+            _atomic_write_json(approval_path, approval, replace=False)
+            idempotent = False
+        final = _evaluate_post_backlog_gates(context, current=current)
+        final_decision = next(item for item in final["gates"] if item["gate_id"] == gate_id)
+        if final_decision.get("state") != "passed":
+            raise AgentTeamCliError(
+                "published approval did not satisfy current gate",
+                reasons=final_decision.get("reasons"),
+            )
+        return {
+            "gate_action": "approve",
+            "gate_status": "passed",
+            "taskpack_id": context["run_dir"].name,
+            "gate_epoch": gate_epoch,
+            "gate_id": gate_id,
+            "evidence_sha256": expected_evidence_sha256,
+            "path": str(approval_path),
+            "idempotent": idempotent,
+        }
+
+
 def _handle_notify(args):
     if args.notify_command == "test":
         summary = _notify_test(args)
@@ -3190,6 +3722,13 @@ def _notify_run_completed(args):
             project=str(project_root),
         )
     signing_secret = os.environ.get(signing_secret_env) if signing_secret_env else None
+    gate_summary = _post_backlog_gate_summary(profile, run_dir)
+    if gate_summary is not None and not gate_summary.get("all_passed"):
+        raise AgentTeamCliError(
+            "run-completed notification is blocked by required post-backlog gates",
+            post_backlog_gates=gate_summary.get("gates"),
+            next_action=gate_summary.get("next_action"),
+        )
     report = build_run_completion_report(
         run_dir,
         project=project,
@@ -3558,10 +4097,12 @@ def _handle_report(args):
         if projected_run is not None
         else _projection_check_metadata(work_root)
     )
-    report = build_run_completion_report(
+    report = _build_gate_guided_completion_report(
         run_dir,
         project=profile.get("project_key") or "unknown",
+        profile=profile,
     )
+    gate_summary = _post_backlog_gate_summary(profile, run_dir)
     artifact_snapshot = snapshot_run_artifacts_safe(
         profile.get("work_root") or run_dir.parent,
         run_dir,
@@ -3578,11 +4119,77 @@ def _handle_report(args):
         return report
     rendered = render_run_completion_report(report)
     sys.stdout.write(rendered)
+    if gate_summary is not None:
+        if not rendered.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.write(
+            f"post_backlog_gates: {gate_summary.get('state') or 'unknown'}\n"
+            f"gate_next_action: {gate_summary.get('next_action') or 'none'}\n"
+        )
+        for gate in gate_summary.get("gates") or []:
+            sys.stdout.write(
+                f"post_backlog_gate: {gate.get('gate_id') or 'unknown'} "
+                f"status={gate.get('status') or 'unknown'} "
+                f"state={gate.get('state') or 'unknown'}\n"
+            )
     if projection_metadata:
         if not rendered.endswith("\n"):
             sys.stdout.write("\n")
         sys.stdout.write("\n".join(_projection_text_lines(projection_metadata)) + "\n")
     sys.stdout.flush()
+
+
+def _build_gate_guided_completion_report(
+    run_dir,
+    *,
+    project,
+    profile,
+    write_files=True,
+):
+    report = build_run_completion_report(
+        run_dir,
+        project=project,
+        write_files=write_files,
+    )
+    gate_summary = _post_backlog_gate_summary(profile, run_dir)
+    if gate_summary is None:
+        return report
+    report = _apply_post_backlog_gate_report_guidance(report, gate_summary)
+    if write_files:
+        Path(report["report_path"]).write_text(
+            render_run_completion_report(report),
+            encoding="utf-8",
+        )
+        _write_json(report["report_json_path"], report)
+    return report
+
+
+def _apply_post_backlog_gate_report_guidance(report, gate_summary):
+    report = dict(report)
+    report["post_backlog_gates"] = gate_summary
+    report["review_hint"] = gate_summary.get("next_action")
+    if gate_summary.get("all_passed"):
+        return report
+    completion = (
+        dict(report.get("completion_summary"))
+        if isinstance(report.get("completion_summary"), dict)
+        else {}
+    )
+    completion["integration_recommendation"] = (
+        "Complete the declared post-backlog gates before integration: "
+        f"{gate_summary.get('next_action') or 'review gate status'}."
+    )
+    review_gate = (
+        dict(completion.get("review_gate"))
+        if isinstance(completion.get("review_gate"), dict)
+        else {}
+    )
+    review_gate["status"] = "post_backlog_gates_pending"
+    review_gate.pop("integrate_command", None)
+    review_gate["gate_command"] = gate_summary.get("next_action")
+    completion["review_gate"] = review_gate
+    report["completion_summary"] = completion
+    return report
     return 0
 
 
@@ -5359,6 +5966,9 @@ def _build_run_status_summary(profile, run_dir):
         "run_dir": str(run_dir),
         **projection_metadata,
     }
+    gate_summary = _post_backlog_gate_summary(profile, run_dir)
+    if gate_summary is not None:
+        summary["post_backlog_gates"] = gate_summary
     return _with_prioritized_status_guidance(summary)
 
 
@@ -5397,6 +6007,19 @@ def _status_operator_guidance(summary):
         return {
             "next_action": f"agentteam watch --taskpack {run_id}; agentteam status --run-dir {run_dir}",
             "operator_hint": "The run is still active; watch progress before reviewing integration results.",
+        }
+    gate_summary = (
+        summary.get("post_backlog_gates")
+        if isinstance(summary.get("post_backlog_gates"), dict)
+        else None
+    )
+    if gate_summary is not None and not gate_summary.get("all_passed"):
+        return {
+            "next_action": gate_summary.get("next_action")
+            or f"agentteam report --taskpack {run_id}",
+            "operator_hint": (
+                "Complete the declared post-backlog gates before integration is exposed."
+            ),
         }
     pursue_recap = summary.get("pursue_recap") if isinstance(summary.get("pursue_recap"), dict) else {}
     pursue_action = _first_non_empty_text(pursue_recap.get("operator_next_action"))
@@ -5530,6 +6153,9 @@ def _build_paths_summary(args, profile, run_dir):
     final_report = run_dir / "reports" / "final_report.md"
     integration_baseline = _paths_integration_baseline(run_dir, state)
     review_commands = _review_commands_for_run(run_dir.name, integration_baseline)
+    gate_summary = _post_backlog_gate_summary(profile, run_dir)
+    if gate_summary is not None and not gate_summary.get("all_passed"):
+        review_commands.pop("integrate", None)
     return {
         "project": profile.get("project_key") or "unknown",
         "project_root": str(project_root) if project_root else None,
@@ -5548,6 +6174,7 @@ def _build_paths_summary(args, profile, run_dir):
         "final_report_exists": final_report.exists(),
         "integration_baseline": integration_baseline,
         "review_commands": review_commands,
+        "post_backlog_gates": gate_summary,
         "read_only_review_commands": {
             key: review_commands[key]
             for key in ["report", "paths", "diff"]
@@ -5626,6 +6253,780 @@ def _write_paths_text(summary):
     sys.stdout.flush()
 
 
+def _require_post_backlog_gate_context(profile, run_dir):
+    context = _post_backlog_gate_context(profile, run_dir)
+    if context is None:
+        raise AgentTeamCliError(
+            "frozen taskpack does not declare post-backlog gates",
+            run_dir=str(Path(run_dir).resolve()),
+        )
+    if not context["run_dir"].is_dir():
+        raise AgentTeamCliError("implementation run directory not found", run_dir=str(context["run_dir"]))
+    return context
+
+
+def _require_gate_declaration(context, gate_id):
+    declaration = context["declarations_by_id"].get(gate_id)
+    if declaration is None:
+        raise AgentTeamCliError(
+            "gate is not declared by the frozen taskpack",
+            gate_id=gate_id,
+            declared_gates=sorted(context["declarations_by_id"]),
+        )
+    return declaration
+
+
+def _canonical_json_bytes(value):
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def _sha256_bytes(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_json(value):
+    return _sha256_bytes(_canonical_json_bytes(value))
+
+
+def _atomic_write_json(path, value, *, replace=True):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(value, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    temporary = path.parent / f".{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if replace:
+            os.replace(temporary, path)
+        else:
+            try:
+                os.link(temporary, path)
+            except FileExistsError as exc:
+                raise AgentTeamCliError(
+                    "immutable gate artifact already exists",
+                    path=str(path),
+                ) from exc
+            temporary.unlink()
+        _fsync_directory(path.parent)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _fsync_directory(path):
+    descriptor = os.open(Path(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _gate_mutation_locks(context, gate_ids):
+    context["locks_root"].mkdir(parents=True, exist_ok=True)
+    acquired = []
+    lock_names = ["gate-state"] + [f"epoch-gate-{gate_id}" for gate_id in sorted(set(gate_ids))]
+    try:
+        for name in lock_names:
+            path = context["locks_root"] / f"{name}.lock"
+            stream = path.open("a+")
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                stream.close()
+                raise AgentTeamCliError(
+                    "post-backlog gate mutation is active",
+                    active_lock=name,
+                    lock_path=str(path),
+                ) from exc
+            acquired.append((name, stream))
+        yield
+    finally:
+        for _name, stream in reversed(acquired):
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            finally:
+                stream.close()
+
+
+def _gate_schema_path(schema_name):
+    return Path(__file__).resolve().parents[2] / "schemas" / schema_name
+
+
+def _validate_gate_record_schema(schema_name, value):
+    schema_path = _gate_schema_path(schema_name)
+    if not schema_path.is_file():
+        raise AgentTeamCliError("bundled gate schema is missing", schema_path=str(schema_path))
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    _validate_json_schema(schema, value, source=str(schema_path))
+
+
+def _validate_json_schema(schema, value, *, source):
+    try:
+        import jsonschema
+
+        validator_class = jsonschema.validators.validator_for(schema)
+        validator_class.check_schema(schema)
+        errors = sorted(
+            validator_class(schema, format_checker=jsonschema.FormatChecker()).iter_errors(value),
+            key=lambda error: tuple(str(part) for part in error.absolute_path),
+        )
+    except Exception as exc:
+        if exc.__class__.__module__.startswith("jsonschema"):
+            raise AgentTeamCliError("gate schema is invalid", schema_source=source, detail=str(exc)) from exc
+        raise
+    if errors:
+        rendered = []
+        for error in errors:
+            location = ".".join(str(part) for part in error.absolute_path) or "<root>"
+            rendered.append(f"{location}: {error.message}")
+        raise AgentTeamCliError(
+            "gate artifact schema validation failed",
+            schema_source=source,
+            validation_errors=rendered,
+        )
+
+
+def _publish_gate_epoch(context, record):
+    epochs_root = context["epochs_root"]
+    epochs_root.mkdir(parents=True, exist_ok=True)
+    epoch_dir = epochs_root / str(record["epoch_number"])
+    staging = context["gate_root"] / f".epoch-{record['epoch_number']}.staging-{uuid.uuid4().hex}"
+    staging.mkdir(parents=True, exist_ok=False)
+    try:
+        (staging / "receipts").mkdir()
+        (staging / "approvals").mkdir()
+        _atomic_write_json(staging / "epoch.v1.json", record, replace=False)
+        _fsync_directory(staging / "receipts")
+        _fsync_directory(staging / "approvals")
+        _fsync_directory(staging)
+        _rename_directory_noreplace(staging, epoch_dir)
+        _fsync_directory(epochs_root)
+        return epoch_dir
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
+def _rename_directory_noreplace(source, target):
+    renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if renameat2 is None:
+        raise AgentTeamCliError("Linux renameat2 is required for atomic gate epoch publication")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,
+        os.fsencode(source),
+        -100,
+        os.fsencode(target),
+        1,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise AgentTeamCliError(
+            "conflicting gate epoch directory already exists",
+            path=str(target),
+        )
+    raise AgentTeamCliError(
+        "atomic gate epoch publication failed",
+        source=str(source),
+        target=str(target),
+        errno=error_number,
+        detail=os.strerror(error_number),
+    )
+
+
+def _read_current_gate_epoch(context):
+    root = context["epochs_root"]
+    if not root.exists():
+        return None
+    entries = [entry for entry in root.iterdir()]
+    if not entries:
+        return None
+    invalid_names = sorted(entry.name for entry in entries if not entry.name.isdigit() or int(entry.name) < 1)
+    if invalid_names:
+        raise AgentTeamCliError(
+            "invalid gate epoch directory entry",
+            invalid_epoch_entries=invalid_names,
+        )
+    numbers = sorted(int(entry.name) for entry in entries)
+    if numbers != list(range(1, numbers[-1] + 1)):
+        raise AgentTeamCliError("gate epoch sequence has a gap", epoch_numbers=numbers)
+    prior_digest = None
+    current = None
+    for number in numbers:
+        epoch_dir = root / str(number)
+        if not epoch_dir.is_dir():
+            raise AgentTeamCliError("gate epoch entry is not a directory", path=str(epoch_dir))
+        record_path = epoch_dir / "epoch.v1.json"
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AgentTeamCliError("gate epoch record is missing or invalid", path=str(record_path)) from exc
+        _validate_gate_record_schema("post_backlog_gate_epoch.schema.json", record)
+        if record.get("implementation_run_id") != context["run_dir"].name:
+            raise AgentTeamCliError("gate epoch binds a different implementation run", path=str(record_path))
+        if record.get("epoch_number") != number:
+            raise AgentTeamCliError("gate epoch number does not match directory", path=str(record_path))
+        if record.get("prior_epoch_sha256") != prior_digest:
+            raise AgentTeamCliError("gate epoch digest chain is invalid", path=str(record_path))
+        if record.get("gate_declaration_sha256") != _sha256_json(context["declarations"]):
+            raise AgentTeamCliError("gate epoch declaration digest is stale", path=str(record_path))
+        digest = _sha256_json(record)
+        prior_digest = digest
+        current = {"record": record, "digest": digest, "path": epoch_dir}
+    return current
+
+
+def _require_current_gate_epoch(context, expected_number):
+    current = _read_current_gate_epoch(context)
+    if current is None:
+        raise AgentTeamCliError("gate baseline has not been sealed")
+    if current["record"]["epoch_number"] != expected_number:
+        raise AgentTeamCliError(
+            "gate epoch is stale",
+            expected_gate_epoch=expected_number,
+            current_gate_epoch=current["record"]["epoch_number"],
+        )
+    return current
+
+
+def _git_object_format(project_root):
+    value = _git_stdout(project_root, ["rev-parse", "--show-object-format"])
+    if value not in {"sha1", "sha256"}:
+        raise AgentTeamCliError("unsupported repository Git object format", git_object_format=value)
+    return value
+
+
+def _valid_git_oid(value, object_format):
+    expected_length = 40 if object_format == "sha1" else 64
+    return (
+        isinstance(value, str)
+        and len(value) == expected_length
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _require_expected_git_oid(project_root, expected, actual, *, field_name):
+    object_format = _git_object_format(project_root)
+    if not _valid_git_oid(expected, object_format):
+        raise AgentTeamCliError(
+            f"{field_name} is not a canonical {object_format} Git OID",
+            value=expected,
+            git_object_format=object_format,
+        )
+    if expected != actual:
+        raise AgentTeamCliError(
+            f"{field_name} changed",
+            expected=expected,
+            actual=actual,
+        )
+
+
+def _resolved_epoch_integration_head(project_root, epoch):
+    if _git_object_format(project_root) != epoch["git_object_format"]:
+        raise AgentTeamCliError("repository Git object format does not match gate epoch")
+    head = _git_stdout(
+        project_root,
+        ["rev-parse", "--verify", f"{epoch['integration_branch']}^{{commit}}"],
+    )
+    if not _valid_git_oid(head, epoch["git_object_format"]):
+        raise AgentTeamCliError("resolved integration head has invalid Git object format")
+    return head
+
+
+def _require_path_within(path, root, label):
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+    except ValueError as exc:
+        raise AgentTeamCliError(f"{label} escapes its authority root", path=str(path), root=str(root)) from exc
+
+
+def _gate_receipt_path(context, epoch, gate_id):
+    return context["epochs_root"] / str(epoch["epoch_number"]) / "receipts" / f"{gate_id}.receipt.v1.json"
+
+
+def _gate_approval_path(context, epoch, gate_id):
+    return context["epochs_root"] / str(epoch["epoch_number"]) / "approvals" / f"{gate_id}.approval.v1.json"
+
+
+def _open_gate_controller_invocations(context, gate_id=None):
+    findings = []
+    runs_root = context["work_root"] / "runs"
+    if not runs_root.is_dir():
+        return findings
+    for path in runs_root.glob("*/state/**/*"):
+        if not path.is_file() or not path.name.endswith(".json"):
+            continue
+        lowered = path.name.lower()
+        if "invocation" not in lowered and "claim" not in lowered:
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        records = value if isinstance(value, list) else [value]
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if record.get("implementation_run_id") not in {None, context["run_dir"].name}:
+                continue
+            if gate_id is not None and record.get("gate_id") not in {None, gate_id}:
+                continue
+            status = str(
+                record.get("status")
+                or record.get("invocation_status")
+                or record.get("lifecycle_status")
+                or ""
+            ).lower()
+            terminal = status in {"completed", "failed", "cancelled", "timed_out", "recovered", "terminal"}
+            looks_open = status in {"open", "running", "starting", "in_progress", "claimed"} or (
+                record.get("invocation_id") and not terminal and not record.get("ended_at")
+            )
+            if looks_open:
+                findings.append(
+                    {
+                        "path": str(path),
+                        "invocation_id": record.get("invocation_id"),
+                        "gate_id": record.get("gate_id"),
+                        "status": status or "open",
+                    }
+                )
+    return findings[:20]
+
+
+def _require_clean_gate_schema_paths(project_root, declaration):
+    paths = [declaration["evidence_schema"]]
+    if declaration.get("operator_approval_schema"):
+        paths.append(declaration["operator_approval_schema"])
+    completed = _git_completed(
+        project_root,
+        ["status", "--porcelain=v1", "--untracked-files=all", "--", *paths],
+        check=False,
+    )
+    if completed.returncode != 0 or completed.stdout.strip():
+        raise AgentTeamCliError(
+            "gate schema paths must be clean in the integration worktree",
+            schema_paths=paths,
+            dirty_status=completed.stdout.strip(),
+        )
+
+
+def _gate_integration_worktree(context):
+    baseline = _paths_integration_baseline(
+        context["run_dir"],
+        _paths_run_state(context["run_dir"]),
+    )
+    worktree = baseline.get("worktree_path")
+    if not worktree or not Path(worktree).is_dir():
+        raise AgentTeamCliError("integration baseline worktree is unavailable")
+    return Path(worktree).resolve()
+
+
+def _schema_from_git(project_root, head, schema_path):
+    completed = _git_completed(
+        project_root,
+        ["show", f"{head}:{schema_path}"],
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AgentTeamCliError(
+            "committed gate schema is missing at the current integration head",
+            integration_head=head,
+            schema_path=schema_path,
+        )
+    try:
+        schema = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise AgentTeamCliError(
+            "committed gate schema is not valid JSON",
+            integration_head=head,
+            schema_path=schema_path,
+        ) from exc
+    return schema, _sha256_bytes(completed.stdout.encode("utf-8"))
+
+
+def _validate_schema_from_git(project_root, head, schema_path, value):
+    schema, digest = _schema_from_git(project_root, head, schema_path)
+    _validate_json_schema(schema, value, source=f"{head}:{schema_path}")
+    return digest
+
+
+def _gate_review_diff_sha256(project_root, epoch, head, *, expected_paths=None):
+    parent = _git_stdout(project_root, ["rev-parse", f"{head}^"])
+    if expected_paths is not None:
+        changed = _git_stdout(
+            project_root,
+            ["diff", "--name-only", f"{parent}..{head}"],
+        ).splitlines()
+        if sorted(changed) != sorted(expected_paths):
+            raise AgentTeamCliError(
+                "final report commit does not contain the exact two-path review diff",
+                expected_paths=expected_paths,
+                changed_paths=changed,
+            )
+    completed = _git_completed(
+        project_root,
+        ["diff", "--binary", f"{parent}..{head}", "--", *(expected_paths or [])],
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AgentTeamCliError("unable to compute gate review diff")
+    return _sha256_bytes(completed.stdout.encode("utf-8"))
+
+
+def _require_operator_approval_context():
+    context_values = " ".join(
+        os.environ.get(name, "")
+        for name in (
+            "AGENTTEAM_AGENT_ROLE",
+            "AGENTTEAM_EXECUTION_CONTEXT",
+            "AGENTTEAM_RUNTIME_ROLE",
+            "AGENTTEAM_ACTOR_ROLE",
+            "AGENTTEAM_WORKER_ID",
+            "AGENT_ROLE",
+        )
+    ).lower()
+    if any(marker in context_values for marker in ("worker", "controller", "scheduler", "agent-")):
+        raise AgentTeamCliError("operator approval is forbidden in worker/controller execution context")
+    if not sys.stdin.isatty() or not sys.stderr.isatty():
+        raise AgentTeamCliError("operator approval requires an interactive TTY")
+
+
+def _evaluate_post_backlog_gates(context, *, current=None):
+    if current is None:
+        current = _read_current_gate_epoch(context)
+    if current is None:
+        return {
+            "state": "awaiting_validated_baseline",
+            "epoch_number": None,
+            "epoch_sha256": None,
+            "all_passed": False,
+            "gates": [
+                {
+                    "gate_id": declaration["gate_id"],
+                    "status": "pending",
+                    "state": "pending",
+                    "reasons": ["validated baseline epoch is missing"],
+                }
+                for declaration in context["declarations"]
+            ],
+        }
+    captured_digest = current["digest"]
+    decisions = {}
+    ordered = []
+    unresolved = list(context["declarations"])
+    while unresolved:
+        progressed = False
+        for declaration in list(unresolved):
+            gate_dependencies = [
+                dependency
+                for dependency in declaration.get("depends_on", [])
+                if dependency in context["declarations_by_id"]
+            ]
+            if any(dependency not in decisions for dependency in gate_dependencies):
+                continue
+            decision = _evaluate_one_post_backlog_gate(
+                context,
+                current,
+                declaration,
+                prior_decisions=decisions,
+            )
+            decisions[declaration["gate_id"]] = decision
+            ordered.append(decision)
+            unresolved.remove(declaration)
+            progressed = True
+        if not progressed:
+            for declaration in unresolved:
+                decision = {
+                    "gate_id": declaration["gate_id"],
+                    "status": "failed",
+                    "state": "failed",
+                    "reasons": ["gate dependency graph cannot be evaluated"],
+                }
+                decisions[declaration["gate_id"]] = decision
+                ordered.append(decision)
+            break
+    reread = _read_current_gate_epoch(context)
+    if reread is None or reread["digest"] != captured_digest:
+        raise AgentTeamCliError("gate epoch changed during read-only evaluation")
+    active_controllers = _open_gate_controller_invocations(context)
+    if active_controllers:
+        active_gate_ids = {
+            item.get("gate_id") for item in active_controllers if item.get("gate_id")
+        }
+        for item in ordered:
+            if not active_gate_ids or item["gate_id"] in active_gate_ids:
+                item.setdefault("reasons", []).append(
+                    "controller invocation is still open"
+                )
+                if item.get("state") == "passed":
+                    item["state"] = "failed"
+                    item["status"] = "failed"
+    all_passed = (
+        not active_controllers
+        and bool(ordered)
+        and all(item["state"] == "passed" for item in ordered)
+    )
+    return {
+        "state": "passed" if all_passed else "pending",
+        "epoch_number": current["record"]["epoch_number"],
+        "epoch_sha256": current["digest"],
+        "all_passed": all_passed,
+        "active_controllers": active_controllers,
+        "gates": ordered,
+    }
+
+
+def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_decisions):
+    gate_id = declaration["gate_id"]
+    reasons = []
+    dependency_states = {
+        dependency: prior_decisions[dependency]["state"]
+        for dependency in declaration.get("depends_on", [])
+        if dependency in prior_decisions
+    }
+    if any(state != "passed" for state in dependency_states.values()):
+        reasons.append("declared gate dependency is not passed")
+    receipt_path = _gate_receipt_path(context, current["record"], gate_id)
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        _validate_gate_record_schema("post_backlog_gate_receipt.schema.json", receipt)
+    except Exception as exc:
+        if isinstance(exc, AgentTeamCliError):
+            detail = str(exc)
+        else:
+            detail = "receipt is missing or invalid"
+        return {
+            "gate_id": gate_id,
+            "status": "failed" if receipt_path.exists() else "pending",
+            "state": "failed" if receipt_path.exists() else "pending",
+            "reasons": reasons + [detail],
+            "receipt_path": str(receipt_path),
+        }
+    expected_receipt = {
+        "implementation_run_id": context["run_dir"].name,
+        "epoch_number": current["record"]["epoch_number"],
+        "epoch_sha256": current["digest"],
+        "gate_id": gate_id,
+        "git_object_format": current["record"]["git_object_format"],
+        "evidence_artifact": declaration["evidence_artifact"],
+        "evidence_schema": declaration["evidence_schema"],
+    }
+    for key, expected in expected_receipt.items():
+        if receipt.get(key) != expected:
+            reasons.append(f"receipt {key} binding does not match")
+    try:
+        head = _resolved_epoch_integration_head(context["project_root"], current["record"])
+        if (
+            receipt.get("expected_integration_head_sha")
+            != current["record"]["integration_head_sha"]
+        ):
+            reasons.append("receipt integration baseline binding is stale")
+        _require_clean_gate_schema_paths(_gate_integration_worktree(context), declaration)
+        relative_run = Path(receipt["evidence_run_relative_path"])
+        if relative_run.is_absolute() or ".." in relative_run.parts:
+            raise AgentTeamCliError("receipt evidence run path is unsafe")
+        evidence_run = (context["work_root"] / relative_run).resolve()
+        _require_path_within(evidence_run, context["work_root"] / "runs", "evidence run")
+        if evidence_run.name != receipt["evidence_run_id"]:
+            raise AgentTeamCliError("receipt evidence run identity does not match path")
+        artifact_path = (evidence_run / declaration["evidence_artifact"]).resolve()
+        _require_path_within(artifact_path, evidence_run, "evidence artifact")
+        artifact_bytes = artifact_path.read_bytes()
+        artifact = json.loads(artifact_bytes)
+        schema_sha256 = _validate_schema_from_git(
+            context["project_root"],
+            head,
+            declaration["evidence_schema"],
+            artifact,
+        )
+        evidence_sha256 = _sha256_bytes(artifact_bytes)
+        if artifact.get(declaration["required_status_field"]) != declaration["required_status_value"]:
+            reasons.append("controller artifact required status does not match")
+        commit_field = declaration.get("commit_field")
+        if commit_field:
+            commit_sha = artifact.get(commit_field)
+            if not _valid_git_oid(commit_sha, current["record"]["git_object_format"]):
+                reasons.append(f"artifact {commit_field} is not a canonical Git OID")
+            elif declaration.get("integration_head_relation") == "ancestor_of":
+                relation = _git_completed(
+                    context["project_root"],
+                    ["merge-base", "--is-ancestor", commit_sha, head],
+                    check=False,
+                )
+                if relation.returncode != 0:
+                    reasons.append(f"artifact {commit_field} is not an ancestor of integration head")
+            elif declaration.get("integration_head_relation") == "equals" and commit_sha != head:
+                reasons.append(f"artifact {commit_field} does not equal integration head")
+        if gate_id == "P1-06E":
+            if artifact.get("validated_code_sha") != current["record"]["validated_code_sha"]:
+                reasons.append("finalization artifact validated_code_sha is stale")
+            parents = _git_stdout(
+                context["project_root"],
+                ["rev-list", "--parents", "-n", "1", head],
+            ).split()
+            if len(parents) != 2:
+                reasons.append("final report commit must have exactly one parent")
+            elif parents[1] != current["record"]["validated_code_sha"]:
+                reasons.append("final report parent does not equal validated_code_sha")
+            changed_paths = _git_stdout(
+                context["project_root"],
+                ["diff", "--name-only", f"{parents[1]}..{head}"],
+            ).splitlines() if len(parents) == 2 else []
+            if sorted(changed_paths) != sorted(_PHASE1_REPORT_REVIEW_PATHS):
+                reasons.append("final report commit does not contain the exact two-path diff")
+            if (
+                isinstance(artifact.get("changed_paths"), list)
+                and sorted(artifact["changed_paths"]) != sorted(_PHASE1_REPORT_REVIEW_PATHS)
+            ):
+                reasons.append("finalization artifact changed_paths does not match review diff")
+    except (AgentTeamCliError, OSError, KeyError, json.JSONDecodeError) as exc:
+        reasons.append(str(exc) or exc.__class__.__name__)
+        return {
+            "gate_id": gate_id,
+            "status": "failed",
+            "state": "failed",
+            "reasons": reasons,
+            "receipt_path": str(receipt_path),
+        }
+    state = "failed" if reasons else "passed"
+    approval_path = None
+    approval_schema_sha256 = None
+    if not reasons and declaration.get("operator_review_required"):
+        state = "awaiting_operator_review"
+        approval_path = _gate_approval_path(context, current["record"], gate_id)
+        try:
+            approval = json.loads(approval_path.read_text(encoding="utf-8"))
+            approval_schema_sha256 = _validate_schema_from_git(
+                context["project_root"],
+                head,
+                declaration["operator_approval_schema"],
+                approval,
+            )
+            expected_approval = {
+                "implementation_run_id": context["run_dir"].name,
+                "epoch_number": current["record"]["epoch_number"],
+                "epoch_sha256": current["digest"],
+                "gate_id": gate_id,
+                "decision": declaration["operator_approval_required_decision"],
+                "evidence_sha256": evidence_sha256,
+                "final_report_sha": head,
+                "git_object_format": current["record"]["git_object_format"],
+                "review_diff_sha256": _gate_review_diff_sha256(
+                    context["project_root"],
+                    current["record"],
+                    head,
+                    expected_paths=(
+                        _PHASE1_REPORT_REVIEW_PATHS
+                        if gate_id == "P1-06E"
+                        else None
+                    ),
+                ),
+            }
+            mismatches = [
+                key for key, expected in expected_approval.items() if approval.get(key) != expected
+            ]
+            if mismatches:
+                reasons.append("operator approval binding mismatch: " + ", ".join(mismatches))
+            else:
+                state = "passed"
+        except (AgentTeamCliError, OSError, KeyError, json.JSONDecodeError) as exc:
+            approval_schema_sha256 = None
+            if approval_path.exists():
+                reasons.append(str(exc) or "operator approval is invalid")
+    return {
+        "gate_id": gate_id,
+        "status": "passed" if state == "passed" else ("failed" if state == "failed" else "pending"),
+        "state": state,
+        "reasons": reasons,
+        "receipt_path": str(receipt_path),
+        "approval_path": str(approval_path) if approval_path else None,
+        "evidence_sha256": evidence_sha256,
+        "evidence_schema_sha256": schema_sha256,
+        "approval_schema_sha256": approval_schema_sha256 if declaration.get("operator_review_required") else None,
+        "integration_head_sha": head,
+    }
+
+
+def _post_backlog_gate_summary(profile, run_dir):
+    context = _post_backlog_gate_context(profile, run_dir)
+    if context is None:
+        return None
+    try:
+        decision = _evaluate_post_backlog_gates(context)
+    except AgentTeamCliError as exc:
+        return {
+            "state": "failed",
+            "all_passed": False,
+            "epoch_number": None,
+            "gates": [],
+            "error": str(exc),
+            "next_action": f"agentteam report --taskpack {context['run_dir'].name}",
+        }
+    decision["active_controllers"] = _open_gate_controller_invocations(context)
+    decision["next_action"] = _post_backlog_gate_next_action(context, decision)
+    return decision
+
+
+def _post_backlog_gate_next_action(context, decision):
+    run_id = context["run_dir"].name
+    if decision.get("active_controllers"):
+        return f"agentteam status --run-dir {context['run_dir']}"
+    if decision.get("epoch_number") is None:
+        try:
+            baseline = _paths_integration_baseline(
+                context["run_dir"],
+                _paths_run_state(context["run_dir"]),
+            )
+            head = _git_stdout(
+                context["project_root"],
+                ["rev-parse", "--verify", f"{baseline['branch']}^{{commit}}"],
+            )
+        except Exception:
+            head = "<integration-head>"
+        return (
+            f"agentteam gate seal-baseline --taskpack {run_id} "
+            f"--expected-integration-head {head} --authorize-revalidation"
+        )
+    for gate in decision.get("gates", []):
+        if gate.get("state") == "passed":
+            continue
+        gate_id = gate["gate_id"]
+        epoch = decision["epoch_number"]
+        head = gate.get("integration_head_sha") or "<integration-head>"
+        if gate.get("state") == "awaiting_operator_review":
+            evidence = gate.get("evidence_sha256") or "<evidence-sha256>"
+            return (
+                f"agentteam gate approve --taskpack {run_id} --gate {gate_id} "
+                f"--gate-epoch {epoch} --expected-evidence-sha256 {evidence} "
+                f"--expected-integration-head {head} --approve"
+            )
+        return (
+            f"agentteam gate register --taskpack {run_id} --gate {gate_id} "
+            f"--gate-epoch {epoch} --evidence-run <evidence-run-id> "
+            f"--expected-integration-head {head}"
+        )
+    return None
+
+
 def _review_commands_for_run(run_id, baseline):
     if not isinstance(baseline, dict) or not baseline.get("branch"):
         return {}
@@ -5647,6 +7048,47 @@ def _review_commands_for_run(run_id, baseline):
 
 
 def _integrate_run_baseline(project_root, profile, run_dir, rebase=False, record_only=False):
+    context = _post_backlog_gate_context(profile, run_dir)
+    if context is None:
+        return _integrate_run_baseline_unchecked(
+            project_root,
+            profile,
+            run_dir,
+            rebase=rebase,
+            record_only=record_only,
+        )
+    if Path(project_root).resolve() != context["project_root"]:
+        raise AgentTeamCliError(
+            "selected project root does not match frozen gate authority",
+            project_root=str(Path(project_root).resolve()),
+            frozen_project_root=str(context["project_root"]),
+        )
+    if rebase:
+        raise AgentTeamCliError(
+            "rebase is forbidden for a commit-bound post-backlog gate",
+            declared_gates=sorted(context["declarations_by_id"]),
+        )
+    gate_ids = sorted(context["declarations_by_id"])
+    with _gate_mutation_locks(context, gate_ids):
+        current = _read_current_gate_epoch(context)
+        decision = _evaluate_post_backlog_gates(context, current=current)
+        if not decision.get("all_passed"):
+            raise AgentTeamCliError(
+                "required post-backlog gates are not passed",
+                gate_epoch=decision.get("epoch_number"),
+                post_backlog_gates=decision.get("gates"),
+                next_action=_post_backlog_gate_next_action(context, decision),
+            )
+        return _integrate_run_baseline_unchecked(
+            project_root,
+            profile,
+            run_dir,
+            rebase=False,
+            record_only=record_only,
+        )
+
+
+def _integrate_run_baseline_unchecked(project_root, profile, run_dir, rebase=False, record_only=False):
     run_dir = Path(run_dir).resolve()
     run_status = _build_run_status_summary(profile, run_dir)
     if run_status.get("status") not in {"idle", "completed"}:
@@ -6004,6 +7446,30 @@ def _write_status_text(summary):
             f"latest={latest.get('taskpack_id') or 'unknown'} "
             f"liveness={latest.get('liveness_status') or 'unknown'}"
         )
+    gate_summary = (
+        summary.get("post_backlog_gates")
+        if isinstance(summary.get("post_backlog_gates"), dict)
+        else None
+    )
+    if gate_summary is not None:
+        lines.append(
+            "post_backlog_gates: "
+            f"{gate_summary.get('state') or 'unknown'} "
+            f"epoch={gate_summary.get('epoch_number') or 'none'}"
+        )
+        for gate in gate_summary.get("gates") or []:
+            lines.append(
+                f"post_backlog_gate: {gate.get('gate_id') or 'unknown'} "
+                f"status={gate.get('status') or 'unknown'} "
+                f"state={gate.get('state') or 'unknown'}"
+            )
+        if gate_summary.get("active_controllers"):
+            lines.append(
+                f"post_backlog_gate_active_controllers: "
+                f"{len(gate_summary['active_controllers'])}"
+            )
+        if summary.get("next_action"):
+            lines.append(f"next_action: {summary['next_action']}")
     lines.append(f"run_dir: {summary['run_dir']}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
@@ -6278,15 +7744,26 @@ def _status_integration_counts(snapshot):
     queue = snapshot.get("integration_queue") if isinstance(snapshot, dict) else None
     if not isinstance(queue, dict):
         return {"total": 0, "blocked": 0, "verified": 0}
+    latest_by_task = {}
+    unbound = []
+    for item in queue.values():
+        if not isinstance(item, dict):
+            continue
+        task_id = item.get("task_id")
+        if task_id:
+            # Replay preserves event order, so a later retry supersedes an
+            # earlier integration outcome for operator status and gate sealing.
+            latest_by_task[task_id] = item
+        else:
+            unbound.append(item)
     statuses = [
         item.get("queue_status") or item.get("integration_queue_status")
-        for item in queue.values()
-        if isinstance(item, dict)
+        for item in [*latest_by_task.values(), *unbound]
     ]
     return {
         "total": len([status for status in statuses if status]),
         "blocked": sum(1 for status in statuses if status == "blocked"),
-        "verified": sum(1 for status in statuses if status == "verified"),
+        "verified": sum(1 for status in statuses if status in {"verified", "committed"}),
     }
 
 
@@ -7049,6 +8526,14 @@ def _run_frozen_taskpack(
         max_attempts=max_attempts,
         commit_verified_integration=commit_verified_integration,
         initial_integration_base_ref=initial_integration_base_ref,
+    )
+    inferred_work_root = _infer_work_root_for_run(
+        run_paths["run_root"],
+        frozen_taskpack_dir,
+    )
+    _initialize_post_backlog_gate_state(
+        {"work_root": str(inferred_work_root)},
+        run_paths["run_dir"],
     )
     if notification_project:
         runtime_args.extend(["--notification-project", notification_project])

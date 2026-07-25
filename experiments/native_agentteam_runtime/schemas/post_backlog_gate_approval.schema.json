@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/post_backlog_gate_approval.schema.json",
+  "title": "AgentTeam immutable post-backlog gate approval",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "implementation_run_id",
+    "epoch_number",
+    "epoch_sha256",
+    "gate_id",
+    "decision",
+    "evidence_sha256",
+    "review_diff_sha256",
+    "final_report_sha",
+    "git_object_format",
+    "operator_identity",
+    "reviewed_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "post_backlog_gate_approval.v1"
+    },
+    "implementation_run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "epoch_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "epoch_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "gate_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision": {
+      "const": "approved"
+    },
+    "evidence_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "review_diff_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "final_report_sha": {
+      "$ref": "#/$defs/gitOid"
+    },
+    "git_object_format": {
+      "enum": [
+        "sha1",
+        "sha256"
+      ]
+    },
+    "operator_identity": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reviewed_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "final_report_sha": {
+            "$ref": "#/$defs/sha1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha256"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "final_report_sha": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha1": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitOid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    }
+  }
+}

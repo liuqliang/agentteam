@@ -5349,6 +5349,629 @@ class TaskpackTests(unittest.TestCase):
             self.assertNotIn("agentteam integrate", status.get("next_action") or "")
             self.assertNotIn("review integration baseline", status.get("next_action") or "")
 
+    def test_status_integration_counts_use_latest_attempt_per_task(self):
+        snapshot = {
+            "integration_queue": {
+                "task-1:attempt-1": {
+                    "task_id": "task-1",
+                    "attempt_id": "attempt-1",
+                    "queue_status": "blocked",
+                },
+                "task-1:attempt-2": {
+                    "task_id": "task-1",
+                    "attempt_id": "attempt-2",
+                    "queue_status": "committed",
+                },
+                "task-2:attempt-1": {
+                    "task_id": "task-2",
+                    "attempt_id": "attempt-1",
+                    "queue_status": "verified",
+                },
+            }
+        }
+
+        self.assertEqual(
+            agentteam_module._status_integration_counts(snapshot),
+            {"total": 2, "blocked": 0, "verified": 2},
+        )
+
+    def test_post_backlog_gate_seal_register_and_integrate_enforcement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "agentteam-work"
+            _init_repo(repo)
+            evidence_schema = {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["controller_validation_status", "validated_code_sha"],
+                "properties": {
+                    "controller_validation_status": {"const": "passed"},
+                    "validated_code_sha": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{40}$",
+                    },
+                },
+            }
+            _write_json(repo / "schemas" / "live.schema.json", evidence_schema)
+            _write_json(
+                repo / "schemas" / "final.schema.json",
+                {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "controller_validation_status",
+                        "validated_code_sha",
+                        "final_report_sha",
+                        "changed_paths",
+                    ],
+                    "properties": {
+                        "controller_validation_status": {"const": "passed"},
+                        "validated_code_sha": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{40}$",
+                        },
+                        "final_report_sha": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{40}$",
+                        },
+                        "changed_paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                },
+            )
+            approval_schema_path = (
+                REPO_ROOT
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "schemas"
+                / "post_backlog_gate_approval.schema.json"
+            )
+            _write_json(
+                repo / "schemas" / "approval.schema.json",
+                json.loads(approval_schema_path.read_text(encoding="utf-8")),
+            )
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add live gate schema"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            _init_agentteam_profile_for_test(repo, work_root, "gated-integrate-project")
+            _start_fake_agentteam_run_for_test(
+                repo,
+                "Create a gated integration fixture.",
+                "gated-integrate-run",
+            )
+            frozen_taskpack_path = (
+                work_root / "frozen" / "gated-integrate-run" / "taskpack.yaml"
+            )
+            taskpack = json.loads(frozen_taskpack_path.read_text(encoding="utf-8"))
+            taskpack["post_backlog_gates"] = [
+                {
+                    "gate_id": "P1-LIVE",
+                    "depends_on": [],
+                    "executor": "deterministic_controller",
+                    "evidence_run_registration_required": True,
+                    "evidence_artifact": "acceptance/live.v1.json",
+                    "evidence_schema": "schemas/live.schema.json",
+                    "required_status_field": "controller_validation_status",
+                    "required_status_value": "passed",
+                    "commit_field": "validated_code_sha",
+                    "integration_head_relation": "ancestor_of",
+                },
+                {
+                    "gate_id": "P1-06E",
+                    "depends_on": ["P1-LIVE"],
+                    "executor": "deterministic_controller",
+                    "operator_review_required": True,
+                    "operator_approval_schema": "schemas/approval.schema.json",
+                    "operator_approval_required_decision": "approved",
+                    "evidence_run_registration_required": True,
+                    "evidence_artifact": "acceptance/final.v1.json",
+                    "evidence_schema": "schemas/final.schema.json",
+                    "required_status_field": "controller_validation_status",
+                    "required_status_value": "passed",
+                    "commit_field": "final_report_sha",
+                    "integration_head_relation": "equals",
+                },
+            ]
+            _write_json(frozen_taskpack_path, taskpack)
+            frozen_verification_path = (
+                work_root / "frozen" / "gated-integrate-run" / "verification.json"
+            )
+            frozen_verification = json.loads(
+                frozen_verification_path.read_text(encoding="utf-8")
+            )
+            frozen_verification["command"] = ["python3", "-c", "pass"]
+            _write_json(frozen_verification_path, frozen_verification)
+            run_dir = work_root / "runs" / "gated-integrate-run"
+            baseline_state = json.loads(
+                (run_dir / "state" / "two_phase_scheduler_state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            baseline_branch = baseline_state["integration_baseline"][
+                "integration_baseline_branch"
+            ]
+            baseline_head = subprocess.run(
+                ["git", "rev-parse", baseline_branch],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+
+            blocked = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "integrate",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "gated-integrate-run",
+                    "--record-only",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("required post-backlog gates are not passed", blocked.stderr)
+            state_after_block = json.loads(
+                (run_dir / "state" / "two_phase_scheduler_state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertNotEqual(
+                state_after_block["integration_baseline"].get(
+                    "integration_baseline_status"
+                ),
+                "acknowledged",
+            )
+
+            status = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            status_payload = json.loads(status.stdout)
+            self.assertIn("gate seal-baseline", status_payload["next_action"])
+            self.assertNotIn("agentteam integrate", status_payload["next_action"])
+            report = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "report",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            report_payload = json.loads(report.stdout)
+            self.assertEqual(
+                report_payload["completion_summary"]["review_gate"]["status"],
+                "post_backlog_gates_pending",
+            )
+            self.assertNotIn(
+                "agentteam integrate",
+                json.dumps(report_payload["completion_summary"]),
+            )
+
+            profile = agentteam_module.load_project_profile(repo)
+            with self.assertRaisesRegex(
+                agentteam_module.AgentTeamCliError,
+                "fully done with no current integration block",
+            ):
+                agentteam_module._gate_seal_baseline(
+                    repo,
+                    profile,
+                    run_dir,
+                    expected_integration_head=baseline_head,
+                )
+            verified_idle = {
+                "status": "idle",
+                "tasks": {"total": 1, "done": 1, "blocked": 0, "ready": 0},
+                "integration": {"total": 1, "blocked": 0, "verified": 1},
+            }
+            original_git_stdout = agentteam_module._git_stdout
+            branch_reads = 0
+
+            def changed_head_after_verification(repo_path, command):
+                nonlocal branch_reads
+                if command == [
+                    "rev-parse",
+                    "--verify",
+                    f"{baseline_branch}^{{commit}}",
+                ]:
+                    branch_reads += 1
+                    if branch_reads == 2:
+                        return "f" * 40
+                return original_git_stdout(repo_path, command)
+
+            with mock.patch.object(
+                agentteam_module,
+                "_build_run_status_summary",
+                return_value=verified_idle,
+            ):
+                with mock.patch.object(
+                    agentteam_module,
+                    "_git_stdout",
+                    side_effect=changed_head_after_verification,
+                ):
+                    with self.assertRaisesRegex(
+                        agentteam_module.AgentTeamCliError,
+                        "changed during frozen verification",
+                    ):
+                        agentteam_module._gate_seal_baseline(
+                            repo,
+                            profile,
+                            run_dir,
+                            expected_integration_head=baseline_head,
+                        )
+            self.assertFalse(
+                (run_dir / "state" / "post_backlog_gates" / "epochs" / "1").exists()
+            )
+            with mock.patch.object(
+                agentteam_module,
+                "_build_run_status_summary",
+                return_value=verified_idle,
+            ):
+                sealed = agentteam_module._gate_seal_baseline(
+                    repo,
+                    profile,
+                    run_dir,
+                    expected_integration_head=baseline_head,
+                )
+            self.assertEqual(sealed["gate_epoch"], 1)
+            epoch_path = (
+                run_dir
+                / "state"
+                / "post_backlog_gates"
+                / "epochs"
+                / "1"
+                / "epoch.v1.json"
+            )
+            self.assertTrue(epoch_path.is_file())
+
+            evidence_run = work_root / "runs" / "live-evidence-run"
+            _write_json(
+                evidence_run / "acceptance" / "live.v1.json",
+                {
+                    "controller_validation_status": "passed",
+                    "validated_code_sha": baseline_head,
+                },
+            )
+            registered = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "gate",
+                    "register",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "gated-integrate-run",
+                    "--gate",
+                    "P1-LIVE",
+                    "--gate-epoch",
+                    "1",
+                    "--evidence-run",
+                    "live-evidence-run",
+                    "--expected-integration-head",
+                    baseline_head,
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(registered.returncode, 0, registered.stderr)
+
+            receipt_path = (
+                run_dir
+                / "state"
+                / "post_backlog_gates"
+                / "epochs"
+                / "1"
+                / "receipts"
+                / "P1-LIVE.receipt.v1.json"
+            )
+            original_receipt = receipt_path.read_bytes()
+            tampered_receipt = json.loads(original_receipt)
+            tampered_receipt["epoch_sha256"] = "0" * 64
+            _write_json(receipt_path, tampered_receipt)
+            tampered_status = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(
+                json.loads(tampered_status.stdout)["post_backlog_gates"]["gates"][0][
+                    "state"
+                ],
+                "failed",
+            )
+            receipt_path.write_bytes(original_receipt)
+
+            artifact_path = evidence_run / "acceptance" / "live.v1.json"
+            valid_artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            _write_json(
+                artifact_path,
+                {
+                    **valid_artifact,
+                    "controller_validation_status": "failed",
+                },
+            )
+            failed_artifact_status = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(
+                json.loads(failed_artifact_status.stdout)["post_backlog_gates"][
+                    "gates"
+                ][0]["state"],
+                "failed",
+            )
+            _write_json(artifact_path, valid_artifact)
+
+            baseline_schema_path = (
+                run_dir / "integration-baseline" / "schemas" / "live.schema.json"
+            )
+            baseline_schema_bytes = baseline_schema_path.read_bytes()
+            baseline_schema_path.write_bytes(baseline_schema_bytes + b"\n")
+            dirty_schema_status = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(
+                json.loads(dirty_schema_status.stdout)["post_backlog_gates"]["gates"][
+                    0
+                ]["state"],
+                "failed",
+            )
+            baseline_schema_path.write_bytes(baseline_schema_bytes)
+
+            final_evidence_run = work_root / "runs" / "final-evidence-run"
+            final_evidence_run.mkdir(parents=True)
+            final_registered = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "gate",
+                    "register",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "gated-integrate-run",
+                    "--gate",
+                    "P1-06E",
+                    "--gate-epoch",
+                    "1",
+                    "--evidence-run",
+                    "final-evidence-run",
+                    "--expected-integration-head",
+                    baseline_head,
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(final_registered.returncode, 0, final_registered.stderr)
+            report_paths = [
+                "experiments/native_agentteam_runtime/implementation_artifacts/"
+                "reports/phase1-model-invocation-usage.md",
+                "experiments/native_agentteam_runtime/implementation_artifacts/"
+                "native_runtime_roadmap.md",
+            ]
+            baseline_worktree = run_dir / "integration-baseline"
+            for relative_path in report_paths:
+                output_path = baseline_worktree / relative_path
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(f"fixture for {relative_path}\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", *report_paths],
+                cwd=baseline_worktree,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "add final report-only fixture"],
+                cwd=baseline_worktree,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            final_report_head = _git_head(baseline_worktree)
+            final_artifact_path = (
+                final_evidence_run / "acceptance" / "final.v1.json"
+            )
+            _write_json(
+                final_artifact_path,
+                {
+                    "controller_validation_status": "passed",
+                    "validated_code_sha": baseline_head,
+                    "final_report_sha": final_report_head,
+                    "changed_paths": report_paths,
+                },
+            )
+            awaiting_review = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            awaiting_payload = json.loads(awaiting_review.stdout)
+            self.assertEqual(
+                awaiting_payload["post_backlog_gates"]["gates"][1]["state"],
+                "awaiting_operator_review",
+            )
+            self.assertIn("gate approve", awaiting_payload["next_action"])
+            evidence_sha256 = hashlib.sha256(final_artifact_path.read_bytes()).hexdigest()
+            profile = agentteam_module.load_project_profile(repo)
+            confirmation = "approve gated-integrate-run P1-06E epoch 1\n"
+            with mock.patch.object(
+                agentteam_module,
+                "_require_operator_approval_context",
+                return_value=None,
+            ):
+                with mock.patch.object(sys, "stdin", io.StringIO(confirmation)):
+                    approved = agentteam_module._gate_approve(
+                        repo,
+                        profile,
+                        run_dir,
+                        gate_id="P1-06E",
+                        gate_epoch=1,
+                        expected_evidence_sha256=evidence_sha256,
+                        expected_integration_head=final_report_head,
+                    )
+            self.assertEqual(approved["gate_status"], "passed")
+
+            rebased = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "integrate",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "gated-integrate-run",
+                    "--rebase",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(rebased.returncode, 0)
+            self.assertIn("rebase is forbidden", rebased.stderr)
+            self.assertEqual(_git_head(repo), baseline_head)
+
+            integrated = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "integrate",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "gated-integrate-run",
+                    "--record-only",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(integrated.returncode, 0, integrated.stderr)
+            self.assertEqual(json.loads(integrated.stdout)["integrate_status"], "acknowledged")
+
+    def test_post_backlog_gate_git_oid_format_and_operator_tty_fail_closed(self):
+        self.assertTrue(agentteam_module._valid_git_oid("a" * 40, "sha1"))
+        self.assertFalse(agentteam_module._valid_git_oid("a" * 64, "sha1"))
+        self.assertTrue(agentteam_module._valid_git_oid("b" * 64, "sha256"))
+        self.assertFalse(agentteam_module._valid_git_oid("b" * 40, "sha256"))
+        with mock.patch.object(sys.stdin, "isatty", return_value=False):
+            with self.assertRaises(agentteam_module.AgentTeamCliError):
+                agentteam_module._require_operator_approval_context()
+
     def test_agentteam_cli_integrate_rebases_diverged_baseline_before_merge(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

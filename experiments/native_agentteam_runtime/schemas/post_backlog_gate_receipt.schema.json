@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/post_backlog_gate_receipt.schema.json",
+  "title": "AgentTeam post-backlog gate receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "implementation_run_id",
+    "epoch_number",
+    "epoch_sha256",
+    "gate_id",
+    "evidence_run_id",
+    "evidence_run_relative_path",
+    "expected_integration_head_sha",
+    "git_object_format",
+    "evidence_artifact",
+    "evidence_schema",
+    "attempt_history",
+    "registered_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "post_backlog_gate_receipt.v1"
+    },
+    "implementation_run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "epoch_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "epoch_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "gate_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_run_relative_path": {
+      "type": "string",
+      "pattern": "^runs/[^/]+$"
+    },
+    "expected_integration_head_sha": {
+      "$ref": "#/$defs/gitOid"
+    },
+    "git_object_format": {
+      "enum": [
+        "sha1",
+        "sha256"
+      ]
+    },
+    "evidence_artifact": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attempt_history": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "evidence_run_id",
+          "evidence_run_relative_path",
+          "registered_at",
+          "superseded_at"
+        ],
+        "properties": {
+          "evidence_run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_run_relative_path": {
+            "type": "string",
+            "pattern": "^runs/[^/]+$"
+          },
+          "registered_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "superseded_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "registered_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "expected_integration_head_sha": {
+            "$ref": "#/$defs/sha1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha256"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "expected_integration_head_sha": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha1": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitOid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    }
+  }
+}
