@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/run_identity.schema.json",
+  "title": "AgentTeam immutable run identity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project_key",
+    "run_id",
+    "taskpack_id",
+    "run_kind",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "run_identity.v1"
+    },
+    "project_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "taskpack_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "run_kind": {
+      "enum": [
+        "implementation",
+        "acceptance_evidence"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "implementation_run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "gate_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "creation_sequence": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "run_kind": {
+            "const": "implementation"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "creation_sequence"
+        ],
+        "not": {
+          "required": [
+            "gate_epoch"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "run_kind": {
+            "const": "acceptance_evidence"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "implementation_run_id",
+          "gate_epoch"
+        ],
+        "not": {
+          "required": [
+            "creation_sequence"
+          ]
+        }
+      }
+    }
+  ]
+}

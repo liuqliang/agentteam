@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/runtime_release_binding.schema.json",
+  "title": "AgentTeam immutable runtime release binding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "release_id",
+    "release_root",
+    "runtime_root",
+    "release_manifest_sha256",
+    "source_commit",
+    "git_object_format",
+    "bound_at",
+    "approval_bound",
+    "expected_release"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "runtime_release_binding.v1"
+    },
+    "release_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "release_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "release_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "git_object_format": {
+      "enum": [
+        "sha1",
+        "sha256"
+      ]
+    },
+    "bound_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "approval_bound": {
+      "type": "boolean"
+    },
+    "expected_release": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "release_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+        },
+        "source_commit": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "git_object_format": {
+          "enum": [
+            "sha1",
+            "sha256"
+          ]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "approval_bound": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "expected_release": {
+            "required": [
+              "release_id",
+              "source_commit",
+              "git_object_format"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

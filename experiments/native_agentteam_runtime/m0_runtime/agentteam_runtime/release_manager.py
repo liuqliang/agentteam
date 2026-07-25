@@ -1,4 +1,8 @@
 import io
+import ctypes
+import errno
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -14,6 +18,8 @@ RELEASE_POINTER_SCHEMA_VERSION = "agentteam_active_release.v1"
 RELEASE_MANIFEST_SCHEMA_VERSION = "agentteam_release_manifest.v1"
 RELEASE_MANIFEST_SCHEMA_VERSION_V2 = "agentteam_release_manifest.v2"
 PROJECT_RELEASE_REF_SCHEMA_VERSION = "agentteam_project_release_ref.v1"
+RUNTIME_RELEASE_BINDING_SCHEMA_VERSION = "runtime_release_binding.v1"
+RUN_IDENTITY_SCHEMA_VERSION = "run_identity.v1"
 RUNTIME_RELEASE_STORE_ENV = "AGENTTEAM_RUNTIME_RELEASE_ROOT"
 TERMINAL_RUN_STATUSES = {"idle", "completed", "failed", "cancelled", "canceled"}
 
@@ -37,6 +43,7 @@ def update_status(profile):
         "latest_installed_release": latest,
         "active_is_latest": bool(active_release_id and active_release_id == latest_release_id),
         "known_releases": releases,
+        "run_staging": run_staging_status(work_root),
         **run_release_bindings(work_root),
     }
 
@@ -59,6 +66,7 @@ def install_release_from_checkout(checkout_root, work_root, release_id=None, act
         "release_root": str(release_root),
         "source_root": str(checkout_root),
         "source_git_commit": _git_commit(checkout_root),
+        "git_object_format": _git_object_format(checkout_root),
         "installed_at": _utc_now(),
         "launcher_path": str(release_root / "agentteam"),
         "runtime_root": str(release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime"),
@@ -274,6 +282,14 @@ def run_release_bindings(work_root):
     if not run_root.exists():
         return {"runs_by_release": runs_by_release, "unmanaged_runs": unmanaged_runs}
     for run_dir in sorted(path for path in run_root.iterdir() if path.is_dir()):
+        try:
+            pair = validate_run_binding(run_dir, expected_project_key=None)
+        except AgentTeamReleaseError:
+            pair = None
+        if pair:
+            release_id = pair["binding"]["release_id"]
+            runs_by_release.setdefault(release_id, []).append(run_dir.name)
+            continue
         state = _run_state(run_dir)
         release_id = state.get("runtime_release_id") if isinstance(state, dict) else None
         if release_id:
@@ -294,7 +310,12 @@ def prune_releases(work_root, keep_latest=1):
     active_release_id = read_active_release(work_root).get("release_id")
     protected_release_ids = {
         release_id
-        for release_id in [active_release_id, *latest_release_ids, *_nonterminal_run_release_ids(work_root)]
+        for release_id in [
+            active_release_id,
+            *latest_release_ids,
+            *_bound_run_release_ids(work_root),
+            *_nonterminal_run_release_ids(work_root),
+        ]
         if release_id
     }
     deleted_releases = []
@@ -323,7 +344,69 @@ def prune_releases(work_root, keep_latest=1):
         "deleted_releases": deleted_releases,
         "protected_release_ids": sorted(protected_release_ids),
         "retained_release_ids": retained_release_ids,
+        "run_staging_gc": cleanup_stale_run_staging(work_root),
     }
+
+
+def run_staging_status(work_root):
+    staging_root = Path(work_root).resolve() / "run-staging"
+    entries = []
+    if staging_root.exists():
+        for path in sorted(staging_root.iterdir(), key=lambda item: item.name):
+            owner_pid = _staging_owner_pid(path.name)
+            entries.append(
+                {
+                    "name": path.name,
+                    "path": str(path),
+                    "owner_pid": owner_pid,
+                    "owner_alive": _pid_alive(owner_pid) if owner_pid else None,
+                    "safe_directory": bool(path.is_dir() and not path.is_symlink()),
+                }
+            )
+    return {
+        "staging_root": str(staging_root),
+        "stale_count": sum(item.get("owner_alive") is False for item in entries),
+        "entries": entries,
+    }
+
+
+def cleanup_stale_run_staging(work_root, limit=20):
+    status = run_staging_status(work_root)
+    removed = []
+    for item in status["entries"]:
+        if len(removed) >= max(0, int(limit)):
+            break
+        if item["owner_alive"] is not False or not item["safe_directory"]:
+            continue
+        path = Path(item["path"])
+        staging_root = Path(status["staging_root"])
+        if path.parent.resolve() != staging_root.resolve():
+            continue
+        shutil.rmtree(path)
+        removed.append(item["name"])
+    return {
+        "removed_count": len(removed),
+        "removed": removed,
+        "limit": max(0, int(limit)),
+        "remaining": run_staging_status(work_root),
+    }
+
+
+def _staging_owner_pid(name):
+    match = re.fullmatch(r".+\.([1-9][0-9]*)\.[0-9a-f]{16}", name)
+    return int(match.group(1)) if match else None
+
+
+def _pid_alive(pid):
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def prune_global_releases(work_root=None, force=False, release_store_root=None):
@@ -382,6 +465,17 @@ def prune_global_releases(work_root=None, force=False, release_store_root=None):
 
 
 def record_active_release_for_run(run_dir, work_root):
+    try:
+        pair = validate_run_binding(run_dir, expected_project_key=None)
+    except AgentTeamReleaseError:
+        pair = None
+    if pair:
+        return {
+            "recorded": False,
+            "reason": "immutable_binding_exists",
+            "runtime_release_id": pair["binding"]["release_id"],
+            "runtime_release_root": pair["binding"]["release_root"],
+        }
     active = read_active_release(work_root)
     if not active.get("release_id"):
         return {"recorded": False, "reason": "no_active_release"}
@@ -426,6 +520,514 @@ def runtime_release_store_root():
     if configured:
         return Path(configured).expanduser().resolve()
     return (Path.home() / ".local" / "share" / "agentteam" / "runtime-releases").resolve()
+
+
+def selected_release_identity(work_root, release_id, expected=None):
+    """Resolve one installed release without consulting the mutable active pointer."""
+    work_root = Path(work_root).resolve()
+    manifest = release_manifest(work_root, release_id)
+    if not isinstance(manifest, dict) or not manifest:
+        raise AgentTeamReleaseError(f"release manifest not found: {release_id}")
+    release_root = Path(
+        manifest.get("release_root") or releases_root(work_root) / _safe_release_id(release_id)
+    ).expanduser().resolve()
+    manifest_path = release_root / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise AgentTeamReleaseError(f"release manifest is missing or unsafe: {manifest_path}")
+    root_manifest = _read_json_strict(manifest_path, "release manifest")
+    if root_manifest.get("release_id") != release_id:
+        raise AgentTeamReleaseError("release manifest ID does not match selected release")
+    declared_root = root_manifest.get("release_root")
+    if declared_root and Path(declared_root).expanduser().resolve() != release_root:
+        raise AgentTeamReleaseError("release manifest root does not match installed release")
+    runtime_root = Path(
+        root_manifest.get("runtime_root")
+        or release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime"
+    ).expanduser().resolve()
+    expected_runtime_root = (
+        release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime"
+    )
+    if runtime_root != expected_runtime_root:
+        raise AgentTeamReleaseError("release runtime root is outside the immutable release layout")
+    if not (runtime_root / "agentteam_runtime" / "agentteam.py").is_file():
+        raise AgentTeamReleaseError(f"release runtime module is missing: {runtime_root}")
+    source_commit = root_manifest.get("source_commit") or root_manifest.get("source_git_commit")
+    git_object_format = (
+        root_manifest.get("git_object_format") or _git_object_format_for_oid(source_commit)
+    )
+    oid_length = 40 if git_object_format == "sha1" else 64 if git_object_format == "sha256" else 0
+    if not oid_length or not isinstance(source_commit, str) or not re.fullmatch(
+        rf"[0-9a-f]{{{oid_length}}}", source_commit
+    ):
+        raise AgentTeamReleaseError("release manifest has an invalid source commit or Git object format")
+    identity = {
+        "release_id": release_id,
+        "release_root": str(release_root),
+        "runtime_root": str(runtime_root),
+        "release_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "source_commit": source_commit,
+        "git_object_format": git_object_format,
+    }
+    _validate_expected_release(identity, expected or {})
+    return identity
+
+
+def active_release_identity(work_root, expected=None):
+    active = read_active_release(work_root)
+    release_id = active.get("release_id")
+    if not release_id:
+        raise AgentTeamReleaseError("an active runtime release is required")
+    identity = selected_release_identity(work_root, release_id, expected=expected)
+    if active.get("release_root") and (
+        Path(active["release_root"]).expanduser().resolve()
+        != Path(identity["release_root"])
+    ):
+        raise AgentTeamReleaseError("active release pointer root does not match its manifest")
+    return identity
+
+
+def publish_implementation_run(
+    work_root,
+    *,
+    project_key,
+    run_id,
+    taskpack_id,
+    release_identity,
+    expected_release=None,
+    implementation_run_id=None,
+):
+    """Publish paired immutable records with a same-filesystem no-replace rename."""
+    work_root = Path(work_root).resolve()
+    run_root = work_root / "runs"
+    staging_root = work_root / "run-staging"
+    state_root = work_root / "state"
+    for path in (run_root, staging_root, state_root):
+        path.mkdir(parents=True, exist_ok=True)
+    with (state_root / "run_creation.lock").open("a+b") as lock_stream:
+        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
+        scan = scan_run_identities(work_root, expected_project_key=project_key)
+        sequence = max(
+            (item["identity"]["creation_sequence"] for item in scan["implementation_runs"]),
+            default=0,
+        ) + 1
+        target = run_root / run_id
+        if target.exists() or target.is_symlink():
+            raise AgentTeamReleaseError(f"run already exists: {target}")
+        expected = dict(expected_release or {})
+        _validate_expected_release(release_identity, expected)
+        _validate_release_identity_files(release_identity)
+        now = _utc_now()
+        identity = {
+            "schema_version": RUN_IDENTITY_SCHEMA_VERSION,
+            "project_key": _required_slug(project_key, "project_key"),
+            "run_id": _required_slug(run_id, "run_id"),
+            "taskpack_id": _required_slug(taskpack_id, "taskpack_id"),
+            "run_kind": "implementation",
+            "created_at": now,
+            "creation_sequence": sequence,
+        }
+        if implementation_run_id:
+            identity["implementation_run_id"] = _required_slug(
+                implementation_run_id, "implementation_run_id"
+            )
+        binding = {
+            "schema_version": RUNTIME_RELEASE_BINDING_SCHEMA_VERSION,
+            **{
+                key: release_identity[key]
+                for key in (
+                    "release_id",
+                    "release_root",
+                    "runtime_root",
+                    "release_manifest_sha256",
+                    "source_commit",
+                    "git_object_format",
+                )
+            },
+            "bound_at": now,
+            "approval_bound": bool(expected),
+            "expected_release": expected,
+        }
+        staged = staging_root / f"{run_id}.{os.getpid()}.{os.urandom(8).hex()}"
+        try:
+            (staged / "state").mkdir(parents=True, exist_ok=False)
+            _write_json_fsync(staged / "state" / "runtime_release_binding.v1.json", binding)
+            _write_json_fsync(staged / "state" / "run_identity.v1.json", identity)
+            _fsync_directory(staged / "state")
+            _fsync_directory(staged)
+            _fsync_directory(staging_root)
+            _rename_noreplace(staged, target)
+            _fsync_directory(run_root)
+            _fsync_directory(staging_root)
+        except Exception:
+            if staged.exists():
+                shutil.rmtree(staged)
+            raise
+    pair = validate_run_binding(
+        target,
+        expected_project_key=project_key,
+        expected_release=expected,
+    )
+    return pair
+
+
+def publish_acceptance_run_identity(
+    work_root,
+    *,
+    project_key,
+    run_id,
+    taskpack_id,
+    implementation_run_id,
+    gate_epoch,
+):
+    if not isinstance(gate_epoch, int) or isinstance(gate_epoch, bool) or gate_epoch <= 0:
+        raise AgentTeamReleaseError("gate_epoch must be a positive integer")
+    work_root = Path(work_root).resolve()
+    run_root = work_root / "runs"
+    staging_root = work_root / "run-staging"
+    state_root = work_root / "state"
+    for path in (run_root, staging_root, state_root):
+        path.mkdir(parents=True, exist_ok=True)
+    with (state_root / "run_creation.lock").open("a+b") as lock_stream:
+        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
+        scan_run_identities(work_root, expected_project_key=project_key)
+        target = run_root / run_id
+        if target.exists() or target.is_symlink():
+            raise AgentTeamReleaseError(f"run already exists: {target}")
+        identity = {
+            "schema_version": RUN_IDENTITY_SCHEMA_VERSION,
+            "project_key": _required_slug(project_key, "project_key"),
+            "run_id": _required_slug(run_id, "run_id"),
+            "taskpack_id": _required_slug(taskpack_id, "taskpack_id"),
+            "run_kind": "acceptance_evidence",
+            "created_at": _utc_now(),
+            "implementation_run_id": _required_slug(
+                implementation_run_id, "implementation_run_id"
+            ),
+            "gate_epoch": gate_epoch,
+        }
+        staged = staging_root / f"{run_id}.{os.getpid()}.{os.urandom(8).hex()}"
+        try:
+            (staged / "state").mkdir(parents=True, exist_ok=False)
+            _write_json_fsync(staged / "state" / "run_identity.v1.json", identity)
+            _fsync_directory(staged / "state")
+            _fsync_directory(staged)
+            _fsync_directory(staging_root)
+            _rename_noreplace(staged, target)
+            _fsync_directory(run_root)
+            _fsync_directory(staging_root)
+        except Exception:
+            if staged.exists():
+                shutil.rmtree(staged)
+            raise
+    return {"run_dir": str(target), "identity": identity}
+
+
+def scan_run_identities(work_root, expected_project_key=None):
+    """Strict direct-child scan used by both allocation and implicit selection."""
+    run_root = Path(work_root).resolve() / "runs"
+    if not run_root.exists():
+        return {"implementation_runs": [], "acceptance_evidence_runs": []}
+    implementations = []
+    evidence = []
+    sequences = {}
+    for child in sorted(run_root.iterdir(), key=lambda path: path.name):
+        if child.is_symlink():
+            raise AgentTeamReleaseError(f"symlink run child blocks implicit selection: {child.name}")
+        if not child.is_dir():
+            continue
+        identity_path = child / "state" / "run_identity.v1.json"
+        if identity_path.is_symlink() or not identity_path.is_file():
+            raise AgentTeamReleaseError(
+                f"run child lacks an immutable identity and blocks implicit selection: {child.name}"
+            )
+        identity = _read_json_strict(identity_path, "run identity")
+        _validate_run_identity(identity, child.name, expected_project_key)
+        if identity["run_kind"] == "acceptance_evidence":
+            binding_path = child / "state" / "runtime_release_binding.v1.json"
+            if binding_path.exists() or binding_path.is_symlink():
+                raise AgentTeamReleaseError("acceptance evidence run must not contain a release binding")
+            evidence.append({"run_dir": str(child.resolve()), "identity": identity})
+            continue
+        pair = validate_run_binding(child, expected_project_key=expected_project_key)
+        sequence = identity["creation_sequence"]
+        if sequence in sequences:
+            raise AgentTeamReleaseError(
+                f"duplicate implementation creation_sequence {sequence}: "
+                f"{sequences[sequence]} and {child.name}"
+            )
+        sequences[sequence] = child.name
+        implementations.append(pair)
+    return {
+        "implementation_runs": implementations,
+        "acceptance_evidence_runs": evidence,
+    }
+
+
+def select_latest_implementation_run(work_root, expected_project_key=None):
+    scan = scan_run_identities(work_root, expected_project_key=expected_project_key)
+    if not scan["implementation_runs"]:
+        raise AgentTeamReleaseError("no bound implementation runs found")
+    return max(
+        scan["implementation_runs"],
+        key=lambda item: item["identity"]["creation_sequence"],
+    )
+
+
+def validate_run_binding(
+    run_dir,
+    *,
+    expected_project_key=None,
+    expected_release=None,
+    expected_identity_sha256=None,
+    validate_release=True,
+):
+    run_dir = Path(run_dir)
+    if run_dir.is_symlink() or not run_dir.is_dir():
+        raise AgentTeamReleaseError(f"run directory is missing or unsafe: {run_dir}")
+    run_dir = run_dir.resolve()
+    identity_path = run_dir / "state" / "run_identity.v1.json"
+    binding_path = run_dir / "state" / "runtime_release_binding.v1.json"
+    for path, label in ((identity_path, "run identity"), (binding_path, "runtime release binding")):
+        if path.is_symlink() or not path.is_file():
+            raise AgentTeamReleaseError(f"{label} is missing or unsafe: {path}")
+    identity = _read_json_strict(identity_path, "run identity")
+    _validate_run_identity(identity, run_dir.name, expected_project_key)
+    if identity["run_kind"] != "implementation":
+        raise AgentTeamReleaseError("selected run is not an implementation run")
+    identity_digest = _canonical_json_sha256(identity)
+    if expected_identity_sha256 and identity_digest != expected_identity_sha256:
+        raise AgentTeamReleaseError("launcher-selected run identity digest changed")
+    binding = _read_json_strict(binding_path, "runtime release binding")
+    _validate_binding_shape(binding)
+    _validate_expected_release(binding, expected_release or {})
+    if validate_release:
+        release_root = Path(binding["release_root"]).expanduser().resolve()
+        manifest_path = release_root / "manifest.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise AgentTeamReleaseError("bound release manifest is missing")
+        if hashlib.sha256(manifest_path.read_bytes()).hexdigest() != binding["release_manifest_sha256"]:
+            raise AgentTeamReleaseError("bound release manifest digest mismatch")
+        manifest = _read_json_strict(manifest_path, "bound release manifest")
+        source_commit = manifest.get("source_commit") or manifest.get("source_git_commit")
+        runtime_root = Path(
+            manifest.get("runtime_root")
+            or release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime"
+        ).expanduser().resolve()
+        if manifest.get("release_id") != binding["release_id"]:
+            raise AgentTeamReleaseError("bound release ID does not match its manifest")
+        if source_commit != binding["source_commit"]:
+            raise AgentTeamReleaseError("bound release source commit does not match its manifest")
+        if runtime_root != Path(binding["runtime_root"]).expanduser().resolve():
+            raise AgentTeamReleaseError("bound runtime root does not match its manifest")
+        if not (runtime_root / "agentteam_runtime" / "agentteam.py").is_file():
+            raise AgentTeamReleaseError("bound runtime module is missing")
+    return {
+        "run_dir": str(run_dir),
+        "identity": identity,
+        "binding": binding,
+        "identity_sha256": identity_digest,
+    }
+
+
+def validate_acceptance_run_identity(
+    run_dir,
+    *,
+    expected_project_key=None,
+    expected_implementation_run_id=None,
+    expected_gate_epoch=None,
+):
+    run_dir = Path(run_dir)
+    if run_dir.is_symlink() or not run_dir.is_dir():
+        raise AgentTeamReleaseError(f"acceptance run directory is missing or unsafe: {run_dir}")
+    run_dir = run_dir.resolve()
+    identity_path = run_dir / "state" / "run_identity.v1.json"
+    if identity_path.is_symlink() or not identity_path.is_file():
+        raise AgentTeamReleaseError("acceptance evidence run identity is missing or unsafe")
+    identity = _read_json_strict(identity_path, "acceptance evidence run identity")
+    _validate_run_identity(identity, run_dir.name, expected_project_key)
+    if identity["run_kind"] != "acceptance_evidence":
+        raise AgentTeamReleaseError("evidence run is not marked acceptance_evidence")
+    if (
+        expected_implementation_run_id
+        and identity["implementation_run_id"] != expected_implementation_run_id
+    ):
+        raise AgentTeamReleaseError("evidence run belongs to a different implementation run")
+    if expected_gate_epoch and identity["gate_epoch"] != expected_gate_epoch:
+        raise AgentTeamReleaseError("evidence run belongs to a different gate epoch")
+    binding_path = run_dir / "state" / "runtime_release_binding.v1.json"
+    if binding_path.exists() or binding_path.is_symlink():
+        raise AgentTeamReleaseError("acceptance evidence run must not have a release binding")
+    return {"run_dir": str(run_dir), "identity": identity}
+
+
+def _validate_expected_release(identity, expected):
+    aliases = {
+        "release_id": ("release_id", "runtime_release_id", "expected_release_id"),
+        "source_commit": (
+            "source_commit",
+            "runtime_release_source_commit",
+            "expected_source_commit",
+        ),
+        "git_object_format": ("git_object_format", "expected_git_object_format"),
+    }
+    for actual_key, keys in aliases.items():
+        value = next((expected.get(key) for key in keys if expected.get(key) is not None), None)
+        if value is not None and identity.get(actual_key) != value:
+            raise AgentTeamReleaseError(
+                f"selected release {actual_key} does not match approval-bound expectation"
+            )
+
+
+def _validate_release_identity_files(identity):
+    release_root = Path(str(identity.get("release_root") or "")).expanduser().resolve()
+    manifest_path = release_root / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise AgentTeamReleaseError("selected release manifest is missing")
+    if hashlib.sha256(manifest_path.read_bytes()).hexdigest() != identity.get(
+        "release_manifest_sha256"
+    ):
+        raise AgentTeamReleaseError("selected release manifest digest changed before binding")
+    manifest = _read_json_strict(manifest_path, "selected release manifest")
+    source_commit = manifest.get("source_commit") or manifest.get("source_git_commit")
+    runtime_root = Path(
+        manifest.get("runtime_root")
+        or release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime"
+    ).expanduser().resolve()
+    if manifest.get("release_id") != identity.get("release_id"):
+        raise AgentTeamReleaseError("selected release ID changed before binding")
+    if source_commit != identity.get("source_commit"):
+        raise AgentTeamReleaseError("selected release source commit changed before binding")
+    if runtime_root != Path(str(identity.get("runtime_root") or "")).expanduser().resolve():
+        raise AgentTeamReleaseError("selected runtime root changed before binding")
+    if not (runtime_root / "agentteam_runtime" / "agentteam.py").is_file():
+        raise AgentTeamReleaseError("selected runtime module is missing before binding")
+
+
+def _validate_run_identity(identity, directory_name, expected_project_key):
+    if not isinstance(identity, dict) or identity.get("schema_version") != RUN_IDENTITY_SCHEMA_VERSION:
+        raise AgentTeamReleaseError("invalid run identity schema version")
+    for key in ("project_key", "run_id", "taskpack_id", "created_at"):
+        if not isinstance(identity.get(key), str) or not identity[key]:
+            raise AgentTeamReleaseError(f"run identity {key} must be a non-empty string")
+    _required_slug(identity["run_id"], "run_id")
+    if identity["run_id"] != directory_name:
+        raise AgentTeamReleaseError("run identity does not match directory name")
+    if expected_project_key and identity["project_key"] != expected_project_key:
+        raise AgentTeamReleaseError("run identity project key does not match this project")
+    if identity.get("run_kind") == "implementation":
+        sequence = identity.get("creation_sequence")
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence <= 0:
+            raise AgentTeamReleaseError("implementation creation_sequence must be positive")
+        if "gate_epoch" in identity:
+            raise AgentTeamReleaseError("implementation identity must not contain gate_epoch")
+    elif identity.get("run_kind") == "acceptance_evidence":
+        if identity.get("creation_sequence") is not None:
+            raise AgentTeamReleaseError("acceptance evidence must not have creation_sequence")
+        if not isinstance(identity.get("implementation_run_id"), str) or not identity["implementation_run_id"]:
+            raise AgentTeamReleaseError("acceptance evidence requires implementation_run_id")
+        gate_epoch = identity.get("gate_epoch")
+        if not isinstance(gate_epoch, int) or isinstance(gate_epoch, bool) or gate_epoch <= 0:
+            raise AgentTeamReleaseError("acceptance evidence requires a positive gate_epoch")
+    else:
+        raise AgentTeamReleaseError("invalid run_kind")
+
+
+def _validate_binding_shape(binding):
+    if not isinstance(binding, dict) or binding.get("schema_version") != RUNTIME_RELEASE_BINDING_SCHEMA_VERSION:
+        raise AgentTeamReleaseError("invalid runtime release binding schema version")
+    for key in (
+        "release_id",
+        "release_root",
+        "runtime_root",
+        "release_manifest_sha256",
+        "source_commit",
+        "git_object_format",
+        "bound_at",
+    ):
+        if not isinstance(binding.get(key), str) or not binding[key]:
+            raise AgentTeamReleaseError(f"runtime release binding {key} must be non-empty")
+    if not re.fullmatch(r"[0-9a-f]{64}", binding["release_manifest_sha256"]):
+        raise AgentTeamReleaseError("runtime release binding manifest digest is invalid")
+    oid_length = 40 if binding["git_object_format"] == "sha1" else 64 if binding["git_object_format"] == "sha256" else 0
+    if not oid_length or not re.fullmatch(rf"[0-9a-f]{{{oid_length}}}", binding["source_commit"]):
+        raise AgentTeamReleaseError("runtime release binding source commit is invalid")
+    if not isinstance(binding.get("approval_bound"), bool):
+        raise AgentTeamReleaseError("runtime release binding approval_bound must be boolean")
+    if not isinstance(binding.get("expected_release"), dict):
+        raise AgentTeamReleaseError("runtime release binding expected_release must be an object")
+    if binding["approval_bound"]:
+        missing = {
+            "release_id",
+            "source_commit",
+            "git_object_format",
+        } - set(binding["expected_release"])
+        if missing:
+            raise AgentTeamReleaseError(
+                "approval-bound release binding is missing expected fields: "
+                + ", ".join(sorted(missing))
+            )
+    _validate_expected_release(binding, binding["expected_release"])
+
+
+def _required_slug(value, field):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise AgentTeamReleaseError(f"{field} is not a safe identifier")
+    return value
+
+
+def _read_json_strict(path, label):
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AgentTeamReleaseError(f"{label} is not readable valid JSON") from exc
+    if not isinstance(value, dict):
+        raise AgentTeamReleaseError(f"{label} must be a JSON object")
+    return value
+
+
+def _canonical_json_sha256(value):
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _write_json_fsync(path, value):
+    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    fd = os.open(Path(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as stream:
+            stream.write(payload)
+            stream.flush()
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_directory(path):
+    fd = os.open(Path(path), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _rename_noreplace(source, target):
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise AgentTeamReleaseError("Linux renameat2 is required for atomic run publication")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    if renameat2(-100, os.fsencode(source), -100, os.fsencode(target), 1) != 0:
+        error = ctypes.get_errno()
+        if error in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise AgentTeamReleaseError(f"run already exists: {target}")
+        raise OSError(error, os.strerror(error), str(target))
 
 
 def release_manifest(work_root, release_id):
@@ -561,6 +1163,7 @@ def _git_release_manifest(release_id, release_root, source_key, source_repo, sou
         "source_repo": source_repo,
         "source_ref": source_ref,
         "source_commit": source_commit,
+        "git_object_format": _git_object_format_for_oid(source_commit),
         "installed_at": _utc_now(),
         "launcher_path": str(release_root / "agentteam"),
         "runtime_root": str(release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime"),
@@ -632,6 +1235,28 @@ def _git_commit(checkout_root):
     return completed.stdout.strip()
 
 
+def _git_object_format(checkout_root):
+    if not (Path(checkout_root) / ".git").exists():
+        return None
+    completed = subprocess.run(
+        ["git", "rev-parse", "--show-object-format"],
+        cwd=checkout_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+def _git_object_format_for_oid(oid):
+    if isinstance(oid, str) and re.fullmatch(r"[0-9a-f]{40}", oid):
+        return "sha1"
+    if isinstance(oid, str) and re.fullmatch(r"[0-9a-f]{64}", oid):
+        return "sha256"
+    return None
+
+
 def _latest_release_ids(releases, count):
     if count <= 0:
         return []
@@ -662,6 +1287,22 @@ def _nonterminal_run_release_ids(work_root):
         scheduler_status = state.get("scheduler_status")
         if not scheduler_status or scheduler_status not in TERMINAL_RUN_STATUSES:
             release_ids.append(release_id)
+    return release_ids
+
+
+def _bound_run_release_ids(work_root):
+    run_root = Path(work_root).resolve() / "runs"
+    if not run_root.exists():
+        return []
+    release_ids = []
+    for run_dir in sorted(run_root.iterdir()):
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            continue
+        try:
+            pair = validate_run_binding(run_dir, expected_project_key=None)
+        except AgentTeamReleaseError:
+            continue
+        release_ids.append(pair["binding"]["release_id"])
     return release_ids
 
 
@@ -748,21 +1389,34 @@ def _global_release_references(work_roots):
         if not run_root.exists():
             continue
         for run_dir in sorted(path for path in run_root.iterdir() if path.is_dir()):
-            state = _run_state(run_dir)
-            if not isinstance(state, dict):
-                continue
-            scheduler_status = state.get("scheduler_status")
-            if scheduler_status and scheduler_status in TERMINAL_RUN_STATUSES:
-                continue
-            reference = _global_release_reference(
-                {
-                    "release_id": state.get("runtime_release_id"),
-                    "release_root": state.get("runtime_release_root"),
-                },
-                work_root,
-                "nonterminal_run",
-                run_id=run_dir.name,
-            )
+            try:
+                pair = validate_run_binding(run_dir, expected_project_key=None)
+            except AgentTeamReleaseError:
+                pair = None
+            if pair:
+                binding = pair["binding"]
+                reference = _global_release_reference(
+                    binding,
+                    work_root,
+                    "bound_run",
+                    run_id=run_dir.name,
+                )
+            else:
+                state = _run_state(run_dir)
+                if not isinstance(state, dict):
+                    continue
+                scheduler_status = state.get("scheduler_status")
+                if scheduler_status and scheduler_status in TERMINAL_RUN_STATUSES:
+                    continue
+                reference = _global_release_reference(
+                    {
+                        "release_id": state.get("runtime_release_id"),
+                        "release_root": state.get("runtime_release_root"),
+                    },
+                    work_root,
+                    "nonterminal_run",
+                    run_id=run_dir.name,
+                )
             if reference:
                 references.append(reference)
     return references

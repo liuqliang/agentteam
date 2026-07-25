@@ -17,4 +17,5 @@ chmod +x "${target}"
 printf '{"development_repo_root": "%s"}\n' "${repo_root}" > "${state_dir}/launcher.json"
 
 printf 'Installed %s from %s\n' "${target}" "${launcher}"
+printf 'Installed launcher sha256: %s\n' "$(sha256sum "${target}" | awk '{print $1}')"
 printf 'Make sure %s is on PATH.\n' "${bin_dir}"

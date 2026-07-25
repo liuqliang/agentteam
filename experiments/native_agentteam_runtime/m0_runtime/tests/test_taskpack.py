@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 import io
+import runpy
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -54,6 +55,16 @@ from agentteam_runtime.goal_memory import build_goal_memory, render_goal_memory_
 from agentteam_runtime.notifications import FeishuWebhookNotifier, _permission_request_text
 from agentteam_runtime.operator_report import concise_report_lines
 from agentteam_runtime.profile import build_project_profile, write_project_profile
+from agentteam_runtime.release_manager import (
+    AgentTeamReleaseError,
+    publish_acceptance_run_identity,
+    publish_implementation_run,
+    prune_releases,
+    scan_run_identities,
+    select_latest_implementation_run,
+    selected_release_identity,
+    validate_run_binding,
+)
 import agentteam_runtime.agentteam as agentteam_module
 import agentteam_runtime.projection_db as projection_db
 from agentteam_runtime.projection_db import (
@@ -157,6 +168,31 @@ def _read_jsonl(path):
             if line:
                 records.append(json.loads(line))
     return records
+
+
+def _pre04_release_fixture(work_root, release_id, source_commit=None, runtime_source=None):
+    source_commit = source_commit or ("1" * 40)
+    release_root = work_root / "releases" / release_id
+    runtime_root = release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime"
+    if runtime_source:
+        shutil.copytree(runtime_source / "agentteam_runtime", runtime_root / "agentteam_runtime")
+    else:
+        package = runtime_root / "agentteam_runtime"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "agentteam.py").write_text("def main(argv=None): return 0\n", encoding="utf-8")
+    manifest = {
+        "manifest_schema_version": "agentteam_release_manifest.v2",
+        "release_id": release_id,
+        "release_root": str(release_root),
+        "runtime_root": str(runtime_root),
+        "source_commit": source_commit,
+        "git_object_format": "sha1",
+        "installed_at": f"2026-07-25T00:00:0{release_id[-1:] if release_id[-1:].isdigit() else '0'}Z",
+    }
+    _write_json(release_root / "manifest.json", manifest)
+    _write_json(work_root / "releases" / "refs" / f"{release_id}.json", manifest)
+    return selected_release_identity(work_root, release_id)
 
 
 def _blueprint_fixture(repo, task_count=3):
@@ -3562,6 +3598,11 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertFalse(target.is_symlink())
+            installed_digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            self.assertIn(
+                f"Installed launcher sha256: {installed_digest}",
+                completed.stdout,
+            )
             config = json.loads(
                 (home / ".local" / "share" / "agentteam" / "launcher.json").read_text(
                     encoding="utf-8"
@@ -17943,3 +17984,322 @@ class TaskpackTests(unittest.TestCase):
                         build_taskpack_runtime_args(frozen["frozen_taskpack_dir"], run_root=run_root)
 
                     self.assertFalse((run_root / taskpack_id).exists())
+
+    def _publish_pre04_run(self, work_root, release, run_id, sequence_project="pre04"):
+        return publish_implementation_run(
+            work_root,
+            project_key=sequence_project,
+            run_id=run_id,
+            taskpack_id=run_id,
+            release_identity=release,
+        )
+
+    def test_pre04_01_active_switch_keeps_bound_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            first = _pre04_release_fixture(work_root, "release-1")
+            second = _pre04_release_fixture(work_root, "release-2", "2" * 40)
+            pair = self._publish_pre04_run(work_root, first, "run-1")
+            _write_json(work_root / "releases" / "active.json", second)
+
+            validated = validate_run_binding(pair["run_dir"], expected_project_key="pre04")
+
+            self.assertEqual(validated["binding"]["release_id"], "release-1")
+
+    def test_pre04_02_publish_uses_already_selected_release_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            selected = _pre04_release_fixture(work_root, "release-1")
+            active = _pre04_release_fixture(work_root, "release-2", "2" * 40)
+            _write_json(work_root / "releases" / "active.json", active)
+
+            pair = self._publish_pre04_run(work_root, selected, "run-1")
+
+            self.assertEqual(pair["binding"]["release_id"], "release-1")
+
+    def test_pre04_03_tampered_or_missing_bound_release_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            release = _pre04_release_fixture(work_root, "release-1")
+            pair = self._publish_pre04_run(work_root, release, "run-1")
+            binding_path = Path(pair["run_dir"]) / "state" / "runtime_release_binding.v1.json"
+            binding = json.loads(binding_path.read_text(encoding="utf-8"))
+            binding["source_commit"] = "f" * 40
+            _write_json(binding_path, binding)
+
+            with self.assertRaises(AgentTeamReleaseError):
+                validate_run_binding(pair["run_dir"], expected_project_key="pre04")
+
+    def test_pre04_04_bound_terminal_release_is_gc_protected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            bound = _pre04_release_fixture(work_root, "release-1")
+            _pre04_release_fixture(work_root, "release-2", "2" * 40)
+            self._publish_pre04_run(work_root, bound, "run-1")
+
+            result = prune_releases(work_root, keep_latest=0)
+
+            self.assertIn("release-1", result["protected_release_ids"])
+            self.assertTrue(Path(bound["release_root"]).exists())
+
+    def test_pre04_05_approval_expected_release_mismatch_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            release = _pre04_release_fixture(work_root, "release-1")
+
+            with self.assertRaises(AgentTeamReleaseError):
+                publish_implementation_run(
+                    work_root,
+                    project_key="pre04",
+                    run_id="run-1",
+                    taskpack_id="run-1",
+                    release_identity=release,
+                    expected_release={"release_id": "release-2"},
+                )
+
+    def test_pre04_06_legacy_run_is_excluded_from_implicit_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            legacy = work_root / "runs" / "legacy"
+            legacy.mkdir(parents=True)
+            (legacy / "events.jsonl").write_text("", encoding="utf-8")
+
+            with self.assertRaises(AgentTeamReleaseError):
+                select_latest_implementation_run(work_root, expected_project_key="pre04")
+            self.assertTrue(legacy.is_dir())
+
+    def test_pre04_07_explicit_and_implicit_selection_share_identity_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            release = _pre04_release_fixture(work_root, "release-1")
+            explicit = self._publish_pre04_run(work_root, release, "run-1")
+
+            implicit = select_latest_implementation_run(work_root, expected_project_key="pre04")
+
+            self.assertEqual(explicit["identity_sha256"], implicit["identity_sha256"])
+            self.assertEqual(explicit["binding"], implicit["binding"])
+
+    def test_pre04_08_initial_run_launcher_resolves_frozen_expected_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            release = _pre04_release_fixture(
+                work_root,
+                "release-1",
+                _git_head(repo),
+                runtime_source=Path(__file__).resolve().parents[1],
+            )
+            write_project_profile(
+                repo,
+                build_project_profile(
+                    repo,
+                    project_key="pre04",
+                    work_root=work_root,
+                    author_runtime="fake",
+                    default_runtime="fake",
+                    one_shot=True,
+                ),
+            )
+            draft = draft_taskpack_files(
+                project_root=repo,
+                goal="Exercise initial immutable runtime binding.",
+                draft_root=work_root / "drafts",
+                taskpack_id="run-1",
+                write_scope=["src/"],
+            )
+            _set_taskpack_runtime_backend(draft["taskpack_dir"], "fake")
+            taskpack_path = Path(draft["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["context"] = {
+                "runtime_release_id": release["release_id"],
+                "runtime_release_source_commit": release["source_commit"],
+                "git_object_format": release["git_object_format"],
+            }
+            _write_json(taskpack_path, taskpack)
+            frozen_result = freeze_taskpack(draft["taskpack_dir"], work_root / "frozen")
+            frozen = Path(frozen_result["frozen_taskpack_dir"])
+            launcher = runpy.run_path(str(Path(__file__).resolve().parents[4] / "agentteam"))
+
+            selection = launcher["_initial_run_selection"](
+                ["run", str(frozen), "--run-root", str(work_root / "runs")]
+            )
+            env = _test_env()
+            env.pop("PYTHONPATH", None)
+            completed = subprocess.run(
+                [
+                    str(Path(__file__).resolve().parents[4] / "agentteam"),
+                    "run",
+                    str(frozen),
+                    "--run-root",
+                    str(work_root / "runs"),
+                    "--one-shot",
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(selection["release"]["release_id"], "release-1")
+            self.assertEqual(selection["run_dir"], str(work_root / "runs" / "run-1"))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            bound = validate_run_binding(
+                work_root / "runs" / "run-1", expected_project_key="pre04"
+            )
+            self.assertEqual(bound["binding"]["release_id"], "release-1")
+
+    def test_pre04_09_acceptance_evidence_does_not_replace_latest_implementation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            release = _pre04_release_fixture(work_root, "release-1")
+            implementation = self._publish_pre04_run(work_root, release, "run-1")
+            publish_acceptance_run_identity(
+                work_root,
+                project_key="pre04",
+                run_id="evidence-1",
+                taskpack_id="gate-taskpack",
+                implementation_run_id="run-1",
+                gate_epoch=1,
+            )
+
+            latest = select_latest_implementation_run(work_root, expected_project_key="pre04")
+
+            self.assertEqual(latest["run_dir"], implementation["run_dir"])
+
+    def test_pre04_10_path_installed_launcher_uses_bound_release_after_switch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            repo = tmp_path / "repo"
+            bin_dir = tmp_path / "bin"
+            _init_repo(repo)
+            bin_dir.mkdir()
+            launcher_source = Path(__file__).resolve().parents[4] / "agentteam"
+            installed = bin_dir / "agentteam"
+            shutil.copy2(launcher_source, installed)
+            installed.chmod(0o755)
+            runtime_source = Path(__file__).resolve().parents[1]
+            first = _pre04_release_fixture(
+                work_root, "release-1", runtime_source=runtime_source
+            )
+            second = _pre04_release_fixture(
+                work_root, "release-2", "2" * 40, runtime_source=runtime_source
+            )
+            pair = self._publish_pre04_run(work_root, first, "run-1")
+            write_project_profile(
+                repo,
+                build_project_profile(
+                    repo,
+                    project_key="pre04",
+                    work_root=work_root,
+                    author_runtime="fake",
+                    default_runtime="fake",
+                ),
+            )
+            _write_json(work_root / "releases" / "active.json", second)
+            _write_json(
+                Path(pair["run_dir"]) / "state" / "scheduler_state.json",
+                {"scheduler_status": "completed"},
+            )
+            env = _test_env()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+
+            completed = subprocess.run(
+                [
+                    shutil.which("agentteam", path=env["PATH"]),
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    pair["run_dir"],
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(shutil.which("agentteam", path=env["PATH"]), str(installed))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_pre04_11_concurrent_creation_allocates_unique_monotonic_sequences(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            release = _pre04_release_fixture(work_root, "release-1")
+            results = []
+            errors = []
+
+            def create(run_id):
+                try:
+                    results.append(self._publish_pre04_run(work_root, release, run_id))
+                except Exception as exc:
+                    errors.append(exc)
+
+            threads = [
+                threading.Thread(target=create, args=(f"run-{index}",))
+                for index in range(1, 5)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                sorted(item["identity"]["creation_sequence"] for item in results),
+                [1, 2, 3, 4],
+            )
+
+    def test_pre04_12_mtime_and_evidence_creation_do_not_change_latest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            release = _pre04_release_fixture(work_root, "release-1")
+            older = self._publish_pre04_run(work_root, release, "z-old")
+            newer = self._publish_pre04_run(work_root, release, "a-new")
+            os.utime(older["run_dir"], (2000000000, 2000000000))
+            publish_acceptance_run_identity(
+                work_root,
+                project_key="pre04",
+                run_id="evidence-new",
+                taskpack_id="gate-taskpack",
+                implementation_run_id="a-new",
+                gate_epoch=2,
+            )
+
+            latest = select_latest_implementation_run(work_root, expected_project_key="pre04")
+
+            self.assertEqual(latest["run_dir"], newer["run_dir"])
+
+    def test_pre04_13_newest_failed_run_remains_selected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            release = _pre04_release_fixture(work_root, "release-1")
+            self._publish_pre04_run(work_root, release, "run-old")
+            newest = self._publish_pre04_run(work_root, release, "run-failed")
+            _write_json(
+                Path(newest["run_dir"]) / "state" / "scheduler_state.json",
+                {"scheduler_status": "failed"},
+            )
+
+            selected = select_latest_implementation_run(work_root, expected_project_key="pre04")
+
+            self.assertEqual(selected["run_dir"], newest["run_dir"])
+
+    def test_pre04_14_explicit_older_bound_run_remains_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            release = _pre04_release_fixture(work_root, "release-1")
+            older = self._publish_pre04_run(work_root, release, "run-old")
+            self._publish_pre04_run(work_root, release, "run-new")
+
+            explicit = validate_run_binding(
+                older["run_dir"], expected_project_key="pre04"
+            )
+
+            self.assertEqual(explicit["identity"]["creation_sequence"], 1)

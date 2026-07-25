@@ -82,10 +82,13 @@ from .release_manager import (
     activate_release,
     install_release_from_git,
     install_release_from_checkout,
+    publish_implementation_run,
     record_active_release_for_run,
     prune_global_releases,
     prune_releases,
     update_status,
+    validate_acceptance_run_identity,
+    validate_run_binding,
 )
 from .notifications import (
     FeishuWebhookNotifier,
@@ -126,6 +129,64 @@ class AgentTeamCliError(RuntimeError):
 class JsonArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         raise AgentTeamCliError(message)
+
+
+_LAUNCHER_SELECTION_ENV = "AGENTTEAM_LAUNCHER_SELECTION"
+
+
+def _launcher_runtime_selection():
+    raw = os.environ.get(_LAUNCHER_SELECTION_ENV)
+    if not raw:
+        return None
+    try:
+        selection = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AgentTeamCliError("launcher runtime selection is not valid JSON") from exc
+    if not isinstance(selection, dict) or (
+        selection.get("selection_version") != "launcher_runtime_selection.v1"
+    ):
+        raise AgentTeamCliError("launcher runtime selection has an invalid version")
+    return selection
+
+
+def _validate_launcher_runtime_selection(args):
+    selection = _launcher_runtime_selection()
+    if not selection:
+        return None
+    release = selection.get("release")
+    if not isinstance(release, dict):
+        raise AgentTeamCliError("launcher runtime selection is missing release identity")
+    loaded_runtime_root = Path(__file__).resolve().parents[1]
+    selected_runtime_root = Path(str(release.get("runtime_root") or "")).expanduser().resolve()
+    if loaded_runtime_root != selected_runtime_root:
+        raise AgentTeamCliError(
+            "imported runtime root does not match launcher-selected release",
+            imported_runtime_root=str(loaded_runtime_root),
+            selected_runtime_root=str(selected_runtime_root),
+        )
+    run_dir = selection.get("run_dir")
+    identity_digest = selection.get("identity_sha256")
+    if run_dir and identity_digest:
+        pair = validate_run_binding(
+            run_dir,
+            expected_project_key=selection.get("project_key"),
+            expected_release=selection.get("expected_release") or {},
+            expected_identity_sha256=identity_digest,
+        )
+        binding = pair["binding"]
+        for key in (
+            "release_id",
+            "release_root",
+            "runtime_root",
+            "release_manifest_sha256",
+            "source_commit",
+            "git_object_format",
+        ):
+            if binding.get(key) != release.get(key):
+                raise AgentTeamCliError(
+                    f"launcher-selected release {key} does not match the immutable run binding"
+                )
+    return selection
 
 
 _HELP_COMMANDS = [
@@ -433,6 +494,7 @@ def main(argv=None):
     try:
         parser = _build_parser()
         args = parser.parse_args(argv)
+        _validate_launcher_runtime_selection(args)
         result = args.handler(args)
         if isinstance(result, int):
             return result
@@ -2907,6 +2969,19 @@ def _handle_continue(args):
     run_dir = Path(args.run_dir).resolve() if args.run_dir else (work_root / "runs" / taskpack_id).resolve()
     run_root = run_dir.parent.resolve()
     _require_existing_frozen_and_run(taskpack_id, frozen_dir, run_dir)
+    selection = _launcher_runtime_selection()
+    if selection and selection.get("selection_mode") == "implicit_latest":
+        state = _read_json_if_exists(run_dir / "state" / "two_phase_scheduler_state.json")
+        if not state:
+            state = _read_json_if_exists(run_dir / "state" / "scheduler_state.json")
+        scheduler_status = state.get("scheduler_status") if isinstance(state, dict) else None
+        if scheduler_status in {"failed", "cancelled", "canceled", "stopped"}:
+            raise AgentTeamCliError(
+                "latest implementation run is not resumable; select an older run explicitly",
+                taskpack_id=taskpack_id,
+                scheduler_status=scheduler_status,
+                selection_mode="implicit_latest",
+            )
 
     _write_progress(f"profile loaded: {profile.get('project_key') or project_root.name}")
     _write_progress(f"continuing taskpack: {taskpack_id}")
@@ -2989,6 +3064,11 @@ def _continue_taskpack_id(args, profile):
     elif args.run_dir:
         taskpack_id = Path(args.run_dir).resolve().name
     else:
+        if not _launcher_runtime_selection():
+            raise AgentTeamCliError(
+                "direct runtime execution cannot select the latest run implicitly; "
+                "use the agentteam launcher or provide --taskpack/--run-dir"
+            )
         taskpack_id = _latest_run_dir(profile).name
     if not taskpack_id:
         raise AgentTeamCliError("taskpack id is required for continue")
@@ -3856,6 +3936,17 @@ def _gate_register(
             raise AgentTeamCliError(
                 "evidence run must exist directly under the configured work root",
                 evidence_run=str(evidence_run),
+            )
+        if (context["run_dir"] / "state" / "run_identity.v1.json").is_file():
+            validate_acceptance_run_identity(
+                evidence_run,
+                expected_project_key=(
+                    _read_json_if_exists(
+                        context["run_dir"] / "state" / "run_identity.v1.json"
+                    ).get("project_key")
+                ),
+                expected_implementation_run_id=context["run_dir"].name,
+                expected_gate_epoch=gate_epoch,
             )
         artifact_relative = declaration["evidence_artifact"]
         artifact_path = (evidence_run / artifact_relative).resolve()
@@ -6123,7 +6214,13 @@ def _format_projection_evidence(summary):
 def _attach_release_status_fields(summary, profile):
     status = update_status(profile)
     enriched = dict(summary)
-    for key in ("active_release", "latest_installed_release", "active_is_latest", "known_releases"):
+    for key in (
+        "active_release",
+        "latest_installed_release",
+        "active_is_latest",
+        "known_releases",
+        "run_staging",
+    ):
         if key not in enriched or enriched[key] is None:
             enriched[key] = status.get(key)
     return enriched
@@ -6196,6 +6293,15 @@ def _latest_run_dir(profile):
     work_root = profile.get("work_root")
     if not work_root:
         raise AgentTeamCliError("profile is missing work_root")
+    selection = _launcher_runtime_selection()
+    if selection and selection.get("selection_mode") == "implicit_latest":
+        selected = Path(selection["run_dir"]).resolve()
+        pair = validate_run_binding(
+            selected,
+            expected_project_key=selection.get("project_key"),
+            expected_identity_sha256=selection.get("identity_sha256"),
+        )
+        return Path(pair["run_dir"])
     run_root = Path(work_root) / "runs"
     if not run_root.exists():
         raise AgentTeamCliError("no AgentTeam runs found", run_root=str(run_root))
@@ -9474,6 +9580,83 @@ def _override_or_profile(override, profile_value):
     return profile_value if override is None else override
 
 
+def _prepare_bound_implementation_run(
+    loaded_taskpack,
+    *,
+    frozen_taskpack_dir,
+    run_paths,
+    work_root,
+):
+    """Publish or validate the launcher-selected pair before any runtime child."""
+    selection = _launcher_runtime_selection()
+    if not selection:
+        return None
+    work_root = Path(work_root).resolve()
+    selected_work_root = Path(selection["work_root"]).resolve()
+    run_dir = Path(run_paths["run_dir"]).resolve()
+    if work_root != selected_work_root:
+        raise AgentTeamCliError(
+            "runtime work root does not match launcher selection",
+            runtime_work_root=str(work_root),
+            launcher_work_root=str(selected_work_root),
+        )
+    selected_run_dir = selection.get("run_dir")
+    if selected_run_dir and Path(selected_run_dir).resolve() != run_dir:
+        raise AgentTeamCliError(
+            "runtime run directory does not match launcher selection",
+            runtime_run_dir=str(run_dir),
+            launcher_run_dir=str(Path(selected_run_dir).resolve()),
+        )
+    taskpack_id = loaded_taskpack.get("taskpack_id") or Path(frozen_taskpack_dir).name
+    context = (
+        loaded_taskpack.get("context")
+        if isinstance(loaded_taskpack.get("context"), dict)
+        else {}
+    )
+    expected = {
+        key: value
+        for key, value in {
+            "release_id": context.get("runtime_release_id"),
+            "source_commit": context.get("runtime_release_source_commit"),
+            "git_object_format": context.get("git_object_format"),
+        }.items()
+        if value is not None
+    }
+    launcher_expected = selection.get("expected_release") or {}
+    if expected != launcher_expected:
+        raise AgentTeamCliError(
+            "frozen taskpack release expectation does not match launcher selection"
+        )
+    if run_dir.exists():
+        pair = validate_run_binding(
+            run_dir,
+            expected_project_key=selection.get("project_key"),
+            expected_release=expected,
+            expected_identity_sha256=selection.get("identity_sha256"),
+        )
+    else:
+        pair = publish_implementation_run(
+            work_root,
+            project_key=selection.get("project_key") or work_root.name,
+            run_id=run_dir.name,
+            taskpack_id=taskpack_id,
+            release_identity=selection["release"],
+            expected_release=expected,
+        )
+    updated_selection = {
+        **selection,
+        "run_dir": pair["run_dir"],
+        "identity_sha256": pair["identity_sha256"],
+        "selection_mode": selection.get("selection_mode") or "runtime_validated",
+    }
+    os.environ[_LAUNCHER_SELECTION_ENV] = json.dumps(
+        updated_selection,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return pair
+
+
 def _complete_submit_args(args):
     if args.interactive:
         _prompt_submit_args(args)
@@ -9596,6 +9779,16 @@ def _run_frozen_taskpack(
             ],
         )
     run_paths = _run_paths_for_frozen_taskpack(frozen_taskpack_dir, run_root)
+    inferred_work_root = _infer_work_root_for_run(
+        run_paths["run_root"],
+        frozen_taskpack_dir,
+    )
+    _prepare_bound_implementation_run(
+        loaded_taskpack,
+        frozen_taskpack_dir=Path(frozen_taskpack_dir).resolve(),
+        run_paths=run_paths,
+        work_root=inferred_work_root,
+    )
     runtime_args = build_taskpack_runtime_args(
         frozen_taskpack_dir,
         run_root=run_paths["run_root"],
@@ -9604,10 +9797,6 @@ def _run_frozen_taskpack(
         max_attempts=max_attempts,
         commit_verified_integration=commit_verified_integration,
         initial_integration_base_ref=initial_integration_base_ref,
-    )
-    inferred_work_root = _infer_work_root_for_run(
-        run_paths["run_root"],
-        frozen_taskpack_dir,
     )
     _initialize_post_backlog_gate_state(
         {"work_root": str(inferred_work_root)},
@@ -9755,7 +9944,12 @@ def _read_json_progress_safe(path):
 
 def _runtime_subprocess_env():
     env = os.environ.copy()
-    runtime_root = str(Path(__file__).resolve().parents[1])
+    selection = _launcher_runtime_selection()
+    runtime_root = str(
+        Path(selection["release"]["runtime_root"]).resolve()
+        if selection
+        else Path(__file__).resolve().parents[1]
+    )
     current = env.get("PYTHONPATH")
     env["PYTHONPATH"] = runtime_root if not current else f"{runtime_root}:{current}"
     return env

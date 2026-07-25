@@ -1,45 +1,479 @@
 #!/usr/bin/env python3
+"""Small pre-import launcher for immutable AgentTeam runtime releases."""
+
+import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 
+SELECTION_ENV = "AGENTTEAM_LAUNCHER_SELECTION"
+RESUMING_COMMANDS = {
+    "continue",
+    "resume",
+    "answer",
+    "permissions",
+    "integrate",
+    "gate",
+    "notify",
+}
+RUN_SELECTING_COMMANDS = RESUMING_COMMANDS | {
+    "status",
+    "report",
+    "watch",
+    "chat",
+    "doctor",
+    "logs",
+    "explain-status",
+    "paths",
+    "stop",
+    "stats",
+}
+
+
+class LauncherError(RuntimeError):
+    pass
+
+
 def main():
-    runtime_root = _active_release_runtime_root(sys.argv[1:]) or _development_runtime_root()
-    sys.path.insert(0, str(runtime_root))
-    from agentteam_runtime.agentteam import main as agentteam_main
-
-    return agentteam_main()
-
-
-def _active_release_runtime_root(argv):
-    project_root = _project_root_from_argv(argv)
-    profile_path = project_root / ".agentteam" / "profile.json"
-    if not profile_path.exists():
-        return None
     try:
-        profile = json.loads(profile_path.read_text(encoding="utf-8"))
-        work_root = Path(profile["work_root"])
-        active = json.loads((work_root / "releases" / "active.json").read_text(encoding="utf-8"))
-    except (OSError, KeyError, json.JSONDecodeError):
-        return None
-    release_root = active.get("release_root")
-    if not release_root:
-        return None
-    runtime_root = Path(release_root) / "experiments" / "native_agentteam_runtime" / "m0_runtime"
-    if (runtime_root / "agentteam_runtime" / "agentteam.py").exists():
-        return runtime_root
+        selection = _launcher_selection(sys.argv[1:])
+        if selection:
+            runtime_root = Path(selection["release"]["runtime_root"])
+            os.environ[SELECTION_ENV] = _canonical_json(selection)
+        else:
+            runtime_root = _active_release_runtime_root(sys.argv[1:]) or _development_runtime_root()
+        sys.path.insert(0, str(runtime_root))
+        from agentteam_runtime.agentteam import main as agentteam_main
+
+        return agentteam_main()
+    except Exception as exc:
+        sys.stderr.write(
+            json.dumps(
+                {
+                    "error": {
+                        "type": exc.__class__.__name__,
+                        "message": str(exc),
+                        "launcher_phase": "runtime_release_selection",
+                    }
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 1
+
+
+def _launcher_selection(argv):
+    command = _command(argv)
+    if command == "run":
+        return _initial_run_selection(argv)
+    if command in RUN_SELECTING_COMMANDS:
+        return _existing_run_selection(argv, command)
+    project = _project_context(argv)
+    if not project and command == "submit" and _arg_value(argv, "--work-root"):
+        work_root = Path(_arg_value(argv, "--work-root")).expanduser().resolve()
+        project_root = _project_root_from_argv(argv)
+        project = {
+            "work_root": work_root,
+            "project_key": _safe_project_key(project_root, fallback=work_root.name),
+        }
+    if project and (project["work_root"] / "releases" / "active.json").is_file():
+        return {
+            "selection_version": "launcher_runtime_selection.v1",
+            "selection_mode": "active_for_new_run",
+            "work_root": str(project["work_root"]),
+            "project_key": project["project_key"],
+            "run_dir": None,
+            "identity_sha256": None,
+            "release": _active_release(project["work_root"]),
+            "expected_release": {},
+        }
     return None
 
 
+def _initial_run_selection(argv):
+    frozen_value = _positional_after_command(argv, "run")
+    run_root_value = _arg_value(argv, "--run-root")
+    if not frozen_value or not run_root_value:
+        return None
+    frozen = Path(frozen_value).expanduser().resolve()
+    taskpack = _bounded_json(frozen / "taskpack.yaml", "frozen taskpack")
+    taskpack_id = taskpack.get("taskpack_id") or frozen.name
+    supplied_run_root = Path(run_root_value).expanduser().resolve()
+    run_root = supplied_run_root.parent if supplied_run_root.name == taskpack_id else supplied_run_root
+    run_dir = (run_root / taskpack_id).resolve()
+    frozen_work_root = frozen.parent.parent.resolve() if frozen.parent.name == "frozen" else None
+    run_work_root = run_root.parent.resolve() if run_root.name == "runs" else None
+    context = taskpack.get("context") if isinstance(taskpack.get("context"), dict) else {}
+    expected = {
+        key: value
+        for key, value in {
+            "release_id": context.get("runtime_release_id"),
+            "source_commit": context.get("runtime_release_source_commit"),
+            "git_object_format": context.get("git_object_format"),
+        }.items()
+        if value is not None
+    }
+    if expected and (not frozen_work_root or not run_work_root or frozen_work_root != run_work_root):
+        raise LauncherError(
+            "approval-bound frozen taskpack and --run-root do not resolve to the same work root"
+        )
+    work_root = frozen_work_root or run_work_root or run_root.parent.resolve()
+    profile = _profile_from_project_root(taskpack.get("project_root"))
+    project_key = (
+        profile.get("project_key")
+        if profile and Path(profile["work_root"]).resolve() == work_root
+        else None
+    ) or _safe_project_key(taskpack.get("project_root"), fallback=work_root.name)
+    release = (
+        _release_by_id(work_root, expected["release_id"], expected)
+        if expected.get("release_id")
+        else _active_release(work_root)
+    )
+    return {
+        "selection_version": "launcher_runtime_selection.v1",
+        "selection_mode": "initial_frozen_taskpack",
+        "work_root": str(work_root),
+        "project_key": project_key,
+        "run_dir": str(run_dir),
+        "identity_sha256": None,
+        "release": release,
+        "expected_release": expected,
+    }
+
+
+def _existing_run_selection(argv, command):
+    project = _project_context(argv)
+    explicit_run = _arg_value(argv, "--run-dir")
+    explicit_taskpack = _arg_value(argv, "--taskpack")
+    if not project and explicit_run:
+        run_dir = Path(explicit_run).expanduser().resolve()
+        project = {
+            "work_root": run_dir.parent.parent.resolve(),
+            "project_key": None,
+        }
+    if not project:
+        return None
+    work_root = project["work_root"]
+    if explicit_run:
+        run_dir = Path(explicit_run).expanduser().resolve()
+        mode = "explicit_run_dir"
+    elif explicit_taskpack:
+        run_dir = (work_root / "runs" / explicit_taskpack).resolve()
+        mode = "explicit_taskpack"
+    else:
+        run_root = work_root / "runs"
+        if not run_root.is_dir() or not any(
+            child.is_dir() or child.is_symlink() for child in run_root.iterdir()
+        ):
+            return None
+        pair = _latest_bound_run(work_root, project["project_key"])
+        run_dir = Path(pair["run_dir"])
+        mode = "implicit_latest"
+    try:
+        pair = _validate_run_pair(run_dir, project["project_key"])
+    except LauncherError:
+        if command not in RESUMING_COMMANDS and (explicit_run or explicit_taskpack):
+            return None  # explicit legacy runs remain readable, never implicitly adopted
+        raise
+    return {
+        "selection_version": "launcher_runtime_selection.v1",
+        "selection_mode": mode,
+        "work_root": str(work_root),
+        "project_key": project["project_key"],
+        "run_dir": pair["run_dir"],
+        "identity_sha256": pair["identity_sha256"],
+        "release": pair["release"],
+        "expected_release": pair["binding"].get("expected_release") or {},
+    }
+
+
+def _latest_bound_run(work_root, project_key):
+    run_root = Path(work_root) / "runs"
+    if not run_root.is_dir():
+        raise LauncherError("no AgentTeam runs found")
+    implementations = []
+    sequences = {}
+    for child in sorted(run_root.iterdir(), key=lambda path: path.name):
+        if child.is_symlink():
+            raise LauncherError(f"symlink run child blocks implicit selection: {child.name}")
+        if not child.is_dir():
+            continue
+        identity_path = child / "state" / "run_identity.v1.json"
+        if identity_path.is_symlink() or not identity_path.is_file():
+            raise LauncherError(
+                f"run child lacks an immutable identity and blocks implicit selection: {child.name}"
+            )
+        identity = _bounded_json(identity_path, "run identity")
+        _validate_identity(identity, child.name, project_key)
+        if identity["run_kind"] == "acceptance_evidence":
+            if (child / "state" / "runtime_release_binding.v1.json").exists():
+                raise LauncherError("acceptance evidence run must not have a release binding")
+            continue
+        pair = _validate_run_pair(child, project_key)
+        sequence = identity["creation_sequence"]
+        if sequence in sequences:
+            raise LauncherError(f"duplicate implementation creation_sequence: {sequence}")
+        sequences[sequence] = child.name
+        implementations.append(pair)
+    if not implementations:
+        raise LauncherError("no bound implementation runs found")
+    return max(implementations, key=lambda item: item["identity"]["creation_sequence"])
+
+
+def _validate_run_pair(run_dir, project_key):
+    run_dir = Path(run_dir)
+    if run_dir.is_symlink() or not run_dir.is_dir():
+        raise LauncherError(f"run directory is missing or unsafe: {run_dir}")
+    run_dir = run_dir.resolve()
+    identity_path = run_dir / "state" / "run_identity.v1.json"
+    binding_path = run_dir / "state" / "runtime_release_binding.v1.json"
+    if identity_path.is_symlink() or not identity_path.is_file():
+        raise LauncherError("selected run has no immutable identity")
+    if binding_path.is_symlink() or not binding_path.is_file():
+        raise LauncherError("selected implementation run has no immutable release binding")
+    identity = _bounded_json(identity_path, "run identity")
+    binding = _bounded_json(binding_path, "runtime release binding")
+    _validate_identity(identity, run_dir.name, project_key)
+    if identity["run_kind"] != "implementation":
+        raise LauncherError("selected run is not an implementation run")
+    release = _validate_bound_release(binding)
+    return {
+        "run_dir": str(run_dir),
+        "identity": identity,
+        "identity_sha256": _sha256_canonical(identity),
+        "binding": binding,
+        "release": release,
+    }
+
+
+def _validate_identity(identity, directory_name, project_key):
+    if identity.get("schema_version") != "run_identity.v1":
+        raise LauncherError("invalid run identity schema")
+    if identity.get("run_id") != directory_name:
+        raise LauncherError("run identity does not match directory name")
+    if project_key and identity.get("project_key") != project_key:
+        raise LauncherError("run identity belongs to a different project")
+    if identity.get("run_kind") == "implementation":
+        sequence = identity.get("creation_sequence")
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence <= 0:
+            raise LauncherError("implementation creation_sequence must be positive")
+    elif identity.get("run_kind") == "acceptance_evidence":
+        if identity.get("creation_sequence") is not None:
+            raise LauncherError("acceptance evidence must not have a creation_sequence")
+        if not identity.get("implementation_run_id"):
+            raise LauncherError("acceptance evidence requires implementation_run_id")
+        epoch = identity.get("gate_epoch")
+        if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch <= 0:
+            raise LauncherError("acceptance evidence requires a positive gate_epoch")
+    else:
+        raise LauncherError("invalid run_kind")
+
+
+def _validate_bound_release(binding):
+    if binding.get("schema_version") != "runtime_release_binding.v1":
+        raise LauncherError("invalid runtime release binding schema")
+    release_root = Path(str(binding.get("release_root") or "")).expanduser().resolve()
+    manifest_path = release_root / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise LauncherError("bound release manifest is missing")
+    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    if digest != binding.get("release_manifest_sha256"):
+        raise LauncherError("bound release manifest digest mismatch")
+    manifest = _bounded_json(manifest_path, "release manifest")
+    runtime_root = Path(
+        manifest.get("runtime_root")
+        or release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime"
+    ).expanduser().resolve()
+    source_commit = manifest.get("source_commit") or manifest.get("source_git_commit")
+    if manifest.get("release_id") != binding.get("release_id"):
+        raise LauncherError("bound release ID does not match manifest")
+    if source_commit != binding.get("source_commit"):
+        raise LauncherError("bound release source commit does not match manifest")
+    if runtime_root != Path(str(binding.get("runtime_root") or "")).expanduser().resolve():
+        raise LauncherError("bound runtime root does not match manifest")
+    if not (runtime_root / "agentteam_runtime" / "agentteam.py").is_file():
+        raise LauncherError("bound runtime module is missing")
+    return {
+        key: binding[key]
+        for key in (
+            "release_id",
+            "release_root",
+            "runtime_root",
+            "release_manifest_sha256",
+            "source_commit",
+            "git_object_format",
+        )
+    }
+
+
+def _active_release(work_root):
+    active = _bounded_json(Path(work_root) / "releases" / "active.json", "active release")
+    release_id = active.get("release_id")
+    if not release_id:
+        raise LauncherError("active release pointer has no release_id")
+    release = _release_by_id(work_root, release_id, {})
+    if active.get("release_root") and (
+        Path(active["release_root"]).expanduser().resolve() != Path(release["release_root"])
+    ):
+        raise LauncherError("active release root does not match release manifest")
+    return release
+
+
+def _release_by_id(work_root, release_id, expected):
+    refs_manifest = Path(work_root) / "releases" / "refs" / f"{release_id}.json"
+    local_manifest = Path(work_root) / "releases" / release_id / "manifest.json"
+    lookup = refs_manifest if refs_manifest.is_file() else local_manifest
+    manifest = _bounded_json(lookup, "project release manifest")
+    release_root = Path(
+        manifest.get("release_root") or local_manifest.parent
+    ).expanduser().resolve()
+    root_manifest_path = release_root / "manifest.json"
+    root_manifest = _bounded_json(root_manifest_path, "release manifest")
+    if root_manifest.get("release_id") != release_id:
+        raise LauncherError("release manifest ID mismatch")
+    runtime_root = Path(
+        root_manifest.get("runtime_root")
+        or release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime"
+    ).expanduser().resolve()
+    source_commit = root_manifest.get("source_commit") or root_manifest.get("source_git_commit")
+    object_format = root_manifest.get("git_object_format") or (
+        "sha1" if isinstance(source_commit, str) and len(source_commit) == 40
+        else "sha256" if isinstance(source_commit, str) and len(source_commit) == 64
+        else None
+    )
+    release = {
+        "release_id": release_id,
+        "release_root": str(release_root),
+        "runtime_root": str(runtime_root),
+        "release_manifest_sha256": hashlib.sha256(root_manifest_path.read_bytes()).hexdigest(),
+        "source_commit": source_commit,
+        "git_object_format": object_format,
+    }
+    if not (runtime_root / "agentteam_runtime" / "agentteam.py").is_file():
+        raise LauncherError("selected release runtime module is missing")
+    for key in ("release_id", "source_commit", "git_object_format"):
+        if expected.get(key) is not None and release.get(key) != expected[key]:
+            raise LauncherError(f"selected release {key} does not match frozen approval")
+    if object_format not in {"sha1", "sha256"}:
+        raise LauncherError("selected release Git object format is invalid")
+    oid_length = 40 if object_format == "sha1" else 64
+    if not isinstance(source_commit, str) or not re.fullmatch(rf"[0-9a-f]{{{oid_length}}}", source_commit):
+        raise LauncherError("selected release source commit is invalid")
+    return release
+
+
+def _project_context(argv):
+    project_root = _project_root_from_argv(argv)
+    profile = _profile_from_project_root(project_root)
+    if not profile:
+        return None
+    return {
+        "project_root": Path(project_root).resolve(),
+        "project_key": profile.get("project_key") or Path(project_root).resolve().name,
+        "work_root": Path(profile["work_root"]).expanduser().resolve(),
+    }
+
+
+def _profile_from_project_root(project_root):
+    if not project_root:
+        return None
+    profile_path = Path(project_root).expanduser().resolve() / ".agentteam" / "profile.json"
+    if not profile_path.is_file():
+        return None
+    profile = _bounded_json(profile_path, "project profile")
+    if not profile.get("work_root"):
+        raise LauncherError("project profile is missing work_root")
+    return profile
+
+
+def _active_release_runtime_root(argv):
+    project = _project_context(argv)
+    if not project:
+        return None
+    active_path = project["work_root"] / "releases" / "active.json"
+    if not active_path.is_file():
+        return None
+    try:
+        return Path(_active_release(project["work_root"])["runtime_root"])
+    except LauncherError:
+        active = _bounded_json(active_path, "active release")
+        release_root = active.get("release_root")
+        if not release_root:
+            raise
+        runtime_root = (
+            Path(release_root).expanduser().resolve()
+            / "experiments"
+            / "native_agentteam_runtime"
+            / "m0_runtime"
+        )
+        if not (runtime_root / "agentteam_runtime" / "agentteam.py").is_file():
+            raise
+        return runtime_root
+
+
 def _project_root_from_argv(argv):
+    value = _arg_value(argv, "--project-root")
+    return Path(value).resolve() if value else Path.cwd().resolve()
+
+
+def _command(argv):
+    return argv[0] if argv else None
+
+
+def _arg_value(argv, flag):
     for index, arg in enumerate(argv):
-        if arg == "--project-root" and index + 1 < len(argv):
-            return Path(argv[index + 1]).resolve()
-        if arg.startswith("--project-root="):
-            return Path(arg.split("=", 1)[1]).resolve()
-    return Path.cwd().resolve()
+        if arg == flag and index + 1 < len(argv):
+            return argv[index + 1]
+        if arg.startswith(flag + "="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _positional_after_command(argv, command):
+    try:
+        index = argv.index(command) + 1
+    except ValueError:
+        return None
+    while index < len(argv):
+        value = argv[index]
+        if value.startswith("-"):
+            index += 2 if "=" not in value else 1
+            continue
+        return value
+    return None
+
+
+def _bounded_json(path, label, limit=1024 * 1024):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise LauncherError(f"{label} is missing or unsafe: {path}")
+    if path.stat().st_size > limit:
+        raise LauncherError(f"{label} exceeds bounded launcher read limit")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LauncherError(f"{label} is not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise LauncherError(f"{label} must be a JSON object")
+    return value
+
+
+def _canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _sha256_canonical(value):
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _safe_project_key(project_root, fallback):
+    name = Path(project_root).name if project_root else fallback
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(name)).strip(".-")
+    return safe or "agentteam"
 
 
 def _development_runtime_root():
