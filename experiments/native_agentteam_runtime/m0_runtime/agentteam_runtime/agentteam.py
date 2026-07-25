@@ -7708,6 +7708,11 @@ def _integrate_run_baseline_unchecked(
         if isinstance(resolved_baseline, dict)
         else _paths_integration_baseline(run_dir, state)
     )
+    fresh_baseline = (
+        dict(resolved_baseline)
+        if isinstance(resolved_baseline, dict)
+        else None
+    )
     branch = baseline.get("branch")
     if not branch:
         raise AgentTeamCliError("integration baseline branch not found", run_dir=str(run_dir))
@@ -7726,11 +7731,16 @@ def _integrate_run_baseline_unchecked(
         )
     current_head = _git_stdout(project_root, ["rev-parse", "HEAD"])
     if record_only:
-        baseline = _mark_integration_baseline_status(
+        recorded_baseline = _mark_integration_baseline_status(
             run_dir,
             "acknowledged",
             target_head=current_head,
             baseline_head=branch_head,
+        )
+        baseline = _integration_result_baseline(
+            recorded_baseline,
+            fresh_baseline,
+            branch_head,
         )
         return {
             "integrate_status": "acknowledged",
@@ -7740,7 +7750,7 @@ def _integrate_run_baseline_unchecked(
             "taskpack_id": run_dir.name,
             "project_root": str(project_root),
             "run_dir": str(run_dir),
-            "integration_baseline": {**baseline, "head_sha": branch_head},
+            "integration_baseline": baseline,
             "before_head": current_head,
             "after_head": current_head,
         }
@@ -7752,11 +7762,16 @@ def _integrate_run_baseline_unchecked(
             dirty_status=dirty_status,
         )
     if branch_head == current_head:
-        baseline = _mark_integration_baseline_status(
+        recorded_baseline = _mark_integration_baseline_status(
             run_dir,
             "integrated",
             target_head=current_head,
             baseline_head=branch_head,
+        )
+        baseline = _integration_result_baseline(
+            recorded_baseline,
+            fresh_baseline,
+            branch_head,
         )
         return {
             "integrate_status": "up_to_date",
@@ -7766,7 +7781,7 @@ def _integrate_run_baseline_unchecked(
             "taskpack_id": run_dir.name,
             "project_root": str(project_root),
             "run_dir": str(run_dir),
-            "integration_baseline": {**baseline, "head_sha": branch_head},
+            "integration_baseline": baseline,
             "before_head": current_head,
             "after_head": current_head,
         }
@@ -7806,11 +7821,16 @@ def _integrate_run_baseline_unchecked(
             )
     merge = _git_completed(project_root, ["merge", "--ff-only", branch])
     after_head = _git_stdout(project_root, ["rev-parse", "HEAD"])
-    baseline = _mark_integration_baseline_status(
+    recorded_baseline = _mark_integration_baseline_status(
         run_dir,
         "integrated",
         target_head=after_head,
         baseline_head=branch_head,
+    )
+    baseline = _integration_result_baseline(
+        recorded_baseline,
+        fresh_baseline,
+        branch_head,
     )
     return {
         "integrate_status": "merged",
@@ -7820,12 +7840,22 @@ def _integrate_run_baseline_unchecked(
         "taskpack_id": run_dir.name,
         "project_root": str(project_root),
         "run_dir": str(run_dir),
-        "integration_baseline": {**baseline, "head_sha": branch_head},
+        "integration_baseline": baseline,
         "before_head": current_head,
         "after_head": after_head,
         "merge_stdout": merge.stdout,
         "merge_stderr": merge.stderr,
     }
+
+
+def _integration_result_baseline(recorded, fresh, head_sha):
+    if not isinstance(fresh, dict):
+        return {**recorded, "head_sha": head_sha}
+    result = {**recorded, **fresh, "head_sha": head_sha}
+    for key in ("status", "handled_at", "handled_by", "handled_head_sha"):
+        if recorded.get(key) is not None:
+            result[key] = recorded[key]
+    return result
 
 
 def _rebase_integration_baseline(project_root, run_dir, baseline, current_head):

@@ -6186,7 +6186,22 @@ class TaskpackTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(integrated.returncode, 0, integrated.stderr)
-            self.assertEqual(json.loads(integrated.stdout)["integrate_status"], "acknowledged")
+            integrated_payload = json.loads(integrated.stdout)
+            self.assertEqual(integrated_payload["integrate_status"], "acknowledged")
+            self.assertEqual(
+                integrated_payload["integration_baseline"]["authority"],
+                "current_gate_epoch_git_ref",
+            )
+            self.assertEqual(
+                integrated_payload["integration_baseline"]["head_sha"],
+                final_report_head,
+            )
+            self.assertEqual(
+                integrated_payload["integration_baseline"][
+                    "historical_scheduler_head_sha"
+                ],
+                baseline_head,
+            )
 
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(baseline_worktree)],
