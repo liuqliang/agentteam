@@ -1161,8 +1161,18 @@ class TaskpackTests(unittest.TestCase):
             _init_repo(repo)
             blueprint_path, blueprint = _blueprint_fixture(repo)
             blueprint["approval"]["runtime_release_binding_required"] = True
+            blueprint["approval"]["pre04_ancestor_binding_required"] = True
             _write_json(repo / blueprint_path, blueprint)
             record = _write_blueprint_approval(repo, blueprint)
+            pre04_integration_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD^"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            record["pre04_integration_commit"] = pre04_integration_commit
+            _write_json(repo / blueprint["approval"]["record_path"], record)
             release_id = record["preflight_release_id"]
             release_source_commit = record["preflight_release_source_commit"]
             _write_json(
@@ -1198,6 +1208,49 @@ class TaskpackTests(unittest.TestCase):
                     )
             self.assertFalse(output_root.exists())
 
+            tree_oid = subprocess.run(
+                ["git", "rev-parse", "HEAD^{tree}"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            unrelated_commit = subprocess.run(
+                ["git", "commit-tree", tree_oid, "-m", "unrelated PRE-04"],
+                cwd=repo,
+                env=_test_env(),
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            record["pre04_integration_commit"] = unrelated_commit
+            _write_json(repo / blueprint["approval"]["record_path"], record)
+            dry_result = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "unrelated-pre04-unused",
+                dry_run=True,
+            )
+            self.assertTrue(
+                any(
+                    "not an ancestor" in detail
+                    for detail in dry_result["approval_diagnostics"]
+                )
+            )
+
+            record["pre04_integration_commit"] = "0" * 40
+            _write_json(repo / blueprint["approval"]["record_path"], record)
+            dry_result = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "pre04-unused",
+                dry_run=True,
+            )
+            self.assertTrue(
+                any("PRE-04" in detail for detail in dry_result["approval_diagnostics"])
+            )
+
+            record["pre04_integration_commit"] = pre04_integration_commit
             record["preflight_release_source_commit"] = "0" * 64
             _write_json(repo / blueprint["approval"]["record_path"], record)
             dry_result = taskpack_module.materialize_taskpack_blueprint(

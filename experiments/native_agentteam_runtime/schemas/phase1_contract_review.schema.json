@@ -12,6 +12,7 @@
     "git_object_format",
     "preflight_release_id",
     "preflight_release_source_commit",
+    "pre04_integration_commit",
     "plan_sha256",
     "blueprint_sha256",
     "research_authority_sha256",
@@ -51,6 +52,9 @@
       "minLength": 1
     },
     "preflight_release_source_commit": {
+      "$ref": "#/$defs/git_oid"
+    },
+    "pre04_integration_commit": {
       "$ref": "#/$defs/git_oid"
     },
     "plan_sha256": {
@@ -105,6 +109,9 @@
         "properties": {
           "preflight_release_source_commit": {
             "pattern": "^[0-9a-f]{40}$"
+          },
+          "pre04_integration_commit": {
+            "pattern": "^[0-9a-f]{40}$"
           }
         }
       }
@@ -123,6 +130,9 @@
       "then": {
         "properties": {
           "preflight_release_source_commit": {
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "pre04_integration_commit": {
             "pattern": "^[0-9a-f]{64}$"
           }
         }

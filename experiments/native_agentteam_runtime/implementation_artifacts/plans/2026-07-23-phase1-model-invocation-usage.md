@@ -88,9 +88,10 @@ All of the following must be true:
    launch and eventually has exactly one terminal record, including completed,
    failed, blocked, cancelled, timed-out, launch-failed, and recovered-orphan
    calls.
-3. Initial taskpack authoring, follow-up authoring, planner/task slicing,
-   repository mapping, implementation, review/repair, and semantic architecture
-   calls are attributable to an explicit stage.
+3. Initial and follow-up taskpack authoring, planner/task slicing, repository
+   mapping, implementation, review/repair, semantic architecture, runtime
+   diagnostic, tracked development-smoke, and acceptance calls are
+   attributable to an explicit stage.
 4. Fake and shell adapters are represented as `not_applicable` only when they
    pass through a model-invocation boundary; deterministic scheduler, Git,
    validation, notification, and SQLite operations are not counted as model
@@ -428,8 +429,12 @@ Schema rules:
 - `provider_usage_snapshot` is null for invocation-scoped reporting and stores
   the compact provider cumulative counters when session-delta accounting is
   required;
-- `runtime_execution_session_id` identifies the AgentTeam scheduler/runtime
-  execution and is allocated independently of provider resume behavior;
+- `runtime_execution_session_id` identifies one controller-owned AgentTeam
+  execution context for one real provider call and is allocated independently
+  of provider resume behavior. Worker calls use the scheduler session;
+  author, diagnostic, development-smoke, and acceptance controllers allocate
+  their own non-empty opaque session identity before durable start
+  publication;
 - `provider_session_id` comes only from provider output or an explicit,
   previously observed provider session selected for resume;
 - `provider_predecessor_invocation_id` identifies the one authoritative prior
@@ -440,6 +445,7 @@ Schema rules:
 - `lifecycle_owner_token` binds the invocation to its worker lease or author
   process owner; terminal recovery must cite the revoked token;
 - `terminal_writer` is `worker`, `taskpack_author`,
+  `runtime_diagnostic_controller`, `development_smoke_controller`,
   `recovery_controller`, or `acceptance_controller`;
 - `usage_status: not_applicable` requires
   `coverage_class: not_applicable_adapter`; a supported start cannot be removed
@@ -466,7 +472,11 @@ Correlation resolution is deterministic:
   context, not from parsing the goal text;
 - `model` comes from the effective runtime profile, explicit command setting,
   or provider event; it remains null when none reports it;
-- `runtime_execution_session_id` comes from AgentTeam scheduler state;
+- `runtime_execution_session_id` comes from the controller that owns the
+  provider launch. The scheduler supplies it for worker calls; taskpack author,
+  diagnostic, development-smoke, and acceptance controllers allocate and
+  durably retain one before launch. It is never synthesized from task,
+  attempt, or provider-session identity;
 - `provider_session_id` comes only from provider session metadata and must not
   be synthesized from task or attempt IDs;
 - `resume_last` may be reported when the provider supplies invocation-scoped
@@ -486,6 +496,8 @@ implementation_worker
 review_or_repair
 follow_up_author
 semantic_architecture
+runtime_diagnostic
+development_smoke
 acceptance_live_smoke
 ```
 
@@ -494,18 +506,42 @@ not infer semantic roles from prompt text.
 
 | Invocation path | Stage rule |
 | --- | --- |
-| Initial `start` or `submit` author call | `taskpack_author` |
-| Author call created by `next` or a pursue round after the first | `follow_up_author` |
+| Ordinary `start` or `submit` author call | `taskpack_author`, `round_index = null` |
+| Pursue round 1 author call | `taskpack_author`, `round_index = 1` |
+| Pursue round 2 or later author call | `follow_up_author`, with its positive `round_index` |
+| Author call created by `next` | `follow_up_author` |
 | `task_kind == decompose_backlog` or role `task_planner` | `planner_or_task_slicer` |
 | Role `repo_map_agent` | `repo_map` |
 | Role `semantic_architecture_agent` | `semantic_architecture` |
 | Explicit review/repair work type or a retry caused by validation/integration rejection | `review_or_repair` |
 | Normal code or documentation execution | `implementation_worker` |
+| `agentteam chat --interactive` | `runtime_diagnostic` |
+| Standalone `live_codex_*_smoke` development entry point | `development_smoke` |
 | Controller-owned candidate-runtime smoke | `acceptance_live_smoke` |
 
 A timeout-only retry remains attributable through its new invocation and
 attempt metadata. It is not relabeled as semantic repair unless the scheduler
 records an explicit repair reason.
+
+The supported real-provider invocation inventory is closed for Phase 1:
+
+1. taskpack author calls made by ordinary `start`/`submit`, pursue, and `next`;
+2. worker calls made through mailbox, scheduler, simulation, and CLI routes;
+3. planner/task-slicer, repository-map, semantic-architecture, and explicit
+   review/repair worker roles;
+4. `agentteam chat --interactive`;
+5. the tracked standalone `live_codex_smoke`,
+   `live_codex_scheduler_smoke`, `live_codex_repo_context_smoke`,
+   `live_codex_pipeline_smoke`, `live_codex_multifile_pipeline_smoke`, and
+   `live_codex_cli_smoke` development entry points;
+6. the Phase 1 candidate-runtime acceptance controller.
+
+Each inventory entry must cross the shared lifecycle primitive with an
+explicit stage and non-empty runtime execution session identity. A new tracked
+real-provider entry point is unsupported until this inventory and its
+deterministic coverage fixture are updated. Test fakes using the same boundary
+remain `not_applicable_adapter`; an external Codex process launched outside
+AgentTeam is outside this contract.
 
 ### Token Counting
 
@@ -536,11 +572,21 @@ records an explicit repair reason.
   bound for the current invocation.
 - A provider session using cumulative accounting has one active writer.
   Calls explicitly resuming the same provider session use a cross-process,
-  cross-run lock below the configured project work root unless an explicit
-  provider contract proves usage is invocation-scoped. `resume_last` calls are
-  single-flight per provider resume domain for liveness safety, but that lock
-  does not make cumulative deltas authoritative. Concurrent, forked, or unseen
-  provider turns make cumulative records partial or unavailable with
+  cross-run lock in the user-level AgentTeam runtime root. The lock key is a
+  canonical digest of backend, credential/account namespace, provider session
+  store identity, and provider session ID; raw credentials never enter a path
+  or record. On first use, that namespace is durably bound to one project
+  identity under the same lock. A later cross-project resume is rejected
+  before provider launch. The authoritative predecessor is selected only by
+  scanning lifecycle files and canonical invocation events in the bound
+  project's registered authority roots; the SQLite projection and current-run
+  dispatch order are never predecessor authority.
+- `resume_last` is single-flight in a domain formed from the bound project,
+  backend, credential/account namespace, and provider session store identity.
+  It may retain invocation-scoped usage, but local serialization does not make
+  a session-cumulative delta authoritative because the concrete predecessor is
+  unknown before provider output identifies the session. Concurrent, forked,
+  or unseen provider turns make cumulative records partial or unavailable with
   `provider_session_lineage_ambiguous`; no branch is silently chosen.
 - Invocation-scoped provider usage does not require session-delta subtraction,
   but provider-session identity is still retained when available.
@@ -735,8 +781,12 @@ to verify G3 before the operator approval record exists.
 - the Phase 1 source commit Git OID and object format, active preflight runtime
   release ID, and that
   release's `source_commit` are recorded in taskpack context;
-- the active release `source_commit` equals the reviewed PRE-04 integration
-  commit and is an ancestor of the Phase 1 source commit.
+- the active pre-Phase-1 release ID and `source_commit` exactly match the
+  release reviewed in the approval record, and that source commit is an
+  ancestor of the Phase 1 source commit;
+- the reviewed PRE-04 integration commit is an ancestor of that active release
+  source commit. P0-A and later accepted readiness corrections may therefore
+  sit between PRE-04 and the approval-reviewed release.
 - `agentteam doctor --invocation-supervision-probe` from the reviewed PRE-00
   release confirms, without a provider call, Linux `pidfd_open`, `loginctl`
   linger enabled, a usable systemd user manager, its enclosing system-level
@@ -776,6 +826,7 @@ reviewed_at
 git_object_format
 preflight_release_id
 preflight_release_source_commit
+pre04_integration_commit
 plan_sha256
 blueprint_sha256
 research_authority_sha256
@@ -799,7 +850,8 @@ not match the tracked source. The release source commit must match the OID
 length declared by `git_object_format`, which is read from
 `git rev-parse --show-object-format`; it is not a SHA-256 file digest. G1 also
 fails when the active release ID or `source_commit` differs from the bound
-preflight release. A semantic
+preflight release, when `pre04_integration_commit` is not a valid commit, or
+when it is not an ancestor of the bound release source. A semantic
 architecture agent may prepare the review and proposed resolutions, but cannot
 approve its own contract.
 
@@ -1012,8 +1064,8 @@ research document and the file-authoritative runtime.
   single-writer rule;
 - the review record digests match the tracked plan, blueprint, stage
   vocabulary, contract decisions, and research authority;
-- the review record binds the active PRE-04 release ID, Git object format, and
-  source commit;
+- the review record binds the active pre-Phase-1 release ID, Git object format,
+  and source commit, and records that PRE-04 is its verified ancestor;
 - the operator, not the reviewing agent, records `decision: approved`;
 - any change to the approved research claims is escalated to the operator.
 
@@ -1278,11 +1330,15 @@ collection without changing identity during replay.
   the AgentTeam runtime execution session.
 - [ ] Propagate an optional prior provider snapshot and predecessor from
   structured scheduler context to the adapter without changing either value.
-- [ ] Serialize explicit cumulative-accounting invocations with a cross-run
-  lock keyed by provider session; reject a known concurrent/forked writer
-  before dispatch, and keep unresolved `resume_last` calls single-flight per
-  provider resume domain without treating that local order as authoritative
-  delta lineage.
+- [ ] Serialize explicit cumulative-accounting invocations with the user-level
+  provider-session namespace lock, atomically establish or verify its immutable
+  project binding, and reject cross-project or known concurrent/forked writers
+  before dispatch.
+- [ ] Resolve explicit predecessors from lifecycle files and canonical events
+  in the bound project's registered authority roots. Keep unresolved
+  `resume_last` calls single-flight per provider resume domain without treating
+  that local order, the projection DB, or current-run event order as
+  authoritative delta lineage.
 - [ ] Propagate the structured record through mailbox outbox and scheduler
   collection.
 - [ ] Reconcile lifecycle directories during collection and recovery. Once the
@@ -1342,7 +1398,7 @@ byte-equivalently, provider-session serialization cannot be enforced, process
 death cannot be fenced and proven for recovery, or mailbox replay would
 require minting a new invocation identity.
 
-## P1-03 Taskpack Author And Follow-Up Capture
+## P1-03 Supported Non-Worker Invocation Capture
 
 **Risk:** L1
 **Role:** `implementation_worker`
@@ -1350,20 +1406,27 @@ require minting a new invocation identity.
 
 ### Objective
 
-Capture real provider usage for initial and follow-up taskpack authoring,
-including failed and timed-out author processes.
+Capture real provider usage for taskpack authoring, runtime diagnostic chat,
+and tracked standalone development-smoke entry points, including failed and
+timed-out processes.
 
 ### Files
 
 - Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py`
 - Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py`
+- Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/diagnostic_chat.py`
+- Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_*.py`
 - Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py`
+- Test: `experiments/native_agentteam_runtime/m0_runtime/tests/test_live_codex_smoke.py`
 
 ### Required Deliverables
 
 - `taskpack_author_usage_capture`
 - `taskpack_author_durable_lifecycle`
 - `follow_up_author_stage_and_round_attribution`
+- `runtime_diagnostic_lifecycle_capture`
+- `development_smoke_lifecycle_capture`
+- `closed_supported_invocation_inventory`
 - `author_failure_and_timeout_coverage`
 - `estimate_separation_evidence`
 - `verification_summary`
@@ -1389,6 +1452,15 @@ including failed and timed-out author processes.
   stage explicitly.
 - [ ] Pass pursue ID and round index when known; keep fields null when they
   genuinely do not apply.
+- [ ] Assign pursue round 1 to `taskpack_author`, pursue round 2 and later to
+  `follow_up_author`, and every `next` author call to `follow_up_author`.
+- [ ] Route `agentteam chat --interactive` through the shared lifecycle
+  primitive as `runtime_diagnostic`; allocate a controller-owned runtime
+  execution session and retain unavailable usage when the interactive provider
+  surface emits no machine-readable total.
+- [ ] Route every tracked standalone `live_codex_*_smoke` provider launch
+  through the same primitive as `development_smoke`; do not let a legacy smoke
+  bypass the supported invocation inventory.
 - [ ] Make the accepted author record available to runtime startup for
   idempotent import by writing the bounded digest-bound
   `author_lifecycle_bootstrap.v1.json` below the selected run before scheduler
@@ -1408,8 +1480,12 @@ including failed and timed-out author processes.
 - author-reported provider usage is not replaced by
   `prompt_estimated_tokens`;
 - initial and follow-up author calls have different stages;
-- a two-round deterministic pursue fixture attributes each author call to the
-  correct round;
+- a two-round deterministic pursue fixture attributes round 1 to
+  `taskpack_author` and round 2 to `follow_up_author`;
+- diagnostic and every tracked development-smoke entry point have lifecycle
+  coverage, explicit stage, and a controller-owned runtime execution session;
+- a source scan and deterministic fixture agree on the closed supported
+  invocation inventory;
 - a crash between author start publication and terminal result remains visible
   and is deterministically reconciled;
 - author recovery uses the same changed-boot, live-pidfd, and exact
@@ -1715,13 +1791,14 @@ Prove the complete deterministic Phase 1 accounting path with fixed fixtures.
 - `core_supported_path_coverage_matrix`
 - `projection_rebuild_reconciliation`
 - `open_and_orphan_lifecycle_evidence`
+- `positive_and_negative_fixture_separation`
 - `verification_summary`
 
 ### Positive End-To-End Fixture
 
 The positive fixture must exercise:
 
-1. one initial taskpack author invocation;
+1. one ordinary taskpack author invocation;
 2. one planner/task-slicer invocation;
 3. one repo-map invocation;
 4. one implementation invocation;
@@ -1733,9 +1810,11 @@ The positive fixture must exercise:
    independent runtime execution sessions, using either confirmed
    invocation-scoped usage or authoritative session-delta accounting;
 9. one follow-up author invocation;
-10. projection rebuild;
-11. filtered and unfiltered stats;
-12. a second replay/rebuild.
+10. one runtime-diagnostic invocation;
+11. every tracked standalone development-smoke entry point;
+12. projection rebuild;
+13. filtered and unfiltered stats;
+14. a second replay/rebuild.
 
 Expected results are predeclared in the fixture. The test must compare exact
 invocation count, both coverage numerators/denominators, stage totals, exact
@@ -2469,9 +2548,10 @@ This taskpack uses risk-proportional evidence:
 ## Integration Policy
 
 - Each task runs in an attempt worktree.
-- The implementation run is bound to the approval-reviewed PRE-04 runtime
-  release before its first scheduler subprocess; all continuations use that
-  immutable binding.
+- The implementation run is bound to the approval-reviewed active
+  pre-Phase-1 runtime release before its first scheduler subprocess; all
+  continuations use that immutable binding. The bound release source must
+  descend from the reviewed PRE-04 integration commit.
 - Accepted task patches are applied to the Phase 1 integration baseline in
   dependency order.
 - Every task starts from the latest verified integration baseline.

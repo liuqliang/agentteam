@@ -25,6 +25,12 @@
     "open_invocations_block_completion": true,
     "runtime_provider_session_identity": "separate",
     "session_cumulative_writer_policy": "single_writer",
+    "provider_session_lock_namespace": "user_shared_backend_account_session_store_provider_session_digest",
+    "provider_session_project_binding_policy": "first_project_binding_is_immutable_and_cross_project_resume_is_rejected",
+    "provider_predecessor_authority": "bound_project_lifecycle_files_and_canonical_events_never_projection_db_or_dispatch_order",
+    "resume_last_domain": "bound_project_backend_account_session_store_single_flight",
+    "runtime_execution_session_allocation": "one_nonempty_controller_allocated_identity_per_real_provider_execution",
+    "supported_invocation_inventory_policy": "closed_tracked_inventory_with_source_scan_and_deterministic_fixture",
     "profile_candidate_root_policy": "explicit_distinct_roots_same_git_common_directory",
     "runtime_release_policy": "immutable_prelaunch_run_binding",
     "latest_implementation_run_policy": "launcher_selected_max_unique_creation_sequence",
@@ -40,6 +46,8 @@
       "review_or_repair",
       "follow_up_author",
       "semantic_architecture",
+      "runtime_diagnostic",
+      "development_smoke",
       "acceptance_live_smoke"
     ]
   },
@@ -49,6 +57,7 @@
     "required_decision": "approved",
     "git_object_format_required": true,
     "runtime_release_binding_required": true,
+    "pre04_ancestor_binding_required": true,
     "digest_bindings": [
       "source_plan",
       "blueprint",
@@ -241,7 +250,7 @@
         "Recovery emits the predeclared writer-revocation event and follows the changed-boot, live-pidfd, or same-boot reaped-supervisor decision tree; it acts only on a pinned pidfd or the exact verified transient service before rereading terminal and bounded-spool evidence.",
         "A supervisor exit and numeric PID reuse between identity comparison and signaling cannot target the replacement process.",
         "ESRCH alone never proves death: the same-boot exact transient-service ControlGroup must report cgroup.events populated 0, while changed-boot or a proved enclosing user-service restart sends no signal and ambiguous identity remains open.",
-        "Explicit cumulative provider sessions use cross-run locks and provider-turn continuity; unresolved resume_last calls in one provider resume domain are single-flight but never gain authoritative delta lineage from local order.",
+        "Explicit cumulative provider sessions use a user-level shared lock namespace, immutable first-project binding, bound-project file authority, and provider-turn continuity; cross-project resume is rejected, and unresolved resume_last calls in one provider resume domain are single-flight but never gain authoritative delta lineage from local order.",
         "Replay preserves invocation and usage event IDs and existing recovery tests pass."
       ],
       "stop_condition": "Stop if session lineage cannot be propagated and serialized, process death cannot be proven through changed-boot, pinned-pidfd, or exact transient-service authority, or mailbox replay would need a new invocation identity.",
@@ -254,8 +263,8 @@
     },
     {
       "task_id": "P1-03",
-      "objective": "Capture durable start and terminal provider usage for initial and follow-up taskpack authors, including failure, timeout, salvage, and recovery paths.",
-      "goal_alignment": "Includes authoring cost in the same invocation-level accounting contract as worker execution.",
+      "objective": "Capture durable start and terminal provider usage for taskpack authors, runtime diagnostic chat, and tracked standalone development-smoke entry points, including failure, timeout, salvage, and recovery paths.",
+      "goal_alignment": "Includes every supported non-worker pre-controller provider call in the same invocation-level accounting contract as worker execution.",
       "work_type": "code_implementation",
       "required_role": "implementation_worker",
       "backlog_status": "ready",
@@ -267,24 +276,45 @@
       "read_scope": [
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/diagnostic_chat.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_smoke.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_scheduler_smoke.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_repo_context_smoke.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_pipeline_smoke.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_multifile_pipeline_smoke.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_cli_smoke.py",
         "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_live_codex_smoke.py",
         "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
       ],
       "write_scope": [
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/diagnostic_chat.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_smoke.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_scheduler_smoke.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_repo_context_smoke.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_pipeline_smoke.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_multifile_pipeline_smoke.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_cli_smoke.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_live_codex_smoke.py"
       ],
       "required_deliverables": [
         "taskpack_author_durable_lifecycle",
         "taskpack_author_usage_capture",
         "follow_up_author_stage_and_round_attribution",
+        "runtime_diagnostic_lifecycle_capture",
+        "development_smoke_lifecycle_capture",
+        "closed_supported_invocation_inventory",
         "author_failure_and_timeout_coverage",
         "estimate_separation_evidence",
         "verification_summary"
       ],
       "acceptance_criteria": [
-        "Initial and follow-up author calls use the gated-supervisor and transient-service handshake, persist process and execution-group identity before provider launch permission, and use distinct stages with correct pursue rounds.",
+        "Ordinary and pursue-round-1 author calls use taskpack_author; pursue round 2 and later plus next use follow_up_author; all use the gated-supervisor and transient-service handshake with explicit round attribution.",
+        "Runtime diagnostic chat and every tracked standalone development-smoke provider entry point cross the shared lifecycle primitive with explicit stage and a controller-owned runtime execution session.",
+        "A source scan and deterministic fixture agree on the closed supported invocation inventory.",
         "Success, failure, timeout, salvage, and changed-boot, live-pidfd, or exact transient-service crash recovery preserve one terminal or open lifecycle as appropriate.",
         "Provider usage is never replaced by prompt_estimated_tokens.",
         "Failed author calls remain discoverable even without a frozen taskpack or run directory.",
@@ -292,12 +322,13 @@
         "Ordinary draft and taskpack cleanup preserves non-rebuildable author lifecycle authority; destructive removal is explicit and reports canonical-import status and accounting loss.",
         "Existing custom-command and legacy author contexts remain compatible."
       ],
-      "stop_condition": "Stop if machine-readable provider usage would break custom author commands or timeout-salvage behavior.",
+      "stop_condition": "Stop if a supported non-worker provider entry point cannot cross the shared lifecycle boundary without breaking its interactive, custom-command, or timeout-salvage contract.",
       "input_artifacts": [
         "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json"
       ],
       "evidence_paths": [
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_live_codex_smoke.py"
       ]
     },
     {
@@ -472,7 +503,7 @@
         "verification_summary"
       ],
       "acceptance_criteria": [
-        "The fixture covers every supported pre-controller author, planner, repo-map, implementation, review, semantic, and follow-up path.",
+        "The fixture covers every supported pre-controller author, planner, repo-map, implementation, review, semantic, follow-up, runtime-diagnostic, and tracked development-smoke path.",
         "The positive fixture has exact predeclared counts and totals, 100 percent lifecycle and token coverage, and zero open invocations.",
         "The separate recovery fixture transitions from lifecycle/token 0/1 with one open invocation to lifecycle 1/1, token 0/1, and zero open without changing the denominator.",
         "Lease expiry while the process is live does not terminalize the recovery fixture.",

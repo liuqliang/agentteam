@@ -1248,12 +1248,55 @@ def _validate_taskpack_blueprint_approval(
             raise TaskpackValidationError(
                 "active runtime release source commit does not match blueprint approval"
             )
+    pre04_integration_commit = record.get("pre04_integration_commit")
+    if approval.get("pre04_ancestor_binding_required"):
+        if not isinstance(pre04_integration_commit, str) or not re.fullmatch(
+            rf"[0-9a-f]{{{oid_length}}}",
+            pre04_integration_commit,
+        ):
+            raise TaskpackValidationError(
+                f"approval PRE-04 integration commit must be a "
+                f"{git_object_format} Git OID"
+            )
+        completed = subprocess.run(
+            ["git", "cat-file", "-e", f"{pre04_integration_commit}^{{commit}}"],
+            cwd=project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise TaskpackValidationError(
+                "approval PRE-04 integration commit is not a commit "
+                "in the target repository"
+            )
+        completed = subprocess.run(
+            [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                pre04_integration_commit,
+                release_source_commit,
+            ],
+            cwd=project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise TaskpackValidationError(
+                "approval PRE-04 integration commit is not an ancestor "
+                "of the preflight release source commit"
+            )
     return {
         "approval_record": approval["record_path"],
         "approval_record_sha256": _sha256_file(record_path),
         "approval_decision": record["decision"],
         "runtime_release_id": release_id,
         "runtime_release_source_commit": release_source_commit,
+        "pre04_integration_commit": pre04_integration_commit,
         "git_object_format": git_object_format,
     }
 
