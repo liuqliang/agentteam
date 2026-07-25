@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import time
+from pathlib import Path
 
 from .daemon import run_file_daemon
 from .mailbox_worker import (
@@ -309,6 +310,15 @@ def main(argv=None):
         return
     _require_execution_arg(parser, args.agent_pool, "--agent-pool")
     _require_execution_arg(parser, args.backlog, "--backlog")
+    if (
+        _backlog_has_post_backlog_gates(args.backlog)
+        and not (args.daemon_run_until_idle and args.daemon_two_phase_worker_pool)
+    ):
+        parser.error(
+            "taskpacks with post-backlog gates require "
+            "--daemon-run-until-idle --daemon-two-phase-worker-pool; "
+            "one-shot and lower-level simulation launch paths cannot wait for gates"
+        )
     runtime_profile_defaults = _build_runtime_profile_defaults(parser, args)
     integration_verification_command = _parse_command_json(
         parser,
@@ -554,15 +564,14 @@ def _run_supervised_two_phase_scheduler(
             break
         supervision.append(worker_pool.supervise_once())
         if last_tick["tick_status"] == "idle":
-            scheduler._emit_run_event_once(
-                "run_completed",
-                scheduler._run_event_payload("completed", {"tick_count": tick_count}),
-            )
+            completion = scheduler.complete_verified_backlog(tick_count)
             result = {
                 **scheduler.summary(),
-                "scheduler_status": "idle",
+                "scheduler_status": completion["scheduler_status"],
                 "tick_count": tick_count,
                 "last_tick": last_tick,
+                "milestone_status": completion["milestone_status"],
+                "next_action": completion.get("next_action"),
             }
             break
         if _should_wait_for_running_inflight(last_tick, supervision_result["after"]):
@@ -672,6 +681,18 @@ def _require_execution_arg(parser, value, flag):
         parser.error(
             f"{flag} is required unless a read-only show flag is set"
         )
+
+
+def _backlog_has_post_backlog_gates(backlog_path):
+    taskpack_path = Path(backlog_path).resolve().parent / "taskpack.yaml"
+    if not taskpack_path.is_file():
+        return False
+    try:
+        taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    gates = taskpack.get("post_backlog_gates") if isinstance(taskpack, dict) else None
+    return isinstance(gates, list) and bool(gates)
 
 
 def _build_runtime_profile_defaults(parser, args):

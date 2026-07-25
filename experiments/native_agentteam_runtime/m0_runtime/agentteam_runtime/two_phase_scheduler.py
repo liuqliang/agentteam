@@ -247,17 +247,15 @@ class TwoPhaseFileScheduler:
                     "last_tick": last_tick,
                 }
             if last_tick["tick_status"] == "idle":
-                summary = {
+                completion = self.complete_verified_backlog(tick_count)
+                return {
                     **self.summary(),
-                    "scheduler_status": "idle",
+                    "scheduler_status": completion["scheduler_status"],
                     "tick_count": tick_count,
                     "last_tick": last_tick,
+                    "milestone_status": completion["milestone_status"],
+                    "next_action": completion.get("next_action"),
                 }
-                self._emit_run_event_once(
-                    "run_completed",
-                    self._run_event_payload("completed", {"tick_count": tick_count}),
-                )
-                return summary
             if last_tick["tick_status"] == "waiting":
                 time.sleep(poll_interval_seconds)
         self.state["scheduler_status"] = "max_ticks_reached"
@@ -294,6 +292,50 @@ class TwoPhaseFileScheduler:
             "state_path": str(self.state_path),
             "state_db_path": str(self.state_db_path),
         }
+
+    def complete_verified_backlog(self, tick_count):
+        """Project verified idle without claiming gated milestone completion."""
+        if not self._requires_post_backlog_gates():
+            self._emit_run_event_once(
+                "run_completed",
+                self._run_event_payload("completed", {"tick_count": tick_count}),
+            )
+            return {
+                "scheduler_status": "idle",
+                "milestone_status": "completed",
+                "next_action": None,
+            }
+
+        self.state["scheduler_status"] = "awaiting_post_backlog_gates"
+        self._write_state()
+        next_action = (
+            f"agentteam gate seal-baseline --taskpack {self.output_dir.name}"
+        )
+        self._emit_run_event_once(
+            "backlog_completed",
+            self._run_event_payload(
+                "awaiting_post_backlog_gates",
+                {
+                    "tick_count": tick_count,
+                    "backlog_status": "completed",
+                    "milestone_status": "awaiting_post_backlog_gates",
+                    "next_action": next_action,
+                },
+            ),
+        )
+        return {
+            "scheduler_status": "awaiting_post_backlog_gates",
+            "milestone_status": "awaiting_post_backlog_gates",
+            "next_action": next_action,
+        }
+
+    def _requires_post_backlog_gates(self):
+        return (
+            self.output_dir
+            / "state"
+            / "post_backlog_gates"
+            / "gate_state.v1.json"
+        ).is_file()
 
     def stop_if_requested(self):
         if not self._apply_run_stop_request():
@@ -1826,6 +1868,11 @@ class TwoPhaseFileScheduler:
         run_event_ids = self.state.setdefault("run_event_ids", {})
         if run_event_ids.get(event_type):
             return []
+        replayed_event_id = self._existing_run_event_id(event_type)
+        if replayed_event_id:
+            run_event_ids[event_type] = replayed_event_id
+            self._write_state()
+            return []
         canonical = self._append_events(
             "STEP-RUN",
             [
@@ -1843,6 +1890,22 @@ class TwoPhaseFileScheduler:
         self._write_state()
         self._notify_canonical_events("STEP-RUN", canonical)
         return canonical
+
+    def _existing_run_event_id(self, event_type):
+        if not self.events_path.is_file():
+            return None
+        expected_key = f"{event_type}:{self.run_id}"
+        for line in self.events_path.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                event.get("event_type") == event_type
+                and event.get("idempotency_key") == expected_key
+            ):
+                return event.get("event_id")
+        return None
 
     def _run_event_payload(self, run_status, extra=None):
         summary = self.summary()

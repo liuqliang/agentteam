@@ -5582,6 +5582,10 @@ class TaskpackTests(unittest.TestCase):
             )
             report_payload = json.loads(report.stdout)
             self.assertEqual(
+                report_payload["run_status"],
+                "awaiting_post_backlog_gates",
+            )
+            self.assertEqual(
                 report_payload["completion_summary"]["review_gate"]["status"],
                 "post_backlog_gates_pending",
             )
@@ -5734,11 +5738,14 @@ class TaskpackTests(unittest.TestCase):
                 text=True,
                 check=True,
             )
+            tampered_payload = json.loads(tampered_status.stdout)
             self.assertEqual(
-                json.loads(tampered_status.stdout)["post_backlog_gates"]["gates"][0][
-                    "state"
-                ],
+                tampered_payload["post_backlog_gates"]["gates"][0]["state"],
                 "failed",
+            )
+            self.assertEqual(
+                tampered_payload["status"],
+                "awaiting_post_backlog_gates",
             )
             receipt_path.write_bytes(original_receipt)
 
@@ -5894,6 +5901,10 @@ class TaskpackTests(unittest.TestCase):
             )
             awaiting_payload = json.loads(awaiting_review.stdout)
             self.assertEqual(
+                awaiting_payload["status"],
+                "awaiting_post_backlog_gates",
+            )
+            self.assertEqual(
                 awaiting_payload["post_backlog_gates"]["gates"][1]["state"],
                 "awaiting_operator_review",
             )
@@ -5917,6 +5928,81 @@ class TaskpackTests(unittest.TestCase):
                         expected_integration_head=final_report_head,
                     )
             self.assertEqual(approved["gate_status"], "passed")
+            self.assertEqual(approved["run_completion"]["run_status"], "completed")
+            self.assertTrue(approved["run_completion"]["idempotent"])
+            run_events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                sum(event["event_type"] == "run_completed" for event in run_events),
+                1,
+            )
+            with mock.patch.object(
+                agentteam_module,
+                "_require_operator_approval_context",
+                return_value=None,
+            ):
+                with mock.patch.object(sys, "stdin", io.StringIO(confirmation)):
+                    replayed_approval = agentteam_module._gate_approve(
+                        repo,
+                        profile,
+                        run_dir,
+                        gate_id="P1-06E",
+                        gate_epoch=1,
+                        expected_evidence_sha256=evidence_sha256,
+                        expected_integration_head=final_report_head,
+                    )
+            self.assertTrue(replayed_approval["idempotent"])
+            self.assertTrue(replayed_approval["run_completion"]["idempotent"])
+
+            completed_receipt = receipt_path.read_bytes()
+            stale_receipt = json.loads(completed_receipt)
+            stale_receipt["epoch_sha256"] = "0" * 64
+            _write_json(receipt_path, stale_receipt)
+            stale_after_completion = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "status",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            stale_after_completion_payload = json.loads(stale_after_completion.stdout)
+            self.assertEqual(
+                stale_after_completion_payload["status"],
+                "awaiting_post_backlog_gates",
+            )
+            self.assertEqual(
+                stale_after_completion_payload["post_backlog_gates"]["gates"][0][
+                    "state"
+                ],
+                "failed",
+            )
+            events_after_stale_status = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertEqual(
+                sum(
+                    event["event_type"] == "run_completed"
+                    for event in events_after_stale_status
+                ),
+                1,
+            )
+            receipt_path.write_bytes(completed_receipt)
 
             rebased = subprocess.run(
                 [

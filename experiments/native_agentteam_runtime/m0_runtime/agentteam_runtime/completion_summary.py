@@ -104,6 +104,11 @@ def build_completion_summary(
         "merge_recommendations": merge_recommendations,
         "evidence_gaps": evidence_gaps,
     }
+    if run_status == "awaiting_post_backlog_gates":
+        summary["integration_recommendation"] = (
+            "Do not integrate: the backlog is verified idle but required "
+            "post-backlog gates are still pending."
+        )
     summary["follow_up_recommendation"] = _follow_up_recommendation(
         run_id,
         run_status,
@@ -210,6 +215,12 @@ def compact_text_items(values, limit=3):
 def _follow_up_recommendation(run_id, run_status, blocked_count, integration_baseline, summary):
     next_step = _first_text(summary.get("next_steps"))
     has_integration = bool(integration_baseline.get("branch"))
+    if run_status == "awaiting_post_backlog_gates":
+        return {
+            "action": "complete_post_backlog_gate",
+            "reason": "The backlog is verified idle, but the gated milestone is not complete.",
+            "report_command": f"agentteam report --taskpack {run_id}",
+        }
     if blocked_count:
         return {
             "action": "review_blocker",

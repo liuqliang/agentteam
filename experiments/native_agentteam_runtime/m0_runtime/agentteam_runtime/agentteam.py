@@ -87,7 +87,11 @@ from .release_manager import (
     prune_releases,
     update_status,
 )
-from .notifications import FeishuWebhookNotifier, diagnose_feishu_webhook_delivery
+from .notifications import (
+    FeishuWebhookNotifier,
+    build_feishu_notification_sink_from_env,
+    diagnose_feishu_webhook_delivery,
+)
 from .taskpack import (
     REPO_MAP_HANDOFF_PATH,
     build_taskpack_runtime_args,
@@ -101,6 +105,7 @@ from .taskpack import (
 )
 from .taskpack_author import draft_taskpack_from_goal
 from .token_usage import format_token_usage, token_usage_from_state
+from .two_phase_scheduler import TwoPhaseFileScheduler
 
 
 AUTHOR_RUNTIME_CHOICES = ["fake", "codex", "deterministic"]
@@ -3260,7 +3265,11 @@ def _gate_seal_baseline(project_root, profile, run_dir, *, expected_integration_
                 current_epoch=current["record"]["epoch_number"] if current else None,
             )
         run_status = _build_run_status_summary(profile, context["run_dir"])
-        if run_status.get("status") not in {"idle", "completed"}:
+        if run_status.get("status") not in {
+            "idle",
+            "completed",
+            "awaiting_post_backlog_gates",
+        }:
             raise AgentTeamCliError(
                 "frozen backlog must be verified idle before sealing",
                 run_status=run_status.get("status") or "unknown",
@@ -3408,7 +3417,7 @@ def _gate_register(
 ):
     context = _require_post_backlog_gate_context(profile, run_dir)
     declaration = _require_gate_declaration(context, gate_id)
-    with _gate_mutation_locks(context, [gate_id]):
+    with _gate_mutation_locks(context, sorted(context["declarations_by_id"])):
         current = _require_current_gate_epoch(context, gate_epoch)
         head = _resolved_epoch_integration_head(project_root, current["record"])
         _require_expected_git_oid(
@@ -3458,7 +3467,7 @@ def _gate_register(
             )
             if previous_decision.get("state") == "passed":
                 if previous_binding == new_binding:
-                    return {
+                    summary = {
                         "gate_action": "register",
                         "gate_status": "passed",
                         "taskpack_id": context["run_dir"].name,
@@ -3467,6 +3476,10 @@ def _gate_register(
                         "path": str(receipt_path),
                         "idempotent": True,
                     }
+                    completion = _complete_gated_milestone_if_ready(context)
+                    if completion is not None:
+                        summary["run_completion"] = completion
+                    return summary
                 raise AgentTeamCliError("a passed gate receipt cannot be replaced", gate_id=gate_id)
         attempts = list(previous.get("attempt_history", [])) if previous else []
         if previous:
@@ -3493,7 +3506,7 @@ def _gate_register(
         }
         _validate_gate_record_schema("post_backlog_gate_receipt.schema.json", receipt)
         _atomic_write_json(receipt_path, receipt)
-        return {
+        summary = {
             "gate_action": "register",
             "gate_status": "pending",
             "taskpack_id": context["run_dir"].name,
@@ -3503,6 +3516,11 @@ def _gate_register(
             "artifact_path": str(artifact_path),
             "attempt_count": len(attempts) + 1,
         }
+        completion = _complete_gated_milestone_if_ready(context)
+        if completion is not None:
+            summary["gate_status"] = "passed"
+            summary["run_completion"] = completion
+        return summary
 
 
 def _gate_approve(
@@ -3521,7 +3539,7 @@ def _gate_approve(
         raise AgentTeamCliError("gate does not accept operator approval", gate_id=gate_id)
     _require_operator_approval_context()
     confirmation = f"approve {context['run_dir'].name} {gate_id} epoch {gate_epoch}"
-    with _gate_mutation_locks(context, [gate_id]):
+    with _gate_mutation_locks(context, sorted(context["declarations_by_id"])):
         sys.stderr.write(
             "Review the final report, diff, coverage, evidence digests, and integration head.\n"
             f"Type exactly `{confirmation}` to publish approval: "
@@ -3532,7 +3550,7 @@ def _gate_approve(
         current = _require_current_gate_epoch(context, gate_epoch)
         decisions = _evaluate_post_backlog_gates(context, current=current)
         decision = next(item for item in decisions["gates"] if item["gate_id"] == gate_id)
-        if decision.get("state") != "awaiting_operator_review":
+        if decision.get("state") not in {"awaiting_operator_review", "passed"}:
             raise AgentTeamCliError(
                 "gate evidence is not ready for operator approval",
                 gate_id=gate_id,
@@ -3552,6 +3570,22 @@ def _gate_approve(
                 expected_evidence_sha256=expected_evidence_sha256,
                 actual_evidence_sha256=decision.get("evidence_sha256"),
             )
+        approval_path = _gate_approval_path(context, current["record"], gate_id)
+        if decision.get("state") == "passed":
+            summary = {
+                "gate_action": "approve",
+                "gate_status": "passed",
+                "taskpack_id": context["run_dir"].name,
+                "gate_epoch": gate_epoch,
+                "gate_id": gate_id,
+                "evidence_sha256": expected_evidence_sha256,
+                "path": str(approval_path),
+                "idempotent": True,
+            }
+            completion = _complete_gated_milestone_if_ready(context)
+            if completion is not None:
+                summary["run_completion"] = completion
+            return summary
         _require_clean_gate_schema_paths(_gate_integration_worktree(context), declaration)
         diff_sha256 = _gate_review_diff_sha256(
             project_root,
@@ -3581,7 +3615,6 @@ def _gate_approve(
             declaration["operator_approval_schema"],
             approval,
         )
-        approval_path = _gate_approval_path(context, current["record"], gate_id)
         existing = _read_json_if_exists(approval_path)
         if existing:
             if _canonical_json_bytes(existing) == _canonical_json_bytes(approval):
@@ -3598,7 +3631,7 @@ def _gate_approve(
                 "published approval did not satisfy current gate",
                 reasons=final_decision.get("reasons"),
             )
-        return {
+        summary = {
             "gate_action": "approve",
             "gate_status": "passed",
             "taskpack_id": context["run_dir"].name,
@@ -3608,6 +3641,10 @@ def _gate_approve(
             "path": str(approval_path),
             "idempotent": idempotent,
         }
+        completion = _complete_gated_milestone_if_ready(context)
+        if completion is not None:
+            summary["run_completion"] = completion
+        return summary
 
 
 def _handle_notify(args):
@@ -4170,6 +4207,8 @@ def _apply_post_backlog_gate_report_guidance(report, gate_summary):
     report["review_hint"] = gate_summary.get("next_action")
     if gate_summary.get("all_passed"):
         return report
+    report["run_status"] = "awaiting_post_backlog_gates"
+    report["scheduler_status"] = "awaiting_post_backlog_gates"
     completion = (
         dict(report.get("completion_summary"))
         if isinstance(report.get("completion_summary"), dict)
@@ -4178,6 +4217,9 @@ def _apply_post_backlog_gate_report_guidance(report, gate_summary):
     completion["integration_recommendation"] = (
         "Complete the declared post-backlog gates before integration: "
         f"{gate_summary.get('next_action') or 'review gate status'}."
+    )
+    completion["status_line"] = (
+        "awaiting_post_backlog_gates: backlog verified idle; milestone incomplete"
     )
     review_gate = (
         dict(completion.get("review_gate"))
@@ -5969,6 +6011,16 @@ def _build_run_status_summary(profile, run_dir):
     gate_summary = _post_backlog_gate_summary(profile, run_dir)
     if gate_summary is not None:
         summary["post_backlog_gates"] = gate_summary
+        if not gate_summary.get("all_passed") and not _status_summary_is_active(summary):
+            summary.update(
+                {
+                    "status": "awaiting_post_backlog_gates",
+                    "overall_status": "awaiting_post_backlog_gates",
+                    "run_status": "awaiting_post_backlog_gates",
+                    "run_outcome": "pending",
+                    "active_phase": "post_backlog_gates",
+                }
+            )
     return _with_prioritized_status_guidance(summary)
 
 
@@ -6964,6 +7016,68 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
         "approval_schema_sha256": approval_schema_sha256 if declaration.get("operator_review_required") else None,
         "integration_head_sha": head,
     }
+
+
+def _complete_gated_milestone_if_ready(context):
+    """Freshly evaluate every gate, then emit the canonical completion once."""
+    decision = _evaluate_post_backlog_gates(context)
+    if not decision.get("all_passed"):
+        return None
+
+    taskpack = context["taskpack"]
+    files = taskpack.get("files") if isinstance(taskpack.get("files"), dict) else {}
+    agent_pool_path = (context["frozen_dir"] / files.get("agent_pool", "agent_pool.json")).resolve()
+    backlog_path = (context["frozen_dir"] / files.get("backlog", "backlog.json")).resolve()
+    notification_sink = _post_backlog_gate_notification_sink(context["profile"])
+    scheduler = TwoPhaseFileScheduler(
+        agent_pool_path,
+        backlog_path,
+        context["run_dir"],
+        project_root=context["project_root"],
+        notification_sink=notification_sink,
+    )
+    scheduler.state["scheduler_status"] = "completed"
+    scheduler._write_state()
+    emitted = scheduler._emit_run_event_once(
+        "run_completed",
+        scheduler._run_event_payload(
+            "completed",
+            {
+                "milestone_status": "completed",
+                "post_backlog_gate_epoch": decision.get("epoch_number"),
+                "post_backlog_gates": decision.get("gates", []),
+            },
+        ),
+    )
+    event_id = (
+        emitted[0]["event_id"]
+        if emitted
+        else scheduler.state.get("run_event_ids", {}).get("run_completed")
+    )
+    return {
+        "run_status": "completed",
+        "event_id": event_id,
+        "idempotent": not bool(emitted),
+        "gate_epoch": decision.get("epoch_number"),
+    }
+
+
+def _post_backlog_gate_notification_sink(profile):
+    feishu = profile.get("feishu") if isinstance(profile.get("feishu"), dict) else {}
+    if feishu and not feishu.get("enabled", True):
+        return None
+    webhook_env = feishu.get("webhook_env") if feishu else None
+    if not webhook_env:
+        return None
+    return build_feishu_notification_sink_from_env(
+        webhook_env=webhook_env,
+        signing_secret_env=feishu.get("signing_secret_env"),
+        project=(
+            profile.get("notification_project")
+            or profile.get("project_key")
+            or "agentteam"
+        ),
+    )
 
 
 def _post_backlog_gate_summary(profile, run_dir):
@@ -8001,6 +8115,8 @@ def _run_progress_status(run):
 def _submit_status_from_run(run):
     if not isinstance(run, dict):
         return "completed"
+    if run.get("scheduler_status") == "awaiting_post_backlog_gates":
+        return "awaiting_post_backlog_gates"
     snapshot = run.get("snapshot")
     if not isinstance(snapshot, dict):
         return "completed"
@@ -8517,6 +8633,19 @@ def _run_frozen_taskpack(
     progress_interval_seconds=2.0,
     initial_integration_base_ref=None,
 ):
+    loaded_taskpack = load_taskpack(frozen_taskpack_dir)["taskpack"]
+    post_backlog_gates = loaded_taskpack.get("post_backlog_gates")
+    if one_shot and isinstance(post_backlog_gates, list) and post_backlog_gates:
+        raise AgentTeamCliError(
+            "--one-shot cannot launch a taskpack with post-backlog gates; "
+            "use the daemon worker-pool path so external controller gates can run",
+            taskpack_id=loaded_taskpack.get("taskpack_id"),
+            post_backlog_gate_ids=[
+                gate.get("gate_id")
+                for gate in post_backlog_gates
+                if isinstance(gate, dict)
+            ],
+        )
     run_paths = _run_paths_for_frozen_taskpack(frozen_taskpack_dir, run_root)
     runtime_args = build_taskpack_runtime_args(
         frozen_taskpack_dir,

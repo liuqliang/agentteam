@@ -12,6 +12,7 @@ from .token_usage import aggregate_token_usage, format_token_usage
 
 DEFAULT_NOTIFICATION_EVENT_TYPES = {
     "run_started",
+    "backlog_completed",
     "run_completed",
     "run_failed",
     "run_timed_out",
@@ -544,6 +545,9 @@ def _concise_event_text(event, run_dir, project):
     run_status = payload.get("run_status") or payload.get("scheduler_status")
     if run_status:
         lines.append(f"Status: {run_status}")
+    if event_type == "backlog_completed":
+        lines.append("Milestone: awaiting required post-backlog gates")
+        lines.append(f"Next gate action: {payload.get('next_action') or 'agentteam report'}")
     task_id = payload.get("task_id")
     if not task_id and isinstance(payload.get("operator_report"), dict):
         task_reports = payload["operator_report"].get("task_reports")
@@ -578,6 +582,8 @@ def _event_text(event, run_dir, project):
         return _manual_gate_text(event, run_dir, project)
     if event.get("event_type") == "permission_request_required":
         return _permission_request_text(event, run_dir, project)
+    if event.get("event_type") == "backlog_completed":
+        return _backlog_completed_text(event, run_dir, project)
     payload = event.get("payload", {})
     lines = [
         f"[AgentTeam] {event.get('event_type', 'event')}",
@@ -608,6 +614,22 @@ def _event_text(event, run_dir, project):
         ]
     )
     return "\n".join(lines)
+
+
+def _backlog_completed_text(event, run_dir, project):
+    payload = event.get("payload", {})
+    return "\n".join(
+        [
+            "[AgentTeam] backlog_completed",
+            f"Project: {project}",
+            "Status: awaiting_post_backlog_gates",
+            "Backlog: verified idle",
+            "Milestone: pending; integration is not yet authorized",
+            f"Next gate action: {payload.get('next_action') or 'agentteam report'}",
+            f"Run dir: {run_dir}",
+            f"Summary: {_event_message_summary(event)}",
+        ]
+    )
 
 
 def _operator_report_text(report):

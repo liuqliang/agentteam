@@ -68,6 +68,7 @@
         "integration_commit_evaluated",
         "artifact_update_proposed",
         "artifact_update_integrated",
+        "backlog_completed",
         "manual_gate_required",
         "operator_answer_received",
         "notification_sent",
