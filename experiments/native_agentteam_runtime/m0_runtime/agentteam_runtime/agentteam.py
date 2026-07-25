@@ -1284,6 +1284,17 @@ def _add_gate_parser(subcommands):
     seal.add_argument("--json", action="store_true")
     seal.set_defaults(handler=_handle_gate)
 
+    refresh = gate_commands.add_parser(
+        "refresh-baseline",
+        help="Merge a newly resolved target into a fresh immutable gate epoch.",
+    )
+    _add_gate_run_selection_arguments(refresh)
+    refresh.add_argument("--expected-gate-epoch", required=True, type=int)
+    refresh.add_argument("--expected-target-head", required=True)
+    refresh.add_argument("--authorize-revalidation", action="store_true", required=True)
+    refresh.add_argument("--json", action="store_true")
+    refresh.set_defaults(handler=_handle_gate)
+
     register = gate_commands.add_parser(
         "register",
         help="Register the epoch-scoped evidence run for a gate.",
@@ -3163,6 +3174,14 @@ def _handle_gate(args):
             run_dir,
             expected_integration_head=args.expected_integration_head,
         )
+    elif args.gate_command == "refresh-baseline":
+        summary = _gate_refresh_baseline(
+            project_root,
+            profile,
+            run_dir,
+            expected_gate_epoch=args.expected_gate_epoch,
+            expected_target_head=args.expected_target_head,
+        )
     elif args.gate_command == "register":
         summary = _gate_register(
             project_root,
@@ -3403,6 +3422,399 @@ def _gate_seal_baseline(project_root, profile, run_dir, *, expected_integration_
             "verification_result": result_authority,
             "path": str(epoch_dir / "epoch.v1.json"),
         }
+
+
+def _gate_refresh_baseline(
+    project_root,
+    profile,
+    run_dir,
+    *,
+    expected_gate_epoch,
+    expected_target_head,
+):
+    context = _require_post_backlog_gate_context(profile, run_dir)
+    if Path(project_root).resolve() != context["project_root"]:
+        raise AgentTeamCliError(
+            "selected project root does not match frozen gate authority",
+            project_root=str(Path(project_root).resolve()),
+            frozen_project_root=str(context["project_root"]),
+        )
+    gate_ids = sorted(context["declarations_by_id"])
+    with _gate_mutation_locks(context, gate_ids):
+        current = _require_current_gate_epoch(context, expected_gate_epoch)
+        record = current["record"]
+        run_status = _build_run_status_summary(profile, context["run_dir"])
+        if run_status.get("status") not in {
+            "idle",
+            "completed",
+            "awaiting_post_backlog_gates",
+        }:
+            raise AgentTeamCliError(
+                "implementation run must be idle before gate baseline refresh",
+                run_status=run_status.get("status") or "unknown",
+            )
+        if _open_gate_controller_invocations(context):
+            raise AgentTeamCliError(
+                "open gate controller invocation blocks baseline refresh",
+                open_controller_invocations=_open_gate_controller_invocations(context),
+            )
+
+        current_head = _resolved_epoch_integration_head(project_root, record)
+        current_worktree = _git_worktree_for_branch(
+            project_root,
+            record["integration_branch"],
+            current_head,
+        )
+        _require_clean_worktree(
+            current_worktree,
+            "current gate integration worktree must be clean before baseline refresh",
+        )
+        relation = _git_completed(
+            project_root,
+            [
+                "merge-base",
+                "--is-ancestor",
+                record["validated_code_sha"],
+                current_head,
+            ],
+            check=False,
+        )
+        if relation.returncode != 0:
+            raise AgentTeamCliError(
+                "current integration branch no longer descends from its validated code",
+                validated_code_sha=record["validated_code_sha"],
+                current_integration_head=current_head,
+            )
+
+        target_head = _git_stdout(
+            project_root,
+            ["rev-parse", "--verify", f"{record['target_branch']}^{{commit}}"],
+        )
+        _require_expected_git_oid(
+            project_root,
+            expected_target_head,
+            target_head,
+            field_name="expected target head",
+        )
+        target_worktree = _git_worktree_for_branch(
+            project_root,
+            record["target_branch"],
+            target_head,
+        )
+        _require_clean_worktree(
+            target_worktree,
+            "target worktree must be clean before gate baseline refresh",
+        )
+        command = _frozen_gate_verification_command(context)
+
+        next_epoch = record["epoch_number"] + 1
+        branch_base = record["integration_branch"]
+        prior_suffix = f"-epoch-{record['epoch_number']}"
+        if branch_base.endswith(prior_suffix):
+            branch_base = branch_base[: -len(prior_suffix)]
+        candidate_branch = f"{branch_base}-epoch-{next_epoch}"
+        candidate_worktree = (
+            context["run_dir"] / f"integration-epoch-{next_epoch}"
+        ).resolve()
+        _require_gate_refresh_candidate_absent(
+            project_root,
+            candidate_branch,
+            candidate_worktree,
+        )
+
+        published = False
+        try:
+            created = _git_completed(
+                project_root,
+                [
+                    "worktree",
+                    "add",
+                    "-b",
+                    candidate_branch,
+                    str(candidate_worktree),
+                    record["validated_code_sha"],
+                ],
+                check=False,
+            )
+            if created.returncode != 0:
+                raise AgentTeamCliError(
+                    "unable to create gate refresh candidate",
+                    candidate_branch=candidate_branch,
+                    candidate_worktree=str(candidate_worktree),
+                    stdout=created.stdout,
+                    stderr=created.stderr,
+                )
+            merged = _git_completed(
+                candidate_worktree,
+                ["merge", "--no-ff", "--no-edit", target_head],
+                check=False,
+            )
+            if merged.returncode != 0:
+                raise AgentTeamCliError(
+                    "target merge conflicted; gate epoch was not published",
+                    target_head_sha=target_head,
+                    candidate_branch=candidate_branch,
+                    stdout=merged.stdout,
+                    stderr=merged.stderr,
+                )
+            merge_head = _git_stdout(candidate_worktree, ["rev-parse", "HEAD"])
+            target_relation = _git_completed(
+                candidate_worktree,
+                ["merge-base", "--is-ancestor", target_head, merge_head],
+                check=False,
+            )
+            if target_relation.returncode != 0:
+                raise AgentTeamCliError(
+                    "refreshed integration head does not descend from target",
+                    target_head_sha=target_head,
+                    integration_head_sha=merge_head,
+                )
+            verification = subprocess.run(
+                command,
+                cwd=candidate_worktree,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=3600,
+            )
+            result_authority = {
+                "command": command,
+                "returncode": verification.returncode,
+                "stdout_sha256": _sha256_bytes(verification.stdout.encode("utf-8")),
+                "stderr_sha256": _sha256_bytes(verification.stderr.encode("utf-8")),
+            }
+            if verification.returncode != 0:
+                raise AgentTeamCliError(
+                    "frozen full verification failed; gate epoch was not published",
+                    verification_result=result_authority,
+                )
+            verified_head = _git_stdout(candidate_worktree, ["rev-parse", "HEAD"])
+            if verified_head != merge_head:
+                raise AgentTeamCliError(
+                    "gate refresh candidate changed during frozen verification",
+                    before_head=merge_head,
+                    after_head=verified_head,
+                )
+            _require_clean_worktree(
+                candidate_worktree,
+                "frozen verification changed the gate refresh candidate",
+            )
+            reread = _require_current_gate_epoch(context, expected_gate_epoch)
+            if reread["digest"] != current["digest"]:
+                raise AgentTeamCliError(
+                    "gate epoch changed during baseline refresh",
+                    expected_epoch_sha256=current["digest"],
+                    current_epoch_sha256=reread["digest"],
+                )
+            reread_target = _git_stdout(
+                project_root,
+                ["rev-parse", "--verify", f"{record['target_branch']}^{{commit}}"],
+            )
+            if reread_target != target_head:
+                raise AgentTeamCliError(
+                    "target branch changed during baseline refresh",
+                    before_head=target_head,
+                    after_head=reread_target,
+                )
+            reread_current_head = _resolved_epoch_integration_head(
+                project_root,
+                record,
+            )
+            if reread_current_head != current_head:
+                raise AgentTeamCliError(
+                    "current integration branch changed during baseline refresh",
+                    before_head=current_head,
+                    after_head=reread_current_head,
+                )
+            current_worktree = _git_worktree_for_branch(
+                project_root,
+                record["integration_branch"],
+                current_head,
+            )
+            _require_clean_worktree(
+                current_worktree,
+                "current gate integration worktree changed during baseline refresh",
+            )
+            target_worktree = _git_worktree_for_branch(
+                project_root,
+                record["target_branch"],
+                target_head,
+            )
+            _require_clean_worktree(
+                target_worktree,
+                "target worktree changed during baseline refresh",
+            )
+            open_invocations = _open_gate_controller_invocations(context)
+            if open_invocations:
+                raise AgentTeamCliError(
+                    "controller invocation opened during baseline refresh",
+                    open_controller_invocations=open_invocations,
+                )
+            reread_candidate = _git_stdout(
+                project_root,
+                ["rev-parse", "--verify", f"{candidate_branch}^{{commit}}"],
+            )
+            if reread_candidate != merge_head:
+                raise AgentTeamCliError(
+                    "gate refresh candidate branch changed during verification",
+                    before_head=merge_head,
+                    after_head=reread_candidate,
+                )
+            refreshed_record = {
+                "schema_version": "post_backlog_gate_epoch.v1",
+                "implementation_run_id": context["run_dir"].name,
+                "epoch_number": next_epoch,
+                "prior_epoch_sha256": current["digest"],
+                "gate_declaration_sha256": record["gate_declaration_sha256"],
+                "git_object_format": record["git_object_format"],
+                "target_branch": record["target_branch"],
+                "target_head_sha": target_head,
+                "integration_branch": candidate_branch,
+                "integration_head_sha": merge_head,
+                "validated_code_sha": merge_head,
+                "verification_command_sha256": _sha256_json(command),
+                "verification_result_sha256": _sha256_json(result_authority),
+                "created_at": _format_utc_timestamp(datetime.now(UTC)),
+            }
+            _validate_gate_record_schema(
+                "post_backlog_gate_epoch.schema.json",
+                refreshed_record,
+            )
+            epoch_dir = _publish_gate_epoch(context, refreshed_record)
+            published = True
+            state_warning = None
+            try:
+                _atomic_write_json(
+                    context["gate_root"] / "gate_state.v1.json",
+                    {
+                        "schema_version": "post_backlog_gate_state.v1",
+                        "implementation_run_id": context["run_dir"].name,
+                        "state": "gates_pending",
+                        "gate_declaration_sha256": refreshed_record[
+                            "gate_declaration_sha256"
+                        ],
+                        "current_epoch": next_epoch,
+                        "current_epoch_sha256": _sha256_json(refreshed_record),
+                        "updated_at": _format_utc_timestamp(datetime.now(UTC)),
+                    },
+                )
+            except Exception as exc:
+                state_warning = str(exc) or exc.__class__.__name__
+            summary = {
+                "gate_action": "refresh-baseline",
+                "gate_status": "pending",
+                "taskpack_id": context["run_dir"].name,
+                "gate_epoch": next_epoch,
+                "parent_gate_epoch": record["epoch_number"],
+                "epoch_sha256": _sha256_json(refreshed_record),
+                "target_head_sha": target_head,
+                "validated_code_sha": merge_head,
+                "integration_branch": candidate_branch,
+                "integration_worktree": str(candidate_worktree),
+                "verification_result": result_authority,
+                "path": str(epoch_dir / "epoch.v1.json"),
+            }
+            if state_warning:
+                summary["state_projection_warning"] = state_warning
+            return summary
+        finally:
+            if not published:
+                _remove_unpublished_gate_candidate(
+                    project_root,
+                    candidate_branch,
+                    candidate_worktree,
+                )
+
+
+def _frozen_gate_verification_command(context):
+    command = load_taskpack(context["frozen_dir"])["verification"].get("command")
+    if not isinstance(command, list) or not command or not all(
+        isinstance(part, str) and part for part in command
+    ):
+        raise AgentTeamCliError(
+            "frozen taskpack does not expose a deterministic full-verification command"
+        )
+    return list(command)
+
+
+def _require_clean_worktree(worktree, message):
+    dirty = _git_stdout(
+        worktree,
+        ["status", "--porcelain=v1", "--untracked-files=all"],
+    )
+    if dirty:
+        raise AgentTeamCliError(message, dirty_status=dirty)
+
+
+def _require_gate_refresh_candidate_absent(project_root, branch, worktree):
+    worktree = Path(worktree).resolve()
+    registered = _git_completed(
+        project_root,
+        ["worktree", "list", "--porcelain"],
+        check=False,
+    )
+    registered_paths = {
+        Path(line.partition(" ")[2]).resolve()
+        for line in registered.stdout.splitlines()
+        if line.startswith("worktree ")
+    }
+    branch_exists = _git_completed(
+        project_root,
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        check=False,
+    ).returncode == 0
+    if worktree in registered_paths or worktree.exists() or branch_exists:
+        raise AgentTeamCliError(
+            "gate refresh candidate already exists; refusing destructive cleanup",
+            candidate_branch=branch,
+            candidate_branch_exists=branch_exists,
+            candidate_worktree=str(worktree),
+            candidate_worktree_exists=worktree.exists(),
+            candidate_worktree_registered=worktree in registered_paths,
+        )
+
+
+def _remove_unpublished_gate_candidate(project_root, branch, worktree):
+    worktree = Path(worktree).resolve()
+    registered = _git_completed(
+        project_root,
+        ["worktree", "list", "--porcelain"],
+        check=False,
+    )
+    registered_paths = {
+        Path(line.partition(" ")[2]).resolve()
+        for line in registered.stdout.splitlines()
+        if line.startswith("worktree ")
+    }
+    if worktree in registered_paths:
+        _git_completed(
+            project_root,
+            ["worktree", "remove", "--force", str(worktree)],
+            check=False,
+        )
+    elif worktree.exists():
+        raise AgentTeamCliError(
+            "unregistered gate refresh candidate path already exists",
+            candidate_worktree=str(worktree),
+        )
+    branch_exists = _git_completed(
+        project_root,
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        check=False,
+    )
+    if branch_exists.returncode == 0:
+        deleted = _git_completed(
+            project_root,
+            ["branch", "-D", branch],
+            check=False,
+        )
+        if deleted.returncode != 0:
+            raise AgentTeamCliError(
+                "unable to remove unpublished gate refresh branch",
+                candidate_branch=branch,
+                stderr=deleted.stderr,
+            )
 
 
 def _gate_register(

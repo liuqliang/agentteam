@@ -5500,6 +5500,26 @@ class TaskpackTests(unittest.TestCase):
             baseline_branch = baseline_state["integration_baseline"][
                 "integration_baseline_branch"
             ]
+            historical_baseline_head = baseline_state["integration_baseline"][
+                "integration_baseline_head_sha"
+            ]
+            baseline_worktree = run_dir / "integration-baseline"
+            (baseline_worktree / "refresh-conflict.txt").write_text(
+                "integration\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "refresh-conflict.txt"],
+                cwd=baseline_worktree,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "add refresh conflict fixture"],
+                cwd=baseline_worktree,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
             baseline_head = subprocess.run(
                 ["git", "rev-parse", baseline_branch],
                 cwd=repo,
@@ -5851,7 +5871,6 @@ class TaskpackTests(unittest.TestCase):
                 "experiments/native_agentteam_runtime/implementation_artifacts/"
                 "native_runtime_roadmap.md",
             ]
-            baseline_worktree = run_dir / "integration-baseline"
             for relative_path in report_paths:
                 output_path = baseline_worktree / relative_path
                 output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5918,7 +5937,7 @@ class TaskpackTests(unittest.TestCase):
                 awaiting_payload["integration_baseline"][
                     "historical_scheduler_head_sha"
                 ],
-                baseline_head,
+                historical_baseline_head,
             )
             self.assertEqual(
                 sorted(
@@ -6164,7 +6183,7 @@ class TaskpackTests(unittest.TestCase):
             )
             self.assertNotEqual(rebased.returncode, 0)
             self.assertIn("rebase is forbidden", rebased.stderr)
-            self.assertEqual(_git_head(repo), baseline_head)
+            self.assertEqual(_git_head(repo), historical_baseline_head)
 
             integrated = subprocess.run(
                 [
@@ -6200,11 +6219,394 @@ class TaskpackTests(unittest.TestCase):
                 integrated_payload["integration_baseline"][
                     "historical_scheduler_head_sha"
                 ],
-                baseline_head,
+                historical_baseline_head,
             )
 
+            epoch_one_receipt = receipt_path.read_bytes()
+            epoch_one_approval_path = Path(approved["path"])
+            epoch_one_approval = epoch_one_approval_path.read_bytes()
+            cost_history_path = (
+                work_root / "runs" / "gate-controller-costs" / "cost_history.json"
+            )
+            _write_json(
+                cost_history_path,
+                {
+                    "implementation_run_id": "gated-integrate-run",
+                    "gate_epoch": 1,
+                    "provider_cost_usd": 1.25,
+                },
+            )
+            cost_history = cost_history_path.read_bytes()
+
+            # Regression 3: a merge conflict leaves epoch 1 and all evidence intact.
+            (repo / "refresh-conflict.txt").write_text("target\n", encoding="utf-8")
+            subprocess.run(["git", "add", "refresh-conflict.txt"], cwd=repo, check=True)
             subprocess.run(
-                ["git", "worktree", "remove", "--force", str(baseline_worktree)],
+                ["git", "commit", "-m", "create refresh conflict"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            conflicting_target_head = _git_head(repo)
+            with self.assertRaisesRegex(
+                agentteam_module.AgentTeamCliError,
+                "target merge conflicted",
+            ):
+                agentteam_module._gate_refresh_baseline(
+                    repo,
+                    profile,
+                    run_dir,
+                    expected_gate_epoch=1,
+                    expected_target_head=conflicting_target_head,
+                )
+            gate_context = agentteam_module._post_backlog_gate_context(
+                profile,
+                run_dir,
+            )
+            self.assertEqual(
+                agentteam_module._read_current_gate_epoch(gate_context)["record"][
+                    "epoch_number"
+                ],
+                1,
+            )
+            self.assertFalse((run_dir / "integration-epoch-2").exists())
+            self.assertNotEqual(
+                subprocess.run(
+                    ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{baseline_branch}-epoch-2"],
+                    cwd=repo,
+                    check=False,
+                ).returncode,
+                0,
+            )
+
+            # Reconcile the target and exercise the exact command contract.
+            (repo / "refresh-conflict.txt").write_text(
+                "integration\n",
+                encoding="utf-8",
+            )
+            (repo / "target-refresh-1.txt").write_text("target epoch 2\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "refresh-conflict.txt", "target-refresh-1.txt"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "advance target for epoch 2"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            target_head_epoch_two = _git_head(repo)
+            refreshed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "gate",
+                    "refresh-baseline",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "gated-integrate-run",
+                    "--expected-gate-epoch",
+                    "1",
+                    "--expected-target-head",
+                    target_head_epoch_two,
+                    "--authorize-revalidation",
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
+            refreshed_payload = json.loads(refreshed.stdout)
+            self.assertEqual(refreshed_payload["gate_epoch"], 2)
+            self.assertEqual(refreshed_payload["parent_gate_epoch"], 1)
+            self.assertIn("-epoch-2", refreshed_payload["integration_branch"])
+            epoch_two = agentteam_module._read_current_gate_epoch(gate_context)
+            self.assertEqual(epoch_two["record"]["prior_epoch_sha256"], sealed["epoch_sha256"])
+            self.assertNotEqual(
+                epoch_two["record"]["validated_code_sha"],
+                final_report_head,
+            )
+            self.assertEqual(
+                epoch_two["record"]["validated_code_sha"],
+                refreshed_payload["validated_code_sha"],
+            )
+            self.assertEqual(
+                subprocess.run(
+                    [
+                        "git",
+                        "rev-parse",
+                        f"{refreshed_payload['validated_code_sha']}^1",
+                    ],
+                    cwd=repo,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    text=True,
+                ).stdout.strip(),
+                baseline_head,
+            )
+            self.assertEqual(
+                subprocess.run(
+                    [
+                        "git",
+                        "merge-base",
+                        "--is-ancestor",
+                        target_head_epoch_two,
+                        refreshed_payload["validated_code_sha"],
+                    ],
+                    cwd=repo,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            epoch_two_decision = agentteam_module._evaluate_post_backlog_gates(
+                gate_context,
+                current=epoch_two,
+            )
+            self.assertFalse(epoch_two_decision["all_passed"])
+            self.assertTrue(
+                all(gate["state"] == "pending" for gate in epoch_two_decision["gates"])
+            )
+            self.assertEqual(receipt_path.read_bytes(), epoch_one_receipt)
+            self.assertEqual(epoch_one_approval_path.read_bytes(), epoch_one_approval)
+
+            (repo / "target-refresh-2.txt").write_text("target epoch 3\n", encoding="utf-8")
+            subprocess.run(["git", "add", "target-refresh-2.txt"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "advance target for epoch 3"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            target_head_epoch_three = _git_head(repo)
+
+            # Regressions 3/5: stale refs and open invocations fail in-lock.
+            with self.assertRaisesRegex(
+                agentteam_module.AgentTeamCliError,
+                "expected target head changed",
+            ):
+                agentteam_module._gate_refresh_baseline(
+                    repo,
+                    profile,
+                    run_dir,
+                    expected_gate_epoch=2,
+                    expected_target_head=target_head_epoch_two,
+                )
+            controller_state = (
+                work_root
+                / "runs"
+                / "refresh-controller"
+                / "state"
+                / "gate_controller_invocation.json"
+            )
+            _write_json(
+                controller_state,
+                {
+                    "implementation_run_id": "gated-integrate-run",
+                    "gate_id": "P1-LIVE",
+                    "gate_epoch": 2,
+                    "invocation_id": "refresh-open-1",
+                    "status": "running",
+                },
+            )
+            with self.assertRaisesRegex(
+                agentteam_module.AgentTeamCliError,
+                "open gate controller invocation",
+            ):
+                agentteam_module._gate_refresh_baseline(
+                    repo,
+                    profile,
+                    run_dir,
+                    expected_gate_epoch=2,
+                    expected_target_head=target_head_epoch_three,
+                )
+            controller_state.unlink()
+
+            # A pre-existing candidate is not proven to belong to this
+            # invocation and must never be deleted as automatic cleanup.
+            epoch_three_branch = (
+                f"{baseline_branch}-epoch-3"
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "branch",
+                    epoch_three_branch,
+                    epoch_two["record"]["validated_code_sha"],
+                ],
+                cwd=repo,
+                check=True,
+            )
+            with self.assertRaisesRegex(
+                agentteam_module.AgentTeamCliError,
+                "refusing destructive cleanup",
+            ):
+                agentteam_module._gate_refresh_baseline(
+                    repo,
+                    profile,
+                    run_dir,
+                    expected_gate_epoch=2,
+                    expected_target_head=target_head_epoch_three,
+                )
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{epoch_three_branch}"],
+                    cwd=repo,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            subprocess.run(
+                ["git", "branch", "-D", epoch_three_branch],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            # Regression 4: the run/gate locks serialize concurrent refreshes.
+            with agentteam_module._gate_mutation_locks(
+                gate_context,
+                sorted(gate_context["declarations_by_id"]),
+            ):
+                with self.assertRaisesRegex(
+                    agentteam_module.AgentTeamCliError,
+                    "post-backlog gate mutation is active",
+                ):
+                    agentteam_module._gate_refresh_baseline(
+                        repo,
+                        profile,
+                        run_dir,
+                        expected_gate_epoch=2,
+                        expected_target_head=target_head_epoch_three,
+                    )
+
+            # Regression 5: a worktree change during verification is caught by
+            # the mandatory post-verification in-lock reread.
+            target_dirty_path = repo / "dirty-during-refresh.txt"
+            frozen_verification["command"] = [
+                "python3",
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    f"Path({str(target_dirty_path)!r}).write_text('dirty\\n')"
+                ),
+            ]
+            _write_json(frozen_verification_path, frozen_verification)
+            with self.assertRaisesRegex(
+                agentteam_module.AgentTeamCliError,
+                "target worktree changed during baseline refresh",
+            ):
+                agentteam_module._gate_refresh_baseline(
+                    repo,
+                    profile,
+                    run_dir,
+                    expected_gate_epoch=2,
+                    expected_target_head=target_head_epoch_three,
+                )
+            target_dirty_path.unlink()
+            self.assertFalse((run_dir / "integration-epoch-3").exists())
+
+            # Regression 3: verification failure and pre-publication crash clean up.
+            frozen_verification["command"] = ["python3", "-c", "raise SystemExit(9)"]
+            _write_json(frozen_verification_path, frozen_verification)
+            with self.assertRaisesRegex(
+                agentteam_module.AgentTeamCliError,
+                "frozen full verification failed",
+            ):
+                agentteam_module._gate_refresh_baseline(
+                    repo,
+                    profile,
+                    run_dir,
+                    expected_gate_epoch=2,
+                    expected_target_head=target_head_epoch_three,
+                )
+            frozen_verification["command"] = ["python3", "-c", "pass"]
+            _write_json(frozen_verification_path, frozen_verification)
+            with mock.patch.object(
+                agentteam_module,
+                "_publish_gate_epoch",
+                side_effect=RuntimeError("simulated pre-publication crash"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated pre-publication crash",
+                ):
+                    agentteam_module._gate_refresh_baseline(
+                        repo,
+                        profile,
+                        run_dir,
+                        expected_gate_epoch=2,
+                        expected_target_head=target_head_epoch_three,
+                    )
+            self.assertEqual(
+                agentteam_module._read_current_gate_epoch(gate_context)["record"][
+                    "epoch_number"
+                ],
+                2,
+            )
+            self.assertFalse((run_dir / "integration-epoch-3").exists())
+
+            # Regressions 6/7/8: old costs stay queryable, stale epoch mutation
+            # fails, and the same protocol publishes epoch N+2.
+            refreshed_again = agentteam_module._gate_refresh_baseline(
+                repo,
+                profile,
+                run_dir,
+                expected_gate_epoch=2,
+                expected_target_head=target_head_epoch_three,
+            )
+            self.assertEqual(refreshed_again["gate_epoch"], 3)
+            epoch_three = agentteam_module._read_current_gate_epoch(gate_context)
+            self.assertEqual(epoch_three["record"]["epoch_number"], 3)
+            self.assertEqual(epoch_three["record"]["prior_epoch_sha256"], epoch_two["digest"])
+            self.assertEqual(
+                subprocess.run(
+                    [
+                        "git",
+                        "rev-parse",
+                        f"{epoch_three['record']['validated_code_sha']}^1",
+                    ],
+                    cwd=repo,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    text=True,
+                ).stdout.strip(),
+                epoch_two["record"]["validated_code_sha"],
+            )
+            self.assertEqual(cost_history_path.read_bytes(), cost_history)
+            with self.assertRaisesRegex(
+                agentteam_module.AgentTeamCliError,
+                "gate epoch is stale",
+            ):
+                agentteam_module._gate_register(
+                    repo,
+                    profile,
+                    run_dir,
+                    gate_id="P1-LIVE",
+                    gate_epoch=1,
+                    evidence_run_id="live-evidence-run",
+                    expected_integration_head=baseline_head,
+                )
+            self.assertEqual(receipt_path.read_bytes(), epoch_one_receipt)
+            self.assertEqual(epoch_one_approval_path.read_bytes(), epoch_one_approval)
+
+            subprocess.run(
+                [
+                    "git",
+                    "worktree",
+                    "remove",
+                    "--force",
+                    refreshed_again["integration_worktree"],
+                ],
                 cwd=repo,
                 check=True,
                 stdout=subprocess.PIPE,
