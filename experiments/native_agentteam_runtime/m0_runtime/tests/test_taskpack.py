@@ -803,7 +803,10 @@ class TaskpackTests(unittest.TestCase):
                 blueprint["post_backlog_gates"],
             )
             self.assertEqual(validate_taskpack(taskpack_dir)["status"], "accepted")
-            self.assertTrue((output_root / "materialization_manifest.json").is_file())
+            self.assertTrue(
+                (output_root / "example-blueprint.materialization_manifest.json").is_file()
+            )
+            self.assertFalse((output_root / "materialization_manifest.json").exists())
             frozen = freeze_taskpack(taskpack_dir, tmp_path / "frozen")
             frozen_taskpack = load_taskpack(frozen["frozen_taskpack_dir"])["taskpack"]
             self.assertEqual(
@@ -849,14 +852,14 @@ class TaskpackTests(unittest.TestCase):
                 work_root / "releases" / "active.json",
                 {
                     "release_id": release_id,
-                    "source_commit": release_source_commit,
+                    "source_git_commit": release_source_commit,
                 },
             )
             _write_json(
-                work_root / "releases" / "refs" / f"{release_id}.json",
+                work_root / "releases" / release_id / "manifest.json",
                 {
                     "release_id": release_id,
-                    "source_commit": release_source_commit,
+                    "source_git_commit": release_source_commit,
                 },
             )
             output_root = tmp_path / "drafts"
@@ -944,6 +947,71 @@ class TaskpackTests(unittest.TestCase):
                         )
 
                     self.assertFalse(output_root.exists())
+
+    def test_blueprint_rejects_symlink_escape_and_conflicting_role_profiles_before_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_root = tmp_path / "drafts"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            (repo / "escape").symlink_to(tmp_path / "outside", target_is_directory=True)
+            blueprint["tasks"][0]["write_scope"] = ["escape/generated.py"]
+            _write_json(repo / blueprint_path, blueprint)
+
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "resolves outside repository",
+            ):
+                taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_path,
+                    output_root,
+                    dry_run=True,
+                )
+            self.assertFalse(output_root.exists())
+
+            blueprint["tasks"][0]["write_scope"] = ["src/task_1.py"]
+            blueprint["post_backlog_gates"][0]["evidence_schema"] = (
+                "escape/generated.schema.json"
+            )
+            _write_json(repo / blueprint_path, blueprint)
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "resolves outside repository",
+            ):
+                taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_path,
+                    output_root,
+                    dry_run=True,
+                )
+            self.assertFalse(output_root.exists())
+
+            blueprint["post_backlog_gates"][0]["evidence_schema"] = (
+                "src/final.schema.json"
+            )
+            blueprint["agents"].append(
+                {
+                    "agent_id": "agent-implementation-worker-2",
+                    "role": "implementation_worker",
+                    "runtime_profile": {
+                        "adapter": "codex",
+                        "model": "different-model",
+                    },
+                }
+            )
+            _write_json(repo / blueprint_path, blueprint)
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "must use one runtime_profile",
+            ):
+                taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_path,
+                    output_root,
+                )
+            self.assertFalse(output_root.exists())
 
     def test_blueprint_manifest_exactly_matches_complete_backlog(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1060,7 +1128,10 @@ class TaskpackTests(unittest.TestCase):
                         )
                     self.assertFalse((output_root / "example-blueprint").exists())
                     self.assertFalse(
-                        (output_root / "materialization_manifest.json").exists()
+                        (
+                            output_root
+                            / "example-blueprint.materialization_manifest.json"
+                        ).exists()
                     )
 
     def test_tracked_phase1_blueprint_dry_run_has_exact_task_and_edge_counts(self):

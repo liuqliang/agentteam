@@ -724,7 +724,7 @@ def materialize_taskpack_blueprint(
 
     taskpack_dir = (output_root / taskpack_id).resolve()
     _require_contained_path(taskpack_dir, output_root, "taskpack_dir")
-    manifest_path = output_root / "materialization_manifest.json"
+    manifest_path = output_root / f"{taskpack_id}.materialization_manifest.json"
     if taskpack_dir.exists():
         raise TaskpackValidationError(
             f"materialized taskpack already exists: {taskpack_dir}"
@@ -826,6 +826,7 @@ def _validate_taskpack_blueprint(
     agents = blueprint["agents"]
     declared_roles = set()
     seen_agent_ids = set()
+    role_runtime_profiles = {}
     for agent in agents:
         agent_id = agent["agent_id"]
         role = agent["role"]
@@ -840,6 +841,12 @@ def _validate_taskpack_blueprint(
             errors.append(
                 f"blueprint agents must declare execution roles, not control role: {role}"
             )
+        existing_profile = role_runtime_profiles.get(role)
+        if existing_profile is not None and existing_profile != agent["runtime_profile"]:
+            errors.append(
+                f"agents for role {role} must use one runtime_profile"
+            )
+        role_runtime_profiles[role] = agent["runtime_profile"]
         declared_roles.add(role)
 
     tasks = blueprint["tasks"]
@@ -870,14 +877,12 @@ def _validate_taskpack_blueprint(
                     errors,
                     allow_repository_root=field_name == "read_scope",
                 )
-                candidate_path = project_root / value
-                if candidate_path.exists():
-                    try:
-                        candidate_path.resolve().relative_to(project_root)
-                    except ValueError:
-                        errors.append(
-                            f"{task_id} {field_name} resolves outside repository: {value}"
-                        )
+                _validate_blueprint_resolved_repository_path(
+                    project_root,
+                    value,
+                    f"{task_id} {field_name}",
+                    errors,
+                )
                 if field_name == "input_artifacts":
                     input_path = project_root / value
                     if not input_path.is_file():
@@ -930,6 +935,12 @@ def _validate_taskpack_blueprint(
             errors,
             allow_repository_root=False,
         )
+        _validate_blueprint_resolved_repository_path(
+            project_root,
+            approval[field_name],
+            f"approval.{field_name}",
+            errors,
+        )
     review_schema_path = project_root / approval["schema_path"]
     if not review_schema_path.is_file():
         errors.append(
@@ -975,6 +986,12 @@ def _validate_taskpack_blueprint(
                     f"{gate_id} {field_name}",
                     errors,
                     allow_repository_root=False,
+                )
+                _validate_blueprint_resolved_repository_path(
+                    project_root,
+                    value,
+                    f"{gate_id} {field_name}",
+                    errors,
                 )
         if gate.get("operator_review_required"):
             if not _is_non_empty_string(gate.get("operator_approval_schema")):
@@ -1034,6 +1051,18 @@ def _validate_blueprint_repository_path(
         errors.append(f"{field_name} must stay inside repository: {value}")
     elif not allow_repository_root and _write_scope_is_repository_root(path):
         errors.append(f"{field_name} must not name repository root")
+
+
+def _validate_blueprint_resolved_repository_path(
+    project_root,
+    value,
+    field_name,
+    errors,
+):
+    try:
+        (project_root / value).resolve().relative_to(project_root)
+    except ValueError:
+        errors.append(f"{field_name} resolves outside repository: {value}")
 
 
 def _blueprint_gate_task_ancestors(gate_id, graph, task_ids):
@@ -1254,8 +1283,12 @@ def _active_taskpack_blueprint_release(project_root):
         )
     return {
         "release_id": release_id,
-        "source_commit": manifest.get("source_commit")
-        or active.get("source_commit"),
+        "source_commit": (
+            manifest.get("source_commit")
+            or manifest.get("source_git_commit")
+            or active.get("source_commit")
+            or active.get("source_git_commit")
+        ),
     }
 
 
