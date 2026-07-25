@@ -9,6 +9,30 @@ The experiment keeps the current `design/` SOP stable. If this runtime model
 works, its results can later be promoted into the design documents through the
 normal artifact update path.
 
+Research claims, prior-work boundaries, capability evidence, missing
+experimental infrastructure, and continue/narrow/stop criteria are maintained
+in the operator-approved research-positioning authority:
+
+- [`research/agentteam_research_positioning.md`](research/agentteam_research_positioning.md)
+
+That document does not replace the runtime semantic contract or authorize
+implementation, merge, release, or semantic-authority changes.
+
+The first implementation milestone under that authority and its execution
+inputs are specified in:
+
+- [`implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md`](implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md)
+- [`implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json`](implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json)
+- [`implementation_artifacts/plans/2026-07-24-phase1-execution-preflight.md`](implementation_artifacts/plans/2026-07-24-phase1-execution-preflight.md)
+
+The semantic plan is complete, but execution is blocked until the no-provider
+invocation-supervision host probe, verified dependency dispatch, deterministic
+multi-item materialization, enforced post-backlog completion/gates, and
+immutable prelaunch run-release binding pass operator review and are active in
+the runtime release.
+Phase 1 crash recovery is deliberately scoped to the current local Linux host
+and requires pidfd plus a lingering systemd user transient-service authority.
+
 ## Goal
 
 Validate this model:
@@ -304,8 +328,12 @@ run bindings, unmanaged runs, or source metadata.
 
 `update --from` requires a clean source checkout, copies the launcher and runtime
 package into `<work_root>/releases/<release-id>`, and switches `active.json` for
-future commands. Existing run state is not rewritten. New runs record
-`runtime_release_id` and `runtime_release_root` when an active release exists.
+future commands. Existing run state is not rewritten. The current runtime
+records `runtime_release_id` and `runtime_release_root` after run state exists,
+but the launcher does not yet select that binding before `continue`; PRE-04 in
+the Phase 1 execution preflight closes this gap with an immutable prelaunch
+binding. Until PRE-04 is active, changing the active release while a run may be
+continued is not evidence that the continuation used its original runtime.
 Use `agentteam gc --global-releases` to dry-run shared release cleanup. Add
 `--force` only when you want to delete orphaned global release roots that are
 not active, not referenced by project refs, and not pinned by nonterminal runs.

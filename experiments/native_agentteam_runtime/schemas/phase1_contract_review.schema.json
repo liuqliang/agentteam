@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase1_contract_review.schema.json",
+  "title": "Phase 1 Model Invocation Usage Contract Review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "decision",
+    "reviewer",
+    "reviewed_at",
+    "git_object_format",
+    "preflight_release_id",
+    "preflight_release_source_commit",
+    "plan_sha256",
+    "blueprint_sha256",
+    "research_authority_sha256",
+    "review_schema_sha256",
+    "stage_vocabulary_sha256",
+    "contract_decisions_sha256",
+    "resolved_contradictions",
+    "remaining_escalations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase1_contract_review.v1"
+    },
+    "decision": {
+      "enum": [
+        "pending",
+        "approved",
+        "rejected"
+      ]
+    },
+    "reviewer": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reviewed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "git_object_format": {
+      "enum": [
+        "sha1",
+        "sha256"
+      ]
+    },
+    "preflight_release_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "preflight_release_source_commit": {
+      "$ref": "#/$defs/git_oid"
+    },
+    "plan_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "blueprint_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "research_authority_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "review_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "stage_vocabulary_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "contract_decisions_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "resolved_contradictions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "remaining_escalations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha1"
+          }
+        },
+        "required": [
+          "git_object_format"
+        ]
+      },
+      "then": {
+        "properties": {
+          "preflight_release_source_commit": {
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha256"
+          }
+        },
+        "required": [
+          "git_object_format"
+        ]
+      },
+      "then": {
+        "properties": {
+          "preflight_release_source_commit": {
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "approved"
+          }
+        },
+        "required": [
+          "decision"
+        ]
+      },
+      "then": {
+        "properties": {
+          "remaining_escalations": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "git_oid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

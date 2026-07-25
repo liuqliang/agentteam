@@ -576,7 +576,9 @@ Remaining follow-up work:
 ### M37: Operator Control Plane And Versioned Update
 
 Status: implemented in the native-runtime branch, including the follow-up
-notification and release lifecycle telemetry listed below.
+notification and release lifecycle telemetry listed below. Immutable
+prelaunch selection of a run's recorded release remains incomplete and is
+tracked by Phase 1 preflight PRE-04.
 
 Goal: make long-running operation understandable and controllable while allowing
 the AgentTeam framework itself to be updated without breaking active runs.
@@ -593,8 +595,9 @@ Scope:
   operator events;
 - add `agentteam update` as a side-by-side release installer for future runs,
   not an in-place overwrite of code used by active runs;
-- record the runtime release id on new runs and warn when a run was started from
-  an unmanaged development worktree.
+- record the runtime release id after new run state exists and warn when a run
+  was started from an unmanaged development worktree; PRE-04 replaces this
+  post-run observation with an immutable prelaunch binding.
 
 Acceptance:
 
@@ -603,7 +606,9 @@ Acceptance:
 - stop can stop a scoped fake worker run and clean stale state safely;
 - Feishu receives only sparse run-level notifications by default;
 - update installs immutable releases, switches the active release for future
-  commands, and leaves existing run release bindings unchanged.
+  commands, and leaves existing run release metadata unchanged. This does not
+  yet prove that `continue` imported the recorded release; PRE-04 adds that
+  launcher guarantee.
 - taskpack delete supports dry-run cleanup and requires explicit run deletion.
 
 Completed follow-up:
@@ -624,7 +629,8 @@ Decision: do not introduce binary packaging or cross-platform release artifacts
 yet. Use git as the version authority. A release is identified by source repo,
 source ref, resolved commit SHA, and a generated release id. The release code is
 stored once under a global cache, while each project stores only active release
-pointers, release events, and run-level release pins.
+pointers, release events, and run-level release metadata. A durable pin that is
+selected before runtime import is still pending PRE-04.
 
 Scope:
 
@@ -639,8 +645,8 @@ Scope:
   pinning continue to work per project;
 - protect globally cached releases that are active or pinned by any known
   project before global cleanup deletes them;
-- preserve the existing side-by-side update rule: existing runs keep using the
-  release they started with, and new runs use the active release.
+- preserve the intended side-by-side update rule: after PRE-04, existing runs
+  keep using the release they started with and new runs use the active release.
 
 Acceptance:
 
@@ -1392,6 +1398,69 @@ Operator integration acknowledgement is now explicit: `agentteam integrate
 so manually handled integration baselines stop appearing as the primary status
 action.
 
+### Post-M67: Cost Attribution And Long-Run Validation
+
+Status: planned measurement-first route. Risk-aware repo-map handoff routing is
+implemented; complete model-usage attribution and comparative validation are
+not yet implemented.
+
+Research claims, experiment boundaries, and continue/narrow/stop criteria are
+governed by the operator-approved
+[`agentteam_research_positioning.md`](../research/agentteam_research_positioning.md).
+This roadmap remains implementation authority and must not broaden or
+reinterpret those claims.
+
+Decision: do not start an unbudgeted long-running benchmark or broaden the
+runtime with more adapters, roles, dashboards, protocols, or artifact types
+until AgentTeam can explain its model cost by run, round, stage, role, task, and
+attempt.
+
+A 2026-07-11 read-only scan of the existing `verisilicon` work root found five
+runs and four worker results, but zero of four expected attempts had reported
+token usage. The current aggregate therefore cannot distinguish taskpack
+authoring, planning, repo mapping, implementation, repair, or follow-up cost.
+M67 live author calibration also showed 283-287 second authoring latency, which
+makes attribution a prerequisite for judging net benefit.
+
+The ordered route is:
+
+1. capture one correlated provider-usage record for every supported Codex
+   invocation, including taskpack authoring;
+2. project usage by stage, role, round, model, task, and attempt, with explicit
+   collection coverage;
+3. add optional budget warnings and resumable hard stops at safe scheduler
+   boundaries;
+4. compare `single_codex`, `agentteam_direct`, and `agentteam_full` through a
+   reproducible experiment manifest;
+5. reach 100% benchmark-counted usage coverage in short-task calibration before
+   a medium multi-round comparison;
+6. complete fault-injection and inflight-resume validation;
+7. run one budgeted real long-running task with a semantic feedback round;
+8. use the evidence to continue the native runtime, narrow it to an
+   artifact-governance layer, or archive the experiment.
+
+Detailed objectives, schemas, acceptance gates, stop conditions, comparison
+metrics, maintainability follow-up, and explicit non-goals are recorded in
+`implementation_artifacts/plans/2026-07-11-cost-attribution-and-long-run-validation.md`.
+The semantically complete Phase 1 taskpack is
+`implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md`,
+with its deterministic task graph in
+`implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json`.
+Execution remains blocked by
+`implementation_artifacts/plans/2026-07-24-phase1-execution-preflight.md`,
+which first verifies the host's crash-safe invocation supervision, repairs
+verified dependency dispatch, and then adds strict multi-item blueprint
+materialization and enforced post-backlog integration gates. Phase 1 treats
+usage capture and invocation projection as one
+review-gated milestone with ordered internal tasks.
+Crash-safe invocation recovery in this milestone is intentionally local-Linux
+specific: PRE-00 must prove pidfd plus systemd user transient-service
+authority with user linger enabled. Cross-platform supervision remains outside
+this phase.
+M68 multi-model adapters remain deferred. Model-usage records must remain
+compact structured events and DB projections, not new per-invocation prose
+trace files.
+
 ## Longer-Term Route
 
 These items should wait until M23-M30 have made the local runtime reliable:
@@ -1432,8 +1501,11 @@ Update this roadmap when one of these events occurs:
 Do not update this roadmap for ordinary local implementation details that are
 already captured in milestone plans, events, or test output.
 
-The next recommended step is the post-M66 dogfood route: make queued
-`next_goal` values specific, explain why the Chinese report/Feishu next action
-is recommended, and expose queue provenance so taskpack authors can continue
-large objectives across multiple bounded taskpacks while preserving review
-gates.
+The next recommended step is PRE-00 in
+`implementation_artifacts/plans/2026-07-24-phase1-execution-preflight.md`,
+followed by PRE-01, PRE-02A, PRE-02B, PRE-03A through PRE-03D, and PRE-04. After their
+reviewed runtime release is active, complete the Phase 1 contract approval,
+materialize the tracked blueprint, and execute its capture, replay, projection,
+controller, and query gates as one milestone. Do not begin the real
+long-running comparison until short calibration reaches the usage-coverage and
+reconciliation gates in the linked route note.

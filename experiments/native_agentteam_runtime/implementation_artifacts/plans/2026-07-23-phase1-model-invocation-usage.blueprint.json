@@ -1,0 +1,684 @@
+{
+  "schema_version": "agentteam_taskpack_blueprint.v1",
+  "blueprint_id": "phase1-model-invocation-usage",
+  "source_plan": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md",
+  "research_authority": "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md",
+  "taskpack": {
+    "taskpack_id": "phase1-model-invocation-usage",
+    "goal_kind": "implementation",
+    "milestone": "research-phase-1",
+    "goal": "Implement durable, replay-stable usage attribution for every supported Codex-backed model invocation, including start-before-launch lifecycle authority, provider-session lineage, projection, reporting, and deterministic acceptance.",
+    "overall_risk": "L2",
+    "integration_policy": "verified integration baseline followed by operator review"
+  },
+  "contract": {
+    "invocation_start_authority": "durable_gated_supervisor_identity_before_provider_launch",
+    "execution_group_authority": "lingering_systemd_user_transient_service_with_enclosing_user_service_identity",
+    "terminal_record_cardinality": "exactly_one_per_started_invocation",
+    "coverage_class_authority": "fixed_in_start_record",
+    "coverage_denominator": "unique_supported_started_invocations",
+    "coverage_metrics": [
+      "lifecycle_terminal_coverage",
+      "token_usage_coverage"
+    ],
+    "exact_total_policy": "reported_records_only_with_invocation_scoped_partial_known_tokens_as_separate_lower_bounds_and_ambiguous_session_snapshots_excluded",
+    "open_invocations_block_completion": true,
+    "runtime_provider_session_identity": "separate",
+    "session_cumulative_writer_policy": "single_writer",
+    "profile_candidate_root_policy": "explicit_distinct_roots_same_git_common_directory",
+    "runtime_release_policy": "immutable_prelaunch_run_binding",
+    "latest_implementation_run_policy": "launcher_selected_max_unique_creation_sequence",
+    "acceptance_runtime_binding_policy": "candidate_commit_and_module_root_in_controller_claim",
+    "acceptance_run_identity_policy": "attempt_scoped_evidence_run_with_logical_implementation_link",
+    "gate_epoch_refresh_policy": "new_branch_from_prior_validated_code_merge_target_verify_then_reset_gates",
+    "authority_model": "per_invocation_lifecycle_files_then_canonical_events_with_rebuildable_db_projection",
+    "stage_vocabulary": [
+      "taskpack_author",
+      "planner_or_task_slicer",
+      "repo_map",
+      "implementation_worker",
+      "review_or_repair",
+      "follow_up_author",
+      "semantic_architecture",
+      "acceptance_live_smoke"
+    ]
+  },
+  "approval": {
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase1-model-invocation-usage-contract-review.v1.json",
+    "schema_path": "experiments/native_agentteam_runtime/schemas/phase1_contract_review.schema.json",
+    "required_decision": "approved",
+    "git_object_format_required": true,
+    "runtime_release_binding_required": true,
+    "digest_bindings": [
+      "source_plan",
+      "blueprint",
+      "research_authority",
+      "review_schema",
+      "stage_vocabulary",
+      "contract"
+    ]
+  },
+  "agents": [
+    {
+      "agent_id": "agent-implementation-worker-1",
+      "role": "implementation_worker",
+      "runtime_profile": {
+        "adapter": "codex"
+      }
+    }
+  ],
+  "verification": {
+    "command": [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "experiments/native_agentteam_runtime/m0_runtime/tests",
+      "-p",
+      "test*.py"
+    ]
+  },
+  "policy": {
+    "allow_merge": false,
+    "merge_requires_verified_integration": true,
+    "operator_review_required": true,
+    "commit_bound_gate_rebase": "forbidden",
+    "target_divergence_recovery": "new_verified_gate_epoch",
+    "bind_runtime_release_before_execution": true
+  },
+  "tasks": [
+    {
+      "task_id": "P1-01",
+      "objective": "Define machine-valid invocation start, terminal usage, and live-smoke schemas; implement strict provider JSONL parsing without cumulative double counting or guessed session deltas.",
+      "goal_alignment": "Freezes the accounting contract used by every later capture, projection, and acceptance task.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/schemas/event.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/token_usage.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md",
+        "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/schemas/model_invocation_started.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_writer_revoked.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_usage.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_live_smoke.schema.json",
+        "experiments/native_agentteam_runtime/schemas/event.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/token_usage.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests"
+      ],
+      "required_deliverables": [
+        "model_invocation_started_v1_schema",
+        "model_invocation_writer_revoked_v1_schema",
+        "model_invocation_usage_v1_schema",
+        "model_invocation_live_smoke_v1_schema",
+        "canonical_invocation_event_types",
+        "terminal_usage_parser_contract",
+        "provider_session_lineage_contract",
+        "execution_group_identity_contract",
+        "parser_no_double_count_evidence",
+        "verification_summary"
+      ],
+      "acceptance_criteria": [
+        "Start and terminal schemas validate stable IDs, immutable prelaunch coverage class, dual session identities, optional implementation-run and gate-epoch correlation, UTC timestamps, token constraints, and unavailable reasons.",
+        "A supported live start requires Linger=yes, the enclosing system-level user service InvocationID, ControlGroup, and cleanup-capable KillMode, plus the exact transient-service unit, InvocationID, user-manager identity, and ControlGroup; not-applicable adapters do not invent them.",
+        "Live-smoke commit fields validate as Git OIDs for the declared repository object format rather than fixed-length file SHA-256 digests.",
+        "The live-smoke schema binds its attempt-scoped evidence run to run_kind acceptance_evidence, the logical implementation run, and one gate epoch.",
+        "Repeated cumulative provider snapshots produce one final usage total.",
+        "Ambiguous, resume_last cumulative, missing-predecessor, missing provider-turn continuity, concurrent, forked, or non-monotonic session usage is partial or unavailable rather than guessed; its per-invocation token fields are null and it cannot contribute a lower bound.",
+        "The canonical event enum declares invocation start, writer revocation, and terminal usage events before scheduler tasks emit them.",
+        "Revocation records bind one invocation and exact owner token and cannot be rewritten for a different owner.",
+        "Cached and reasoning fields do not inflate provider total tokens.",
+        "Legacy parser and aggregation tests remain compatible."
+      ],
+      "stop_condition": "Stop before adapter changes if the installed provider fixture cannot identify a terminal usage payload without guessing.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests"
+      ]
+    },
+    {
+      "task_id": "P1-02A",
+      "objective": "Persist a durable invocation start before every Codex worker launch attempt and finalize exactly one terminal usage record for every controlled outcome.",
+      "goal_alignment": "Prevents provider calls from disappearing after crashes and captures real cost on failure and timeout paths.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "P1-01"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/m0_runtime.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/worker_pool.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/m0_runtime.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py"
+      ],
+      "required_deliverables": [
+        "worker_durable_start_capture",
+        "shared_supervisor_and_terminalization_primitive",
+        "worker_terminal_usage_capture",
+        "terminal_path_coverage",
+        "exclusive_terminal_and_process_group_evidence",
+        "systemd_execution_group_fencing_evidence",
+        "resumed_session_delta_evidence",
+        "verification_summary"
+      ],
+      "acceptance_criteria": [
+        "A gated supervisor cannot launch the provider until its PID, PGID, boot ID, process start ticks, owner token, launch nonce digest, and exact transient-service identity are durable in the start record.",
+        "The supervisor remains the process-group leader through provider terminalization, installs the supported Linux parent-death safeguard, and kills/reaps the group on abnormal exit.",
+        "The supervisor launches only inside a uniquely identified systemd user transient service with RemainAfterExit and control-group kill semantics under a lingering, identity-bound user service; PGID-only fallback is forbidden.",
+        "Parent death before durable start closes the permit channel without a provider call; death after durable start but before permit becomes one recoverable launch_failed; death after permit leaves a PID-reuse-safe fenceable identity.",
+        "Recovery distinguishes changed host boot, live pinned pidfd, and same-boot reaped supervisor: ESRCH alone never proves death, and the exact transient-service ControlGroup must report cgroup.events populated 0 or be stopped and observed at populated 0.",
+        "A completed enclosing user-service restart with a changed InvocationID and cleanup-capable persisted KillMode proves the old manager lifetime dead without signaling; an unexplained inner-manager identity change remains open.",
+        "Every controlled terminal outcome has one idempotent terminal usage record.",
+        "Provider process ownership and terminal writer tokens are bounded and terminal creation is exclusive.",
+        "Normal and recovery finalizers share one invocation lock; revocation is durable under that lock and a revoked old writer cannot publish a competing terminal.",
+        "A post-start crash leaves a discoverable open invocation for recovery.",
+        "Missing, recycled, or ambiguous systemd unit, manager, or control-group identity remains open rather than signaling or terminalizing an unrelated process.",
+        "Timeout after usage preserves provider totals; timeout before usage is unavailable with a bounded reason.",
+        "Retries have distinct invocation IDs and untrusted session snapshots never overcount."
+      ],
+      "stop_condition": "Stop if durable process and execution-group identity cannot precede launch, the required Linux pidfd/systemd authority is unavailable, or terminal capture would require unbounded subprocess logs.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py"
+      ]
+    },
+    {
+      "task_id": "P1-02B",
+      "objective": "Propagate lifecycle and session context through mailbox and scheduler paths, serialize cumulative provider-session writers, and reconcile dead orphaned invocations.",
+      "goal_alignment": "Makes durable worker capture survive process boundaries, retries, replay, and scheduler recovery.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "P1-02A"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/mailbox_worker.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/worker_pool.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/mailbox_worker.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py"
+      ],
+      "required_deliverables": [
+        "supported_worker_invocation_inventory",
+        "role_and_stage_routing_evidence",
+        "outbox_identity_replay_evidence",
+        "orphaned_invocation_reconciliation",
+        "lease_fencing_and_process_death_evidence",
+        "provider_session_single_writer_evidence",
+        "verification_summary"
+      ],
+      "acceptance_criteria": [
+        "Every supported worker route supplies explicit stage and lifecycle context.",
+        "Snapshot and predecessor identity cross mailbox boundaries byte-equivalently.",
+        "A dead fenced orphan becomes one recovery terminal invocation while lease expiry with a live process remains open.",
+        "Recovery emits the predeclared writer-revocation event and follows the changed-boot, live-pidfd, or same-boot reaped-supervisor decision tree; it acts only on a pinned pidfd or the exact verified transient service before rereading terminal and bounded-spool evidence.",
+        "A supervisor exit and numeric PID reuse between identity comparison and signaling cannot target the replacement process.",
+        "ESRCH alone never proves death: the same-boot exact transient-service ControlGroup must report cgroup.events populated 0, while changed-boot or a proved enclosing user-service restart sends no signal and ambiguous identity remains open.",
+        "Explicit cumulative provider sessions use cross-run locks and provider-turn continuity; unresolved resume_last calls in one provider resume domain are single-flight but never gain authoritative delta lineage from local order.",
+        "Replay preserves invocation and usage event IDs and existing recovery tests pass."
+      ],
+      "stop_condition": "Stop if session lineage cannot be propagated and serialized, process death cannot be proven through changed-boot, pinned-pidfd, or exact transient-service authority, or mailbox replay would need a new invocation identity.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py"
+      ]
+    },
+    {
+      "task_id": "P1-03",
+      "objective": "Capture durable start and terminal provider usage for initial and follow-up taskpack authors, including failure, timeout, salvage, and recovery paths.",
+      "goal_alignment": "Includes authoring cost in the same invocation-level accounting contract as worker execution.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "P1-02B"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
+      ],
+      "required_deliverables": [
+        "taskpack_author_durable_lifecycle",
+        "taskpack_author_usage_capture",
+        "follow_up_author_stage_and_round_attribution",
+        "author_failure_and_timeout_coverage",
+        "estimate_separation_evidence",
+        "verification_summary"
+      ],
+      "acceptance_criteria": [
+        "Initial and follow-up author calls use the gated-supervisor and transient-service handshake, persist process and execution-group identity before provider launch permission, and use distinct stages with correct pursue rounds.",
+        "Success, failure, timeout, salvage, and changed-boot, live-pidfd, or exact transient-service crash recovery preserve one terminal or open lifecycle as appropriate.",
+        "Provider usage is never replaced by prompt_estimated_tokens.",
+        "Failed author calls remain discoverable even without a frozen taskpack or run directory.",
+        "A successful submit writes one bounded author lifecycle bootstrap below the run before scheduler launch, with work-root-relative contained paths and fixed record digests.",
+        "Ordinary draft and taskpack cleanup preserves non-rebuildable author lifecycle authority; destructive removal is explicit and reports canonical-import status and accounting loss.",
+        "Existing custom-command and legacy author contexts remain compatible."
+      ],
+      "stop_condition": "Stop if machine-readable provider usage would break custom author commands or timeout-salvage behavior.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
+      ]
+    },
+    {
+      "task_id": "P1-04A",
+      "objective": "Import invocation starts and terminal usage into canonical events with idempotent replay, conflict detection, provider predecessor reconstruction, and open-lifecycle preservation.",
+      "goal_alignment": "Creates replayable file authority without counting artifact replay as additional model cost.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "P1-03"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/schemas/event.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py"
+      ],
+      "required_deliverables": [
+        "canonical_invocation_started_event",
+        "canonical_usage_event",
+        "idempotent_replay_accounting",
+        "author_record_import_evidence",
+        "authoritative_snapshot_lookup",
+        "verification_summary"
+      ],
+      "acceptance_criteria": [
+        "Canonical start and terminal event imports are idempotent and preserve source IDs.",
+        "The scheduler validates the author bootstrap path containment and record digests before worker dispatch; bootstrap replay does not duplicate cost.",
+        "Duplicate byte-equivalent records count once and conflicting records fail integrity checks.",
+        "An open start remains visible through replay.",
+        "Provider predecessor and snapshot reconstruction uses provider_session_id, never runtime execution order.",
+        "Historical event logs are not rewritten."
+      ],
+      "stop_condition": "Stop if replayability requires destructive event migration or replacing file authority with mutable database state.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py"
+      ]
+    },
+    {
+      "task_id": "P1-04B",
+      "objective": "Aggregate canonical invocation lifecycles into compact terminal and Feishu reports while preserving reported, partial, unavailable, not-applicable, and open states.",
+      "goal_alignment": "Makes full-run usage understandable without raw logs or task-level undercounting.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "P1-04A"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/operator_report.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/notifications.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/operator_report.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/notifications.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
+      ],
+      "required_deliverables": [
+        "full_run_usage_aggregation",
+        "legacy_summary_compatibility",
+        "partial_unavailable_and_open_rendering",
+        "exact_and_partial_lower_bound_aggregation",
+        "verification_summary"
+      ],
+      "acceptance_criteria": [
+        "Reports include author and worker invocations and distinguish invocation count from completed task count.",
+        "Reported, partial, unavailable, not-applicable, and open states remain distinct.",
+        "Exact reported totals are labeled as subset totals when token coverage is below 100 percent, with only invocation-scoped partial fields shown as lower bounds and ambiguous session snapshots excluded.",
+        "Open invocations block completion and 100 percent coverage.",
+        "Terminal and Feishu summaries render the same compact aggregate values.",
+        "Legacy summaries are labeled and never mixed into benchmark totals."
+      ],
+      "stop_condition": "Stop if reporting requires mutating canonical events or treating missing historical usage as zero.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
+      ]
+    },
+    {
+      "task_id": "P1-05",
+      "objective": "Project authoritative starts and terminals into rebuildable SQLite rows and expose invocation-level coverage and attribution through agentteam stats.",
+      "goal_alignment": "Enables exact cost and coverage queries while retaining files as authority.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "P1-04B"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/projection_db.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+        "experiments/native_agentteam_runtime/schemas/run_identity.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/tests",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/projection_db.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests"
+      ],
+      "required_deliverables": [
+        "invocation_projection_schema",
+        "file_scan_and_db_reconciliation",
+        "usage_coverage_breakdowns",
+        "exact_and_lower_bound_projection",
+        "stats_filter_surface",
+        "projection_rebuild_stability",
+        "isolated_acceptance_projection",
+        "verification_summary"
+      ],
+      "acceptance_criteria": [
+        "Projection left-joins terminals onto unique starts and uses starts as the coverage denominator.",
+        "Fresh DB and authoritative file scan have identical counts, digests, coverage, and token totals.",
+        "Deleting and rebuilding the DB is stable and corrupt or stale DB falls back to files with a warning.",
+        "Controller acceptance artifacts are discovered only under the configured project work_root/runs tree.",
+        "Acceptance evidence runs remain explicitly queryable and included in milestone aggregation but cannot replace the default latest implementation run.",
+        "Open recovery changes lifecycle status without changing invocation count, and session-cumulative ambiguous snapshots never enter projected lower bounds.",
+        "Stats filters preserve authority and legacy runs cannot silently pass benchmark coverage."
+      ],
+      "stop_condition": "Stop if SQL would need to repair missing capture records or fresh-DB and file-fallback semantics cannot be identical.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests"
+      ]
+    },
+    {
+      "task_id": "P1-06A",
+      "objective": "Build a positive deterministic end-to-end fixture for complete usage coverage and a separate negative fixture for safely fenced crash recovery, projection rebuild, filters, and replay.",
+      "goal_alignment": "Proves complete positive accounting without hiding the intentionally unavailable token usage in the recovery fixture.",
+      "work_type": "test_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "P1-05"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime",
+        "experiments/native_agentteam_runtime/m0_runtime/tests",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests"
+      ],
+      "required_deliverables": [
+        "deterministic_end_to_end_usage_fixture",
+        "core_supported_path_coverage_matrix",
+        "projection_rebuild_reconciliation",
+        "open_and_orphan_lifecycle_evidence",
+        "positive_and_negative_fixture_separation",
+        "verification_summary"
+      ],
+      "acceptance_criteria": [
+        "The fixture covers every supported pre-controller author, planner, repo-map, implementation, review, semantic, and follow-up path.",
+        "The positive fixture has exact predeclared counts and totals, 100 percent lifecycle and token coverage, and zero open invocations.",
+        "The separate recovery fixture transitions from lifecycle/token 0/1 with one open invocation to lifecycle 1/1, token 0/1, and zero open without changing the denominator.",
+        "Lease expiry while the process is live does not terminalize the recovery fixture.",
+        "The reaped-supervisor recovery path terminalizes only after exact transient-service control-group empty proof; changed-boot, proved enclosing user-service restart, and ambiguous same-boot cases are covered separately.",
+        "Two replay and projection rebuild passes are identical and the full discovery suite passes."
+      ],
+      "stop_condition": "Do not pass with incomplete positive coverage, unexpected negative-fixture metrics, projection drift, or recovery that erases or prematurely closes a start.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests"
+      ]
+    },
+    {
+      "task_id": "P1-06B",
+      "objective": "Implement a bounded live-smoke helper and independent deterministic controller that alone can atomically publish the fixed acceptance artifact.",
+      "goal_alignment": "Makes the real provider compatibility gate executable and prevents worker prose or the production parser from self-validating success.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "P1-06A"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_live_codex_smoke.py",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_live_smoke.schema.json",
+        "experiments/native_agentteam_runtime/schemas/run_identity.schema.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/usage_live_smoke.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase1_usage_acceptance.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_live_codex_smoke.py"
+      ],
+      "required_deliverables": [
+        "bounded_live_smoke_helper",
+        "deterministic_acceptance_controller",
+        "completed_supported_path_coverage_matrix",
+        "independent_provider_reconciliation",
+        "failure_artifact_and_atomic_publish_evidence",
+        "verification_summary"
+      ],
+      "acceptance_criteria": [
+        "Only the deterministic controller can atomically publish the fixed success artifact.",
+        "Controller and imported Phase 1 modules resolve from the candidate integration worktree rather than the old active release.",
+        "Controller validation independently decodes the bounded provider spool rather than reusing token_usage.py.",
+        "Start and terminal records share one invocation ID and provider hash and totals reconcile exactly.",
+        "An isolated projection of the staged candidate passes before the fixed authoritative artifact is published.",
+        "The controller derives its run directory below the configured project work_root so projection can discover the final artifact.",
+        "The controller loads the profile from an explicit source checkout, validates a separate candidate worktree in the same Git common directory, and does not require .agentteam inside that candidate.",
+        "Before gate registration or provider launch, the controller durably stages run identity plus immutable owner/commit/series/attempt claim and publishes the complete attempt run with one Linux no-replace directory rename; check-then-create is forbidden.",
+        "The controller durably writes run_identity.v1.json with run_kind acceptance_evidence and the logical taskpack and implementation run IDs before registration or launch.",
+        "Every real retry uses a fresh immutable acceptance run ID; incomplete-run reopening is recovery-only, passed-run lookup is idempotent, and failed attempts remain attributed.",
+        "The helper, lifecycle records, projection row, and final artifact all use the same attempt-scoped run ID derived from acceptance series and attempt IDs.",
+        "Claim, run identity, lifecycle records, projection row, fixed artifact, and receipt agree on the logical implementation run and current gate epoch; a stale epoch fails before provider launch.",
+        "The implementation-run gate receipt is pending before publication and resolves only from the validated fixed artifact.",
+        "Fake-command tests cover authorization, malformed data, mismatches, oversized output, dirty or changed source, projection rejection, interrupted publish, retry IDs, idempotent passed lookup, and concurrent same-ID claims with exactly one provider launch.",
+        "One epoch/gate execution lock prevents concurrent different-attempt live calls, and an open invocation from a crashed attempt blocks replacement until safe recovery.",
+        "The live controller retains both run-level and epoch/gate locks, then rereads epoch, claims, open invocations, Git refs, and worktree state under lock before provider launch.",
+        "Normal unit tests never make a live provider call or write into the candidate worktree."
+      ],
+      "stop_condition": "Stop if helper or worker claims can publish success, independent validation is not independent, or the live call can mutate candidate source.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_live_codex_smoke.py"
+      ]
+    },
+    {
+      "task_id": "P1-06C",
+      "objective": "Implement deterministic milestone report rendering and external finalization that verifies the report-only commit lineage without a self-referential source commit SHA.",
+      "goal_alignment": "Makes the post-live merge recommendation reproducible and binds validated code to a narrowly scoped report-only integration commit.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "P1-06B"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/operator_report.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/projection_db.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_projection_db_operator_paths.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase1_usage_report.py",
+        "experiments/native_agentteam_runtime/schemas/phase1_usage_finalization.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_projection_db_operator_paths.py"
+      ],
+      "required_deliverables": [
+        "deterministic_milestone_report_renderer",
+        "report_only_commit_lineage_validator",
+        "external_finalization_artifact",
+        "report_tamper_and_scope_evidence",
+        "verification_summary"
+      ],
+      "acceptance_criteria": [
+        "Report rendering is byte-stable and accepts only canonical deterministic and P1-LIVE evidence.",
+        "Renderer and finalizer functions resolve from the Phase 1 integration worktree rather than the old active release.",
+        "The report uses explicit acceptance-series metadata and includes usage from every failed, incomplete, retried, and selected live attempt.",
+        "The source report records validated_code_sha and evidence digests but never attempts to contain its own commit SHA.",
+        "The source report and roadmap remain finalization_pending and make only a conditional merge recommendation.",
+        "Renderer requires a clean validated_code_sha head, writes and commits only the fixed report and roadmap paths, and returns the single-parent final_report_sha without source-merge authority.",
+        "One complete controller holds both run-level and P1-06E epoch/gate execution locks across pending registration, report commit, validation, and final artifact publication, rereads all preconditions under lock, and rejects a stale epoch before source mutation.",
+        "Finalization requires a clean single-parent head whose parent is validated_code_sha and whose diff contains only the fixed report and roadmap paths.",
+        "Wrong parent, extra path, evidence mismatch, dirty status, and report tampering all fail closed.",
+        "Renderer and finalizer load the profile from the explicit source checkout, validate the separate candidate worktree in the same Git common directory, and use the same configured project work_root and registered acceptance run as P1-LIVE.",
+        "Only a passed internal finalizer atomically publishes the external schema-valid finalization artifact.",
+        "A crash after the report-only commit is resumable only when that exact clean child and pending receipt match byte-stable output for the same evidence; retry never creates a second report commit.",
+        "A byte-equivalent retry after passed finalization returns idempotently without a second report commit or completion notification.",
+        "Finalization commit fields validate as Git OIDs for the declared repository object format.",
+        "The implementation-run P1-06E gate remains pending before publication, becomes awaiting_operator_review when final_report_sha equals the integration head, and passes only after matching immutable operator approval."
+      ],
+      "stop_condition": "Stop if canonical evidence cannot drive the report, finalization becomes self-referential, or the controller would need source-branch merge authority.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_projection_db_operator_paths.py"
+      ]
+    },
+    {
+      "task_id": "P1-06D",
+      "objective": "Document the implemented invocation accounting, stats filters, lifecycle states, database authority boundary, live gate, report renderer, and finalizer commands.",
+      "goal_alignment": "Provides an operator surface that matches verified behavior without claiming the live or finalization gates have already passed.",
+      "work_type": "documentation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L0",
+      "depends_on": [
+        "P1-06C"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "docs/agentteam-command-reference.md",
+        "experiments/native_agentteam_runtime/README.md",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase1_usage_acceptance.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase1_usage_report.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
+      ],
+      "write_scope": [
+        "docs/agentteam-command-reference.md",
+        "experiments/native_agentteam_runtime/README.md"
+      ],
+      "required_deliverables": [
+        "operator_documentation",
+        "documentation_verification_summary"
+      ],
+      "acceptance_criteria": [
+        "Commands and fields match the implemented CLI and schemas.",
+        "Documentation explains provider-token units, cached and reasoning fields, coverage, open and legacy states, and DB projection authority.",
+        "The exact live controller, report completion, and digest-bound interactive operator approval commands are documented.",
+        "No document claims Phase 1 complete before P1-LIVE, finalization evidence, and operator approval pass.",
+        "All referenced links and paths resolve."
+      ],
+      "stop_condition": "Stop if implementation evidence and requested documentation disagree; do not weaken the contract to hide the mismatch.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json"
+      ],
+      "evidence_paths": [
+        "docs/agentteam-command-reference.md",
+        "experiments/native_agentteam_runtime/README.md"
+      ]
+    }
+  ],
+  "post_backlog_gates": [
+    {
+      "gate_id": "P1-LIVE",
+      "depends_on": [
+        "P1-06D"
+      ],
+      "executor": "deterministic_controller",
+      "operator_authorization_required": true,
+      "evidence_run_registration_required": true,
+      "evidence_artifact": "acceptance/model-invocation-live-smoke.v1.json",
+      "evidence_schema": "experiments/native_agentteam_runtime/schemas/model_invocation_live_smoke.schema.json",
+      "required_status_field": "controller_validation_status",
+      "required_status_value": "passed",
+      "commit_field": "validated_code_sha",
+      "integration_head_relation": "ancestor_of",
+      "source_plan_section": "P1-LIVE Candidate Runtime Gate"
+    },
+    {
+      "gate_id": "P1-06E",
+      "depends_on": [
+        "P1-LIVE"
+      ],
+      "executor": "deterministic_controller",
+      "operator_review_required": true,
+      "operator_approval_schema": "experiments/native_agentteam_runtime/schemas/post_backlog_gate_approval.schema.json",
+      "operator_approval_required_decision": "approved",
+      "evidence_run_registration_required": true,
+      "evidence_artifact": "acceptance/phase1-usage-finalization.v1.json",
+      "evidence_schema": "experiments/native_agentteam_runtime/schemas/phase1_usage_finalization.schema.json",
+      "required_status_field": "controller_validation_status",
+      "required_status_value": "passed",
+      "commit_field": "final_report_sha",
+      "integration_head_relation": "equals",
+      "source_plan_section": "P1-06E Milestone Report"
+    }
+  ]
+}
