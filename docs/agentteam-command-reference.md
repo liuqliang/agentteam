@@ -1130,7 +1130,8 @@ agentteam taskpack freeze /path/to/draft --frozen-root ~/.local/share/agentteam/
 
 ### `agentteam taskpack materialize`
 
-Converts a deterministic semantic skeleton into an executable taskpack.
+Converts either a deterministic semantic skeleton or a tracked
+`agentteam_taskpack_blueprint.v1` document into an executable taskpack.
 
 Use it when:
 
@@ -1138,6 +1139,8 @@ Use it when:
   `semantic_authoring_required`.
 - A semantic author has filled in the concrete objective, goal alignment,
   read/write scopes, deliverables, verification command, and evidence paths.
+- An approved tracked blueprint already declares every executable task,
+  dependency, scope, role, verification command, and policy field.
 - You want the resulting taskpack to enter the normal freeze/run path.
 
 Example semantic file:
@@ -1170,8 +1173,49 @@ agentteam taskpack materialize /path/to/skeleton \
   --frozen-root ~/.local/share/agentteam/project/frozen
 ```
 
+Blueprint dry-run example:
+
+```bash
+agentteam taskpack materialize \
+  --blueprint-file experiments/native_agentteam_runtime/implementation_artifacts/plans/example.blueprint.json \
+  --project-root . \
+  --output-root ~/.local/share/agentteam/project/drafts \
+  --dry-run \
+  --json
+```
+
+Blueprint retained-and-frozen example:
+
+```bash
+agentteam taskpack materialize \
+  --blueprint-file plans/example.blueprint.json \
+  --output-root ~/.local/share/agentteam/project/drafts \
+  --freeze \
+  --frozen-root ~/.local/share/agentteam/project/frozen
+```
+
 Notes:
 
+- Exactly one of `--semantic-json`, `--semantic-json-file`, or
+  `--blueprint-file` is required.
+- The positional `skeleton_taskpack_dir` is required for semantic JSON sources
+  and must be omitted with `--blueprint-file`.
+- `--project-root` applies to blueprint materialization and defaults to the
+  current directory. The blueprint must be tracked inside that Git repository.
+- In blueprint mode, `--taskpack-id` may be omitted. If supplied, it must
+  equal the approved blueprint's declared taskpack ID; materialization cannot
+  rename it.
+- `--dry-run` and `--freeze` are mutually exclusive. Blueprint dry-run
+  validates and generates in memory, reports `freeze_eligible: false`, and
+  leaves no draft, materialization manifest, or frozen package.
+- Retained blueprint drafts and frozen packages require a valid approval
+  record. When the blueprint requires runtime release binding, the current
+  active release ID and release `source_commit` must match that record using
+  the repository's declared Git object format.
+- Compact text reports the taskpack ID, task and dependency-edge counts,
+  validation status, blueprint SHA-256, manifest path, draft path, and frozen
+  path when present. `--json` returns those values as fields, the exact
+  materialization `manifest`, and a structured `paths` object.
 - `validate` and `freeze` can accept a semantic skeleton as an authoring
   artifact, but `run`, `continue`, `start`, and `next` will reject it before
   launch while `semantic_authoring_required` is present.

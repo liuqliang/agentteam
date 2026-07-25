@@ -814,6 +814,281 @@ class TaskpackTests(unittest.TestCase):
                 generated_taskpack["context"],
             )
 
+    def test_taskpack_materialize_cli_blueprint_dry_run_defaults_project_root_to_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_root = tmp_path / "unused"
+            _init_repo(repo)
+            blueprint_path, _blueprint = _blueprint_fixture(repo)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "materialize",
+                    "--blueprint-file",
+                    blueprint_path,
+                    "--output-root",
+                    str(output_root),
+                    "--dry-run",
+                    "--json",
+                ],
+                cwd=repo,
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["materialize_status"], "dry-run")
+            self.assertEqual(summary["source_kind"], "blueprint")
+            self.assertEqual(summary["taskpack_id"], "example-blueprint")
+            self.assertEqual(summary["task_count"], 3)
+            self.assertEqual(summary["dependency_edge_count"], 2)
+            self.assertEqual(summary["validation"]["status"], "accepted")
+            self.assertEqual(
+                summary["blueprint_sha256"],
+                summary["manifest"]["blueprint_sha256"],
+            )
+            self.assertFalse(summary["freeze_eligible"])
+            self.assertEqual(summary["validation_status"], "accepted")
+            self.assertIsNone(summary["manifest_path"])
+            self.assertIsNone(summary["taskpack_dir"])
+            self.assertIsNone(summary["frozen_taskpack_dir"])
+            self.assertIsNone(summary["paths"]["manifest_path"])
+            self.assertIsNone(summary["paths"]["draft_dir"])
+            self.assertIsNone(summary["paths"]["frozen_dir"])
+            self.assertEqual(len(summary["manifest"]["artifact_digests"]), 5)
+            self.assertFalse(output_root.exists())
+
+            text_completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "materialize",
+                    "--blueprint-file",
+                    blueprint_path,
+                    "--output-root",
+                    str(output_root),
+                    "--dry-run",
+                ],
+                cwd=repo,
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(text_completed.returncode, 0, text_completed.stderr)
+            self.assertEqual(
+                text_completed.stdout.splitlines(),
+                [
+                    "taskpack_id: example-blueprint",
+                    "materialize_status: dry-run",
+                    "task_count: 3",
+                    "edge_count: 2",
+                    "validation: accepted",
+                    f"blueprint_sha256: {summary['blueprint_sha256']}",
+                    "freeze_eligible: false",
+                    "manifest_path: -",
+                    "draft_dir: -",
+                ],
+            )
+
+    def test_taskpack_materialize_cli_blueprint_freezes_with_structured_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_root = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            _init_repo(repo)
+            blueprint_path, _blueprint = _blueprint_fixture(repo)
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "materialize",
+                    "--blueprint-file",
+                    blueprint_path,
+                    "--project-root",
+                    str(repo),
+                    "--output-root",
+                    str(output_root),
+                    "--freeze",
+                    "--frozen-root",
+                    str(frozen_root),
+                    "--json",
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["materialize_status"], "frozen")
+            self.assertEqual(summary["task_count"], 3)
+            self.assertEqual(summary["dependency_edge_count"], 2)
+            self.assertEqual(summary["validation"]["status"], "accepted")
+            self.assertEqual(
+                summary["manifest_path"],
+                str(
+                    output_root
+                    / "example-blueprint.materialization_manifest.json"
+                ),
+            )
+            self.assertEqual(
+                summary["taskpack_dir"],
+                str(output_root / "example-blueprint"),
+            )
+            self.assertEqual(
+                summary["frozen_taskpack_dir"],
+                str(frozen_root / "example-blueprint"),
+            )
+            self.assertEqual(
+                summary["paths"]["manifest_path"],
+                str(
+                    output_root
+                    / "example-blueprint.materialization_manifest.json"
+                ),
+            )
+            self.assertEqual(
+                summary["paths"]["draft_dir"],
+                str(output_root / "example-blueprint"),
+            )
+            self.assertEqual(
+                summary["paths"]["frozen_dir"],
+                str(frozen_root / "example-blueprint"),
+            )
+            self.assertTrue(
+                (Path(summary["paths"]["frozen_dir"]) / "manifest.json").is_file()
+            )
+
+    def test_taskpack_materialize_cli_rejects_conflicting_retention_and_blueprint_rename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_root = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            _init_repo(repo)
+            blueprint_path, _blueprint = _blueprint_fixture(repo)
+
+            conflicting = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "materialize",
+                    "--blueprint-file",
+                    blueprint_path,
+                    "--project-root",
+                    str(repo),
+                    "--output-root",
+                    str(output_root),
+                    "--dry-run",
+                    "--freeze",
+                    "--frozen-root",
+                    str(frozen_root),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(conflicting.returncode, 1)
+            self.assertIn("not allowed with argument --dry-run", conflicting.stderr)
+
+            renamed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "taskpack",
+                    "materialize",
+                    "--blueprint-file",
+                    blueprint_path,
+                    "--project-root",
+                    str(repo),
+                    "--output-root",
+                    str(output_root),
+                    "--taskpack-id",
+                    "renamed-blueprint",
+                    "--freeze",
+                    "--frozen-root",
+                    str(frozen_root),
+                ],
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(renamed.returncode, 1)
+            self.assertIn(
+                "must equal the approved blueprint taskpack_id",
+                renamed.stderr,
+            )
+            self.assertFalse(output_root.exists())
+            self.assertFalse(frozen_root.exists())
+
+    def test_taskpack_materialize_handler_removes_partial_frozen_blueprint_on_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_root = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            _init_repo(repo)
+            blueprint_path, _blueprint = _blueprint_fixture(repo)
+
+            def fail_after_partial_freeze(_taskpack_dir, target_root):
+                partial = Path(target_root) / "example-blueprint"
+                partial.mkdir(parents=True)
+                (partial / "taskpack.yaml").write_text("partial", encoding="utf-8")
+                raise TaskpackValidationError("injected freeze failure")
+
+            with mock.patch.object(
+                agentteam_module,
+                "freeze_taskpack",
+                side_effect=fail_after_partial_freeze,
+            ):
+                with self.assertRaisesRegex(
+                    TaskpackValidationError,
+                    "injected freeze failure",
+                ):
+                    _handle_taskpack_materialize(
+                        SimpleNamespace(
+                            skeleton_taskpack_dir=None,
+                            blueprint_file=blueprint_path,
+                            project_root=str(repo),
+                            output_root=str(output_root),
+                            taskpack_id=None,
+                            semantic_json=None,
+                            semantic_json_file=None,
+                            dry_run=False,
+                            freeze=True,
+                            frozen_root=str(frozen_root),
+                            json=True,
+                        )
+                    )
+
+            self.assertTrue((output_root / "example-blueprint").is_dir())
+            self.assertFalse((frozen_root / "example-blueprint").exists())
+
     def test_blueprint_freeze_revalidates_approval_and_cleans_failed_freeze(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

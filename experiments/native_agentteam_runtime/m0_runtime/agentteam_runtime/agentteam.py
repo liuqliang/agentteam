@@ -89,6 +89,7 @@ from .taskpack import (
     freeze_taskpack,
     load_taskpack,
     materialize_semantic_taskpack,
+    materialize_taskpack_blueprint,
     reuse_repo_map_handoff_in_taskpack,
     validate_taskpack,
 )
@@ -898,15 +899,29 @@ def _add_taskpack_freeze_parser(subcommands):
 def _add_taskpack_materialize_parser(subcommands):
     parser = subcommands.add_parser(
         "materialize",
-        help="Convert a semantic skeleton taskpack into an executable taskpack.",
+        help="Convert a semantic skeleton or tracked blueprint into an executable taskpack.",
     )
-    parser.add_argument("skeleton_taskpack_dir", help="Deterministic skeleton taskpack directory.")
+    parser.add_argument(
+        "skeleton_taskpack_dir",
+        nargs="?",
+        help="Deterministic skeleton taskpack directory (semantic sources only).",
+    )
+    parser.add_argument(
+        "--project-root",
+        help="Git repository root for blueprint materialization. Defaults to cwd.",
+    )
     parser.add_argument("--output-root", required=True, help="Directory where the executable draft is written.")
     parser.add_argument("--taskpack-id", help="Optional id for the executable taskpack.")
     semantic_source = parser.add_mutually_exclusive_group(required=True)
     semantic_source.add_argument("--semantic-json", help="Semantic completion JSON object.")
     semantic_source.add_argument("--semantic-json-file", help="Path to a semantic completion JSON object.")
-    parser.add_argument("--freeze", action="store_true", help="Freeze the materialized taskpack immediately.")
+    semantic_source.add_argument(
+        "--blueprint-file",
+        help="Tracked agentteam_taskpack_blueprint.v1 JSON file.",
+    )
+    retention = parser.add_mutually_exclusive_group()
+    retention.add_argument("--dry-run", action="store_true", help="Validate a blueprint without retaining output.")
+    retention.add_argument("--freeze", action="store_true", help="Freeze the materialized taskpack immediately.")
     parser.add_argument("--frozen-root", help="Directory where frozen taskpacks are written when --freeze is set.")
     parser.add_argument("--json", action="store_true", help="Print result as JSON instead of human text.")
     parser.set_defaults(handler=_handle_taskpack_materialize)
@@ -1557,19 +1572,44 @@ def _handle_taskpack_freeze(args):
 
 
 def _handle_taskpack_materialize(args):
-    if args.freeze and not args.frozen_root:
+    freeze = bool(getattr(args, "freeze", False))
+    dry_run = bool(getattr(args, "dry_run", False))
+    frozen_root = getattr(args, "frozen_root", None)
+    blueprint_file = getattr(args, "blueprint_file", None)
+    skeleton_taskpack_dir = getattr(args, "skeleton_taskpack_dir", None)
+    if freeze and dry_run:
+        raise AgentTeamCliError("--dry-run and --freeze are mutually exclusive")
+    if freeze and not frozen_root:
         raise AgentTeamCliError("--frozen-root is required when --freeze is set")
+    if blueprint_file is not None:
+        if skeleton_taskpack_dir:
+            raise AgentTeamCliError(
+                "skeleton_taskpack_dir cannot be used with --blueprint-file"
+            )
+        return _handle_taskpack_blueprint_materialize(
+            args,
+            blueprint_file=blueprint_file,
+            dry_run=dry_run,
+            freeze=freeze,
+            frozen_root=frozen_root,
+        )
+    if not skeleton_taskpack_dir:
+        raise AgentTeamCliError(
+            "skeleton_taskpack_dir is required with --semantic-json or --semantic-json-file"
+        )
+    if dry_run:
+        raise AgentTeamCliError("--dry-run is supported only with --blueprint-file")
     semantic_task = _load_semantic_task_arg(args.semantic_json, args.semantic_json_file)
     materialized = materialize_semantic_taskpack(
-        args.skeleton_taskpack_dir,
+        skeleton_taskpack_dir,
         output_root=args.output_root,
         taskpack_id=args.taskpack_id,
         semantic_task=semantic_task,
     )
     validation = validate_taskpack(materialized["taskpack_dir"])
     frozen = None
-    if args.freeze:
-        frozen = freeze_taskpack(materialized["taskpack_dir"], args.frozen_root)
+    if freeze:
+        frozen = freeze_taskpack(materialized["taskpack_dir"], frozen_root)
     summary = {
         "materialize_status": "frozen" if frozen else "draft",
         "taskpack_id": materialized["taskpack_id"],
@@ -1578,10 +1618,75 @@ def _handle_taskpack_materialize(args):
         "validation": validation,
         "frozen": frozen,
         "paths": {
-            "skeleton_taskpack_dir": str(Path(args.skeleton_taskpack_dir).resolve()),
+            "skeleton_taskpack_dir": str(Path(skeleton_taskpack_dir).resolve()),
             "taskpack_dir": materialized["taskpack_dir"],
             "output_root": str(Path(args.output_root).resolve()),
-            "frozen_root": str(Path(args.frozen_root).resolve()) if args.frozen_root else None,
+            "frozen_root": str(Path(frozen_root).resolve()) if frozen_root else None,
+        },
+    }
+    if args.json:
+        return summary
+    _write_taskpack_materialize_text(summary)
+    return 0
+
+
+def _handle_taskpack_blueprint_materialize(
+    args,
+    *,
+    blueprint_file,
+    dry_run,
+    freeze,
+    frozen_root,
+):
+    project_root = Path(getattr(args, "project_root", None) or ".").resolve()
+    manifest = materialize_taskpack_blueprint(
+        project_root,
+        blueprint_file,
+        args.output_root,
+        taskpack_id=args.taskpack_id,
+        dry_run=dry_run,
+    )
+    frozen = None
+    if freeze:
+        frozen_dir = (Path(frozen_root).resolve() / manifest["taskpack_id"]).resolve()
+        frozen_dir_existed = frozen_dir.exists()
+        try:
+            frozen = freeze_taskpack(manifest["taskpack_dir"], frozen_root)
+        except Exception:
+            if not frozen_dir_existed and frozen_dir.exists():
+                shutil.rmtree(frozen_dir)
+            raise
+    status = "dry-run" if dry_run else ("frozen" if frozen else "draft")
+    frozen_dir = frozen["frozen_taskpack_dir"] if frozen else None
+    summary = {
+        "materialize_status": status,
+        "source_kind": "blueprint",
+        "taskpack_id": manifest["taskpack_id"],
+        "task_count": manifest["task_count"],
+        "dependency_edge_count": manifest["dependency_edge_count"],
+        "validation": {"status": manifest["validation_status"]},
+        "validation_status": manifest["validation_status"],
+        "blueprint_sha256": manifest["blueprint_sha256"],
+        "freeze_eligible": manifest["freeze_eligible"],
+        "manifest_path": manifest["manifest_path"],
+        "taskpack_dir": manifest["taskpack_dir"],
+        "frozen_taskpack_dir": frozen_dir,
+        "manifest": manifest,
+        "frozen": frozen,
+        "paths": {
+            "project_root": str(project_root),
+            "blueprint_file": str(
+                (
+                    Path(blueprint_file)
+                    if Path(blueprint_file).is_absolute()
+                    else project_root / blueprint_file
+                ).resolve()
+            ),
+            "output_root": str(Path(args.output_root).resolve()),
+            "manifest_path": manifest["manifest_path"],
+            "draft_dir": manifest["taskpack_dir"],
+            "frozen_root": str(Path(frozen_root).resolve()) if frozen_root else None,
+            "frozen_dir": frozen_dir,
         },
     }
     if args.json:
@@ -1607,6 +1712,24 @@ def _load_semantic_task_arg(raw_json, json_file):
 
 
 def _write_taskpack_materialize_text(summary):
+    if summary.get("source_kind") == "blueprint":
+        paths = summary["paths"]
+        lines = [
+            f"taskpack_id: {summary['taskpack_id']}",
+            f"materialize_status: {summary['materialize_status']}",
+            f"task_count: {summary['task_count']}",
+            f"edge_count: {summary['dependency_edge_count']}",
+            f"validation: {summary['validation']['status']}",
+            f"blueprint_sha256: {summary['blueprint_sha256']}",
+            f"freeze_eligible: {str(summary['freeze_eligible']).lower()}",
+            f"manifest_path: {paths['manifest_path'] or '-'}",
+            f"draft_dir: {paths['draft_dir'] or '-'}",
+        ]
+        if paths["frozen_dir"]:
+            lines.append(f"frozen_dir: {paths['frozen_dir']}")
+        sys.stdout.write("\n".join(lines) + "\n")
+        sys.stdout.flush()
+        return
     lines = [
         f"taskpack_id: {summary['taskpack_id']}",
         f"materialize_status: {summary['materialize_status']}",
