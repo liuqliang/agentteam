@@ -308,7 +308,7 @@ class _InvocationProbeFakeHost:
             [
                 f"Id={unit_id}",
                 f"InvocationID={invocation_id}",
-                f"ControlGroup={self.unit_cgroup}",
+                f"ControlGroup={'' if self.released else self.unit_cgroup}",
                 f"MainPID={main_pid}",
                 "ActiveState=active",
                 f"SubState={'exited' if self.released else 'start'}",

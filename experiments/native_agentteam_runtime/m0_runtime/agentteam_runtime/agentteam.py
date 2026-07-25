@@ -4618,8 +4618,13 @@ def _same_unit_identity(left, right):
 
 
 def _same_queryable_unit_identity(left, right):
-    keys = ("Id", "InvocationID", "ControlGroup", "KillMode", "RemainAfterExit", "Type")
-    return all(left.get(key) == right.get(key) for key in keys)
+    keys = ("Id", "InvocationID", "KillMode", "RemainAfterExit", "Type")
+    return (
+        all(left.get(key) == right.get(key) for key in keys)
+        and right.get("LoadState") == "loaded"
+        and right.get("ActiveState") == "active"
+        and right.get("SubState") == "exited"
+    )
 
 
 def _write_invocation_supervision_probe_text(summary):
