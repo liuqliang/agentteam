@@ -1263,20 +1263,28 @@ def _copy_release_files(checkout_root, release_root):
     _validate_release_root(checkout_root)
     release_root.mkdir(parents=True, exist_ok=False)
     shutil.copy2(checkout_root / "agentteam", release_root / "agentteam")
-    runtime_package = checkout_root / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
-    target_package = release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+    native_root = checkout_root / "experiments" / "native_agentteam_runtime"
+    target_native_root = release_root / "experiments" / "native_agentteam_runtime"
+    runtime_package = native_root / "m0_runtime" / "agentteam_runtime"
+    target_package = target_native_root / "m0_runtime" / "agentteam_runtime"
     target_package.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(runtime_package, target_package)
+    shutil.copytree(native_root / "schemas", target_native_root / "schemas")
 
 
 def _validate_release_root(release_root):
     release_root = Path(release_root)
     launcher = release_root / "agentteam"
     runtime_package = release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+    schema_root = release_root / "experiments" / "native_agentteam_runtime" / "schemas"
     if not launcher.exists():
         raise AgentTeamReleaseError(f"release source is missing launcher: {launcher}")
     if not runtime_package.exists():
         raise AgentTeamReleaseError(f"release source is missing runtime package: {runtime_package}")
+    if not (schema_root / "taskpack_blueprint.schema.json").is_file():
+        raise AgentTeamReleaseError(
+            f"release source is missing runtime schemas: {schema_root}"
+        )
 
 
 def _require_git_repository(source_repo):

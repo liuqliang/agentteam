@@ -130,8 +130,11 @@ def _write_jsonl(path, records):
 
 def _write_agentteam_release_fixture(checkout, marker="fixture"):
     runtime_pkg = checkout / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+    schemas = checkout / "experiments" / "native_agentteam_runtime" / "schemas"
     runtime_pkg.mkdir(parents=True, exist_ok=True)
+    schemas.mkdir(parents=True, exist_ok=True)
     (runtime_pkg / "__init__.py").write_text(f"# {marker} runtime\n", encoding="utf-8")
+    _write_json(schemas / "taskpack_blueprint.schema.json", {"type": "object"})
     (checkout / "agentteam").write_text(
         f"#!/usr/bin/env python3\nprint({marker!r})\n",
         encoding="utf-8",
@@ -9956,8 +9959,11 @@ class TaskpackTests(unittest.TestCase):
             _init_repo(repo)
             _init_repo(checkout)
             runtime_pkg = checkout / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime"
+            schemas = checkout / "experiments" / "native_agentteam_runtime" / "schemas"
             runtime_pkg.mkdir(parents=True)
+            schemas.mkdir(parents=True)
             (runtime_pkg / "__init__.py").write_text("# fixture runtime\n", encoding="utf-8")
+            _write_json(schemas / "taskpack_blueprint.schema.json", {"type": "object"})
             (checkout / "agentteam").write_text("#!/usr/bin/env python3\nprint('fixture')\n", encoding="utf-8")
             subprocess.run(["git", "add", "."], cwd=checkout, check=True)
             subprocess.run(
@@ -10047,6 +10053,15 @@ class TaskpackTests(unittest.TestCase):
             self.assertTrue((release_root / "manifest.json").exists())
             self.assertTrue((release_root / "agentteam").exists())
             self.assertTrue((release_root / "experiments" / "native_agentteam_runtime" / "m0_runtime" / "agentteam_runtime" / "__init__.py").exists())
+            self.assertTrue(
+                (
+                    release_root
+                    / "experiments"
+                    / "native_agentteam_runtime"
+                    / "schemas"
+                    / "taskpack_blueprint.schema.json"
+                ).is_file()
+            )
             self.assertFalse(stale_release.exists())
             active = json.loads((work_root / "releases" / "active.json").read_text(encoding="utf-8"))
             self.assertEqual(active["release_id"], "fixture-release")
