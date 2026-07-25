@@ -577,10 +577,6 @@ class TwoPhaseFileScheduler:
             if runtime_result["result_status"] == "blocked" and not permission_request
             else None
         )
-        retry_allowed = (
-            outcome["retryable"]
-            and inflight["attempt_number"] < self.state["max_attempts"]
-        )
         next_attempt_id = (
             f"{inflight['task_id']}-ATTEMPT-{inflight['attempt_number'] + 1:03d}"
         )
@@ -656,6 +652,20 @@ class TwoPhaseFileScheduler:
             result,
             outcome,
         )
+        transition = self._verified_backlog_transition(
+            inflight,
+            result,
+            patch_path,
+            outcome,
+        )
+        result.update(transition)
+        retry_allowed = (
+            transition["retryable"]
+            and inflight["attempt_number"] < self.state["max_attempts"]
+        )
+        result["retry_allowed"] = retry_allowed
+        if transition["task_status"] == "retryable":
+            result["task_status"] = "ready" if retry_allowed else "blocked"
         runtime_events = [
                 self._event(
                     "runtime_session_observed",
@@ -771,7 +781,7 @@ class TwoPhaseFileScheduler:
                             },
                         )
                     ]
-                    if outcome["validation_status"] == "accepted"
+                    if result["task_status"] == "done"
                     else []
                 ),
                 *(
@@ -821,6 +831,36 @@ class TwoPhaseFileScheduler:
                 *(
                     [
                         self._event(
+                            "backlog_updated",
+                            "agent-scheduler",
+                            None,
+                            (
+                                f"backlog-integration-"
+                                f"{result['task_status']}:{inflight['attempt_id']}"
+                            ),
+                            inflight["correlation_id"],
+                            {
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "task_status": result["task_status"],
+                                "lease_id": inflight["lease_id"],
+                                "update_type": "integration_outcome",
+                                "failure_category": result["failure_category"],
+                                "retryable": result["retryable"],
+                            },
+                        )
+                    ]
+                    if (
+                        outcome["validation_status"] == "accepted"
+                        and result["task_status"] != "done"
+                        and not manual_gate
+                        and not permission_request
+                    )
+                    else []
+                ),
+                *(
+                    [
+                        self._event(
                             "recovery_routed",
                             "agent-scheduler",
                             inflight["agent_id"],
@@ -845,8 +885,9 @@ class TwoPhaseFileScheduler:
         self._update_task_from_outcome(
             inflight["task_id"],
             outcome["validation_status"],
-            outcome["failure_category"],
+            result["failure_category"],
             retry_allowed,
+            task_status=result["task_status"],
             manual_gate_question_id=manual_gate["question_id"] if manual_gate else None,
             permission_request_id=permission_request["request_id"]
             if permission_request
@@ -859,8 +900,8 @@ class TwoPhaseFileScheduler:
                 "task_id": inflight["task_id"],
                 "attempt_number": inflight["attempt_number"],
                 "validation_status": outcome["validation_status"],
-                "failure_category": outcome["failure_category"],
-                "retryable": outcome["retryable"],
+                "failure_category": result["failure_category"],
+                "retryable": result["retryable"],
                 "result": result,
             }
         )
@@ -1011,6 +1052,83 @@ class TwoPhaseFileScheduler:
             "integration_baseline_head_sha": head_sha,
         }
 
+    def _verified_backlog_transition(self, inflight, result, patch_path, outcome):
+        if outcome["validation_status"] != "accepted":
+            return {
+                "task_status": "retryable" if outcome["retryable"] else "blocked",
+                "completion_policy": "worker_validation",
+                "failure_category": outcome["failure_category"],
+                "retryable": outcome["retryable"],
+                "verified_integration_head_sha": None,
+            }
+        if not patch_path:
+            return {
+                "task_status": "done",
+                "completion_policy": "verified_noop",
+                "failure_category": None,
+                "retryable": False,
+                "verified_integration_head_sha": (
+                    result.get("integration_baseline_commit_sha")
+                    or inflight.get("integration_base_sha")
+                ),
+            }
+        if not self.integrate_accepted_patch:
+            return {
+                "task_status": "done",
+                "completion_policy": "worker_validation_without_integration",
+                "failure_category": None,
+                "retryable": False,
+                "verified_integration_head_sha": None,
+            }
+
+        baseline = self.state.get("integration_baseline", {})
+        verified_head = (
+            result.get("integration_baseline_commit_sha")
+            or baseline.get("integration_baseline_head_sha")
+        )
+        committed = (
+            result.get("integration_baseline_commit_status") == "committed"
+            and bool(result.get("integration_baseline_commit_sha"))
+        )
+        recovered_verified_commit = (
+            result.get("integration_recovery_status") == "reused_existing"
+            and result.get("integration_verification_status") == "passed"
+            and bool(verified_head)
+            and verified_head != inflight.get("integration_base_sha")
+        )
+        if committed or recovered_verified_commit:
+            return {
+                "task_status": "done",
+                "completion_policy": "verified_integration_commit",
+                "failure_category": None,
+                "retryable": False,
+                "verified_integration_head_sha": verified_head,
+            }
+
+        if result.get("integration_status") == "failed":
+            failure_category = "integration_apply_failed"
+            retryable = True
+        elif result.get("integration_verification_status") == "failed":
+            failure_category = "integration_verification_failed"
+            retryable = True
+        elif result.get("integration_block_reason") == "evidence_incomplete":
+            failure_category = "integration_evidence_incomplete"
+            retryable = False
+        else:
+            failure_category = (
+                result.get("integration_baseline_commit_reason")
+                or result.get("integration_commit_reason")
+                or "integration_not_verified"
+            )
+            retryable = False
+        return {
+            "task_status": "retryable" if retryable else "blocked",
+            "completion_policy": "verified_integration_commit",
+            "failure_category": failure_category,
+            "retryable": retryable,
+            "verified_integration_head_sha": None,
+        }
+
     def _integrate_accepted_result(self, inflight, result, patch_path, outcome):
         if outcome["validation_status"] != "accepted":
             return []
@@ -1054,6 +1172,40 @@ class TwoPhaseFileScheduler:
                 ),
             ]
         events = []
+        if not patch_path:
+            baseline_head = (
+                self.state.get("integration_baseline", {}).get(
+                    "integration_baseline_head_sha"
+                )
+                or inflight.get("integration_base_sha")
+            )
+            result.update(
+                {
+                    "integration_status": "verified_noop",
+                    "integration_noop_status": "verified",
+                    "integration_noop_reason": "accepted_result_has_no_patch",
+                    "integration_baseline_commit_status": "unchanged",
+                    "integration_baseline_commit_sha": baseline_head,
+                    "integration_baseline_commit_reason": "verified_noop",
+                }
+            )
+            return [
+                self._event(
+                    "integration_noop_verified",
+                    "agent-scheduler",
+                    inflight["agent_id"],
+                    f"integration-noop:{inflight['attempt_id']}",
+                    inflight["correlation_id"],
+                    {
+                        "task_id": inflight["task_id"],
+                        "attempt_id": inflight["attempt_id"],
+                        "lease_id": inflight["lease_id"],
+                        "integration_noop_status": "verified",
+                        "integration_noop_reason": "accepted_result_has_no_patch",
+                        "integration_baseline_commit_sha": baseline_head,
+                    },
+                )
+            ]
         if patch_path:
             queue = upsert_integration_queue_item(self.output_dir, result)
             result.update(queue)
@@ -1074,12 +1226,95 @@ class TwoPhaseFileScheduler:
                 )
             )
         if self.integrate_accepted_patch and self.project_root and patch_path:
-            integration = apply_patch_to_integration_baseline_worktree(
-                self.project_root,
-                self.output_dir,
-                patch_path,
-            )
+            try:
+                integration = apply_patch_to_integration_baseline_worktree(
+                    self.project_root,
+                    self.output_dir,
+                    patch_path,
+                )
+            except Exception as exc:
+                integration = {
+                    "integration_status": "failed",
+                    "integration_failure_reason": "apply_failed",
+                    "integration_error": str(exc),
+                    "integration_base_ref": inflight.get("integration_base_ref"),
+                    "integration_base_sha": inflight.get("integration_base_sha"),
+                    "integration_baseline_branch": inflight.get(
+                        "integration_baseline_branch"
+                    ),
+                    "integration_baseline_worktree_path": inflight.get(
+                        "integration_baseline_worktree_path"
+                    ),
+                }
             result.update(integration)
+            if integration.get("integration_status") != "applied":
+                baseline_commit = skip_integration_baseline_commit("apply_failed")
+                rollback = reset_integration_baseline_worktree(
+                    inflight["integration_baseline_worktree_path"]
+                )
+                result.update(baseline_commit)
+                result.update(rollback)
+                self._record_integration_baseline_result(
+                    integration,
+                    inflight["integration_base_sha"],
+                )
+                events.append(
+                    self._event(
+                        "integration_blocked",
+                        "agent-scheduler",
+                        inflight["agent_id"],
+                        f"integration-blocked:{inflight['attempt_id']}",
+                        inflight["correlation_id"],
+                        {
+                            "task_id": inflight["task_id"],
+                            "attempt_id": inflight["attempt_id"],
+                            "lease_id": inflight["lease_id"],
+                            "block_reason": "apply_failed",
+                            "patch_path": str(patch_path),
+                            **integration,
+                            **baseline_commit,
+                            **rollback,
+                        },
+                    )
+                )
+                events.append(
+                    self._event(
+                        "integration_baseline_commit_evaluated",
+                        "agent-scheduler",
+                        inflight["agent_id"],
+                        f"integration-baseline-commit:{inflight['attempt_id']}",
+                        inflight["correlation_id"],
+                        {
+                            "task_id": inflight["task_id"],
+                            "attempt_id": inflight["attempt_id"],
+                            "lease_id": inflight["lease_id"],
+                            **baseline_commit,
+                            **rollback,
+                        },
+                    )
+                )
+                if self.commit_verified_integration:
+                    integration_commit = _integration_commit_from_baseline_result(
+                        result
+                    )
+                    result.update(integration_commit)
+                    events.append(
+                        self._event(
+                            "integration_commit_evaluated",
+                            "agent-scheduler",
+                            inflight["agent_id"],
+                            f"integration-commit:{inflight['attempt_id']}",
+                            inflight["correlation_id"],
+                            {
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "lease_id": inflight["lease_id"],
+                                **integration_commit,
+                            },
+                        )
+                    )
+                result.update(upsert_integration_queue_item(self.output_dir, result))
+                return events
             events.append(
                 self._event(
                     "patch_integrated",
@@ -1475,14 +1710,15 @@ class TwoPhaseFileScheduler:
         validation_status,
         failure_category,
         retry_allowed,
+        task_status=None,
         manual_gate_question_id=None,
         permission_request_id=None,
     ):
         task = self._task_by_id(task_id)
-        if validation_status == "accepted":
+        if task_status == "done":
             task["backlog_status"] = "done"
             task["blockers"] = []
-        elif retry_allowed:
+        elif task_status == "ready" or retry_allowed:
             task["backlog_status"] = "ready"
             task["blockers"] = []
         else:
@@ -1512,7 +1748,18 @@ class TwoPhaseFileScheduler:
     def _append_events(self, step_id, events):
         sequence = self._next_sequence()
         canonical = []
+        existing_idempotency_keys = set()
+        if self.events_path.exists():
+            for line in self.events_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                existing_idempotency_keys.add(
+                    json.loads(line).get("idempotency_key")
+                )
         for event in events:
+            idempotency_key = event.get("idempotency_key")
+            if idempotency_key in existing_idempotency_keys:
+                continue
             canonical.append(
                 {
                     **event,
@@ -1522,6 +1769,7 @@ class TwoPhaseFileScheduler:
                     "step_id": step_id,
                 }
             )
+            existing_idempotency_keys.add(idempotency_key)
             sequence += 1
         _append_jsonl(self.events_path, canonical)
         return canonical
