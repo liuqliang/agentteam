@@ -13,6 +13,7 @@ from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from agentteam_runtime import (
     TaskpackValidationError,
@@ -183,6 +184,206 @@ def _start_webhook_capture_server():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, payloads
+
+
+class _InvocationProbeFakeHost:
+    boot_id = "12345678-1234-4234-8234-123456789abc"
+    enclosing_invocation_id = "1" * 32
+    unit_invocation_id = "2" * 32
+    enclosing_cgroup = "/user.slice/user-1000.slice/user@1000.service"
+
+    def __init__(self, scenario="success"):
+        self.scenario = scenario
+        self.now = 0.0
+        self.unit_name = None
+        self.unit_started = False
+        self.unit_stopped = False
+        self.stop_attempted = False
+        self.released = False
+        self.state_removed = False
+        self.pidfd_closed = False
+        self.enclosing_show_count = 0
+        self.manager_stat_count = 0
+        self.helper_stat_count = 0
+        self.loaded_unit_show_count = 0
+        self.commands = []
+
+    @property
+    def unit_cgroup(self):
+        return f"{self.enclosing_cgroup}/app.slice/{self.unit_name}"
+
+    def is_linux(self):
+        return self.scenario != "non_linux"
+
+    def pidfd_supported(self):
+        return self.scenario != "pidfd_unavailable"
+
+    def uid(self):
+        return 1000
+
+    def executable(self):
+        return "/usr/bin/python3"
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def run(self, command, timeout):
+        self.commands.append(list(command))
+        if self.scenario == "command_missing" and command[0] == "loginctl":
+            raise FileNotFoundError("loginctl")
+        if self.scenario == "command_timeout" and command[0] == "loginctl":
+            raise subprocess.TimeoutExpired(command, timeout)
+        if command[0] == "loginctl":
+            if self.scenario == "loginctl_failed":
+                return subprocess.CompletedProcess(command, 1, "", "failed")
+            linger = "no" if self.scenario == "linger_disabled" else "yes"
+            return subprocess.CompletedProcess(command, 0, f"{linger}\n", "")
+        if command[0] == "systemd-run":
+            self.unit_name = next(part.split("=", 1)[1] for part in command if part.startswith("--unit="))
+            if self.scenario == "transient_start_failed":
+                return subprocess.CompletedProcess(command, 1, "", "failed")
+            self.unit_started = True
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:3] == ["systemctl", "--user", "show"]:
+            return self._show_unit(command)
+        if command[:3] == ["systemctl", "--user", "stop"]:
+            self.stop_attempted = True
+            if self.scenario != "cleanup_incomplete":
+                self.unit_stopped = True
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:3] == ["systemctl", "--user", "reset-failed"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:2] == ["systemctl", "show"]:
+            return self._show_enclosing(command)
+        raise AssertionError(f"unexpected command: {command!r}")
+
+    def _show_enclosing(self, command):
+        self.enclosing_show_count += 1
+        if self.scenario == "enclosing_unavailable":
+            return subprocess.CompletedProcess(command, 1, "", "failed")
+        invocation_id = self.enclosing_invocation_id
+        if self.scenario == "enclosing_restarted" and self.enclosing_show_count > 1:
+            invocation_id = "3" * 32
+        kill_mode = "process" if self.scenario == "kill_mode_unsuitable" else "control-group"
+        unit_id = "" if self.scenario == "enclosing_identity_missing" else "user@1000.service"
+        manager_pid = "0" if self.scenario == "manager_identity_missing" else "111"
+        output = "\n".join(
+            [
+                f"Id={unit_id}",
+                f"InvocationID={invocation_id}",
+                f"ControlGroup={self.enclosing_cgroup}",
+                f"KillMode={kill_mode}",
+                f"MainPID={manager_pid}",
+            ]
+        )
+        return subprocess.CompletedProcess(command, 0, output + "\n", "")
+
+    def _show_unit(self, command):
+        if not self.unit_started:
+            if self.scenario == "unexpected_unit_reuse":
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    "LoadState=loaded\nId=collision.service\n",
+                    "",
+                )
+            return subprocess.CompletedProcess(command, 0, "LoadState=not-found\n", "")
+        if self.unit_stopped:
+            return subprocess.CompletedProcess(command, 0, "LoadState=not-found\n", "")
+        self.loaded_unit_show_count += 1
+        if self.scenario == "unit_show_failed" and self.loaded_unit_show_count == 2:
+            return subprocess.CompletedProcess(command, 1, "", "failed")
+        invocation_id = self.unit_invocation_id
+        if self.scenario == "unit_identity_changed" and self.loaded_unit_show_count > 1:
+            invocation_id = "4" * 32
+        if self.scenario == "unit_identity_not_queryable" and self.released:
+            invocation_id = "5" * 32
+        unit_id = "" if self.scenario == "unit_identity_missing" else self.unit_name
+        kill_mode = "process" if self.scenario == "unit_property_mismatch" else "control-group"
+        main_pid = "0" if self.released else "222"
+        output = "\n".join(
+            [
+                f"Id={unit_id}",
+                f"InvocationID={invocation_id}",
+                f"ControlGroup={self.unit_cgroup}",
+                f"MainPID={main_pid}",
+                "ActiveState=active",
+                f"SubState={'exited' if self.released else 'start'}",
+                "LoadState=loaded",
+                f"KillMode={kill_mode}",
+                "RemainAfterExit=yes",
+                "Type=oneshot",
+            ]
+        )
+        return subprocess.CompletedProcess(command, 0, output + "\n", "")
+
+    def read_text(self, path):
+        path = str(path)
+        if path == "/proc/sys/kernel/random/boot_id":
+            return "not-a-boot-id\n" if self.scenario == "boot_id_missing" else f"{self.boot_id}\n"
+        if path == "/proc/111/stat":
+            self.manager_stat_count += 1
+            if self.scenario == "process_identity_missing":
+                return "malformed\n"
+            ticks = 101 if self.scenario == "manager_identity_changed" and self.manager_stat_count > 1 else 100
+            return self._proc_stat(111, ticks)
+        if path == "/proc/111/cgroup":
+            cgroup = (
+                "/wrong"
+                if self.scenario == "manager_identity_missing"
+                else f"{self.enclosing_cgroup}/init.scope"
+            )
+            return f"0::{cgroup}\n"
+        if path == "/proc/222/stat":
+            self.helper_stat_count += 1
+            ticks = 201 if self.scenario == "helper_identity_changed" and self.helper_stat_count > 1 else 200
+            return self._proc_stat(222, ticks)
+        if path == "/proc/222/cgroup":
+            cgroup = "/wrong" if self.scenario == "helper_cgroup_mismatch" else self.unit_cgroup
+            return f"0::{cgroup}\n"
+        if path.endswith("/cgroup.events"):
+            if self.unit_stopped and self.scenario != "cleanup_incomplete":
+                raise FileNotFoundError(path)
+            if self.scenario == "cgroup_events_unavailable":
+                raise OSError("unavailable")
+            if self.scenario == "cgroup_events_invalid":
+                return "populated maybe\n"
+            if self.scenario == "cgroup_drain_timeout":
+                return "populated 1\n"
+            if self.scenario == "cleanup_incomplete" and self.stop_attempted:
+                return "populated 1\n"
+            return f"populated {0 if self.released else 1}\n"
+        raise AssertionError(f"unexpected read: {path}")
+
+    @staticmethod
+    def _proc_stat(pid, start_ticks):
+        prefix_fields = ["S"] + ["0"] * 18
+        return f"{pid} (agentteam probe) {' '.join(prefix_fields)} {start_ticks} 0\n"
+
+    def make_state_dir(self):
+        return Path("/tmp/fake-agentteam-invocation-probe")
+
+    def release_helper(self, _gate_path):
+        if self.scenario == "release_failed":
+            raise OSError("release failed")
+        self.released = True
+
+    def remove_state_dir(self, _state_dir):
+        self.state_removed = True
+
+    def open_pidfd(self, _pid):
+        if self.scenario == "pidfd_open_failed":
+            raise OSError("pidfd failed")
+        return 99
+
+    def pidfd_exited(self, _pidfd, _timeout_seconds):
+        return self.scenario != "helper_exit_timeout"
+
+    def close_pidfd(self, _pidfd):
+        self.pidfd_closed = True
 
 
 def _write_failed_integration_run(run_dir):
@@ -2961,6 +3162,160 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("profile", check_names)
             self.assertIn("git_repository", check_names)
             self.assertIn("verification_profile", check_names)
+
+    def test_invocation_supervision_probe_proves_linger_identity_and_cleanup_without_provider(self):
+        host = _InvocationProbeFakeHost()
+        with mock.patch.object(
+            agentteam_module,
+            "draft_taskpack_from_goal",
+            side_effect=AssertionError("provider path must not be called"),
+        ) as author_call, mock.patch.object(
+            agentteam_module,
+            "run_runtime_diagnostic_chat",
+            side_effect=AssertionError("provider path must not be called"),
+        ) as chat_call:
+            summary = agentteam_module._run_invocation_supervision_probe(
+                timeout_seconds=1.0,
+                host=host,
+            )
+
+        self.assertEqual(summary["status"], "passed")
+        self.assertTrue(summary["linger"])
+        self.assertTrue(summary["enclosing_identity_stable"])
+        self.assertTrue(summary["user_manager_identity_stable"])
+        self.assertTrue(summary["unit_identity_verified"])
+        self.assertTrue(summary["cgroup_drained"])
+        self.assertTrue(summary["cleanup_complete"])
+        self.assertEqual(summary["provider_calls"], 0)
+        self.assertEqual(host.enclosing_show_count, 3)
+        self.assertTrue(host.released)
+        self.assertTrue(host.pidfd_closed)
+        self.assertTrue(host.state_removed)
+        author_call.assert_not_called()
+        chat_call.assert_not_called()
+        self.assertTrue(
+            all(command[0] in {"loginctl", "systemctl", "systemd-run"} for command in host.commands)
+        )
+        systemd_run = next(command for command in host.commands if command[0] == "systemd-run")
+        self.assertIn("--property=Type=oneshot", systemd_run)
+        self.assertIn("--property=RemainAfterExit=yes", systemd_run)
+        self.assertIn("--property=KillMode=control-group", systemd_run)
+        self.assertIn("--no-block", systemd_run)
+        self.assertTrue(
+            any(command[:3] == ["systemctl", "--user", "stop"] for command in host.commands)
+        )
+        self.assertTrue(
+            any(command[:3] == ["systemctl", "--user", "reset-failed"] for command in host.commands)
+        )
+
+    def test_invocation_supervision_probe_fails_closed_for_every_bounded_branch(self):
+        cases = {
+            "non_linux": "linux_required",
+            "pidfd_unavailable": "pidfd_open_unavailable",
+            "boot_id_missing": "boot_id_missing",
+            "command_missing": "required_command_unavailable",
+            "command_timeout": "timeout",
+            "loginctl_failed": "loginctl_failed",
+            "linger_disabled": "linger_disabled",
+            "enclosing_unavailable": "enclosing_user_service_unavailable",
+            "enclosing_identity_missing": "enclosing_identity_missing",
+            "kill_mode_unsuitable": "enclosing_kill_mode_unsuitable",
+            "manager_identity_missing": "user_manager_identity_missing",
+            "process_identity_missing": "process_identity_missing",
+            "unexpected_unit_reuse": "unexpected_unit_reuse",
+            "transient_start_failed": "transient_unit_start_failed",
+            "unit_identity_missing": "unit_identity_missing",
+            "unit_property_mismatch": "unit_property_mismatch",
+            "helper_cgroup_mismatch": "helper_cgroup_mismatch",
+            "enclosing_restarted": "enclosing_user_service_restarted",
+            "manager_identity_changed": "user_manager_identity_changed",
+            "unit_show_failed": "unit_identity_unavailable",
+            "unit_identity_changed": "unit_identity_changed",
+            "helper_identity_changed": "helper_identity_changed",
+            "pidfd_open_failed": "pidfd_open_failed",
+            "release_failed": "host_operation_failed",
+            "helper_exit_timeout": "helper_exit_timeout",
+            "cgroup_events_unavailable": "cgroup_events_unavailable",
+            "cgroup_events_invalid": "cgroup_events_invalid",
+            "cgroup_drain_timeout": "timeout",
+            "unit_identity_not_queryable": "unit_identity_not_queryable",
+            "cleanup_incomplete": "cleanup_incomplete",
+        }
+        for scenario, expected_failure in cases.items():
+            with self.subTest(scenario=scenario):
+                host = _InvocationProbeFakeHost(scenario)
+                summary = agentteam_module._run_invocation_supervision_probe(
+                    timeout_seconds=0.08,
+                    host=host,
+                )
+                self.assertEqual(summary["status"], "failed")
+                self.assertEqual(summary["failure_code"], expected_failure)
+                self.assertEqual(summary["provider_calls"], 0)
+                if host.unit_started:
+                    self.assertTrue(
+                        any(
+                            command[:3] == ["systemctl", "--user", "stop"]
+                            for command in host.commands
+                        )
+                    )
+                    self.assertTrue(host.state_removed)
+
+    def test_invocation_supervision_probe_json_is_compact_and_secret_free(self):
+        summary = agentteam_module._run_invocation_supervision_probe(
+            timeout_seconds=1.0,
+            host=_InvocationProbeFakeHost(),
+        )
+        expected_fields = {
+            "probe",
+            "status",
+            "linux",
+            "pidfd_open",
+            "linger",
+            "boot_id",
+            "enclosing_kill_mode",
+            "enclosing_identity_stable",
+            "user_manager_identity_stable",
+            "transient_unit_created",
+            "unit_identity_verified",
+            "pidfd_opened",
+            "cgroup_drained",
+            "unit_identity_queryable_after_exit",
+            "cleanup_complete",
+            "provider_calls",
+            "failure_code",
+        }
+        self.assertEqual(set(summary), expected_fields)
+        with mock.patch.dict(os.environ, {"AGENTTEAM_TEST_SECRET": "do-not-leak"}):
+            with mock.patch.object(
+                agentteam_module,
+                "_run_invocation_supervision_probe",
+                return_value=summary,
+            ):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = agentteam_module.main(
+                        ["doctor", "--invocation-supervision-probe", "--json"]
+                    )
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(set(payload), expected_fields)
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("do-not-leak", serialized)
+        self.assertNotIn("/tmp/", serialized)
+
+        failed_summary = dict(summary, status="failed", failure_code="linger_disabled")
+        with mock.patch.object(
+            agentteam_module,
+            "_run_invocation_supervision_probe",
+            return_value=failed_summary,
+        ):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agentteam_module.main(
+                    ["doctor", "--invocation-supervision-probe", "--json"]
+                )
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(json.loads(stdout.getvalue())["failure_code"], "linger_disabled")
 
     def test_agentteam_cli_gc_prunes_old_releases(self):
         with tempfile.TemporaryDirectory() as tmp:

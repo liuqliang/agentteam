@@ -102,6 +102,8 @@ Examples:
 ```bash
 agentteam doctor
 agentteam doctor --project-root /path/to/repo --json
+agentteam doctor --invocation-supervision-probe
+agentteam doctor --invocation-supervision-probe --json
 ```
 
 What it checks:
@@ -118,6 +120,58 @@ Output status:
 - `passed`: no failed checks.
 - `failed`: at least one required check failed.
 - Individual checks may be `passed`, `warning`, `failed`, or `skipped`.
+
+#### Invocation-supervision host probe
+
+`--invocation-supervision-probe` is an explicit Linux host-capability test. It
+is the only `doctor` mode that may create a systemd unit; ordinary
+`agentteam doctor` remains read-only. The probe has a bounded timeout and does
+not invoke Codex, a model adapter, or any provider.
+
+The probe requires all of the following:
+
+- Linux `pidfd_open` support and a valid current boot ID.
+- `loginctl show-user` reporting `Linger=yes`, so the user manager persists
+  after logout.
+- A stable system-level `user@<uid>.service` identity, control group, manager
+  PID/start time, and `KillMode=control-group` or `KillMode=mixed`.
+- A newly allocated systemd user transient `Type=oneshot` service with
+  `RemainAfterExit=yes` and `KillMode=control-group`; an existing unit with the
+  generated name is rejected rather than reused.
+- Agreement among the transient unit's `InvocationID`, `MainPID`, process
+  start ticks, `/proc/<pid>/cgroup`, and exact systemd `ControlGroup`.
+- A pidfd for the inert gated helper, followed by helper exit and
+  `cgroup.events` reaching `populated 0` at that exact persisted control group
+  while the unit identity remains queryable.
+
+The command then explicitly stops and resets the transient unit and removes
+its gate state. Success and every failure path attempt the same bounded
+cleanup. A timeout, disabled linger, unsuitable enclosing `KillMode`, missing
+or changed identity, unexpected unit reuse, non-empty control group, or
+incomplete cleanup returns a nonzero exit status.
+
+JSON output is intentionally compact: it contains only fixed capability
+booleans, the boot ID, the bounded enclosing `KillMode`, `provider_calls: 0`,
+the status/failure code, and cleanup status. It does not include command
+environments, environment-variable values, subprocess output, unit paths, or
+probe-state paths.
+
+This check must be run by an operator on the actual execution host because
+mocked tests cannot establish the authority or persistence of that host's user
+manager:
+
+```bash
+agentteam doctor --invocation-supervision-probe --json
+systemctl --user list-units \
+  'agentteam-invocation-probe-*.service' \
+  --all --no-legend
+```
+
+Accept the host evidence only when the first command exits zero with
+`status: "passed"`, `provider_calls: 0`, `cgroup_drained: true`, and
+`cleanup_complete: true`, and the second command prints no probe unit. Record
+the compact JSON result with the reviewed active release ID. Source merge,
+push, and release activation remain separate operator-review actions.
 
 ### `agentteam grounding`
 

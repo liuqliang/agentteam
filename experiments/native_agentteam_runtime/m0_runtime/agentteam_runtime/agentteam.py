@@ -1,12 +1,14 @@
 import argparse
 import json
 import os
+import select
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -229,6 +231,11 @@ _HELP_COMMANDS = [
         "examples": [
             "agentteam doctor --project-root <repo>",
             "agentteam doctor --project-root <repo> --json",
+            "agentteam doctor --invocation-supervision-probe --json",
+        ],
+        "notes": [
+            "The invocation-supervision probe is the only doctor mode that creates a transient unit.",
+            "The probe is bounded, invokes no provider, and cleans its transient unit before returning.",
         ],
     },
     {
@@ -1158,6 +1165,11 @@ def _add_db_parser(subcommands):
 def _add_doctor_parser(subcommands):
     parser = subcommands.add_parser("doctor", help="Check AgentTeam project configuration and prerequisites.")
     parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument(
+        "--invocation-supervision-probe",
+        action="store_true",
+        help="Run the bounded no-provider Linux pidfd/systemd-user lifecycle probe.",
+    )
     parser.add_argument("--json", action="store_true", help="Print doctor checks as JSON instead of human text.")
     parser.set_defaults(handler=_handle_doctor)
 
@@ -3497,6 +3509,13 @@ def _handle_grounding(args):
 
 
 def _handle_doctor(args):
+    if args.invocation_supervision_probe:
+        summary = _run_invocation_supervision_probe()
+        if args.json:
+            _print_json(summary, stream=sys.stdout)
+        else:
+            _write_invocation_supervision_probe_text(summary)
+        return 0 if summary["status"] == "passed" else 1
     project_root = Path(args.project_root or ".").resolve()
     summary = _build_doctor_summary(project_root)
     if args.json:
@@ -4084,6 +4103,539 @@ def _write_doctor_text(summary):
     ]
     for check in summary.get("checks") or []:
         lines.append(f"{check['name']}: {check['status']} - {check['summary']}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+_INVOCATION_PROBE_TIMEOUT_SECONDS = 15.0
+_INVOCATION_PROBE_CLEANUP_SECONDS = 3.0
+_INVOCATION_PROBE_SUITABLE_KILL_MODES = {"control-group", "mixed"}
+_INVOCATION_PROBE_HELPER_CODE = (
+    "import pathlib,sys,time\n"
+    "gate=pathlib.Path(sys.argv[1])\n"
+    "deadline=time.monotonic()+float(sys.argv[2])\n"
+    "while time.monotonic()<deadline:\n"
+    "    if gate.exists():\n"
+    "        raise SystemExit(0)\n"
+    "    time.sleep(0.02)\n"
+    "raise SystemExit(124)\n"
+)
+
+
+class _InvocationProbeFailure(RuntimeError):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+class _InvocationProbeHost:
+    def is_linux(self):
+        return sys.platform.startswith("linux")
+
+    def pidfd_supported(self):
+        return callable(getattr(os, "pidfd_open", None))
+
+    def uid(self):
+        return os.getuid()
+
+    def executable(self):
+        return sys.executable
+
+    def monotonic(self):
+        return time.monotonic()
+
+    def sleep(self, seconds):
+        time.sleep(seconds)
+
+    def run(self, command, timeout):
+        return subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+
+    def read_text(self, path):
+        return Path(path).read_text(encoding="utf-8")
+
+    def make_state_dir(self):
+        return Path(tempfile.mkdtemp(prefix="agentteam-invocation-probe-"))
+
+    def release_helper(self, gate_path):
+        Path(gate_path).touch(exist_ok=False)
+
+    def remove_state_dir(self, state_dir):
+        shutil.rmtree(state_dir)
+
+    def open_pidfd(self, pid):
+        return os.pidfd_open(pid, 0)
+
+    def pidfd_exited(self, pidfd, timeout_seconds):
+        poller = select.poll()
+        poller.register(pidfd, select.POLLIN)
+        return bool(poller.poll(max(1, int(timeout_seconds * 1000))))
+
+    def close_pidfd(self, pidfd):
+        os.close(pidfd)
+
+
+def _run_invocation_supervision_probe(timeout_seconds=None, host=None):
+    host = host or _InvocationProbeHost()
+    timeout_seconds = float(timeout_seconds or _INVOCATION_PROBE_TIMEOUT_SECONDS)
+    summary = {
+        "probe": "invocation_supervision",
+        "status": "failed",
+        "linux": False,
+        "pidfd_open": False,
+        "linger": False,
+        "boot_id": None,
+        "enclosing_kill_mode": None,
+        "enclosing_identity_stable": False,
+        "user_manager_identity_stable": False,
+        "transient_unit_created": False,
+        "unit_identity_verified": False,
+        "pidfd_opened": False,
+        "cgroup_drained": False,
+        "unit_identity_queryable_after_exit": False,
+        "cleanup_complete": False,
+        "provider_calls": 0,
+        "failure_code": None,
+    }
+    deadline = host.monotonic() + max(0.1, timeout_seconds)
+    state_dir = None
+    unit_name = f"agentteam-invocation-probe-{os.getpid()}-{uuid.uuid4().hex}.service"
+    unit_cleanup_needed = False
+    unit_control_group = None
+    pidfd = None
+    failure_code = None
+    try:
+        if not host.is_linux():
+            raise _InvocationProbeFailure("linux_required")
+        summary["linux"] = True
+        if not host.pidfd_supported():
+            raise _InvocationProbeFailure("pidfd_open_unavailable")
+        summary["pidfd_open"] = True
+
+        boot_id = host.read_text("/proc/sys/kernel/random/boot_id").strip()
+        if not _is_uuid(boot_id):
+            raise _InvocationProbeFailure("boot_id_missing")
+        summary["boot_id"] = boot_id
+
+        uid = host.uid()
+        linger = _invocation_probe_command(
+            host,
+            ["loginctl", "show-user", str(uid), "--property=Linger", "--value"],
+            deadline,
+            "loginctl_failed",
+        ).stdout.strip().lower()
+        if linger != "yes":
+            raise _InvocationProbeFailure("linger_disabled")
+        summary["linger"] = True
+
+        enclosing_unit = f"user@{uid}.service"
+        enclosing_before = _invocation_probe_show_enclosing(host, enclosing_unit, deadline)
+        manager_before = _invocation_probe_manager_identity(host, enclosing_before)
+        summary["enclosing_kill_mode"] = enclosing_before["KillMode"]
+
+        existing = _invocation_probe_show_unit(host, unit_name, deadline, allow_missing=True)
+        if existing.get("LoadState") not in {None, "", "not-found"}:
+            raise _InvocationProbeFailure("unexpected_unit_reuse")
+
+        state_dir = host.make_state_dir()
+        gate_path = state_dir / "release"
+        unit_cleanup_needed = True
+        start_command = [
+            "systemd-run",
+            "--user",
+            "--quiet",
+            "--no-block",
+            f"--unit={unit_name}",
+            "--property=Type=oneshot",
+            "--property=RemainAfterExit=yes",
+            "--property=KillMode=control-group",
+            "--",
+            host.executable(),
+            "-c",
+            _INVOCATION_PROBE_HELPER_CODE,
+            str(gate_path),
+            str(max(1.0, timeout_seconds)),
+        ]
+        _invocation_probe_command(
+            host,
+            start_command,
+            deadline,
+            "transient_unit_start_failed",
+        )
+        summary["transient_unit_created"] = True
+
+        unit_before = _invocation_probe_wait_for_unit(host, unit_name, deadline)
+        _invocation_probe_validate_unit(unit_before, unit_name)
+        helper_pid = _positive_int(unit_before.get("MainPID"), "unit_identity_missing")
+        helper_start_ticks = _invocation_probe_start_ticks(host, helper_pid)
+        helper_cgroup = _invocation_probe_process_cgroup(host, helper_pid)
+        unit_control_group = unit_before["ControlGroup"]
+        if helper_cgroup != unit_control_group:
+            raise _InvocationProbeFailure("helper_cgroup_mismatch")
+        if not _is_descendant_cgroup(unit_control_group, enclosing_before["ControlGroup"]):
+            raise _InvocationProbeFailure("helper_cgroup_mismatch")
+
+        enclosing_during = _invocation_probe_show_enclosing(host, enclosing_unit, deadline)
+        manager_during = _invocation_probe_manager_identity(host, enclosing_during)
+        if not _same_enclosing_identity(enclosing_before, enclosing_during):
+            raise _InvocationProbeFailure("enclosing_user_service_restarted")
+        if manager_before != manager_during:
+            raise _InvocationProbeFailure("user_manager_identity_changed")
+        summary["enclosing_identity_stable"] = True
+        summary["user_manager_identity_stable"] = True
+
+        unit_crosscheck = _invocation_probe_show_unit(host, unit_name, deadline)
+        _invocation_probe_validate_unit(unit_crosscheck, unit_name)
+        if not _same_unit_identity(unit_before, unit_crosscheck):
+            raise _InvocationProbeFailure("unit_identity_changed")
+        if _invocation_probe_start_ticks(host, helper_pid) != helper_start_ticks:
+            raise _InvocationProbeFailure("helper_identity_changed")
+        summary["unit_identity_verified"] = True
+
+        try:
+            pidfd = host.open_pidfd(helper_pid)
+        except OSError as exc:
+            raise _InvocationProbeFailure("pidfd_open_failed") from exc
+        summary["pidfd_opened"] = True
+        host.release_helper(gate_path)
+        if not host.pidfd_exited(pidfd, _invocation_probe_remaining(host, deadline)):
+            raise _InvocationProbeFailure("helper_exit_timeout")
+
+        _invocation_probe_wait_for_empty_cgroup(host, unit_control_group, deadline)
+        summary["cgroup_drained"] = True
+        unit_after = _invocation_probe_show_unit(host, unit_name, deadline)
+        if not _same_queryable_unit_identity(unit_before, unit_after):
+            raise _InvocationProbeFailure("unit_identity_not_queryable")
+        summary["unit_identity_queryable_after_exit"] = True
+
+        enclosing_after = _invocation_probe_show_enclosing(host, enclosing_unit, deadline)
+        manager_after = _invocation_probe_manager_identity(host, enclosing_after)
+        if not _same_enclosing_identity(enclosing_before, enclosing_after):
+            raise _InvocationProbeFailure("enclosing_user_service_restarted")
+        if manager_before != manager_after:
+            raise _InvocationProbeFailure("user_manager_identity_changed")
+    except _InvocationProbeFailure as exc:
+        failure_code = exc.code
+    except (OSError, ValueError):
+        failure_code = "host_operation_failed"
+    finally:
+        cleanup_deadline = host.monotonic() + _INVOCATION_PROBE_CLEANUP_SECONDS
+        cleanup_complete = True
+        if pidfd is not None:
+            try:
+                host.close_pidfd(pidfd)
+            except OSError:
+                cleanup_complete = False
+        if unit_cleanup_needed:
+            cleanup_complete = (
+                _invocation_probe_cleanup_unit(
+                    host,
+                    unit_name,
+                    unit_control_group,
+                    cleanup_deadline,
+                )
+                and cleanup_complete
+            )
+        if state_dir is not None:
+            try:
+                host.remove_state_dir(state_dir)
+            except OSError:
+                cleanup_complete = False
+        summary["cleanup_complete"] = cleanup_complete
+        if not cleanup_complete and failure_code is None:
+            failure_code = "cleanup_incomplete"
+
+    summary["failure_code"] = failure_code
+    summary["status"] = "passed" if failure_code is None else "failed"
+    return summary
+
+
+def _invocation_probe_command(host, command, deadline, failure_code, allow_failure=False):
+    try:
+        completed = host.run(command, _invocation_probe_remaining(host, deadline))
+    except subprocess.TimeoutExpired as exc:
+        raise _InvocationProbeFailure("timeout") from exc
+    except FileNotFoundError as exc:
+        raise _InvocationProbeFailure("required_command_unavailable") from exc
+    except OSError as exc:
+        raise _InvocationProbeFailure("host_operation_failed") from exc
+    if completed.returncode != 0 and not allow_failure:
+        raise _InvocationProbeFailure(failure_code)
+    return completed
+
+
+def _invocation_probe_remaining(host, deadline):
+    remaining = deadline - host.monotonic()
+    if remaining <= 0:
+        raise _InvocationProbeFailure("timeout")
+    return max(0.01, remaining)
+
+
+def _invocation_probe_show_enclosing(host, unit_name, deadline):
+    completed = _invocation_probe_command(
+        host,
+        [
+            "systemctl",
+            "show",
+            unit_name,
+            "--no-page",
+            "--property=Id",
+            "--property=InvocationID",
+            "--property=ControlGroup",
+            "--property=KillMode",
+            "--property=MainPID",
+        ],
+        deadline,
+        "enclosing_user_service_unavailable",
+    )
+    properties = _invocation_probe_properties(completed.stdout)
+    if properties.get("Id") != unit_name:
+        raise _InvocationProbeFailure("enclosing_identity_missing")
+    if not _is_invocation_id(properties.get("InvocationID")):
+        raise _InvocationProbeFailure("enclosing_identity_missing")
+    if not _is_absolute_cgroup(properties.get("ControlGroup")):
+        raise _InvocationProbeFailure("enclosing_identity_missing")
+    if properties.get("KillMode") not in _INVOCATION_PROBE_SUITABLE_KILL_MODES:
+        raise _InvocationProbeFailure("enclosing_kill_mode_unsuitable")
+    _positive_int(properties.get("MainPID"), "user_manager_identity_missing")
+    return properties
+
+
+def _invocation_probe_manager_identity(host, enclosing):
+    manager_pid = _positive_int(enclosing.get("MainPID"), "user_manager_identity_missing")
+    start_ticks = _invocation_probe_start_ticks(host, manager_pid)
+    process_cgroup = _invocation_probe_process_cgroup(host, manager_pid)
+    if (
+        process_cgroup != enclosing["ControlGroup"]
+        and not _is_descendant_cgroup(process_cgroup, enclosing["ControlGroup"])
+    ):
+        raise _InvocationProbeFailure("user_manager_identity_missing")
+    return manager_pid, start_ticks, process_cgroup
+
+
+def _invocation_probe_show_unit(host, unit_name, deadline, allow_missing=False):
+    completed = _invocation_probe_command(
+        host,
+        [
+            "systemctl",
+            "--user",
+            "show",
+            unit_name,
+            "--no-page",
+            "--property=Id",
+            "--property=InvocationID",
+            "--property=ControlGroup",
+            "--property=MainPID",
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=LoadState",
+            "--property=KillMode",
+            "--property=RemainAfterExit",
+            "--property=Type",
+        ],
+        deadline,
+        "unit_identity_unavailable",
+        allow_failure=allow_missing,
+    )
+    if completed.returncode != 0 and allow_missing:
+        return {"LoadState": "not-found"}
+    return _invocation_probe_properties(completed.stdout)
+
+
+def _invocation_probe_wait_for_unit(host, unit_name, deadline):
+    while True:
+        properties = _invocation_probe_show_unit(host, unit_name, deadline, allow_missing=True)
+        if properties.get("LoadState") == "loaded" and _int_or_zero(properties.get("MainPID")) > 0:
+            return properties
+        if properties.get("LoadState") not in {None, "", "not-found", "loaded"}:
+            raise _InvocationProbeFailure("unit_identity_missing")
+        host.sleep(min(0.02, _invocation_probe_remaining(host, deadline)))
+
+
+def _invocation_probe_validate_unit(properties, unit_name):
+    if properties.get("Id") != unit_name:
+        raise _InvocationProbeFailure("unit_identity_missing")
+    if not _is_invocation_id(properties.get("InvocationID")):
+        raise _InvocationProbeFailure("unit_identity_missing")
+    if not _is_absolute_cgroup(properties.get("ControlGroup")):
+        raise _InvocationProbeFailure("unit_identity_missing")
+    if properties.get("KillMode") != "control-group":
+        raise _InvocationProbeFailure("unit_property_mismatch")
+    if properties.get("RemainAfterExit") != "yes":
+        raise _InvocationProbeFailure("unit_property_mismatch")
+    if properties.get("Type") != "oneshot":
+        raise _InvocationProbeFailure("unit_property_mismatch")
+    _positive_int(properties.get("MainPID"), "unit_identity_missing")
+
+
+def _invocation_probe_start_ticks(host, pid):
+    try:
+        stat = host.read_text(f"/proc/{pid}/stat").strip()
+    except OSError as exc:
+        raise _InvocationProbeFailure("process_identity_missing") from exc
+    closing = stat.rfind(")")
+    fields = stat[closing + 1 :].split() if closing >= 0 else []
+    if len(fields) < 20:
+        raise _InvocationProbeFailure("process_identity_missing")
+    return _positive_int(fields[19], "process_identity_missing")
+
+
+def _invocation_probe_process_cgroup(host, pid):
+    try:
+        lines = host.read_text(f"/proc/{pid}/cgroup").splitlines()
+    except OSError as exc:
+        raise _InvocationProbeFailure("process_identity_missing") from exc
+    unified = [line.split("::", 1)[1] for line in lines if line.startswith("0::")]
+    if len(unified) != 1 or not _is_absolute_cgroup(unified[0]):
+        raise _InvocationProbeFailure("process_identity_missing")
+    return unified[0]
+
+
+def _invocation_probe_wait_for_empty_cgroup(host, control_group, deadline):
+    events_path = _invocation_probe_cgroup_events_path(control_group)
+    while True:
+        try:
+            events = _invocation_probe_properties(host.read_text(events_path), separator=" ")
+        except OSError as exc:
+            raise _InvocationProbeFailure("cgroup_events_unavailable") from exc
+        if events.get("populated") == "0":
+            return
+        if events.get("populated") != "1":
+            raise _InvocationProbeFailure("cgroup_events_invalid")
+        host.sleep(min(0.02, _invocation_probe_remaining(host, deadline)))
+
+
+def _invocation_probe_cleanup_unit(host, unit_name, control_group, deadline):
+    cleanup_ok = True
+    for action in ("stop", "reset-failed"):
+        try:
+            _invocation_probe_command(
+                host,
+                ["systemctl", "--user", action, unit_name],
+                deadline,
+                "cleanup_incomplete",
+                allow_failure=True,
+            )
+        except _InvocationProbeFailure:
+            cleanup_ok = False
+    while cleanup_ok:
+        try:
+            properties = _invocation_probe_show_unit(host, unit_name, deadline, allow_missing=True)
+        except _InvocationProbeFailure:
+            cleanup_ok = False
+            break
+        if properties.get("LoadState") in {None, "", "not-found"}:
+            break
+        try:
+            host.sleep(min(0.02, _invocation_probe_remaining(host, deadline)))
+        except _InvocationProbeFailure:
+            cleanup_ok = False
+    if control_group:
+        try:
+            events = _invocation_probe_properties(
+                host.read_text(_invocation_probe_cgroup_events_path(control_group)),
+                separator=" ",
+            )
+            cleanup_ok = events.get("populated") == "0" and cleanup_ok
+        except FileNotFoundError:
+            pass
+        except OSError:
+            cleanup_ok = False
+    return cleanup_ok
+
+
+def _invocation_probe_properties(output, separator="="):
+    properties = {}
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or separator not in line:
+            continue
+        key, value = line.split(separator, 1)
+        properties[key.strip()] = value.strip()
+    return properties
+
+
+def _invocation_probe_cgroup_events_path(control_group):
+    relative = Path(control_group.lstrip("/"))
+    if ".." in relative.parts:
+        raise _InvocationProbeFailure("helper_cgroup_mismatch")
+    return Path("/sys/fs/cgroup") / relative / "cgroup.events"
+
+
+def _is_uuid(value):
+    try:
+        return str(uuid.UUID(str(value))) == str(value).lower()
+    except (ValueError, AttributeError):
+        return False
+
+
+def _is_invocation_id(value):
+    if not isinstance(value, str) or len(value) != 32:
+        return False
+    return all(character in "0123456789abcdefABCDEF" for character in value)
+
+
+def _is_absolute_cgroup(value):
+    return isinstance(value, str) and value.startswith("/") and ".." not in Path(value).parts
+
+
+def _is_descendant_cgroup(child, parent):
+    parent = parent.rstrip("/")
+    return child.startswith(parent + "/")
+
+
+def _positive_int(value, failure_code):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise _InvocationProbeFailure(failure_code) from exc
+    if parsed <= 0:
+        raise _InvocationProbeFailure(failure_code)
+    return parsed
+
+
+def _int_or_zero(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _same_enclosing_identity(left, right):
+    keys = ("Id", "InvocationID", "ControlGroup", "KillMode", "MainPID")
+    return all(left.get(key) == right.get(key) for key in keys)
+
+
+def _same_unit_identity(left, right):
+    keys = ("Id", "InvocationID", "ControlGroup", "MainPID", "KillMode", "RemainAfterExit", "Type")
+    return all(left.get(key) == right.get(key) for key in keys)
+
+
+def _same_queryable_unit_identity(left, right):
+    keys = ("Id", "InvocationID", "ControlGroup", "KillMode", "RemainAfterExit", "Type")
+    return all(left.get(key) == right.get(key) for key in keys)
+
+
+def _write_invocation_supervision_probe_text(summary):
+    lines = [
+        f"invocation_supervision_probe: {summary['status']}",
+        f"linux: {str(summary['linux']).lower()}",
+        f"pidfd_open: {str(summary['pidfd_open']).lower()}",
+        f"linger: {str(summary['linger']).lower()}",
+        f"enclosing_kill_mode: {summary.get('enclosing_kill_mode') or 'unknown'}",
+        f"identity_stable: {str(summary['enclosing_identity_stable'] and summary['user_manager_identity_stable']).lower()}",
+        f"cgroup_drained: {str(summary['cgroup_drained']).lower()}",
+        f"cleanup_complete: {str(summary['cleanup_complete']).lower()}",
+        f"provider_calls: {summary['provider_calls']}",
+    ]
+    if summary.get("failure_code"):
+        lines.append(f"failure_code: {summary['failure_code']}")
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 
