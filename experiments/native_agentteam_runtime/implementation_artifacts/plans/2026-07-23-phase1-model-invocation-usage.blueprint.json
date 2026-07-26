@@ -45,6 +45,7 @@
     },
     "profile_candidate_root_policy": "explicit_distinct_roots_same_git_common_directory",
     "runtime_release_policy": "immutable_prelaunch_run_binding",
+    "versioned_execution_artifact_namespace_policy": "frozen_and_runs_may_use_bounded_version_subdirectories_under_one_work_root",
     "blueprint_freeze_integrity_policy": "trusted_caller_expected_authoring_mode_external_manifest_deterministic_regeneration_and_rename_noreplace_staging_publish",
     "preflight_release_ancestry_policy": "pre04_ancestor_of_release_source_ancestor_of_materialization_source",
     "candidate_integration_verification_environment": "candidate_runtime_pythonpath_first_and_outer_launcher_selection_removed",
@@ -70,7 +71,7 @@
     }
   },
   "approval": {
-    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase1-model-invocation-usage-contract-review.v2.json",
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase1-model-invocation-usage-contract-review.v3.json",
     "schema_path": "experiments/native_agentteam_runtime/schemas/phase1_contract_review.schema.json",
     "required_decision": "approved",
     "git_object_format_required": true,

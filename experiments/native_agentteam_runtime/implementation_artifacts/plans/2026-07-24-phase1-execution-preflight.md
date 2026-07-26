@@ -913,7 +913,9 @@ For an initial `agentteam run`, which currently has no `--project-root`, the
 launcher derives the work root from the frozen taskpack path and `--run-root`,
 reads the frozen approval-bound release identity directly as bounded JSON, and
 selects that release before importing runtime code. It fails closed when those
-locations disagree.
+locations disagree. Bounded version components below the enclosing `frozen`
+and `runs` namespaces are allowed so immutable earlier artifacts need not be
+moved or overwritten.
 
 The reviewed PRE-04 launcher must be installed through
 `scripts/install-local.sh` after source merge. Verification invokes the actual
@@ -961,7 +963,9 @@ must exactly match the loaded release and its new binding.
     implicit `continue` reports that state and never falls back to an older
     resumable run;
 14. an explicitly selected older implementation run remains available when its
-    identity and release binding validate.
+    identity and release binding validate;
+15. `frozen/vN/<taskpack>` and `runs/vN/<taskpack>` resolve to the same work
+    root, while paths under different work roots fail before runtime import.
 
 ### Acceptance
 
@@ -975,6 +979,7 @@ must exactly match the loaded release and its new binding.
   selection;
 - unique creation sequences, not mtimes or lexical names, determine latest;
 - launcher-selected identity and runtime-validated identity are identical;
+- versioned frozen and run namespaces preserve immutable earlier evidence;
 - focused tests and the full native-runtime discovery suite pass.
 
 ## Final Preflight Verification

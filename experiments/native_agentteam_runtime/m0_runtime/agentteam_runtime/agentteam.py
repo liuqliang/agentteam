@@ -2676,10 +2676,12 @@ def _profile_and_work_root_for_args_run_dir(args, project_root):
 
 def _infer_work_root_from_run_dir(run_dir):
     run_dir = Path(run_dir).resolve()
-    if run_dir.parent.name == "runs":
-        return run_dir.parent.parent
-    if run_dir.parent.parent.name == "runs" and run_dir.parent.name == run_dir.name:
-        return run_dir.parent.parent.parent
+    namespaced_work_root = _work_root_for_namespace(
+        run_dir.parent,
+        "runs",
+    )
+    if namespaced_work_root is not None:
+        return namespaced_work_root
     return run_dir.parent
 
 
@@ -3056,11 +3058,25 @@ def _handle_run(args):
 def _infer_work_root_for_run(run_root, frozen_taskpack_dir):
     run_root = Path(run_root).resolve()
     frozen_taskpack_dir = Path(frozen_taskpack_dir).resolve()
-    if run_root.name == "runs":
-        return run_root.parent.resolve()
-    if frozen_taskpack_dir.parent.name == "frozen":
-        return frozen_taskpack_dir.parent.parent.resolve()
+    run_work_root = _work_root_for_namespace(run_root, "runs")
+    if run_work_root is not None:
+        return run_work_root
+    frozen_work_root = _work_root_for_namespace(
+        frozen_taskpack_dir.parent,
+        "frozen",
+    )
+    if frozen_work_root is not None:
+        return frozen_work_root
     return run_root.parent.resolve()
+
+
+def _work_root_for_namespace(path, namespace):
+    current = Path(path).resolve()
+    while current != current.parent:
+        if current.name == namespace:
+            return current.parent.resolve()
+        current = current.parent
+    return None
 
 
 def _handle_continue(args):
@@ -9886,6 +9902,7 @@ def _prepare_bound_implementation_run(
             taskpack_id=taskpack_id,
             release_identity=selection["release"],
             expected_release=expected,
+            run_root=run_dir.parent,
         )
     updated_selection = {
         **selection,

@@ -22,6 +22,7 @@ RUNTIME_RELEASE_BINDING_SCHEMA_VERSION = "runtime_release_binding.v1"
 RUN_IDENTITY_SCHEMA_VERSION = "run_identity.v1"
 RUNTIME_RELEASE_STORE_ENV = "AGENTTEAM_RUNTIME_RELEASE_ROOT"
 TERMINAL_RUN_STATUSES = {"idle", "completed", "failed", "cancelled", "canceled"}
+RUN_NAMESPACE_PATTERN = re.compile(r"^v[1-9][0-9]*$")
 
 
 class AgentTeamReleaseError(RuntimeError):
@@ -600,13 +601,18 @@ def publish_implementation_run(
     release_identity,
     expected_release=None,
     implementation_run_id=None,
+    run_root=None,
 ):
     """Publish paired immutable records with a same-filesystem no-replace rename."""
     work_root = Path(work_root).resolve()
-    run_root = work_root / "runs"
+    canonical_run_root = work_root / "runs"
+    run_root = _validated_run_root(
+        canonical_run_root,
+        run_root,
+    )
     staging_root = work_root / "run-staging"
     state_root = work_root / "state"
-    for path in (run_root, staging_root, state_root):
+    for path in (canonical_run_root, run_root, staging_root, state_root):
         path.mkdir(parents=True, exist_ok=True)
     with (state_root / "run_creation.lock").open("a+b") as lock_stream:
         fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
@@ -839,6 +845,47 @@ def adopt_legacy_implementation_run(
     )
 
 
+def _validated_run_root(canonical_run_root, requested_run_root):
+    canonical_run_root = Path(canonical_run_root).resolve()
+    if requested_run_root is None:
+        return canonical_run_root
+    requested = Path(requested_run_root).expanduser()
+    if requested.is_symlink():
+        raise AgentTeamReleaseError(
+            f"versioned run root must not be a symlink: {requested}"
+        )
+    requested = requested.resolve()
+    if requested == canonical_run_root:
+        return requested
+    if (
+        requested.parent != canonical_run_root
+        or not RUN_NAMESPACE_PATTERN.fullmatch(requested.name)
+    ):
+        raise AgentTeamReleaseError(
+            "run_root must be the project runs root or one bounded vN namespace"
+        )
+    return requested
+
+
+def _iter_run_identity_directories(run_root):
+    run_root = Path(run_root).resolve()
+    for child in sorted(run_root.iterdir(), key=lambda path: path.name):
+        if child.is_symlink() or not child.is_dir():
+            raise AgentTeamReleaseError(
+                f"unsafe direct run child blocks identity scan: {child.name}"
+            )
+        if not RUN_NAMESPACE_PATTERN.fullmatch(child.name):
+            yield child
+            continue
+        for nested in sorted(child.iterdir(), key=lambda path: path.name):
+            if nested.is_symlink() or not nested.is_dir():
+                raise AgentTeamReleaseError(
+                    "unsafe versioned run child blocks identity scan: "
+                    f"{child.name}/{nested.name}"
+                )
+            yield nested
+
+
 def _scan_run_identities_for_creation(
     work_root,
     *,
@@ -853,7 +900,7 @@ def _scan_run_identities_for_creation(
     evidence = []
     legacy = []
     sequences = {}
-    for child in sorted(run_root.iterdir(), key=lambda path: path.name):
+    for child in _iter_run_identity_directories(run_root):
         if child.is_symlink() or not child.is_dir():
             raise AgentTeamReleaseError(f"unsafe direct run child blocks creation: {child.name}")
         state_dir = child / "state"
@@ -898,14 +945,14 @@ def _scan_run_identities_for_creation(
 
 
 def scan_run_identities(work_root, expected_project_key=None):
-    """Strict direct-child scan used by both allocation and implicit selection."""
+    """Strict direct-or-versioned scan used by allocation and implicit selection."""
     run_root = Path(work_root).resolve() / "runs"
     if not run_root.exists():
         return {"implementation_runs": [], "acceptance_evidence_runs": []}
     implementations = []
     evidence = []
     sequences = {}
-    for child in sorted(run_root.iterdir(), key=lambda path: path.name):
+    for child in _iter_run_identity_directories(run_root):
         if child.is_symlink() or not child.is_dir():
             raise AgentTeamReleaseError(f"unsafe run child blocks implicit selection: {child.name}")
         state_dir = child / "state"

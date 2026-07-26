@@ -818,16 +818,15 @@ workers.
 
 The current execution approval record is:
 
-`experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase1-model-invocation-usage-contract-review.v2.json`
+`experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase1-model-invocation-usage-contract-review.v3.json`
 
-The immutable v1 record remains retained as evidence for the first frozen
-package and stopped run. That run exposed a pre-Phase-1 runtime defect:
+The immutable v1 and v2 records remain retained as evidence. The v1 frozen
+package and stopped run exposed a pre-Phase-1 runtime defect:
 integration verification correctly selected the candidate worktree through
 `PYTHONPATH` but inherited the outer release launcher's
 `AGENTTEAM_LAUNCHER_SELECTION`, so candidate CLI subprocesses rejected their
 own module root. Commit `78d67d5` removes that outer-only variable from primary
-and worker-added integration verification environments. The v2 review binds
-the corrected release; it does not rewrite or delete v1 evidence.
+and worker-added integration verification environments.
 
 The accepted P1-01 patch from that stopped run was recovered from its immutable
 attempt artifact, independently reviewed, and verified with the focused
@@ -837,6 +836,14 @@ not a v2 backlog item. The v2 blueprint records that exact commit, starts at
 P1-02A, and gives P1-02A bounded read access to the recovered schemas, parser,
 event vocabulary, and tests. This avoids charging a second model invocation
 for byte-equivalent P1-01 work while preserving the original v1 run evidence.
+
+The v2 approval produced a valid frozen package but its launcher stopped before
+creating a run or provider invocation: the immutable-release selector only
+recognized direct `frozen/<taskpack>` and `runs/<taskpack>` layouts, while
+preserving earlier artifacts requires bounded `frozen/v2/<taskpack>` and
+`runs/v2/<taskpack>` namespaces. The v3 review binds the launcher correction
+that resolves the enclosing `frozen` and `runs` namespace, requires both paths
+to share one work root, and retains v1 and v2 evidence without moving it.
 
 It conforms to:
 
@@ -1001,6 +1008,9 @@ G5 passes only when:
   the selected identity digest for runtime validation without reselection;
 - the launcher resolves an existing run's binding before importing runtime code
   for `continue`;
+- bounded version subdirectories below the same `frozen` and `runs`
+  namespaces resolve to one work root without moving immutable earlier
+  taskpack or run evidence;
 - manifest or source-commit mismatch fails before any worker/provider action;
 - release garbage collection protects every valid bound release;
 - changing the active release affects future runs only;

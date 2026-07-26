@@ -110,8 +110,11 @@ def _initial_run_selection(argv):
     supplied_run_root = Path(run_root_value).expanduser().resolve()
     run_root = supplied_run_root.parent if supplied_run_root.name == taskpack_id else supplied_run_root
     run_dir = (run_root / taskpack_id).resolve()
-    frozen_work_root = frozen.parent.parent.resolve() if frozen.parent.name == "frozen" else None
-    run_work_root = run_root.parent.resolve() if run_root.name == "runs" else None
+    frozen_work_root = _work_root_for_namespace(
+        frozen.parent,
+        "frozen",
+    )
+    run_work_root = _work_root_for_namespace(run_root, "runs")
     context = taskpack.get("context") if isinstance(taskpack.get("context"), dict) else {}
     expected = {
         key: value
@@ -150,6 +153,15 @@ def _initial_run_selection(argv):
     }
 
 
+def _work_root_for_namespace(path, namespace):
+    current = Path(path).resolve()
+    while current != current.parent:
+        if current.name == namespace:
+            return current.parent.resolve()
+        current = current.parent
+    return None
+
+
 def _existing_run_selection(argv, command):
     project = _project_context(argv)
     explicit_run = _arg_value(argv, "--run-dir")
@@ -157,7 +169,10 @@ def _existing_run_selection(argv, command):
     if not project and explicit_run:
         run_dir = Path(explicit_run).expanduser().resolve()
         project = {
-            "work_root": run_dir.parent.parent.resolve(),
+            "work_root": (
+                _work_root_for_namespace(run_dir.parent, "runs")
+                or run_dir.parent.parent.resolve()
+            ),
             "project_key": None,
         }
     if not project:
