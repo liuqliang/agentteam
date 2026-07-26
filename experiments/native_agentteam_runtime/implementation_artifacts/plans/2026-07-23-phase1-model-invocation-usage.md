@@ -815,9 +815,18 @@ materializing the execution taskpack. Frozen taskpacks remain immutable; a
 post-freeze review cannot silently rewrite the contract consumed by later
 workers.
 
-The fixed approval record is:
+The current execution approval record is:
 
-`experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase1-model-invocation-usage-contract-review.v1.json`
+`experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase1-model-invocation-usage-contract-review.v2.json`
+
+The immutable v1 record remains retained as evidence for the first frozen
+package and stopped run. That run exposed a pre-Phase-1 runtime defect:
+integration verification correctly selected the candidate worktree through
+`PYTHONPATH` but inherited the outer release launcher's
+`AGENTTEAM_LAUNCHER_SELECTION`, so candidate CLI subprocesses rejected their
+own module root. Commit `78d67d5` removes that outer-only variable from primary
+and worker-added integration verification environments. The v2 review binds
+the corrected release; it does not rewrite or delete v1 evidence.
 
 It conforms to:
 
