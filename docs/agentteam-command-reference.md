@@ -271,11 +271,18 @@ Important behavior:
 - `agentteam.db` is a rebuildable projection. Frozen taskpacks, run
   directories, `events.jsonl`, reports, patches, and state snapshots remain the
   authoritative records.
+- Model-invocation authority likewise remains in immutable per-invocation
+  `started.json`/`terminal.json` records and their canonical
+  `model_invocation_started`/`model_invocation_usage_recorded` events. SQLite
+  may join and aggregate those records, but it cannot create a missing start,
+  close an open invocation, repair provider usage, or change an authoritative
+  token total.
 - `rebuild` scans `frozen/` and `runs/`, writes a temporary database, then
   replaces the old projection only after a successful rebuild.
 - `check` compares projected counts and artifact digest with a fresh file scan
   and reports mismatches such as stale event counts or changed artifact
-  content. It does not mutate files.
+  content. Invocation checks also compare the authority invocation digest,
+  coverage, open count, and token aggregates. It does not mutate files.
 - The projection indexes runs, taskpacks, events, tasks, compact evidence
   summaries, artifact hashes/sizes, and per-run token/stat aggregates.
 - M60 read-through commands use the DB only when `agentteam db check` would
@@ -309,6 +316,9 @@ Examples:
 agentteam stats
 agentteam stats --json
 agentteam stats --project-root /path/to/repo --json
+agentteam stats --implementation-run phase1-model-invocation-usage --gate-epoch 1 --json
+agentteam stats --run <attempt-scoped-run-id> --stage acceptance_live_smoke --json
+agentteam stats --run-kind acceptance_evidence --backend codex --model <model> --json
 ```
 
 Behavior:
@@ -320,7 +330,31 @@ Behavior:
   and `next_action: run agentteam db rebuild`.
 - Does not rebuild the DB automatically and does not mutate runtime state.
 - JSON output includes counts, evidence status counts, artifact type/retention
-  summaries, artifact bytes, and aggregate token usage.
+  summaries, artifact bytes, and `model_invocation_usage`.
+- Invocation output includes `invocation_count`, `open_invocations`,
+  `lifecycle_terminal_coverage`, `token_usage_coverage`,
+  `usage_status_counts`, `reported_token_totals`,
+  `partial_known_token_lower_bounds`, bounded reason counts, the authority
+  invocation digest, and attribution breakdowns.
+- Both coverage denominators are unique starts whose immutable
+  `coverage_class` is `supported_model_invocation`; they are not task,
+  terminal-event, or completed-task counts. Lifecycle coverage counts any valid
+  terminal. Token coverage counts only `usage_status: reported`.
+- `reported_token_totals` are exact only for reported invocations. When token
+  coverage is incomplete they are a reported-subset total, not the full-run
+  cost. Proven invocation-scoped fields from partial records stay separate in
+  `partial_known_token_lower_bounds`; ambiguous session-cumulative snapshots
+  are excluded.
+- Supported filters are `--run`, `--run-kind`, `--implementation-run`,
+  `--gate-epoch`, `--pursue`, `--round`, `--stage`, `--role`, `--task`,
+  `--attempt`, `--backend`, and `--model`. Filters select a view of the same
+  file authority; they do not change projection or lifecycle records.
+- Compact text reports the exact reported total, lifecycle/token coverage,
+  any partial lower bound, the largest stage, and a next action when coverage
+  is incomplete. Use `--json` for all fields and breakdowns.
+- Historical legacy `token_usage` task summaries remain visible for
+  compatibility, are labeled legacy/non-benchmark-counted, and never silently
+  satisfy invocation coverage.
 
 ### `agentteam gc`
 
@@ -386,6 +420,157 @@ Behavior:
 - Global release deletion is explicit: `agentteam gc --global-releases` only
   explains protected and deletable releases; `--force` is required to delete
   orphaned global release roots.
+
+## Phase 1 Invocation Accounting And Completion Gates
+
+The Phase 1 accounting contract counts one actual provider launch attempt as
+one invocation. An invocation ID is durable before provider launch; a retry
+that launches the provider again receives another ID and represents another
+real cost. Replaying the same immutable start or terminal record preserves its
+IDs and counts once.
+
+The schema and controller implementations are:
+
+- [`model_invocation_started.schema.json`](../experiments/native_agentteam_runtime/schemas/model_invocation_started.schema.json)
+- [`model_invocation_usage.schema.json`](../experiments/native_agentteam_runtime/schemas/model_invocation_usage.schema.json)
+- [`model_invocation_live_smoke.schema.json`](../experiments/native_agentteam_runtime/schemas/model_invocation_live_smoke.schema.json)
+- [`phase1_usage_finalization.schema.json`](../experiments/native_agentteam_runtime/schemas/phase1_usage_finalization.schema.json)
+- [`post_backlog_gate_approval.schema.json`](../experiments/native_agentteam_runtime/schemas/post_backlog_gate_approval.schema.json)
+- [`phase1_usage_acceptance.py`](../experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase1_usage_acceptance.py)
+- [`phase1_usage_report.py`](../experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase1_usage_report.py)
+
+### Token units and lifecycle states
+
+Token fields are provider-reported token units. They are not bytes, elapsed
+seconds, request counts, money, or prompt estimates:
+
+- `input_tokens` is stored as reported. Do not subtract
+  `cached_input_tokens`.
+- `cached_input_tokens` is a diagnostic subset unless the provider contract
+  says otherwise. Do not add it to `total_tokens`.
+- `reasoning_tokens` is displayed separately. Do not add it to
+  `output_tokens` or `total_tokens` when the provider already includes it.
+- `total_tokens` is the provider total; do not recompute it from the other
+  fields when their provider semantics are unknown.
+
+An invocation lifecycle is `open` until one immutable terminal record exists,
+then `terminal`. Terminal runtime outcomes are `completed`, `failed`,
+`blocked`, `cancelled`, `timed_out`, `launch_failed`, `missing_result`,
+`invalid_result`, or `recovered_orphan`. This outcome is independent of token
+availability:
+
+| `usage_status` | Meaning | Coverage effect |
+| --- | --- | --- |
+| `reported` | Provider usage is attributable to this invocation. | Counts for lifecycle and token coverage. |
+| `partial` | Only bounded invocation-scoped fields are known. | Counts for lifecycle coverage; known fields may contribute only to the separate lower bound. |
+| `unavailable` | The invocation terminalized without attributable usage; a bounded reason is retained. | Counts for lifecycle coverage, not token coverage. |
+| `not_applicable` | The adapter was fixed as non-provider/non-applicable at start. | Excluded from both supported-invocation denominators. |
+
+Open invocations count in both supported denominators but neither numerator.
+They are reported separately and block verified completion and 100% coverage.
+Legacy task-result summaries predate this lifecycle contract: they remain
+diagnostic, are never interpreted as zero usage, and cannot pass a Phase 1
+benchmark gate.
+
+### Candidate live gate
+
+The presence of these commands, deterministic tests, or worker prose is not
+evidence that Phase 1 is complete. `P1-LIVE` requires one explicitly authorized
+real provider call from the exact clean candidate integration worktree:
+
+```bash
+env PYTHONPATH=<candidate-worktree>/experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.phase1_usage_acceptance \
+  --profile-project-root <source-checkout-with-agentteam-profile> \
+  --candidate-project-root <clean-integration-worktree> \
+  --implementation-run-id phase1-model-invocation-usage \
+  --gate-epoch <current-epoch> \
+  --acceptance-series-id <phase1-run-id>-acceptance \
+  --attempt-id <fresh-attempt-id> \
+  --work-root <configured-project-work-root> \
+  --expected-commit <verified-integration-sha> \
+  --authorize-live-call
+```
+
+`--profile-project-root` is the checkout that owns
+`.agentteam/profile.json`; `--candidate-project-root` is the clean integration
+worktree under test. They must share one Git common directory, but the candidate
+does not need its own `.agentteam`. `--work-root` must exactly equal the
+profile's configured work root, and `PYTHONPATH` must resolve the controller
+and Phase 1 modules from the candidate. Runtime output stays outside the
+candidate source tree. `--timeout-seconds` is optional and must be from 1
+through 900 seconds.
+
+The controller derives
+`<acceptance-run-id> = <acceptance-series-id>-<attempt-id>`. Only its atomically
+published
+`<work-root>/runs/<acceptance-run-id>/acceptance/model-invocation-live-smoke.v1.json`
+with `controller_validation_status: passed` can pass `P1-LIVE`. A failed or
+interrupted attempt remains cost-visible but requires a fresh attempt ID for
+another real call.
+
+### Report completion and final operator approval
+
+After `P1-LIVE` passes, run the deterministic report/finalizer transaction
+against the same current epoch, configured work root, selected passed
+acceptance run, and clean candidate worktree:
+
+```bash
+env PYTHONPATH=<candidate-worktree>/experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.phase1_usage_report complete \
+  --profile-project-root <source-checkout-with-agentteam-profile> \
+  --candidate-project-root <clean-integration-worktree> \
+  --implementation-run-id phase1-model-invocation-usage \
+  --gate-epoch <current-epoch> \
+  --work-root <configured-project-work-root> \
+  --acceptance-series-id <phase1-run-id>-acceptance \
+  --run-id <selected-passed-acceptance-run-id> \
+  --validated-code-sha <P1-LIVE-validated-sha>
+```
+
+The command accepts canonical deterministic evidence and the controller-owned
+P1-LIVE artifact only. It creates or safely resumes one clean single-parent
+report commit whose parent is `validated_code_sha` and whose diff contains
+only
+`experiments/native_agentteam_runtime/implementation_artifacts/reports/phase1-model-invocation-usage.md`
+(created by the renderer) and
+`experiments/native_agentteam_runtime/implementation_artifacts/native_runtime_roadmap.md`.
+It then atomically publishes
+`<work-root>/runs/<selected-passed-acceptance-run-id>/acceptance/phase1-usage-finalization.v1.json`.
+The external artifact carries `final_report_sha` because the source report
+cannot contain its own commit SHA. Successful finalization moves `P1-06E` only
+to `awaiting_operator_review`; it does not merge, push, activate a release, or
+approve the gate.
+
+Review the exact report-only diff, finalization artifact, evidence bindings,
+and current integration head. Compute the SHA-256 of the immutable
+finalization artifact:
+
+```bash
+sha256sum <work-root>/runs/<selected-passed-acceptance-run-id>/acceptance/phase1-usage-finalization.v1.json
+```
+
+Then run the explicit digest- and head-bound operator action, substituting the
+printed digest and the artifact's `final_report_sha`:
+
+```bash
+agentteam gate approve \
+  --project-root <source-checkout-with-agentteam-profile> \
+  --run-dir <work-root>/runs/phase1-model-invocation-usage \
+  --gate P1-06E \
+  --gate-epoch <current-epoch> \
+  --expected-evidence-sha256 <finalization-artifact-sha256> \
+  --expected-integration-head <final_report_sha> \
+  --approve \
+  --json
+```
+
+Phase 1 remains `live_validation_pending` before P1-LIVE, remains
+`finalization_pending` until the external finalization artifact validates, and
+remains `awaiting_operator_review` until the matching immutable approval passes.
+Only current-epoch `P1-LIVE: passed` and `P1-06E: passed` permit the normal
+integration path; source merge, push, and release activation are still
+separate operator actions.
 
 ## Run Lifecycle
 

@@ -25,11 +25,11 @@ inputs are specified in:
 - [`implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json`](implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json)
 - [`implementation_artifacts/plans/2026-07-24-phase1-execution-preflight.md`](implementation_artifacts/plans/2026-07-24-phase1-execution-preflight.md)
 
-The semantic plan is complete, but execution is blocked until the no-provider
-invocation-supervision host probe, verified dependency dispatch, deterministic
-multi-item materialization, enforced post-backlog completion/gates, and
-immutable prelaunch run-release binding pass operator review and are active in
-the runtime release.
+The Phase 1 invocation-accounting and post-backlog controller surfaces are
+implemented in the candidate runtime. Their presence is not Phase 1 completion
+evidence: the current gate epoch still requires a controller-validated
+`P1-LIVE` artifact, the external `P1-06E` finalization artifact, and a matching
+immutable operator approval before integration may be recommended.
 Phase 1 crash recovery is deliberately scoped to the current local Linux host
 and requires pidfd plus a lingering systemd user transient-service authority.
 
@@ -469,6 +469,91 @@ files and symlinks before copying artifacts and writing `manifest.json`.
 The taskpack launcher currently translates `fake` and `codex` runtime backends.
 It intentionally rejects `shell` taskpack launches until shell command mapping
 has an explicit design.
+
+## Phase 1 Invocation Usage Operator Flow
+
+The detailed counting contract, lifecycle/usage states, stats filters, and
+authority boundary are in the
+[command reference](../../docs/agentteam-command-reference.md#phase-1-invocation-accounting-and-completion-gates).
+In brief:
+
+- Token values are provider-reported tokens, not bytes, time, money, or prompt
+  estimates. `cached_input_tokens` is not subtracted from `input_tokens` or
+  added to `total_tokens`; `reasoning_tokens` stays separate.
+- Unique supported durable starts are the denominator for both lifecycle and
+  token coverage. `reported`, `partial`, `unavailable`, `not_applicable`, and
+  `open` remain distinct; any open supported invocation blocks completion.
+- Exact `reported_token_totals` cover only reported invocations. Proven
+  invocation-scoped partial fields are separate lower bounds, while ambiguous
+  session-cumulative snapshots are excluded.
+- Per-invocation lifecycle files and canonical events are authority.
+  `<work_root>/agentteam.db` is a disposable, rebuildable projection and cannot
+  alter starts, terminals, coverage, or token totals.
+- `agentteam stats` can filter by run, run kind, implementation run, gate
+  epoch, pursue loop, round, stage, role, task, attempt, backend, and model.
+  Legacy summaries remain visible but are not benchmark-counted.
+
+Run the bounded candidate-runtime live controller only after operator
+authorization:
+
+```bash
+env PYTHONPATH=<candidate-worktree>/experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.phase1_usage_acceptance \
+  --profile-project-root <source-checkout-with-agentteam-profile> \
+  --candidate-project-root <clean-integration-worktree> \
+  --implementation-run-id phase1-model-invocation-usage \
+  --gate-epoch <current-epoch> \
+  --acceptance-series-id <phase1-run-id>-acceptance \
+  --attempt-id <fresh-attempt-id> \
+  --work-root <configured-project-work-root> \
+  --expected-commit <verified-integration-sha> \
+  --authorize-live-call
+```
+
+Supply the profile checkout and candidate integration worktree as distinct
+roots in the same Git common directory. The candidate must be clean, may omit
+`.agentteam`, and is the source of all Phase 1 modules through `PYTHONPATH`.
+Only the controller's atomically published, schema-valid
+`<work-root>/runs/<acceptance-series-id>-<attempt-id>/acceptance/model-invocation-live-smoke.v1.json`
+can pass `P1-LIVE`; failure records and worker prose cannot.
+
+After P1-LIVE passes, render and externally finalize the report-only commit:
+
+```bash
+env PYTHONPATH=<candidate-worktree>/experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.phase1_usage_report complete \
+  --profile-project-root <source-checkout-with-agentteam-profile> \
+  --candidate-project-root <clean-integration-worktree> \
+  --implementation-run-id phase1-model-invocation-usage \
+  --gate-epoch <current-epoch> \
+  --work-root <configured-project-work-root> \
+  --acceptance-series-id <phase1-run-id>-acceptance \
+  --run-id <selected-passed-acceptance-run-id> \
+  --validated-code-sha <P1-LIVE-validated-sha>
+```
+
+This transaction may commit only the fixed milestone report and roadmap paths.
+It publishes
+`<work-root>/runs/<selected-passed-acceptance-run-id>/acceptance/phase1-usage-finalization.v1.json`
+and advances `P1-06E` only to `awaiting_operator_review`. Review that artifact
+and the exact report-only diff, run `sha256sum` on the artifact, then bind the
+approval to both that digest and its `final_report_sha`:
+
+```bash
+agentteam gate approve \
+  --project-root <source-checkout-with-agentteam-profile> \
+  --run-dir <work-root>/runs/phase1-model-invocation-usage \
+  --gate P1-06E \
+  --gate-epoch <current-epoch> \
+  --expected-evidence-sha256 <finalization-artifact-sha256> \
+  --expected-integration-head <final_report_sha> \
+  --approve \
+  --json
+```
+
+Do not report Phase 1 complete or merge-ready before current-epoch P1-LIVE,
+external finalization, and immutable operator approval all pass. Merge, push,
+and runtime release activation remain separate operator actions.
 
 ## Relationship To Codex
 
