@@ -1,10 +1,24 @@
+import contextlib
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from agentteam_runtime.operator_report import build_run_completion_report, render_run_completion_report
+from agentteam_runtime.phase1_usage_report import (
+    FIXED_ARTIFACT_RELATIVE as PHASE1_FINALIZATION_ARTIFACT,
+    FIXED_CHANGED_PATHS,
+    REPORT_EVIDENCE_SCHEMA_VERSION,
+    REPORT_RELATIVE_PATH,
+    ROADMAP_RELATIVE_PATH,
+    Phase1UsageReportError,
+    complete_phase1_usage_report,
+    render_report_artifacts,
+    render_milestone_report,
+    validate_report_only_commit,
+)
 from agentteam_runtime.profile import build_project_profile
 from agentteam_runtime.projection_db import rebuild_project_projection_db
 
@@ -152,6 +166,190 @@ def _write_authoritative_recap(work_root, run_id, memory_path):
         },
     )
     return recap_path
+
+
+def _phase1_report_evidence(validated_code_sha):
+    digests = {
+        "acceptance_attempts_sha256": "1" * 64,
+        "deterministic_verification_sha256": "2" * 64,
+        "gate_epoch_sha256": "3" * 64,
+        "p1_live_receipt_sha256": "4" * 64,
+        "projection_invocation_sha256": "5" * 64,
+        "selected_live_artifact_sha256": "6" * 64,
+    }
+    empty_totals = {
+        "input_tokens": None,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+        "reasoning_tokens": None,
+        "total_tokens": None,
+        "contributing_invocation_count": 0,
+    }
+    reported_totals = {
+        "input_tokens": 7,
+        "cached_input_tokens": 2,
+        "output_tokens": 5,
+        "reasoning_tokens": 3,
+        "total_tokens": 12,
+        "contributing_invocation_count": 1,
+    }
+    return {
+        "schema_version": REPORT_EVIDENCE_SCHEMA_VERSION,
+        "authority": "canonical_deterministic_and_p1_live",
+        "implementation_run_id": "phase1-model-invocation-usage",
+        "gate_epoch": 1,
+        "acceptance_series_id": "phase1-acceptance",
+        "selected_acceptance_run_id": "phase1-acceptance-attempt-2",
+        "git_object_format": "sha1",
+        "validated_code_sha": validated_code_sha,
+        "evidence_digests": digests,
+        "deterministic_evidence": {
+            "status": "passed",
+            "scheduler_status": "awaiting_post_backlog_gates",
+            "task_results": [
+                {
+                    "task_id": "P1-06D",
+                    "attempt_id": "P1-06D-ATTEMPT-001",
+                    "result_status": "completed",
+                    "integration_status": "passed",
+                    "integration_verification_status": "passed",
+                    "integration_verification_additions_status": "passed",
+                }
+            ],
+            "state_sha256": "7" * 64,
+        },
+        "projection_summary": {
+            "projection_source": "db",
+            "check_status": "passed",
+            "schema_version": "agentteam_projection.v5",
+            "invocation_count": 2,
+            "open_invocations": 0,
+            "lifecycle_terminal_coverage": {
+                "covered": 2,
+                "total": 2,
+                "percent": 100.0,
+                "status": "complete",
+            },
+            "token_usage_coverage": {
+                "covered": 1,
+                "total": 2,
+                "percent": 50.0,
+                "status": "partial",
+            },
+            "reported_token_totals": reported_totals,
+            "partial_known_token_lower_bounds": empty_totals,
+            "usage_status_counts": {
+                "reported": 1,
+                "partial": 0,
+                "unavailable": 1,
+                "not_applicable": 0,
+            },
+        },
+        "acceptance_attempts": [
+            {
+                "run_id": "phase1-acceptance-attempt-1",
+                "acceptance_series_id": "phase1-acceptance",
+                "acceptance_attempt_id": "attempt-1",
+                "selected": False,
+                "controller_status": "failed",
+                "usage": {
+                    "invocation_count": 1,
+                    "open_invocations": 0,
+                    "usage_status_counts": {
+                        "reported": 0,
+                        "partial": 0,
+                        "unavailable": 1,
+                        "not_applicable": 0,
+                    },
+                    "reported_token_totals": empty_totals,
+                    "partial_known_token_lower_bounds": empty_totals,
+                },
+            },
+            {
+                "run_id": "phase1-acceptance-attempt-2",
+                "acceptance_series_id": "phase1-acceptance",
+                "acceptance_attempt_id": "attempt-2",
+                "selected": True,
+                "controller_status": "passed",
+                "usage": {
+                    "invocation_count": 1,
+                    "open_invocations": 0,
+                    "usage_status_counts": {
+                        "reported": 1,
+                        "partial": 0,
+                        "unavailable": 0,
+                        "not_applicable": 0,
+                    },
+                    "reported_token_totals": reported_totals,
+                    "partial_known_token_lower_bounds": empty_totals,
+                },
+            },
+        ],
+        "verification_summary": {
+            "deterministic_completion_status": "passed",
+            "task_result_count": 1,
+            "integration_verification_passed_count": 1,
+            "projection_replay_status": "passed",
+            "verification_command_sha256": "8" * 64,
+            "verification_result_sha256": "9" * 64,
+        },
+        "deterministic_fixture_token_totals": {
+            "input_tokens": 270,
+            "cached_input_tokens": 45,
+            "output_tokens": 75,
+            "reasoning_tokens": 30,
+            "total_tokens": 345,
+        },
+        "implemented_invocation_paths": [
+            "implementation_worker",
+            "acceptance_live_smoke",
+        ],
+        "unsupported_or_unavailable_paths": ["provider_failed_before_usage"],
+        "changed_files": ["agentteam_runtime/model_invocation.py"],
+        "remaining_risks": [
+            "P1-06E operator approval remains required before source integration"
+        ],
+    }
+
+
+def _git(repo, *arguments):
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _initialize_report_repository(root):
+    repo = Path(root) / "repo"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.name", "Phase 1 Test")
+    _git(repo, "config", "user.email", "phase1-test@example.invalid")
+    roadmap = repo / ROADMAP_RELATIVE_PATH
+    roadmap.parent.mkdir(parents=True, exist_ok=True)
+    roadmap.write_text("# Native runtime roadmap\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "validated code")
+    return repo, _git(repo, "rev-parse", "HEAD")
+
+
+def _commit_report_artifacts(repo, artifacts, *, extra_path=None):
+    for relative, payload in artifacts.items():
+        path = Path(repo) / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    if extra_path:
+        path = Path(repo) / extra_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("out of scope\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "report only")
+    return _git(repo, "rev-parse", "HEAD")
 
 
 class ProjectionDbOperatorPathTests(unittest.TestCase):
@@ -361,6 +559,147 @@ class ProjectionDbOperatorPathTests(unittest.TestCase):
         )
         self.assertEqual(recap["latest_follow_up_queue"]["item_count"], 2)
 
+    def test_phase1_milestone_renderer_is_byte_stable_and_includes_all_attempts(self):
+        evidence = _phase1_report_evidence("a" * 40)
+
+        first = render_milestone_report(evidence)
+        second = render_milestone_report(
+            json.loads(json.dumps(evidence, sort_keys=True))
+        )
+
+        self.assertEqual(first, second)
+        self.assertIn(b"finalization_pending", first)
+        self.assertIn(b"phase1-acceptance-attempt-1", first)
+        self.assertIn(b"phase1-acceptance-attempt-2", first)
+        self.assertIn(b"provider_failed_before_usage", first)
+        self.assertNotIn(b"final_report_sha", first)
+
+        invalid = json.loads(json.dumps(evidence))
+        invalid["acceptance_attempts"][0].pop("acceptance_series_id")
+        with self.assertRaisesRegex(
+            Phase1UsageReportError,
+            "explicit series",
+        ):
+            render_milestone_report(invalid)
+
+    def test_report_only_commit_validator_rejects_tamper_and_extra_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, validated = _initialize_report_repository(Path(tmp))
+            evidence = _phase1_report_evidence(validated)
+            artifacts = render_report_artifacts(
+                evidence,
+                (repo / ROADMAP_RELATIVE_PATH).read_bytes(),
+            )
+            final = _commit_report_artifacts(repo, artifacts)
+
+            lineage = validate_report_only_commit(
+                repo,
+                validated_code_sha=validated,
+                final_report_sha=final,
+                expected_evidence_digests=evidence["evidence_digests"],
+                expected_artifacts=artifacts,
+            )
+            self.assertEqual(lineage["parent_commit_sha"], validated)
+            self.assertEqual(
+                lineage["changed_paths"],
+                sorted(FIXED_CHANGED_PATHS),
+            )
+
+            report_path = repo / REPORT_RELATIVE_PATH
+            report_path.write_bytes(
+                report_path.read_bytes() + b"\ntampered\n"
+            )
+            with self.assertRaisesRegex(
+                Phase1UsageReportError,
+                "clean integration worktree",
+            ):
+                validate_report_only_commit(
+                    repo,
+                    validated_code_sha=validated,
+                    final_report_sha=final,
+                    expected_evidence_digests=evidence["evidence_digests"],
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, validated = _initialize_report_repository(Path(tmp))
+            evidence = _phase1_report_evidence(validated)
+            artifacts = render_report_artifacts(
+                evidence,
+                (repo / ROADMAP_RELATIVE_PATH).read_bytes(),
+            )
+            final = _commit_report_artifacts(
+                repo,
+                artifacts,
+                extra_path="unexpected.txt",
+            )
+            with self.assertRaisesRegex(
+                Phase1UsageReportError,
+                "outside the fixed report scope",
+            ):
+                validate_report_only_commit(
+                    repo,
+                    validated_code_sha=validated,
+                    final_report_sha=final,
+                    expected_evidence_digests=evidence["evidence_digests"],
+                )
+
+    def test_phase1_complete_controller_is_resumable_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self._phase1_completion_fixture(root)
+            interrupted = {"count": 0}
+
+            def fail_once(path, artifact):
+                interrupted["count"] += 1
+                if interrupted["count"] == 1:
+                    raise OSError("simulated crash after report commit")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+
+            with self._patched_phase1_completion(fixture):
+                with self.assertRaisesRegex(
+                    Phase1UsageReportError,
+                    "simulated crash after report commit",
+                ):
+                    complete_phase1_usage_report(
+                        **fixture["arguments"],
+                        final_publisher=fail_once,
+                    )
+                recovered = complete_phase1_usage_report(
+                    **fixture["arguments"],
+                    final_publisher=fail_once,
+                )
+                repeated = complete_phase1_usage_report(
+                    **fixture["arguments"],
+                    final_publisher=fail_once,
+                )
+
+            self.assertFalse(recovered["idempotent"])
+            self.assertTrue(repeated["idempotent"])
+            self.assertEqual(interrupted["count"], 2)
+            self.assertEqual(
+                _git(fixture["repo"], "rev-list", "--count", "HEAD"),
+                "2",
+            )
+            artifact_path = (
+                fixture["selected_run_dir"]
+                / PHASE1_FINALIZATION_ARTIFACT
+            )
+            finalization = json.loads(
+                artifact_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                finalization["parent_commit_sha"],
+                fixture["validated_code_sha"],
+            )
+            self.assertEqual(
+                finalization["changed_paths"],
+                sorted(FIXED_CHANGED_PATHS),
+            )
+
     def test_native_runtime_verification_profile_stays_compatible_with_focused_addition(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
@@ -385,6 +724,170 @@ class ProjectionDbOperatorPathTests(unittest.TestCase):
             profile["verification_profile"]["correctness"]["command"],
             NATIVE_RUNTIME_CORRECTNESS_COMMAND,
         )
+
+    def _phase1_completion_fixture(self, root):
+        repo, validated = _initialize_report_repository(root)
+        work_root = root / "work"
+        implementation_run_id = "phase1-model-invocation-usage"
+        implementation_run_dir = work_root / "runs" / implementation_run_id
+        implementation_run_dir.mkdir(parents=True)
+        selected_run_id = "phase1-acceptance-attempt-2"
+        selected_run_dir = work_root / "runs" / selected_run_id
+        selected_run_dir.mkdir(parents=True)
+        profile = {
+            "project_key": "phase1-test",
+            "work_root": str(work_root),
+        }
+        live_declaration = {
+            "gate_id": "P1-LIVE",
+            "evidence_artifact": (
+                "acceptance/model-invocation-live-smoke.v1.json"
+            ),
+        }
+        final_declaration = {
+            "gate_id": "P1-06E",
+            "depends_on": ["P1-LIVE"],
+            "evidence_artifact": (
+                "acceptance/phase1-usage-finalization.v1.json"
+            ),
+            "evidence_schema": (
+                "experiments/native_agentteam_runtime/schemas/"
+                "phase1_usage_finalization.schema.json"
+            ),
+            "required_status_field": "controller_validation_status",
+            "required_status_value": "passed",
+            "commit_field": "final_report_sha",
+            "integration_head_relation": "equals",
+        }
+        context = {
+            "profile": profile,
+            "work_root": work_root,
+            "project_root": repo,
+            "run_dir": implementation_run_dir,
+            "taskpack": {"taskpack_id": implementation_run_id},
+            "declarations": [live_declaration, final_declaration],
+            "declarations_by_id": {
+                "P1-LIVE": live_declaration,
+                "P1-06E": final_declaration,
+            },
+            "gate_root": (
+                implementation_run_dir / "state" / "post_backlog_gates"
+            ),
+            "epochs_root": (
+                implementation_run_dir
+                / "state"
+                / "post_backlog_gates"
+                / "epochs"
+            ),
+            "locks_root": (
+                implementation_run_dir
+                / "state"
+                / "post_backlog_gates"
+                / "locks"
+            ),
+        }
+        epoch = {
+            "record": {
+                "epoch_number": 1,
+                "integration_head_sha": validated,
+                "validated_code_sha": validated,
+                "integration_branch": _git(
+                    repo,
+                    "symbolic-ref",
+                    "--short",
+                    "HEAD",
+                ),
+                "git_object_format": "sha1",
+            },
+            "digest": "3" * 64,
+        }
+        return {
+            "repo": repo,
+            "work_root": work_root,
+            "profile": profile,
+            "context": context,
+            "epoch": epoch,
+            "evidence": _phase1_report_evidence(validated),
+            "validated_code_sha": validated,
+            "selected_run_dir": selected_run_dir,
+            "arguments": {
+                "profile_project_root": repo,
+                "candidate_project_root": repo,
+                "implementation_run_id": implementation_run_id,
+                "gate_epoch": 1,
+                "work_root": work_root,
+                "acceptance_series_id": "phase1-acceptance",
+                "run_id": selected_run_id,
+                "validated_code_sha": validated,
+            },
+        }
+
+    @contextlib.contextmanager
+    def _patched_phase1_completion(self, fixture):
+        declarations = fixture["context"]["declarations_by_id"]
+        patches = [
+            patch(
+                "agentteam_runtime.phase1_usage_report."
+                "_profile_runtime.load_project_profile",
+                return_value=fixture["profile"],
+            ),
+            patch(
+                "agentteam_runtime.phase1_usage_report."
+                "_gate_runtime._require_post_backlog_gate_context",
+                return_value=fixture["context"],
+            ),
+            patch(
+                "agentteam_runtime.phase1_usage_report."
+                "_gate_runtime._require_gate_declaration",
+                side_effect=lambda _context, gate_id: declarations[gate_id],
+            ),
+            patch(
+                "agentteam_runtime.phase1_usage_report."
+                "_gate_runtime._require_current_gate_epoch",
+                return_value=fixture["epoch"],
+            ),
+            patch(
+                "agentteam_runtime.phase1_usage_report."
+                "_gate_runtime._gate_mutation_locks",
+                side_effect=lambda _context, _gate_ids: (
+                    contextlib.nullcontext()
+                ),
+            ),
+            patch(
+                "agentteam_runtime.phase1_usage_report."
+                "_gate_runtime._gate_integration_worktree",
+                return_value=fixture["repo"],
+            ),
+            patch(
+                "agentteam_runtime.phase1_usage_report."
+                "_acceptance_runtime._require_same_git_repository",
+            ),
+            patch(
+                "agentteam_runtime.phase1_usage_report."
+                "_acceptance_runtime._verify_candidate_runtime_modules",
+            ),
+            patch(
+                "agentteam_runtime.phase1_usage_report."
+                "_require_live_gate_passed",
+            ),
+            patch(
+                "agentteam_runtime.phase1_usage_report."
+                "build_report_evidence",
+                return_value=fixture["evidence"],
+            ),
+            patch(
+                "agentteam_runtime.phase1_usage_report."
+                "_validate_existing_finalization_evidence",
+            ),
+            patch(
+                "agentteam_runtime.phase1_usage_report._final_gate_state",
+                return_value="awaiting_operator_review",
+            ),
+        ]
+        with contextlib.ExitStack() as stack:
+            for patcher in patches:
+                stack.enter_context(patcher)
+            yield
 
 
 if __name__ == "__main__":

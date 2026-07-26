@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase1_usage_finalization.schema.json",
+  "title": "AgentTeam Phase 1 usage report external finalization",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "implementation_run_id",
+    "gate_epoch",
+    "acceptance_series_id",
+    "selected_acceptance_run_id",
+    "git_object_format",
+    "validated_code_sha",
+    "parent_commit_sha",
+    "final_report_sha",
+    "changed_paths",
+    "report_sha256",
+    "roadmap_sha256",
+    "evidence_digests",
+    "verification_summary",
+    "merge_recommendation",
+    "controller_validation_status",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase1_usage_finalization.v1"
+    },
+    "implementation_run_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "gate_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "acceptance_series_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "selected_acceptance_run_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "git_object_format": {
+      "enum": [
+        "sha1",
+        "sha256"
+      ]
+    },
+    "validated_code_sha": {
+      "$ref": "#/$defs/gitOid"
+    },
+    "parent_commit_sha": {
+      "$ref": "#/$defs/gitOid"
+    },
+    "final_report_sha": {
+      "$ref": "#/$defs/gitOid"
+    },
+    "changed_paths": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "const": "experiments/native_agentteam_runtime/implementation_artifacts/native_runtime_roadmap.md"
+        },
+        {
+          "const": "experiments/native_agentteam_runtime/implementation_artifacts/reports/phase1-model-invocation-usage.md"
+        }
+      ],
+      "items": false
+    },
+    "report_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "roadmap_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "evidence_digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "acceptance_attempts_sha256",
+        "deterministic_verification_sha256",
+        "gate_epoch_sha256",
+        "p1_live_receipt_sha256",
+        "projection_invocation_sha256",
+        "selected_live_artifact_sha256"
+      ],
+      "properties": {
+        "acceptance_attempts_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "deterministic_verification_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "gate_epoch_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "p1_live_receipt_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "projection_invocation_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "selected_live_artifact_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "verification_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deterministic_completion_status",
+        "live_validation_status",
+        "projection_status",
+        "open_invocations",
+        "acceptance_attempt_count"
+      ],
+      "properties": {
+        "deterministic_completion_status": {
+          "const": "passed"
+        },
+        "live_validation_status": {
+          "const": "passed"
+        },
+        "projection_status": {
+          "const": "passed"
+        },
+        "open_invocations": {
+          "const": 0
+        },
+        "acceptance_attempt_count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "merge_recommendation": {
+      "const": "ready_for_operator_review"
+    },
+    "controller_validation_status": {
+      "const": "passed"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha1"
+          }
+        },
+        "required": [
+          "git_object_format"
+        ]
+      },
+      "then": {
+        "properties": {
+          "validated_code_sha": {
+            "$ref": "#/$defs/sha1"
+          },
+          "parent_commit_sha": {
+            "$ref": "#/$defs/sha1"
+          },
+          "final_report_sha": {
+            "$ref": "#/$defs/sha1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha256"
+          }
+        },
+        "required": [
+          "git_object_format"
+        ]
+      },
+      "then": {
+        "properties": {
+          "validated_code_sha": {
+            "$ref": "#/$defs/sha256"
+          },
+          "parent_commit_sha": {
+            "$ref": "#/$defs/sha256"
+          },
+          "final_report_sha": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "sha1": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitOid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    }
+  }
+}
