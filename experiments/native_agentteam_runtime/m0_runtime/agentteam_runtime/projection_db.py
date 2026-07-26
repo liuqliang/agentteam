@@ -6,10 +6,86 @@ from pathlib import Path
 
 from .token_usage import normalize_token_usage, token_usage_from_state
 
-PROJECTION_SCHEMA_VERSION = "agentteam_projection.v4"
+PROJECTION_SCHEMA_VERSION = "agentteam_projection.v5"
 PROJECTION_WARNING_UNAVAILABLE = "projection_db_unavailable"
 PROJECTION_REBUILD_NEXT_ACTION = "run agentteam db rebuild"
 PROJECTION_REBUILD_HINT = "agentteam db rebuild"
+_INVOCATION_EVENT_TYPES = {
+    "model_invocation_started",
+    "model_invocation_usage_recorded",
+}
+_INVOCATION_FILTER_FIELDS = {
+    "run": "run_id",
+    "run_id": "run_id",
+    "run_kind": "run_kind",
+    "implementation_run": "implementation_run_id",
+    "implementation_run_id": "implementation_run_id",
+    "gate_epoch": "gate_epoch",
+    "pursue": "pursue_id",
+    "pursue_id": "pursue_id",
+    "round": "round_index",
+    "round_index": "round_index",
+    "stage": "usage_stage",
+    "usage_stage": "usage_stage",
+    "role": "role",
+    "task": "task_id",
+    "task_id": "task_id",
+    "attempt": "attempt_id",
+    "attempt_id": "attempt_id",
+    "backend": "backend",
+    "model": "model",
+}
+_INVOCATION_COLUMNS = (
+    "invocation_id",
+    "usage_event_id",
+    "start_schema_version",
+    "usage_schema_version",
+    "project",
+    "run_id",
+    "run_kind",
+    "implementation_run_id",
+    "gate_epoch",
+    "pursue_id",
+    "round_index",
+    "taskpack_id",
+    "task_id",
+    "attempt_id",
+    "runtime_execution_session_id",
+    "provider_session_id",
+    "provider_predecessor_invocation_id",
+    "provider_turn_id",
+    "provider_predecessor_turn_id",
+    "agent_id",
+    "role",
+    "usage_stage",
+    "backend",
+    "model",
+    "coverage_class",
+    "lifecycle_status",
+    "terminal_status",
+    "usage_status",
+    "usage_source",
+    "provider_usage_scope",
+    "accounting_method",
+    "provider_usage_snapshot_json",
+    "unavailable_reason",
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+    "started_at",
+    "finished_at",
+    "wall_time_seconds",
+    "source_artifact_path",
+    "start_record_sha256",
+    "terminal_record_sha256",
+    "record_sha256",
+)
+
+
+class ProjectionIntegrityError(RuntimeError):
+    """Authoritative invocation files disagree and cannot be projected safely."""
 
 
 def project_projection_db_path(work_root):
@@ -22,22 +98,101 @@ def rebuild_project_projection_db(work_root):
     db_path = project_projection_db_path(work_root)
     temp_path = db_path.with_suffix(".db.tmp")
     projection = _scan_work_root(work_root)
-    if temp_path.exists():
-        temp_path.unlink()
-    try:
-        with sqlite3.connect(temp_path) as connection:
-            _create_projection_schema(connection)
-            _write_projection_rows(connection, projection)
-        os.replace(temp_path, db_path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
+    _write_projection_database(temp_path, projection)
+    os.replace(temp_path, db_path)
     return {
         "db_status": "rebuilt",
         "db_path": str(db_path),
         "schema_version": PROJECTION_SCHEMA_VERSION,
         **_projection_counts(projection),
     }
+
+
+def build_isolated_acceptance_projection(
+    work_root,
+    acceptance_artifact,
+    db_path,
+    *,
+    filters=None,
+):
+    """Project one staged acceptance artifact without making it file authority."""
+    work_root = Path(work_root).resolve()
+    db_path = Path(db_path).resolve()
+    if db_path == project_projection_db_path(work_root):
+        raise ValueError("isolated projection DB must not replace the project projection DB")
+    artifact, artifact_path = _load_explicit_acceptance_artifact(
+        acceptance_artifact
+    )
+    projection = _scan_work_root(
+        work_root,
+        explicit_acceptance_artifacts=[(artifact, artifact_path)],
+    )
+    _write_projection_database(db_path, projection)
+    invocation_rows = projection["invocations"]
+    applied_filters = _normalize_invocation_filters(filters or {})
+    filtered_rows = _filter_invocation_rows(invocation_rows, applied_filters)
+    return {
+        "projection_status": "isolated",
+        "projection_source": "files_plus_explicit_staged_acceptance",
+        "db_path": str(db_path),
+        "schema_version": PROJECTION_SCHEMA_VERSION,
+        **_projection_counts(projection),
+        "model_invocation_usage": _aggregate_invocation_rows(
+            filtered_rows,
+            applied_filters=applied_filters,
+            all_rows=invocation_rows,
+        ),
+    }
+
+
+def project_isolated_acceptance_artifact(
+    work_root,
+    acceptance_artifact,
+    db_path,
+    *,
+    filters=None,
+):
+    """Compatibility spelling for the isolated controller validation API."""
+    return build_isolated_acceptance_projection(
+        work_root,
+        acceptance_artifact,
+        db_path,
+        filters=filters,
+    )
+
+
+def _write_projection_database(db_path, projection):
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if db_path.exists():
+        db_path.unlink()
+    try:
+        with sqlite3.connect(db_path) as connection:
+            _create_projection_schema(connection)
+            _write_projection_rows(connection, projection)
+    except BaseException:
+        if db_path.exists():
+            db_path.unlink()
+        raise
+
+
+def _load_explicit_acceptance_artifact(acceptance_artifact):
+    if isinstance(acceptance_artifact, dict):
+        payload = dict(acceptance_artifact)
+        source_path = "<explicit-staged-acceptance>"
+    else:
+        path = Path(acceptance_artifact).resolve()
+        payload = _read_json_if_exists(path)
+        source_path = str(path)
+        if not isinstance(payload, dict) or not payload:
+            raise ProjectionIntegrityError(
+                f"staged acceptance artifact is missing or invalid: {path}"
+            )
+    if payload.get("schema_version") != "model_invocation_live_smoke.v1":
+        raise ProjectionIntegrityError(
+            "staged acceptance artifact has an invalid schema version"
+        )
+    return payload, source_path
 
 
 def check_project_projection_db(work_root):
@@ -80,6 +235,8 @@ def check_project_projection_db(work_root):
         "worker_results",
         "integration_outcomes",
         "worker_verification_additions",
+        "invocations",
+        "invocation_digest",
     ]
     mismatches = [
         key
@@ -683,11 +840,18 @@ def _retention_candidate_validation(row):
     }
 
 
-def build_project_stats(work_root):
+def build_project_stats(work_root, *, filters=None, **filter_values):
     work_root = Path(work_root).resolve()
+    applied_filters = _normalize_invocation_filters(
+        {**(filters or {}), **filter_values}
+    )
     check = check_project_projection_db(work_root)
     if check["check_status"] == "passed":
-        stats = _project_stats_from_database(work_root, check)
+        stats = _project_stats_from_database(
+            work_root,
+            check,
+            applied_filters=applied_filters,
+        )
         if stats is not None:
             return stats
     projection = _scan_work_root(work_root)
@@ -698,10 +862,11 @@ def build_project_stats(work_root):
         db_path=str(project_projection_db_path(work_root)),
         projection_warning="projection_db_unavailable",
         next_action="run agentteam db rebuild",
+        applied_filters=applied_filters,
     )
 
 
-def _scan_work_root(work_root):
+def _scan_work_root(work_root, *, explicit_acceptance_artifacts=None):
     runs = _scan_runs(work_root / "runs")
     taskpacks = _scan_taskpacks(work_root / "frozen")
     artifacts = _scan_artifacts(work_root, runs, taskpacks)
@@ -718,6 +883,11 @@ def _scan_work_root(work_root):
         "worker_verification_additions": _scan_worker_verification_additions(
             worker_results,
             integration_outcomes,
+        ),
+        "invocations": _scan_invocations(
+            work_root,
+            runs,
+            explicit_acceptance_artifacts=explicit_acceptance_artifacts,
         ),
     }
 
@@ -757,6 +927,415 @@ def _scan_runs(runs_root):
             }
         )
     return runs
+
+
+def _scan_invocations(
+    work_root,
+    runs,
+    *,
+    explicit_acceptance_artifacts=None,
+):
+    starts = {}
+    terminals_by_event = {}
+    terminals_by_invocation = {}
+    acceptance_metadata = {}
+
+    for run in runs:
+        source_path = run.get("events_path") or str(
+            Path(run["run_dir"]) / "events.jsonl"
+        )
+        for event in run.get("raw_events", []):
+            event_type = event.get("event_type")
+            if event_type not in _INVOCATION_EVENT_TYPES:
+                continue
+            record = event.get("payload")
+            if not isinstance(record, dict):
+                continue
+            if event_type == "model_invocation_started":
+                _register_invocation_start(starts, record, source_path)
+            else:
+                _register_invocation_terminal(
+                    terminals_by_event,
+                    terminals_by_invocation,
+                    record,
+                    source_path,
+                )
+
+    for started_path in _authoritative_started_paths(work_root):
+        start = _read_json_if_exists(started_path)
+        if not start:
+            continue
+        _register_invocation_start(starts, start, str(started_path.resolve()))
+        terminal_path = started_path.with_name("terminal.json")
+        terminal = _read_json_if_exists(terminal_path)
+        if terminal:
+            _register_invocation_terminal(
+                terminals_by_event,
+                terminals_by_invocation,
+                terminal,
+                str(terminal_path.resolve()),
+            )
+
+    acceptance_artifacts = list(_passed_acceptance_artifacts(work_root))
+    acceptance_artifacts.extend(explicit_acceptance_artifacts or [])
+    for artifact, artifact_path in acceptance_artifacts:
+        start = artifact.get("invocation_start_record")
+        terminal = artifact.get("invocation_usage_record")
+        if not isinstance(start, dict):
+            raise ProjectionIntegrityError(
+                f"acceptance artifact has no invocation start: {artifact_path}"
+            )
+        _validate_acceptance_artifact_correlation(
+            artifact,
+            start,
+            terminal,
+            artifact_path,
+        )
+        _register_invocation_start(starts, start, artifact_path)
+        if isinstance(terminal, dict):
+            _register_invocation_terminal(
+                terminals_by_event,
+                terminals_by_invocation,
+                terminal,
+                artifact_path,
+            )
+        invocation_id = start.get("invocation_id")
+        metadata = {
+            key: artifact.get(key)
+            for key in (
+                "project",
+                "run_id",
+                "run_kind",
+                "taskpack_id",
+                "implementation_run_id",
+                "gate_epoch",
+            )
+            if artifact.get(key) is not None
+        }
+        existing = acceptance_metadata.get(invocation_id)
+        if existing is not None and existing != metadata:
+            raise ProjectionIntegrityError(
+                f"conflicting acceptance metadata for invocation {invocation_id}"
+            )
+        acceptance_metadata[invocation_id] = metadata
+
+    orphaned = sorted(set(terminals_by_invocation) - set(starts))
+    if orphaned:
+        raise ProjectionIntegrityError(
+            "terminal invocation has no authoritative start: "
+            + ", ".join(orphaned)
+        )
+
+    run_identities = _scan_run_identities(work_root)
+    rows = []
+    for invocation_id in sorted(starts):
+        start_entry = starts[invocation_id]
+        terminal_entry = terminals_by_invocation.get(invocation_id)
+        start = start_entry["record"]
+        terminal = terminal_entry["record"] if terminal_entry else None
+        if terminal:
+            _validate_start_terminal_correlation(start, terminal)
+        rows.append(
+            _invocation_projection_row(
+                start,
+                terminal,
+                source_path=start_entry["source_path"],
+                start_sha256=start_entry["sha256"],
+                terminal_sha256=(
+                    terminal_entry["sha256"] if terminal_entry else None
+                ),
+                run_identity=run_identities.get(start.get("run_id"), {}),
+                acceptance_metadata=acceptance_metadata.get(
+                    invocation_id,
+                    {},
+                ),
+            )
+        )
+    return rows
+
+
+def _validate_acceptance_artifact_correlation(
+    artifact,
+    start,
+    terminal,
+    source_path,
+):
+    for key in (
+        "project",
+        "run_id",
+        "taskpack_id",
+        "implementation_run_id",
+        "gate_epoch",
+    ):
+        artifact_value = artifact.get(key)
+        for record in (start, terminal):
+            if not isinstance(record, dict):
+                continue
+            record_value = record.get(key)
+            if (
+                artifact_value is not None
+                and record_value is not None
+                and artifact_value != record_value
+            ):
+                raise ProjectionIntegrityError(
+                    f"acceptance artifact correlation differs for {key}: "
+                    f"{source_path}"
+                )
+
+
+def _authoritative_started_paths(work_root):
+    work_root = Path(work_root).resolve()
+    return sorted(
+        path
+        for path in work_root.rglob("started.json")
+        if path.parent.parent.name == "model_invocations"
+        and _is_registered_controller_path(path, work_root)
+    )
+
+
+def _is_registered_controller_path(path, work_root):
+    relative_parts = path.resolve().relative_to(work_root).parts
+    try:
+        controller_index = relative_parts.index("controller_invocations")
+    except ValueError:
+        return True
+    candidate = work_root.joinpath(*relative_parts[: controller_index + 1])
+    for part in relative_parts[controller_index + 1 : -3]:
+        candidate = candidate / part
+        if (candidate / "controller_claim.json").is_file():
+            return True
+    return False
+
+
+def _passed_acceptance_artifacts(work_root):
+    runs_root = Path(work_root).resolve() / "runs"
+    for path in _iter_files(runs_root, suffixes={".json"}):
+        payload = _read_json_if_exists(path)
+        if (
+            isinstance(payload, dict)
+            and
+            payload.get("schema_version") == "model_invocation_live_smoke.v1"
+            and payload.get("controller_validation_status") == "passed"
+        ):
+            yield payload, str(path.resolve())
+
+
+def _scan_run_identities(work_root):
+    identities = {}
+    runs_root = Path(work_root).resolve() / "runs"
+    if not runs_root.exists():
+        return identities
+    for run_dir in sorted(path for path in runs_root.iterdir() if path.is_dir()):
+        identity = _read_json_if_exists(
+            run_dir / "state" / "run_identity.v1.json"
+        )
+        run_id = identity.get("run_id")
+        if run_id:
+            identities[run_id] = identity
+    return identities
+
+
+def _register_invocation_start(starts, record, source_path):
+    invocation_id = record.get("invocation_id")
+    if not invocation_id:
+        raise ProjectionIntegrityError(
+            f"invocation start has no invocation_id: {source_path}"
+        )
+    digest = _record_sha256(record)
+    existing = starts.get(invocation_id)
+    if existing and existing["sha256"] != digest:
+        raise ProjectionIntegrityError(
+            f"conflicting starts for invocation {invocation_id}"
+        )
+    if not existing:
+        starts[invocation_id] = {
+            "record": dict(record),
+            "sha256": digest,
+            "source_path": str(source_path),
+        }
+
+
+def _register_invocation_terminal(
+    terminals_by_event,
+    terminals_by_invocation,
+    record,
+    source_path,
+):
+    invocation_id = record.get("invocation_id")
+    usage_event_id = record.get("usage_event_id")
+    if not invocation_id or not usage_event_id:
+        raise ProjectionIntegrityError(
+            f"invocation terminal is missing identity: {source_path}"
+        )
+    digest = _record_sha256(record)
+    existing_event = terminals_by_event.get(usage_event_id)
+    if existing_event and existing_event["sha256"] != digest:
+        raise ProjectionIntegrityError(
+            f"conflicting terminals for usage event {usage_event_id}"
+        )
+    existing_invocation = terminals_by_invocation.get(invocation_id)
+    if existing_invocation and existing_invocation["sha256"] != digest:
+        raise ProjectionIntegrityError(
+            f"multiple terminals for invocation {invocation_id}"
+        )
+    entry = {
+        "record": dict(record),
+        "sha256": digest,
+        "source_path": str(source_path),
+    }
+    terminals_by_event.setdefault(usage_event_id, entry)
+    terminals_by_invocation.setdefault(invocation_id, entry)
+
+
+def _validate_start_terminal_correlation(start, terminal):
+    if start.get("invocation_id") != terminal.get("invocation_id"):
+        raise ProjectionIntegrityError("start and terminal invocation IDs differ")
+    for key in (
+        "project",
+        "run_id",
+        "pursue_id",
+        "round_index",
+        "taskpack_id",
+        "implementation_run_id",
+        "gate_epoch",
+        "task_id",
+        "attempt_id",
+        "runtime_execution_session_id",
+        "provider_predecessor_invocation_id",
+        "provider_predecessor_turn_id",
+        "agent_id",
+        "role",
+        "usage_stage",
+        "backend",
+        "model",
+        "coverage_class",
+        "started_at",
+    ):
+        start_value = start.get(key)
+        terminal_value = terminal.get(key)
+        if (
+            start_value is not None
+            and terminal_value is not None
+            and start_value != terminal_value
+        ):
+            raise ProjectionIntegrityError(
+                f"start/terminal correlation differs for {key} "
+                f"on invocation {start.get('invocation_id')}"
+            )
+
+
+def _invocation_projection_row(
+    start,
+    terminal,
+    *,
+    source_path,
+    start_sha256,
+    terminal_sha256,
+    run_identity,
+    acceptance_metadata,
+):
+    terminal = terminal or {}
+
+    def value(key):
+        terminal_value = terminal.get(key)
+        return terminal_value if terminal_value is not None else start.get(key)
+
+    run_id = value("run_id") or acceptance_metadata.get("run_id")
+    run_kind = (
+        acceptance_metadata.get("run_kind")
+        or run_identity.get("run_kind")
+    )
+    implementation_run_id = (
+        value("implementation_run_id")
+        or acceptance_metadata.get("implementation_run_id")
+        or run_identity.get("implementation_run_id")
+    )
+    gate_epoch = (
+        value("gate_epoch")
+        if value("gate_epoch") is not None
+        else acceptance_metadata.get("gate_epoch", run_identity.get("gate_epoch"))
+    )
+    if run_kind is None:
+        if implementation_run_id is not None and gate_epoch is not None:
+            run_kind = "acceptance_evidence"
+        else:
+            run_kind = "legacy"
+    row = {
+        "invocation_id": start["invocation_id"],
+        "usage_event_id": terminal.get("usage_event_id"),
+        "start_schema_version": (
+            start.get("start_schema_version")
+            or start.get("invocation_schema_version")
+        ),
+        "usage_schema_version": terminal.get("usage_schema_version"),
+        "project": value("project") or acceptance_metadata.get("project"),
+        "run_id": run_id,
+        "run_kind": run_kind,
+        "implementation_run_id": implementation_run_id,
+        "gate_epoch": gate_epoch,
+        "pursue_id": value("pursue_id"),
+        "round_index": value("round_index"),
+        "taskpack_id": (
+            value("taskpack_id")
+            or acceptance_metadata.get("taskpack_id")
+            or run_identity.get("taskpack_id")
+        ),
+        "task_id": value("task_id"),
+        "attempt_id": value("attempt_id"),
+        "runtime_execution_session_id": value(
+            "runtime_execution_session_id"
+        ),
+        "provider_session_id": terminal.get("provider_session_id"),
+        "provider_predecessor_invocation_id": value(
+            "provider_predecessor_invocation_id"
+        ),
+        "provider_turn_id": terminal.get("provider_turn_id"),
+        "provider_predecessor_turn_id": value(
+            "provider_predecessor_turn_id"
+        ),
+        "agent_id": value("agent_id"),
+        "role": value("role"),
+        "usage_stage": value("usage_stage"),
+        "backend": value("backend"),
+        "model": value("model"),
+        "coverage_class": value("coverage_class"),
+        "lifecycle_status": "terminal" if terminal else "open",
+        "terminal_status": terminal.get("terminal_status"),
+        "usage_status": terminal.get("usage_status"),
+        "usage_source": terminal.get("usage_source"),
+        "provider_usage_scope": terminal.get("provider_usage_scope"),
+        "accounting_method": terminal.get("accounting_method"),
+        "provider_usage_snapshot_json": (
+            _json_dumps(terminal.get("provider_usage_snapshot"))
+            if terminal.get("provider_usage_snapshot") is not None
+            else None
+        ),
+        "unavailable_reason": terminal.get("unavailable_reason"),
+        "input_tokens": terminal.get("input_tokens"),
+        "cached_input_tokens": terminal.get("cached_input_tokens"),
+        "output_tokens": terminal.get("output_tokens"),
+        "reasoning_tokens": terminal.get("reasoning_tokens"),
+        "total_tokens": terminal.get("total_tokens"),
+        "started_at": start.get("started_at"),
+        "finished_at": terminal.get("finished_at"),
+        "wall_time_seconds": terminal.get("wall_time_seconds"),
+        "source_artifact_path": source_path,
+        "start_record_sha256": start_sha256,
+        "terminal_record_sha256": terminal_sha256,
+    }
+    row["record_sha256"] = _record_sha256(row)
+    return row
+
+
+def _record_sha256(record):
+    return hashlib.sha256(
+        json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _scan_taskpacks(frozen_root):
@@ -1386,6 +1965,87 @@ def _create_projection_schema(connection):
     )
     connection.execute(
         """
+        create table if not exists invocations(
+            invocation_id text primary key,
+            usage_event_id text unique,
+            start_schema_version text,
+            usage_schema_version text,
+            project text,
+            run_id text,
+            run_kind text,
+            implementation_run_id text,
+            gate_epoch integer,
+            pursue_id text,
+            round_index integer,
+            taskpack_id text,
+            task_id text,
+            attempt_id text,
+            runtime_execution_session_id text,
+            provider_session_id text,
+            provider_predecessor_invocation_id text,
+            provider_turn_id text,
+            provider_predecessor_turn_id text,
+            agent_id text,
+            role text,
+            usage_stage text,
+            backend text,
+            model text,
+            coverage_class text,
+            lifecycle_status text not null,
+            terminal_status text,
+            usage_status text,
+            usage_source text,
+            provider_usage_scope text,
+            accounting_method text,
+            provider_usage_snapshot_json text,
+            unavailable_reason text,
+            input_tokens integer,
+            cached_input_tokens integer,
+            output_tokens integer,
+            reasoning_tokens integer,
+            total_tokens integer,
+            started_at text,
+            finished_at text,
+            wall_time_seconds real,
+            source_artifact_path text not null,
+            start_record_sha256 text not null,
+            terminal_record_sha256 text,
+            record_sha256 text not null
+        )
+        """
+    )
+    connection.execute(
+        """
+        create index if not exists invocations_query_dimensions_idx
+        on invocations(
+            run_id, run_kind, usage_stage, role, task_id, attempt_id,
+            backend, model, pursue_id, round_index
+        )
+        """
+    )
+    connection.execute(
+        """
+        create index if not exists invocations_implementation_lineage_idx
+        on invocations(implementation_run_id, run_kind, run_id)
+        """
+    )
+    connection.execute(
+        """
+        create index if not exists invocations_gate_epoch_idx
+        on invocations(gate_epoch, implementation_run_id)
+        """
+    )
+    connection.execute(
+        """
+        create index if not exists invocations_provider_lineage_idx
+        on invocations(
+            provider_session_id, provider_predecessor_invocation_id,
+            provider_turn_id
+        )
+        """
+    )
+    connection.execute(
+        """
         insert or replace into schema_info(key, value) values('schema_version', ?)
         """,
         (PROJECTION_SCHEMA_VERSION,),
@@ -1722,6 +2382,16 @@ def _write_projection_rows(connection, projection):
             for item in projection["worker_verification_additions"]
         ],
     )
+    connection.executemany(
+        f"""
+        insert into invocations({", ".join(_INVOCATION_COLUMNS)})
+        values({", ".join("?" for _ in _INVOCATION_COLUMNS)})
+        """,
+        [
+            tuple(item.get(column) for column in _INVOCATION_COLUMNS)
+            for item in projection["invocations"]
+        ],
+    )
 
 
 def _projection_counts(projection):
@@ -1750,6 +2420,8 @@ def _projection_counts(projection):
         "worker_verification_additions": len(
             projection["worker_verification_additions"]
         ),
+        "invocations": len(projection["invocations"]),
+        "invocation_digest": _invocation_digest(projection["invocations"]),
         "evidence": evidence_counts,
     }
 
@@ -1773,6 +2445,8 @@ def _database_counts(db_path):
                 connection,
                 "worker_verification_additions",
             ),
+            "invocations": _table_count(connection, "invocations"),
+            "invocation_digest": _database_invocation_digest(connection),
             "evidence": _database_evidence_counts(connection),
         }
 
@@ -1826,7 +2500,17 @@ def _database_artifact_digest(connection):
     return _artifact_digest(rows)
 
 
-def _project_stats_from_database(work_root, check):
+def _database_invocation_digest(connection):
+    try:
+        rows = _read_invocation_rows_from_connection(connection)
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        rows = []
+    return _invocation_digest(rows)
+
+
+def _project_stats_from_database(work_root, check, *, applied_filters):
     db_path = project_projection_db_path(work_root)
     try:
         with sqlite3.connect(db_path) as connection:
@@ -1856,6 +2540,7 @@ def _project_stats_from_database(work_root, check):
                 order by run_id
                 """
             ).fetchall()
+            invocation_rows = _read_invocation_rows_from_connection(connection)
     except sqlite3.DatabaseError:
         return None
     return _project_stats_payload(
@@ -1866,6 +2551,11 @@ def _project_stats_from_database(work_root, check):
         artifact_types=_group_rows_to_count_bytes(artifact_type_rows),
         retention_policies=_group_rows_to_count_bytes(retention_rows),
         token_usage=_aggregate_token_usage_from_rows(token_rows),
+        invocation_usage=_aggregate_invocation_rows(
+            _filter_invocation_rows(invocation_rows, applied_filters),
+            applied_filters=applied_filters,
+            all_rows=invocation_rows,
+        ),
     )
 
 
@@ -1894,6 +2584,7 @@ def _project_stats_from_projection(
     db_path,
     projection_warning=None,
     next_action=None,
+    applied_filters=None,
 ):
     counts = _projection_counts(projection)
     return _project_stats_payload(
@@ -1918,6 +2609,14 @@ def _project_stats_from_projection(
                 for row in projection["run_stats"]
             ]
         ),
+        invocation_usage=_aggregate_invocation_rows(
+            _filter_invocation_rows(
+                projection["invocations"],
+                applied_filters or {},
+            ),
+            applied_filters=applied_filters or {},
+            all_rows=projection["invocations"],
+        ),
         projection_warning=projection_warning,
         next_action=next_action,
     )
@@ -1932,6 +2631,7 @@ def _project_stats_payload(
     artifact_types,
     retention_policies,
     token_usage,
+    invocation_usage,
     projection_warning=None,
     next_action=None,
 ):
@@ -1952,6 +2652,8 @@ def _project_stats_payload(
             "worker_verification_additions",
             0,
         ),
+        "invocations": counts.get("invocations", 0),
+        "invocation_digest": counts.get("invocation_digest"),
         "evidence": counts.get("evidence", {}),
         "artifacts": {
             "total_count": counts.get("artifacts", 0),
@@ -1960,12 +2662,277 @@ def _project_stats_payload(
             "by_retention": retention_policies,
         },
         "token_usage": token_usage,
+        "legacy_task_token_usage": {
+            "accounting_scope": "legacy_task_results",
+            "benchmark_counted": False,
+            "usage": token_usage,
+        },
+        "model_invocation_usage": invocation_usage,
+        "invocation_count": invocation_usage.get("invocation_count", 0),
+        "open_invocations": invocation_usage.get("open_invocations", 0),
+        "lifecycle_terminal_coverage": invocation_usage.get(
+            "lifecycle_terminal_coverage"
+        ),
+        "token_usage_coverage": invocation_usage.get(
+            "token_usage_coverage"
+        ),
+        "reported_token_totals": invocation_usage.get(
+            "reported_token_totals"
+        ),
+        "partial_known_token_lower_bounds": invocation_usage.get(
+            "partial_known_token_lower_bounds"
+        ),
+        "invocation_breakdowns": invocation_usage.get("breakdowns", {}),
     }
     if projection_warning:
         payload["projection_warning"] = projection_warning
     if next_action:
         payload["next_action"] = next_action
     return payload
+
+
+def _read_invocation_rows_from_connection(connection):
+    rows = connection.execute(
+        f"""
+        select {", ".join(_INVOCATION_COLUMNS)}
+        from invocations
+        order by invocation_id
+        """
+    ).fetchall()
+    return [
+        dict(zip(_INVOCATION_COLUMNS, row))
+        for row in rows
+    ]
+
+
+def _normalize_invocation_filters(filters):
+    normalized = {}
+    for raw_key, raw_value in dict(filters or {}).items():
+        if raw_value is None or raw_value == "":
+            continue
+        key = _INVOCATION_FILTER_FIELDS.get(raw_key)
+        if key is None:
+            raise ValueError(f"unsupported invocation stats filter: {raw_key}")
+        values = (
+            list(raw_value)
+            if isinstance(raw_value, (list, tuple, set))
+            else [raw_value]
+        )
+        if key in {"gate_epoch", "round_index"}:
+            values = [int(value) for value in values]
+        existing = normalized.setdefault(key, [])
+        for value in values:
+            if value not in existing:
+                existing.append(value)
+    return {
+        key: values
+        for key, values in sorted(normalized.items())
+    }
+
+
+def _filter_invocation_rows(rows, filters):
+    return [
+        row
+        for row in rows
+        if all(row.get(key) in values for key, values in filters.items())
+    ]
+
+
+def _aggregate_invocation_rows(rows, *, applied_filters, all_rows):
+    rows = list(rows)
+    all_rows = list(all_rows)
+    summary = _aggregate_invocation_rows_base(rows)
+    legacy_supported_count = sum(
+        1
+        for row in rows
+        if row.get("run_kind") == "legacy"
+        and row.get("coverage_class") == "supported_model_invocation"
+    )
+    if legacy_supported_count:
+        summary["benchmark_ready"] = False
+        if summary.get("completion_status") == "complete":
+            summary["completion_status"] = "legacy_non_benchmark"
+    summary.update(
+        {
+            "authority": "authoritative_lifecycle_files_and_canonical_events",
+            "authority_invocation_count": len(all_rows),
+            "authority_invocation_digest": _invocation_digest(all_rows),
+            "filtered_invocation_digest": _invocation_digest(rows),
+            "applied_filters": applied_filters,
+            "legacy_supported_invocation_count": legacy_supported_count,
+            "legacy_aggregate": {
+                "accounting_scope": "legacy_task_results",
+                "benchmark_counted": False,
+                "explanation": (
+                    "legacy task-result totals remain visible but do not count "
+                    "as invocation benchmark coverage"
+                ),
+            },
+        }
+    )
+    dimensions = {
+        "run": "run_id",
+        "run_kind": "run_kind",
+        "implementation_run": "implementation_run_id",
+        "gate_epoch": "gate_epoch",
+        "stage": "usage_stage",
+        "role": "role",
+        "round": "round_index",
+        "model": "model",
+        "task": "task_id",
+        "attempt": "attempt_id",
+    }
+    breakdowns = {
+        name: _invocation_breakdown(rows, field)
+        for name, field in dimensions.items()
+    }
+    summary["breakdowns"] = breakdowns
+    for name, breakdown in breakdowns.items():
+        summary[f"{name}_breakdown"] = breakdown
+    return summary
+
+
+def _aggregate_invocation_rows_base(rows):
+    # Imported lazily because operator_report uses projection readers.
+    from .operator_report import aggregate_model_invocation_usage
+
+    events = []
+    for row in rows:
+        start = {
+            key: row.get(key)
+            for key in (
+                "invocation_id",
+                "coverage_class",
+                "usage_stage",
+                "task_id",
+                "attempt_id",
+                "role",
+                "backend",
+                "model",
+            )
+        }
+        events.append(
+            {
+                "event_type": "model_invocation_started",
+                "source_event_id": row.get("invocation_id"),
+                "payload": start,
+            }
+        )
+        if row.get("lifecycle_status") != "terminal":
+            continue
+        terminal = {
+            key: row.get(key)
+            for key in (
+                "usage_event_id",
+                "invocation_id",
+                "coverage_class",
+                "usage_stage",
+                "task_id",
+                "attempt_id",
+                "role",
+                "backend",
+                "model",
+                "terminal_status",
+                "usage_status",
+                "provider_usage_scope",
+                "unavailable_reason",
+                "input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+            )
+        }
+        events.append(
+            {
+                "event_type": "model_invocation_usage_recorded",
+                "source_event_id": row.get("usage_event_id"),
+                "payload": terminal,
+            }
+        )
+    summary = aggregate_model_invocation_usage(events)
+    if summary is not None:
+        return summary
+    empty_totals = {
+        "input_tokens": None,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+        "reasoning_tokens": None,
+        "total_tokens": None,
+        "contributing_invocation_count": 0,
+    }
+    empty_coverage = {
+        "covered": 0,
+        "total": 0,
+        "percent": None,
+        "status": "not_applicable",
+    }
+    return {
+        "summary_schema_version": "model_invocation_usage_summary.v1",
+        "summary_status": "empty",
+        "accounting_scope": "full_project_canonical_invocations",
+        "benchmark_counted": True,
+        "invocation_count": 0,
+        "terminal_invocation_count": 0,
+        "supported_invocation_count": 0,
+        "open_invocations": 0,
+        "open_supported_invocations": 0,
+        "usage_status_counts": {
+            "reported": 0,
+            "partial": 0,
+            "unavailable": 0,
+            "not_applicable": 0,
+        },
+        "terminal_status_counts": {},
+        "stage_breakdown": {},
+        "lifecycle_terminal_coverage": dict(empty_coverage),
+        "token_usage_coverage": dict(empty_coverage),
+        "reported_totals_scope": "not_applicable",
+        "reported_token_totals": dict(empty_totals),
+        "partial_known_token_lower_bounds": dict(empty_totals),
+        "observed_token_lower_bound": {
+            key: None
+            for key in (
+                "input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+            )
+        },
+        "reason_counts": {"partial": [], "unavailable": []},
+        "completion_status": "not_applicable",
+        "benchmark_ready": False,
+        "integrity_conflict_count": 0,
+    }
+
+
+def _invocation_breakdown(rows, field):
+    grouped = {}
+    for row in rows:
+        raw_key = row.get(field)
+        key = str(raw_key) if raw_key is not None else "unknown"
+        grouped.setdefault(key, []).append(row)
+    result = {}
+    for key in sorted(grouped):
+        summary = _aggregate_invocation_rows_base(grouped[key])
+        result[key] = {
+            field: None if key == "unknown" else grouped[key][0].get(field),
+            "invocation_count": summary["invocation_count"],
+            "supported_invocation_count": summary["supported_invocation_count"],
+            "terminal_invocation_count": summary["terminal_invocation_count"],
+            "open_invocations": summary["open_invocations"],
+            "usage_status_counts": summary["usage_status_counts"],
+            "lifecycle_terminal_coverage": summary[
+                "lifecycle_terminal_coverage"
+            ],
+            "token_usage_coverage": summary["token_usage_coverage"],
+            "reported_token_totals": summary["reported_token_totals"],
+            "partial_known_token_lower_bounds": summary[
+                "partial_known_token_lower_bounds"
+            ],
+        }
+    return result
 
 
 def _group_rows_to_count_bytes(rows):
@@ -2500,6 +3467,27 @@ def _artifact_digest(artifacts):
     digest = hashlib.sha256()
     for artifact in sorted(artifacts, key=lambda row: (row[6], row[1], row[0])):
         digest.update(json.dumps(artifact, sort_keys=True).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _invocation_digest(invocations):
+    digest = hashlib.sha256()
+    for invocation in sorted(
+        invocations,
+        key=lambda row: row.get("invocation_id") or "",
+    ):
+        digest.update(
+            json.dumps(
+                {
+                    column: invocation.get(column)
+                    for column in _INVOCATION_COLUMNS
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
         digest.update(b"\n")
     return digest.hexdigest()
 

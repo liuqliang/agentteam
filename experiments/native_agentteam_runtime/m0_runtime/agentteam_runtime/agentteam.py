@@ -1558,6 +1558,18 @@ def _add_status_parser(subcommands):
 def _add_stats_parser(subcommands):
     parser = subcommands.add_parser("stats", help="Show AgentTeam project-level statistics.")
     parser.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
+    parser.add_argument("--run", dest="stats_run_id", help="Filter invocation stats by attempt-scoped run ID.")
+    parser.add_argument("--run-kind", help="Filter by implementation or acceptance_evidence run kind.")
+    parser.add_argument("--implementation-run", help="Filter by logical implementation run ID.")
+    parser.add_argument("--gate-epoch", type=int, help="Filter by post-backlog gate epoch.")
+    parser.add_argument("--pursue", help="Filter by pursue loop ID.")
+    parser.add_argument("--round", dest="round_index", type=int, help="Filter by pursue round index.")
+    parser.add_argument("--stage", help="Filter by model usage stage.")
+    parser.add_argument("--role", help="Filter by agent role.")
+    parser.add_argument("--task", help="Filter by task ID.")
+    parser.add_argument("--attempt", help="Filter by attempt ID.")
+    parser.add_argument("--backend", help="Filter by provider backend.")
+    parser.add_argument("--model", help="Filter by model.")
     parser.add_argument("--json", action="store_true", help="Print stats as JSON instead of human text.")
     parser.set_defaults(handler=_handle_stats)
 
@@ -5498,8 +5510,22 @@ def _handle_stats(args):
     project_root = Path(args.project_root or ".").resolve()
     profile = load_project_profile(project_root)
     work_root = Path(profile["work_root"]).resolve()
+    filters = {
+        "run_id": getattr(args, "stats_run_id", None),
+        "run_kind": getattr(args, "run_kind", None),
+        "implementation_run_id": getattr(args, "implementation_run", None),
+        "gate_epoch": getattr(args, "gate_epoch", None),
+        "pursue_id": getattr(args, "pursue", None),
+        "round_index": getattr(args, "round_index", None),
+        "usage_stage": getattr(args, "stage", None),
+        "role": getattr(args, "role", None),
+        "task_id": getattr(args, "task", None),
+        "attempt_id": getattr(args, "attempt", None),
+        "backend": getattr(args, "backend", None),
+        "model": getattr(args, "model", None),
+    }
     summary = {
-        **build_project_stats(work_root),
+        **build_project_stats(work_root, filters=filters),
         "project": profile.get("project_key") or "unknown",
         "project_root": str(project_root),
         "work_root": str(work_root),
@@ -6540,6 +6566,37 @@ def _write_experiment_pilot_text(summary):
 def _write_stats_text(summary):
     artifacts = summary.get("artifacts") if isinstance(summary.get("artifacts"), dict) else {}
     token_usage = summary.get("token_usage") if isinstance(summary.get("token_usage"), dict) else {}
+    invocation_usage = (
+        summary.get("model_invocation_usage")
+        if isinstance(summary.get("model_invocation_usage"), dict)
+        else {}
+    )
+    reported_totals = (
+        invocation_usage.get("reported_token_totals")
+        if isinstance(invocation_usage.get("reported_token_totals"), dict)
+        else {}
+    )
+    partial_bounds = (
+        invocation_usage.get("partial_known_token_lower_bounds")
+        if isinstance(
+            invocation_usage.get("partial_known_token_lower_bounds"),
+            dict,
+        )
+        else {}
+    )
+    stage_breakdown = (
+        invocation_usage.get("stage_breakdown")
+        if isinstance(invocation_usage.get("stage_breakdown"), dict)
+        else {}
+    )
+    largest_stage = max(
+        stage_breakdown,
+        key=lambda stage: (
+            stage_breakdown[stage].get("invocation_count", 0),
+            stage,
+        ),
+        default=None,
+    )
     lines = [
         f"stats_status: {summary.get('stats_status') or 'unknown'}",
         f"project: {summary.get('project') or 'unknown'}",
@@ -6553,11 +6610,49 @@ def _write_stats_text(summary):
         f"artifacts: {artifacts.get('total_count', 0)}",
         f"artifact_bytes: {artifacts.get('total_bytes', 0)}",
         format_token_usage(token_usage, label="tokens"),
+        f"invocations: {invocation_usage.get('invocation_count', 0)}",
+        (
+            "exact_reported_tokens: "
+            f"{reported_totals.get('total_tokens')}"
+        ),
+        (
+            "lifecycle_coverage: "
+            f"{_format_invocation_coverage(invocation_usage.get('lifecycle_terminal_coverage'))}"
+        ),
+        (
+            "token_coverage: "
+            f"{_format_invocation_coverage(invocation_usage.get('token_usage_coverage'))}"
+        ),
     ]
+    if partial_bounds.get("contributing_invocation_count"):
+        lines.append(
+            "partial_known_token_lower_bound: "
+            f"{partial_bounds.get('total_tokens')}"
+        )
+    if largest_stage:
+        lines.append(
+            "largest_stage: "
+            f"{largest_stage} "
+            f"({stage_breakdown[largest_stage].get('invocation_count', 0)})"
+        )
     if summary.get("next_action"):
         lines.append(f"next_action: {summary['next_action']}")
+    elif not invocation_usage.get("benchmark_ready"):
+        lines.append(
+            "next_action: reconcile open, partial, unavailable, or legacy invocations"
+        )
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
+
+
+def _format_invocation_coverage(coverage):
+    coverage = coverage if isinstance(coverage, dict) else {}
+    covered = coverage.get("covered", 0)
+    total = coverage.get("total", 0)
+    percent = coverage.get("percent")
+    if percent is None:
+        return f"{covered}/{total} ({coverage.get('status') or 'not_applicable'})"
+    return f"{covered}/{total} ({percent:.2f}%)"
 
 
 def _format_projection_evidence(summary):
