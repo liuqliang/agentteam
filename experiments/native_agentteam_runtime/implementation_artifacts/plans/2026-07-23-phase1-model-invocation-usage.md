@@ -1013,7 +1013,8 @@ G5 passes only when:
   taskpack or run evidence, and explicit-taskpack, explicit-run, and implicit
   latest continuation all recover the matching frozen namespace; initial
   launch rejects flat/versioned or cross-version mismatches, while an
-  identity-marked flat run ID such as `v2` remains a direct run;
+  identity-marked flat run ID such as `v2` remains a direct run and prevents
+  the same path from also becoming a version namespace;
 - manifest or source-commit mismatch fails before any worker/provider action;
 - release garbage collection protects every valid bound run release and every
   release-bound frozen taskpack release before run creation;

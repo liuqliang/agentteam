@@ -865,6 +865,11 @@ def _validated_run_root(canonical_run_root, requested_run_root):
         raise AgentTeamReleaseError(
             "run_root must be the project runs root or one bounded vN namespace"
         )
+    direct_identity = requested / "state" / "run_identity.v1.json"
+    if direct_identity.exists() or direct_identity.is_symlink():
+        raise AgentTeamReleaseError(
+            "versioned run root conflicts with an existing direct vN run"
+        )
     return requested
 
 

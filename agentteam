@@ -197,6 +197,17 @@ def _artifact_version_namespace(path, work_root, namespace, leaf_id):
         and RUN_NAMESPACE_PATTERN.fullmatch(relative.parts[0])
         and relative.parts[1] == leaf_id
     ):
+        if namespace == "runs":
+            direct_identity = (
+                namespace_root
+                / relative.parts[0]
+                / "state"
+                / "run_identity.v1.json"
+            )
+            if direct_identity.exists() or direct_identity.is_symlink():
+                raise LauncherError(
+                    "versioned run namespace conflicts with a direct vN run"
+                )
         return relative.parts[0]
     raise LauncherError(f"{namespace} artifact has an unsupported namespace")
 

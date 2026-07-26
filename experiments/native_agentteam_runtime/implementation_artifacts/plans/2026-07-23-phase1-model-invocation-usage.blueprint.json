@@ -45,7 +45,7 @@
     },
     "profile_candidate_root_policy": "explicit_distinct_roots_same_git_common_directory",
     "runtime_release_policy": "immutable_prelaunch_run_binding",
-    "versioned_execution_artifact_namespace_policy": "initial_and_resumed_runs_require_matching_bounded_frozen_and_runs_version_subdirectories_with_identity_marker_disambiguation_for_flat_vN_ids",
+    "versioned_execution_artifact_namespace_policy": "initial_and_resumed_runs_require_matching_bounded_frozen_and_runs_version_subdirectories_with_identity_marker_disambiguation_and_no_direct_vN_namespace_collision",
     "frozen_release_gc_policy": "release_bound_frozen_taskpacks_protect_release_before_run_creation",
     "blueprint_freeze_integrity_policy": "trusted_caller_expected_authoring_mode_external_manifest_deterministic_regeneration_and_rename_noreplace_staging_publish",
     "preflight_release_ancestry_policy": "pre04_ancestor_of_release_source_ancestor_of_materialization_source",

@@ -19031,17 +19031,75 @@ class TaskpackTests(unittest.TestCase):
 
     def test_pre04_08c_flat_vn_run_id_is_not_treated_as_namespace(self):
         with tempfile.TemporaryDirectory() as tmp:
-            work_root = Path(tmp)
-            release = _pre04_release_fixture(work_root, "release-1")
-            pair = publish_implementation_run(
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            release = _pre04_release_fixture(
                 work_root,
-                project_key="pre04",
-                run_id="v2",
+                "release-1",
+                _git_head(repo),
+                runtime_source=Path(__file__).resolve().parents[1],
+            )
+            write_project_profile(
+                repo,
+                build_project_profile(
+                    repo,
+                    project_key="pre04",
+                    work_root=work_root,
+                    author_runtime="fake",
+                    default_runtime="fake",
+                    one_shot=True,
+                ),
+            )
+            draft = draft_taskpack_files(
+                project_root=repo,
+                goal="Exercise a flat vN run identity.",
+                draft_root=work_root / "drafts",
                 taskpack_id="v2",
-                release_identity=release,
+                write_scope=["src/"],
+            )
+            _set_taskpack_runtime_backend(draft["taskpack_dir"], "fake")
+            taskpack_path = Path(draft["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack["context"] = {
+                "runtime_release_id": release["release_id"],
+                "runtime_release_source_commit": release["source_commit"],
+                "git_object_format": release["git_object_format"],
+            }
+            _write_json(taskpack_path, taskpack)
+            frozen = Path(
+                freeze_taskpack(
+                    draft["taskpack_dir"],
+                    work_root / "frozen",
+                )["frozen_taskpack_dir"]
+            )
+            env = _test_env()
+            env.pop("PYTHONPATH", None)
+            launcher_path = str(Path(__file__).resolve().parents[4] / "agentteam")
+            started = subprocess.run(
+                [
+                    launcher_path,
+                    "run",
+                    str(frozen),
+                    "--run-root",
+                    str(work_root / "runs"),
+                    "--one-shot",
+                    "--json",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(started.returncode, 0, started.stderr)
+            pair = validate_run_binding(
+                work_root / "runs" / "v2",
+                expected_project_key="pre04",
             )
             launcher = runpy.run_path(
-                str(Path(__file__).resolve().parents[4] / "agentteam")
+                launcher_path
             )
 
             runtime_selected = select_latest_implementation_run(
@@ -19055,6 +19113,43 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertEqual(runtime_selected["run_dir"], pair["run_dir"])
             self.assertEqual(launcher_selected["run_dir"], pair["run_dir"])
+            for resume_args in (
+                ["--run-dir", pair["run_dir"]],
+                ["--taskpack", "v2"],
+                [],
+            ):
+                continued = subprocess.run(
+                    [
+                        launcher_path,
+                        "continue",
+                        "--project-root",
+                        str(repo),
+                        *resume_args,
+                        "--one-shot",
+                        "--json",
+                    ],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(continued.returncode, 0, continued.stderr)
+                result = json.loads(continued.stdout)
+                self.assertEqual(result["paths"]["run_dir"], pair["run_dir"])
+                self.assertEqual(
+                    result["paths"]["frozen_taskpack_dir"],
+                    str(frozen),
+                )
+            with self.assertRaises(AgentTeamReleaseError):
+                publish_implementation_run(
+                    work_root,
+                    project_key="pre04",
+                    run_id="nested-run",
+                    taskpack_id="nested-run",
+                    release_identity=release,
+                    run_root=work_root / "runs" / "v2",
+                )
 
     def test_pre04_09_acceptance_evidence_does_not_replace_latest_implementation(self):
         with tempfile.TemporaryDirectory() as tmp:

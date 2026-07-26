@@ -969,7 +969,8 @@ must exactly match the loaded release and its new binding.
     root; explicit-taskpack, explicit-run, and implicit-latest continuation
     recover the matching frozen namespace; initial flat/versioned and
     cross-version mismatches fail before runtime import; identity-marked flat
-    run IDs such as `v2` remain direct runs rather than namespaces; paths under
+    run IDs such as `v2` remain direct runs rather than namespaces and reject
+    attempts to reuse the same directory as a version namespace; paths under
     different work roots fail before runtime import;
 16. a release-bound frozen taskpack protects its release from project and
     global garbage collection before run creation.
