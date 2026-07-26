@@ -1610,7 +1610,6 @@ class TaskpackTests(unittest.TestCase):
         self.assertEqual(
             result["task_ids"],
             [
-                "P1-01",
                 "P1-02A",
                 "P1-02B",
                 "P1-03",
@@ -1623,10 +1622,19 @@ class TaskpackTests(unittest.TestCase):
                 "P1-06D",
             ],
         )
-        self.assertEqual(result["task_count"], 11)
-        self.assertEqual(result["dependency_edge_count"], 10)
+        self.assertEqual(result["task_count"], 10)
+        self.assertEqual(result["dependency_edge_count"], 9)
         self.assertEqual(result["validation_status"], "accepted")
         self.assertFalse(result["freeze_eligible"])
+        blueprint = json.loads((project_root / blueprint_path).read_text())
+        self.assertEqual(
+            blueprint["contract"]["recovered_completed_seed_tasks"],
+            {
+                "P1-01": (
+                    "bc38dfb753de6424935888439965add16197c351"
+                )
+            },
+        )
 
     def _run_agentteam_json(self, *args):
         completed = subprocess.run(
