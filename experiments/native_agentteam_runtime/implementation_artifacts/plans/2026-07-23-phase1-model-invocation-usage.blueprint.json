@@ -34,6 +34,16 @@
     "lifecycle_owner_policy": "worker_lease_author_process_or_durable_controller_claim",
     "controller_lifecycle_authority": "fixed_registered_run_state_root_with_canonical_import_and_unresolved_file_projection",
     "controller_report_projection_policy": "all_supported_stages_count_once_from_canonical_or_unresolved_file_authority",
+    "write_scope_cardinality_policy": {
+      "default_max_entries": 3,
+      "exact_path_exceptions": {
+        "P1-01": 7,
+        "P1-03": 11,
+        "P1-04A": 5
+      },
+      "exception_scope_rule": "production_paths_exact_test_directory_scope_allowed",
+      "exception_verification": "full_taskpack_verification_required"
+    },
     "profile_candidate_root_policy": "explicit_distinct_roots_same_git_common_directory",
     "runtime_release_policy": "immutable_prelaunch_run_binding",
     "preflight_release_ancestry_policy": "pre04_ancestor_of_release_source_ancestor_of_materialization_source",
@@ -278,6 +288,7 @@
       ],
       "blockers": [],
       "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/diagnostic_chat.py",

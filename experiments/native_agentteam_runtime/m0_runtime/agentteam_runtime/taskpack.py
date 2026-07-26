@@ -902,6 +902,7 @@ def _validate_taskpack_blueprint(
                 f"{task_id} input_artifacts must include tracked blueprint "
                 f"{blueprint_relative_path}"
             )
+    _validate_blueprint_write_scope_cardinality(blueprint, tasks, task_id_set, errors)
     _validate_dependency_graph(dependency_graph, task_id_set, errors)
 
     for field_name in ("source_plan", "research_authority"):
@@ -1076,6 +1077,70 @@ def _blueprint_gate_task_ancestors(gate_id, graph, task_ids):
             ancestors.add(dependency)
         pending.extend(graph.get(dependency, []))
     return ancestors
+
+
+def _validate_blueprint_write_scope_cardinality(
+    blueprint,
+    tasks,
+    task_ids,
+    errors,
+):
+    policy = (blueprint.get("contract") or {}).get(
+        "write_scope_cardinality_policy"
+    )
+    if policy is None:
+        return
+    if not isinstance(policy, dict):
+        errors.append("contract.write_scope_cardinality_policy must be an object")
+        return
+    default_max = policy.get("default_max_entries")
+    exceptions = policy.get("exact_path_exceptions")
+    if (
+        not isinstance(default_max, int)
+        or isinstance(default_max, bool)
+        or default_max < 1
+    ):
+        errors.append(
+            "contract.write_scope_cardinality_policy.default_max_entries "
+            "must be a positive integer"
+        )
+        return
+    if not isinstance(exceptions, dict):
+        errors.append(
+            "contract.write_scope_cardinality_policy.exact_path_exceptions "
+            "must be an object"
+        )
+        return
+    unknown_exceptions = sorted(set(exceptions) - set(task_ids))
+    for task_id in unknown_exceptions:
+        errors.append(
+            "contract.write_scope_cardinality_policy exception references "
+            f"unknown task: {task_id}"
+        )
+    for task in tasks:
+        task_id = task["task_id"]
+        write_count = len(task.get("write_scope") or [])
+        if task_id in exceptions:
+            expected_count = exceptions[task_id]
+            if (
+                not isinstance(expected_count, int)
+                or isinstance(expected_count, bool)
+                or expected_count < 1
+            ):
+                errors.append(
+                    "contract.write_scope_cardinality_policy exception for "
+                    f"{task_id} must be a positive integer"
+                )
+            elif write_count != expected_count:
+                errors.append(
+                    f"{task_id} write_scope count {write_count} does not match "
+                    f"the contract exception {expected_count}"
+                )
+        elif write_count > default_max:
+            errors.append(
+                f"{task_id} write_scope count {write_count} exceeds the "
+                f"contract default maximum {default_max}"
+            )
 
 
 def _blueprint_path_in_write_scope(path, write_scope):

@@ -1015,10 +1015,21 @@ package:
   the machine contract to be read;
 - preserve both blueprint `post_backlog_gates` and initialize their run-state
   receipts as pending;
-- keep execution items within three write-scope entries except P1-01, which
-  uses seven exact entries to avoid granting directory-wide write access over
-  approved review/preflight schemas; assign `risk_target: L0` or `L1` as
-  specified below;
+- keep execution items within three write-scope entries except these
+  digest-bound exact-path cases:
+  - P1-01 uses seven entries so schema and parser changes remain explicit
+    instead of granting directory-wide access over approved schemas;
+  - P1-03 uses eleven entries because the author, diagnostic, and six tracked
+    development-smoke callers must cross one shared lifecycle boundary in the
+    same verified change, with two focused test files;
+  - P1-04A uses five entries because the shared importer, scheduler,
+    diagnostic caller, and their two focused test files must adopt one
+    conflict-detection rule atomically;
+- these exceptions remain `risk_target: L1` because every production path is
+  enumerated, only the existing test-only directory scope is allowed, no
+  production directory or wildcard scope is granted, and integration requires
+  the full verification command; all other tasks retain the three-entry
+  maximum and their specified L0/L1 risk;
 - give each item bounded read access to its files, direct callers, tests, and
   the two authority documents;
 - keep `policy.allow_merge` false;
@@ -1420,6 +1431,7 @@ timed-out processes.
 
 ### Files
 
+- Read: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py`
 - Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py`
 - Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py`
 - Modify: `experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/diagnostic_chat.py`

@@ -1337,6 +1337,46 @@ class TaskpackTests(unittest.TestCase):
                 ],
             )
 
+    def test_blueprint_enforces_write_scope_cardinality_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            blueprint["contract"] = {
+                "write_scope_cardinality_policy": {
+                    "default_max_entries": 2,
+                    "exact_path_exceptions": {"T-2": 3},
+                }
+            }
+            blueprint["tasks"][1]["write_scope"].append("src/task_2_helper.py")
+            blueprint["tasks"][1]["write_scope"].append("src/task_2_extra.py")
+            _write_json(repo / blueprint_path, blueprint)
+            _write_blueprint_approval(repo, blueprint)
+
+            result = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "accepted",
+                dry_run=True,
+            )
+            self.assertEqual(result["validation_status"], "accepted")
+
+            blueprint["tasks"][0]["write_scope"].append("src/task_1_helper.py")
+            blueprint["tasks"][0]["write_scope"].append("src/task_1_extra.py")
+            _write_json(repo / blueprint_path, blueprint)
+            _write_blueprint_approval(repo, blueprint)
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "T-1 write_scope count 3 exceeds the contract default maximum 2",
+            ):
+                taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_path,
+                    tmp_path / "rejected",
+                    dry_run=True,
+                )
+
     def test_blueprint_negative_schema_dag_and_path_cases_fail_before_output(self):
         cases = {
             "unknown-dependency": lambda value: value["tasks"][0]["depends_on"].append("missing"),
