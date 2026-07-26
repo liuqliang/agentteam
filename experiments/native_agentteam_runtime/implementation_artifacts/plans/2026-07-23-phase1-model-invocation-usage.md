@@ -1012,7 +1012,8 @@ G5 passes only when:
   namespaces resolve to one work root without moving immutable earlier
   taskpack or run evidence;
 - manifest or source-commit mismatch fails before any worker/provider action;
-- release garbage collection protects every valid bound release;
+- release garbage collection protects every valid bound run release and every
+  approval-bound frozen taskpack release before run creation;
 - changing the active release affects future runs only;
 - the reviewed launcher is installed into the actual machine command path and
   its digest plus bound-continuation behavior are verified there.

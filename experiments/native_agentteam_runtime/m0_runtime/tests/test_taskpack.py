@@ -10674,7 +10674,12 @@ class TaskpackTests(unittest.TestCase):
             tmp_path = Path(tmp)
             work_root = tmp_path / "agentteam-work"
             releases = work_root / "releases"
-            for release_id in ["active-release", "running-release", "idle-release"]:
+            for release_id in [
+                "active-release",
+                "frozen-release",
+                "running-release",
+                "idle-release",
+            ]:
                 release_root = releases / release_id
                 release_root.mkdir(parents=True)
                 (release_root / "manifest.json").write_text(
@@ -10712,12 +10717,37 @@ class TaskpackTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
+            frozen_taskpack = (
+                work_root
+                / "frozen"
+                / "v2"
+                / "approved-before-run"
+            )
+            frozen_taskpack.mkdir(parents=True)
+            _write_json(
+                frozen_taskpack / "taskpack.yaml",
+                {
+                    "taskpack_id": "approved-before-run",
+                    "status": "frozen",
+                    "context": {
+                        "runtime_release_id": "frozen-release",
+                    },
+                },
+            )
 
             result = prune_releases(work_root, keep_latest=1)
 
             self.assertEqual(result["deleted_release_ids"], ["idle-release"])
-            self.assertEqual(result["protected_release_ids"], ["active-release", "running-release"])
+            self.assertEqual(
+                result["protected_release_ids"],
+                [
+                    "active-release",
+                    "frozen-release",
+                    "running-release",
+                ],
+            )
             self.assertTrue((releases / "active-release").exists())
+            self.assertTrue((releases / "frozen-release").exists())
             self.assertTrue((releases / "running-release").exists())
             self.assertFalse((releases / "idle-release").exists())
 
@@ -10823,7 +10853,13 @@ class TaskpackTests(unittest.TestCase):
             other_work_root = tmp_path / "agentteam-home" / "project-b"
 
             release_roots = {}
-            for release_id in ["active-release", "ref-release", "running-release", "orphan-release"]:
+            for release_id in [
+                "active-release",
+                "frozen-release",
+                "ref-release",
+                "running-release",
+                "orphan-release",
+            ]:
                 release_root = source_root / release_id
                 release_root.mkdir(parents=True)
                 (release_root / "manifest.json").write_text(
@@ -10862,6 +10898,27 @@ class TaskpackTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            (refs_root / "frozen-release.json").write_text(
+                json.dumps(
+                    {
+                        "release_id": "frozen-release",
+                        "release_root": str(release_roots["frozen-release"]),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            frozen_taskpack = work_root / "frozen" / "v3" / "approved-before-run"
+            frozen_taskpack.mkdir(parents=True)
+            _write_json(
+                frozen_taskpack / "taskpack.yaml",
+                {
+                    "taskpack_id": "approved-before-run",
+                    "status": "frozen",
+                    "context": {
+                        "runtime_release_id": "frozen-release",
+                    },
+                },
+            )
             running_state = other_work_root / "runs" / "running-run" / "state"
             running_state.mkdir(parents=True)
             (running_state / "two_phase_scheduler_state.json").write_text(
@@ -10886,9 +10943,18 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(dry_run["deletable_global_release_ids"], ["orphan-release"])
             self.assertEqual(
                 dry_run["protected_global_release_ids"],
-                ["active-release", "ref-release", "running-release"],
+                [
+                    "active-release",
+                    "frozen-release",
+                    "ref-release",
+                    "running-release",
+                ],
             )
             self.assertIn("active_project", statuses["active-release"]["protection_reasons"])
+            self.assertIn(
+                "frozen_taskpack",
+                statuses["frozen-release"]["protection_reasons"],
+            )
             self.assertIn("project_ref", statuses["ref-release"]["protection_reasons"])
             self.assertIn("nonterminal_run", statuses["running-release"]["protection_reasons"])
             self.assertEqual(statuses["orphan-release"]["status"], "deletable")
@@ -10903,6 +10969,7 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(pruned["prune_status"], "pruned")
             self.assertEqual(pruned["deleted_global_release_ids"], ["orphan-release"])
             self.assertTrue(release_roots["active-release"].exists())
+            self.assertTrue(release_roots["frozen-release"].exists())
             self.assertTrue(release_roots["ref-release"].exists())
             self.assertTrue(release_roots["running-release"].exists())
             self.assertFalse(release_roots["orphan-release"].exists())

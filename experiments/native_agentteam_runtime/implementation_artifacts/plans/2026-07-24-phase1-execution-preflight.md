@@ -907,7 +907,8 @@ the selected run before importing `agentteam_runtime`, honoring explicit
 binding and release manifest, and imports from the bound runtime root. A
 concurrent `agentteam update` may change future runs but cannot change this
 selection. Release garbage collection treats a valid binding as a protection
-reference.
+reference. It also treats an approval-bound frozen taskpack as a protection
+reference before the first run identity can be created.
 
 For an initial `agentteam run`, which currently has no `--project-root`, the
 launcher derives the work root from the frozen taskpack path and `--run-root`,
@@ -965,7 +966,9 @@ must exactly match the loaded release and its new binding.
 14. an explicitly selected older implementation run remains available when its
     identity and release binding validate;
 15. `frozen/vN/<taskpack>` and `runs/vN/<taskpack>` resolve to the same work
-    root, while paths under different work roots fail before runtime import.
+    root, while paths under different work roots fail before runtime import;
+16. an approval-bound frozen taskpack protects its release from project and
+    global garbage collection before run creation.
 
 ### Acceptance
 

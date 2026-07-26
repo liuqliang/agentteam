@@ -282,7 +282,7 @@ def run_release_bindings(work_root):
     unmanaged_runs = []
     if not run_root.exists():
         return {"runs_by_release": runs_by_release, "unmanaged_runs": unmanaged_runs}
-    for run_dir in sorted(path for path in run_root.iterdir() if path.is_dir()):
+    for run_dir in _iter_run_identity_directories(run_root):
         try:
             pair = validate_run_binding(run_dir, expected_project_key=None)
         except AgentTeamReleaseError:
@@ -316,6 +316,7 @@ def prune_releases(work_root, keep_latest=1):
             *latest_release_ids,
             *_bound_run_release_ids(work_root),
             *_nonterminal_run_release_ids(work_root),
+            *_frozen_taskpack_release_ids(work_root),
         ]
         if release_id
     }
@@ -868,11 +869,18 @@ def _validated_run_root(canonical_run_root, requested_run_root):
 
 
 def _iter_run_identity_directories(run_root):
-    run_root = Path(run_root).resolve()
-    for child in sorted(run_root.iterdir(), key=lambda path: path.name):
+    yield from _iter_versioned_artifact_directories(
+        run_root,
+        artifact_kind="run",
+    )
+
+
+def _iter_versioned_artifact_directories(root, *, artifact_kind):
+    root = Path(root).resolve()
+    for child in sorted(root.iterdir(), key=lambda path: path.name):
         if child.is_symlink() or not child.is_dir():
             raise AgentTeamReleaseError(
-                f"unsafe direct run child blocks identity scan: {child.name}"
+                f"unsafe direct {artifact_kind} child blocks scan: {child.name}"
             )
         if not RUN_NAMESPACE_PATTERN.fullmatch(child.name):
             yield child
@@ -880,7 +888,7 @@ def _iter_run_identity_directories(run_root):
         for nested in sorted(child.iterdir(), key=lambda path: path.name):
             if nested.is_symlink() or not nested.is_dir():
                 raise AgentTeamReleaseError(
-                    "unsafe versioned run child blocks identity scan: "
+                    f"unsafe versioned {artifact_kind} child blocks scan: "
                     f"{child.name}/{nested.name}"
                 )
             yield nested
@@ -1568,7 +1576,7 @@ def _nonterminal_run_release_ids(work_root):
     if not run_root.exists():
         return []
     release_ids = []
-    for run_dir in sorted(path for path in run_root.iterdir() if path.is_dir()):
+    for run_dir in _iter_run_identity_directories(run_root):
         state = _run_state(run_dir)
         if not isinstance(state, dict):
             continue
@@ -1586,14 +1594,43 @@ def _bound_run_release_ids(work_root):
     if not run_root.exists():
         return []
     release_ids = []
-    for run_dir in sorted(run_root.iterdir()):
-        if run_dir.is_symlink() or not run_dir.is_dir():
-            continue
+    for run_dir in _iter_run_identity_directories(run_root):
         try:
             pair = validate_run_binding(run_dir, expected_project_key=None)
         except AgentTeamReleaseError:
             continue
         release_ids.append(pair["binding"]["release_id"])
+    return release_ids
+
+
+def _frozen_taskpack_release_ids(work_root):
+    frozen_root = Path(work_root).resolve() / "frozen"
+    if not frozen_root.exists():
+        return []
+    release_ids = []
+    for taskpack_dir in _iter_versioned_artifact_directories(
+        frozen_root,
+        artifact_kind="frozen taskpack",
+    ):
+        taskpack_path = taskpack_dir / "taskpack.yaml"
+        if not taskpack_path.exists() and not taskpack_path.is_symlink():
+            continue
+        if taskpack_path.is_symlink() or not taskpack_path.is_file():
+            raise AgentTeamReleaseError(
+                f"frozen taskpack metadata is unsafe: {taskpack_path}"
+            )
+        taskpack = _read_json_strict(
+            taskpack_path,
+            "frozen taskpack metadata",
+        )
+        context = (
+            taskpack.get("context")
+            if isinstance(taskpack.get("context"), dict)
+            else {}
+        )
+        release_id = context.get("runtime_release_id")
+        if release_id:
+            release_ids.append(_safe_release_id(release_id))
     return release_ids
 
 
@@ -1677,37 +1714,52 @@ def _global_release_references(work_roots):
                     references.append(reference)
 
         run_root = work_root / "runs"
-        if not run_root.exists():
-            continue
-        for run_dir in sorted(path for path in run_root.iterdir() if path.is_dir()):
-            try:
-                pair = validate_run_binding(run_dir, expected_project_key=None)
-            except AgentTeamReleaseError:
-                pair = None
-            if pair:
-                binding = pair["binding"]
-                reference = _global_release_reference(
-                    binding,
-                    work_root,
-                    "bound_run",
-                    run_id=run_dir.name,
-                )
-            else:
-                state = _run_state(run_dir)
-                if not isinstance(state, dict):
-                    continue
-                scheduler_status = state.get("scheduler_status")
-                if scheduler_status and scheduler_status in TERMINAL_RUN_STATUSES:
-                    continue
-                reference = _global_release_reference(
-                    {
-                        "release_id": state.get("runtime_release_id"),
-                        "release_root": state.get("runtime_release_root"),
-                    },
-                    work_root,
-                    "nonterminal_run",
-                    run_id=run_dir.name,
-                )
+        if run_root.exists():
+            for run_dir in _iter_run_identity_directories(run_root):
+                try:
+                    pair = validate_run_binding(
+                        run_dir,
+                        expected_project_key=None,
+                    )
+                except AgentTeamReleaseError:
+                    pair = None
+                if pair:
+                    binding = pair["binding"]
+                    reference = _global_release_reference(
+                        binding,
+                        work_root,
+                        "bound_run",
+                        run_id=run_dir.name,
+                    )
+                else:
+                    state = _run_state(run_dir)
+                    if not isinstance(state, dict):
+                        continue
+                    scheduler_status = state.get("scheduler_status")
+                    if (
+                        scheduler_status
+                        and scheduler_status in TERMINAL_RUN_STATUSES
+                    ):
+                        continue
+                    reference = _global_release_reference(
+                        {
+                            "release_id": state.get("runtime_release_id"),
+                            "release_root": state.get("runtime_release_root"),
+                        },
+                        work_root,
+                        "nonterminal_run",
+                        run_id=run_dir.name,
+                    )
+                if reference:
+                    references.append(reference)
+
+        for release_id in _frozen_taskpack_release_ids(work_root):
+            manifest = release_manifest(work_root, release_id)
+            reference = _global_release_reference(
+                manifest,
+                work_root,
+                "frozen_taskpack",
+            )
             if reference:
                 references.append(reference)
     return references
