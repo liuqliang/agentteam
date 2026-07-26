@@ -1,4 +1,6 @@
 import argparse
+import fcntl
+import hashlib
 import inspect
 import json
 import os
@@ -6,6 +8,8 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager, nullcontext
+from copy import deepcopy
 from pathlib import Path
 
 from .m0_runtime import CodexRuntimeAdapter, FakeRuntimeAdapter, SystemClock
@@ -13,6 +17,112 @@ from .m0_runtime import CodexRuntimeAdapter, FakeRuntimeAdapter, SystemClock
 
 IDLE_HEARTBEAT_MIN_INTERVAL_SECONDS = 15
 HEARTBEAT_PROGRESS_MAX_CHARS = 220
+MODEL_INVOCATION_CONTEXT_FIELDS = (
+    "project",
+    "run_id",
+    "pursue_id",
+    "round_index",
+    "taskpack_id",
+    "implementation_run_id",
+    "gate_epoch",
+    "task_id",
+    "attempt_id",
+    "runtime_execution_session_id",
+    "requested_provider_session_id",
+    "provider_resume_mode",
+    "provider_predecessor_invocation_id",
+    "provider_predecessor_turn_id",
+    "provider_predecessor_usage_snapshot",
+    "lifecycle_owner_token",
+    "lease_id",
+    "agent_id",
+    "agent_role",
+    "required_role",
+    "usage_stage",
+    "provider_usage_scope",
+    "provider_session_lock_held",
+    "provider_project_binding_valid",
+    "provider_lineage_status",
+    "previous_provider_session_id",
+    "previous_provider_turn_id",
+    "previous_invocation_id",
+)
+
+
+class ProviderSessionProjectBindingError(RuntimeError):
+    """Raised before launch when a provider session is bound to another project."""
+
+
+class ProviderSessionCoordinator:
+    """Serialize cumulative provider-session writers in a user-shared namespace."""
+
+    def __init__(self, state_root=None):
+        self.state_root = Path(state_root) if state_root else _provider_session_state_root()
+
+    @contextmanager
+    def prepare_message(self, message, runtime_adapter, *, authority_root):
+        prepared = deepcopy(message)
+        payload = prepared.setdefault("payload", {})
+        resume_mode, requested_session = _provider_resume_request(
+            payload,
+            runtime_adapter,
+        )
+        payload["provider_resume_mode"] = resume_mode
+        payload["requested_provider_session_id"] = requested_session
+        if resume_mode == "new":
+            yield prepared
+            return
+
+        domain_dir = self.state_root / _provider_session_namespace(payload, None)
+        namespace_dir = (
+            self.state_root
+            / _provider_session_namespace(payload, requested_session)
+            if resume_mode == "explicit"
+            else domain_dir
+        )
+        domain_lock_mode = (
+            fcntl.LOCK_SH if resume_mode == "explicit" else fcntl.LOCK_EX
+        )
+        with _provider_lock(domain_dir / "writer.lock", domain_lock_mode):
+            session_lock = (
+                _provider_lock(namespace_dir / "writer.lock", fcntl.LOCK_EX)
+                if resume_mode == "explicit"
+                else nullcontext()
+            )
+            with session_lock:
+                binding = _bind_provider_session_project(
+                    namespace_dir,
+                    payload,
+                    authority_root=authority_root,
+                )
+                context = {
+                    "provider_resume_mode": resume_mode,
+                    "requested_provider_session_id": requested_session,
+                    "provider_session_lock_held": True,
+                    "provider_project_binding_valid": True,
+                    "provider_usage_scope": "session_cumulative",
+                }
+                if resume_mode == "explicit":
+                    context.update(
+                        _provider_predecessor_context(
+                            binding["lifecycle_authority_root"],
+                            requested_session,
+                        )
+                    )
+                else:
+                    context.update(
+                        {
+                            "provider_lineage_status": "ambiguous_resume_last",
+                            "provider_predecessor_invocation_id": None,
+                            "provider_predecessor_turn_id": None,
+                            "provider_predecessor_usage_snapshot": None,
+                            "previous_provider_session_id": None,
+                            "previous_provider_turn_id": None,
+                            "previous_invocation_id": None,
+                        }
+                    )
+                _update_model_invocation_context(payload, context)
+                yield prepared
 
 
 class FileMailboxWorker:
@@ -48,6 +158,35 @@ class FileMailboxWorker:
                 "poll_status": "idle",
                 "reason": "no_dispatch_message",
             }
+        lock_digest = hashlib.sha256(
+            message["message_id"].encode("utf-8")
+        ).hexdigest()
+        lock_path = (
+            self.output_dir
+            / "state"
+            / "mailbox_dispatch_locks"
+            / f"{lock_digest}.lock"
+        )
+        with _provider_lock(lock_path, fcntl.LOCK_EX):
+            replayed_result = _runtime_result_record(
+                self.outbox_path,
+                message["message_id"],
+            )
+            if replayed_result is not None:
+                return {
+                    "poll_status": "processed",
+                    "source_message_id": message["message_id"],
+                    "result_status": replayed_result["result_status"],
+                    "changed_files": replayed_result["changed_files"],
+                    "outbox_path": str(self.outbox_path),
+                    "replayed_from_outbox": True,
+                }
+            return self._process_dispatch(
+                message,
+                worktree_path=worktree_path,
+            )
+
+    def _process_dispatch(self, message, *, worktree_path=None):
         if worktree_path is None:
             worktree_path = message.get("payload", {}).get("worktree_path")
         self._write_heartbeat(
@@ -65,18 +204,67 @@ class FileMailboxWorker:
                 worktree_path=worktree_path,
             )
 
-        runtime_result = _run_runtime_adapter(
+        authority_root = _invocation_authority_root(
+            message,
             self.runtime_adapter,
+            self.output_dir,
+        )
+        replay = _replay_model_invocation_result(
+            authority_root,
             message,
             worktree_path=worktree_path,
-            progress_callback=progress_callback,
         )
-        result_message = self._result_message(message, runtime_result)
+        if replay and replay.get("recovery_status") == "open":
+            self._write_heartbeat(
+                activity="processing",
+                poll_status="waiting_recovery",
+                reason="open_model_invocation_requires_scheduler_reconciliation",
+                message=message,
+                worktree_path=worktree_path,
+            )
+            return {
+                "poll_status": "waiting_recovery",
+                "source_message_id": message["message_id"],
+                "invocation_id": replay["invocation_id"],
+                "outbox_path": str(self.outbox_path),
+            }
+
+        if replay:
+            runtime_message = message
+            runtime_result = replay["runtime_result"]
+        else:
+            try:
+                coordinator = ProviderSessionCoordinator(
+                    message.get("payload", {}).get("provider_session_state_root")
+                )
+                with coordinator.prepare_message(
+                    message,
+                    self.runtime_adapter,
+                    authority_root=authority_root,
+                ) as runtime_message:
+                    runtime_result = _run_runtime_adapter(
+                        self.runtime_adapter,
+                        runtime_message,
+                        worktree_path=worktree_path,
+                        progress_callback=progress_callback,
+                    )
+            except ProviderSessionProjectBindingError as exc:
+                runtime_message = message
+                runtime_result = {
+                    "result_status": "failed",
+                    "changed_files": [],
+                    "output": {
+                        "adapter": "mailbox",
+                        "error": "provider_session_project_binding_conflict",
+                        "reason": str(exc),
+                    },
+                }
+        result_message = self._result_message(runtime_message, runtime_result)
         _append_jsonl(self.outbox_path, [result_message])
         self._write_heartbeat(
             activity="processed",
             poll_status="processed",
-            message=message,
+            message=runtime_message,
             runtime_result=runtime_result,
             worktree_path=worktree_path,
         )
@@ -164,6 +352,7 @@ class FileMailboxWorker:
         return None
 
     def _result_message(self, message, runtime_result):
+        invocation_context = _model_invocation_context_payload(message)
         payload = {
             "source_message_id": message["message_id"],
             "task_id": message["payload"]["task_id"],
@@ -173,6 +362,11 @@ class FileMailboxWorker:
             "changed_files": runtime_result["changed_files"],
             "output": runtime_result.get("output", {}),
         }
+        if invocation_context:
+            payload["model_invocation_context"] = invocation_context
+        model_invocation = runtime_result.get("output", {}).get("model_invocation")
+        if isinstance(model_invocation, dict):
+            payload["model_invocation"] = deepcopy(model_invocation)
         if isinstance(runtime_result.get("token_usage"), dict):
             payload["token_usage"] = runtime_result["token_usage"]
         if isinstance(runtime_result.get("usage"), dict):
@@ -699,6 +893,17 @@ class FileMailboxWorkerProcessSupervisor:
 
 
 def _runtime_result_from_outbox(outbox_path, source_message_id):
+    result = _runtime_result_record(outbox_path, source_message_id)
+    if result is not None:
+        return result
+    return {
+        "result_status": "failed",
+        "changed_files": [],
+        "output": {"adapter": "mailbox", "error": "mailbox_result_missing"},
+    }
+
+
+def _runtime_result_record(outbox_path, source_message_id):
     for record in _read_jsonl_if_exists(outbox_path):
         if record.get("message_type") != "runtime_result":
             continue
@@ -711,11 +916,329 @@ def _runtime_result_from_outbox(outbox_path, source_message_id):
             "output": payload.get("output", {}),
             "usage": payload.get("usage"),
             "token_usage": payload.get("token_usage"),
+            "model_invocation_context": payload.get("model_invocation_context"),
+            "model_invocation": payload.get("model_invocation"),
+        }
+    return None
+
+
+def _provider_session_state_root():
+    configured = os.environ.get("AGENTTEAM_PROVIDER_SESSION_STATE_ROOT")
+    if configured:
+        return Path(configured)
+    xdg_state_home = os.environ.get("XDG_STATE_HOME")
+    if xdg_state_home:
+        return Path(xdg_state_home) / "agentteam" / "provider_sessions"
+    return Path.home() / ".local" / "state" / "agentteam" / "provider_sessions"
+
+
+@contextmanager
+def _provider_lock(lock_path, mode):
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path.touch(mode=0o600, exist_ok=True)
+    with lock_path.open("r+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), mode)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _provider_resume_request(payload, runtime_adapter):
+    requested = payload.get("requested_provider_session_id")
+    adapter_requested = getattr(runtime_adapter, "resume_session_id", None)
+    if requested and adapter_requested and requested != adapter_requested:
+        raise ProviderSessionProjectBindingError(
+            "dispatch requested_provider_session_id does not match worker runtime profile"
+        )
+    requested = requested or adapter_requested
+    resume_last = bool(
+        payload.get("provider_resume_mode") == "resume_last"
+        or getattr(runtime_adapter, "resume_last", False)
+    )
+    if requested and resume_last:
+        raise ProviderSessionProjectBindingError(
+            "explicit provider session and resume_last are mutually exclusive"
+        )
+    if requested:
+        return "explicit", str(requested)
+    if resume_last:
+        return "resume_last", None
+    return "new", None
+
+
+def _provider_session_namespace(payload, requested_session):
+    identity = {
+        "backend": payload.get("backend") or "codex",
+        "backend_account": payload.get("provider_backend_account") or "default",
+        "session_store": payload.get("provider_session_store") or "default",
+        "provider_session": requested_session or "__resume_last_domain__",
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return digest
+
+
+def _bind_provider_session_project(namespace_dir, payload, *, authority_root):
+    binding_path = namespace_dir / "project_binding.json"
+    project_identity = str(
+        payload.get("provider_project_identity")
+        or payload.get("project_root")
+        or payload.get("project")
+        or "agentteam"
+    )
+    lifecycle_root = Path(
+        payload.get("provider_project_lifecycle_root") or authority_root
+    ).resolve()
+    candidate = {
+        "binding_schema_version": "provider_session_project_binding.v1",
+        "project_identity": project_identity,
+        "lifecycle_authority_root": str(lifecycle_root),
+    }
+    if binding_path.exists():
+        existing = json.loads(binding_path.read_text(encoding="utf-8"))
+        if existing.get("project_identity") != project_identity:
+            raise ProviderSessionProjectBindingError(
+                "provider session is already bound to project "
+                f"{existing.get('project_identity')!r}; cross-project resume rejected"
+            )
+        return existing
+    data = json.dumps(candidate, sort_keys=True).encode("utf-8")
+    descriptor = os.open(
+        binding_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        try:
+            binding_path.unlink()
+        except OSError:
+            pass
+        raise
+    return candidate
+
+
+def _provider_predecessor_context(lifecycle_root, provider_session_id):
+    terminals = []
+    root = Path(lifecycle_root)
+    if root.exists():
+        for path in sorted(root.glob("**/model_invocations/*/terminal.json")):
+            try:
+                terminal = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if terminal.get("provider_session_id") != provider_session_id:
+                continue
+            turn_id = terminal.get("provider_turn_id")
+            invocation_id = terminal.get("invocation_id")
+            if not isinstance(turn_id, str) or not turn_id:
+                continue
+            if not isinstance(invocation_id, str) or not invocation_id:
+                continue
+            terminals.append((path, terminal))
+
+    referenced_turn_ids = {
+        terminal.get("provider_predecessor_turn_id")
+        for _, terminal in terminals
+        if terminal.get("provider_predecessor_turn_id")
+    }
+    tips = [
+        item
+        for item in terminals
+        if item[1].get("provider_turn_id") not in referenced_turn_ids
+    ]
+    if len(tips) != 1:
+        return {
+            "provider_lineage_status": "unresolved",
+            "provider_predecessor_invocation_id": None,
+            "provider_predecessor_turn_id": None,
+            "provider_predecessor_usage_snapshot": None,
+            "previous_provider_session_id": None,
+            "previous_provider_turn_id": None,
+            "previous_invocation_id": None,
+        }
+
+    terminal_path, terminal = tips[0]
+    snapshot = _provider_usage_snapshot(
+        terminal_path.with_name("stdout.jsonl"),
+        provider_session_id,
+    )
+    if snapshot is None:
+        return {
+            "provider_lineage_status": "unresolved",
+            "provider_predecessor_invocation_id": None,
+            "provider_predecessor_turn_id": None,
+            "provider_predecessor_usage_snapshot": None,
+            "previous_provider_session_id": None,
+            "previous_provider_turn_id": None,
+            "previous_invocation_id": None,
         }
     return {
-        "result_status": "failed",
-        "changed_files": [],
-        "output": {"adapter": "mailbox", "error": "mailbox_result_missing"},
+        "provider_lineage_status": "authoritative",
+        "provider_predecessor_invocation_id": terminal["invocation_id"],
+        "provider_predecessor_turn_id": terminal["provider_turn_id"],
+        "provider_predecessor_usage_snapshot": snapshot,
+        "previous_provider_session_id": provider_session_id,
+        "previous_provider_turn_id": terminal["provider_turn_id"],
+        "previous_invocation_id": terminal["invocation_id"],
+    }
+
+
+def _provider_usage_snapshot(stdout_path, provider_session_id):
+    try:
+        lines = stdout_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    snapshot = None
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or not isinstance(event.get("usage"), dict):
+            continue
+        event_session = event.get("provider_session_id")
+        if event_session not in {None, provider_session_id}:
+            continue
+        usage = event["usage"]
+        candidate = {
+            field: usage.get(field, 0)
+            for field in (
+                "input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+            )
+        }
+        if all(isinstance(value, int) and value >= 0 for value in candidate.values()):
+            snapshot = candidate
+    return snapshot
+
+
+def _update_model_invocation_context(payload, context):
+    payload.update(deepcopy(context))
+    nested = payload.get("model_invocation_context")
+    if isinstance(nested, dict):
+        payload["model_invocation_context"] = {
+            **nested,
+            **deepcopy(context),
+        }
+
+
+def _model_invocation_context_payload(message):
+    payload = message.get("payload", {})
+    nested = payload.get("model_invocation_context")
+    merged = dict(payload)
+    if isinstance(nested, dict):
+        merged.update(nested)
+    return {
+        field: deepcopy(merged.get(field))
+        for field in MODEL_INVOCATION_CONTEXT_FIELDS
+        if field in merged
+    }
+
+
+def _invocation_authority_root(message, runtime_adapter, fallback):
+    payload = message.get("payload", {})
+    configured = payload.get("model_invocation_authority_root")
+    if configured:
+        return Path(configured)
+    adapter_root = getattr(runtime_adapter, "output_dir", None)
+    if adapter_root:
+        return Path(adapter_root)
+    return Path(fallback)
+
+
+def _replay_model_invocation_result(authority_root, message, *, worktree_path):
+    payload = message.get("payload", {})
+    attempt_id = payload.get("attempt_id")
+    owner_token = payload.get("lifecycle_owner_token") or payload.get("lease_id")
+    agent_id = payload.get("agent_id") or message.get("to_agent")
+    matches = []
+    invocation_root = Path(authority_root) / "model_invocations"
+    if not invocation_root.exists():
+        return None
+    for started_path in sorted(invocation_root.glob("*/started.json")):
+        try:
+            start = json.loads(started_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if start.get("attempt_id") != attempt_id:
+            continue
+        if start.get("lifecycle_owner_token") != owner_token:
+            continue
+        if agent_id and start.get("agent_id") not in {None, agent_id}:
+            continue
+        matches.append((started_path, start))
+    if not matches:
+        return None
+    if len(matches) != 1:
+        return {
+            "recovery_status": "open",
+            "invocation_id": None,
+            "reason": "multiple_model_invocations_for_dispatch",
+        }
+    started_path, start = matches[0]
+    terminal_path = started_path.with_name("terminal.json")
+    if not terminal_path.exists():
+        return {
+            "recovery_status": "open",
+            "invocation_id": start["invocation_id"],
+            "reason": "open_model_invocation",
+        }
+    terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
+    terminal_status = terminal.get("terminal_status")
+    result_status = (
+        terminal_status
+        if terminal_status in {"completed", "failed", "blocked", "cancelled", "timed_out"}
+        else "failed"
+    )
+    token_usage = None
+    if terminal.get("usage_status") in {"reported", "partial"}:
+        token_usage = {
+            field: terminal.get(field, 0)
+            for field in (
+                "input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+            )
+        }
+        token_usage["usage_source"] = "model_invocation_terminal"
+    invocation_dir = started_path.parent
+    invocation = {
+        "invocation_id": start["invocation_id"],
+        "usage_event_id": terminal.get("usage_event_id"),
+        "started_path": str(started_path),
+        "terminal_path": str(terminal_path),
+        "stdout_path": str(invocation_dir / "stdout.jsonl"),
+        "stderr_path": str(invocation_dir / "stderr.log"),
+        "replayed_from_terminal": True,
+    }
+    runtime_result = {
+        "result_status": result_status,
+        "changed_files": _worktree_changed_files(worktree_path),
+        "output": {
+            "adapter": "mailbox_replay",
+            "model_invocation": invocation,
+            "model_invocation_usage": terminal,
+        },
+    }
+    if token_usage is not None:
+        runtime_result["token_usage"] = token_usage
+    return {
+        "recovery_status": "terminal_replayed",
+        "invocation_id": start["invocation_id"],
+        "runtime_result": runtime_result,
     }
 
 

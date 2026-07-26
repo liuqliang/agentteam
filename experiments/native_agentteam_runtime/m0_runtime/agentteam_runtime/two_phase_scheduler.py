@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import time
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
@@ -34,11 +36,44 @@ from .integration_queue import integration_queue_path, upsert_integration_queue_
 from .notifications import DEFAULT_NOTIFICATION_EVENT_TYPES
 from .operator_control import read_run_stop_request
 from .planner_context import build_planner_context
+from .model_invocation import (
+    InvocationLifecycle,
+    ModelInvocationIntegrityError,
+    assess_execution_group_fence,
+)
 from .task_proposal import normalize_evidence_summary, normalize_task_proposal
 from .token_usage import aggregate_token_usage, token_usage_from_result
 
 
 _STOP_SCHEDULER_STATUSES = {"stopped", "stop_requested"}
+WORKER_USAGE_STAGE_BY_ROLE = {
+    "task_planner": "planner_or_task_slicer",
+    "planner": "planner_or_task_slicer",
+    "task_slicer": "planner_or_task_slicer",
+    "repo_map_agent": "repo_map",
+    "repo_map": "repo_map",
+    "implementation_worker": "implementation_worker",
+    "reviewer": "review_or_repair",
+    "code_reviewer": "review_or_repair",
+    "repair_worker": "review_or_repair",
+    "review_or_repair": "review_or_repair",
+    "follow_up_author": "follow_up_author",
+    "semantic_architecture_agent": "semantic_architecture",
+    "semantic_architecture": "semantic_architecture",
+    "runtime_diagnostic": "runtime_diagnostic",
+    "development_smoke": "development_smoke",
+    "acceptance_live_smoke": "acceptance_live_smoke",
+}
+SUPPORTED_WORKER_INVOCATION_INVENTORY = (
+    {
+        "route": "decompose_backlog",
+        "role": "*",
+        "usage_stage": "planner_or_task_slicer",
+    },
+) + tuple(
+    {"route": "worker", "role": role, "usage_stage": usage_stage}
+    for role, usage_stage in sorted(WORKER_USAGE_STAGE_BY_ROLE.items())
+)
 
 
 class TwoPhaseFileScheduler:
@@ -69,6 +104,8 @@ class TwoPhaseFileScheduler:
         decomposition_max_waves=1,
         unavailable_agent_ids=None,
         notification_sink=None,
+        invocation_fence_assessor=None,
+        invocation_service_stopper=None,
     ):
         if max_inflight < 1:
             raise ValueError("max_inflight must be at least 1")
@@ -109,6 +146,8 @@ class TwoPhaseFileScheduler:
         self.decomposition_max_waves = decomposition_max_waves
         self.unavailable_agent_ids = set(unavailable_agent_ids or [])
         self.notification_sink = notification_sink
+        self.invocation_fence_assessor = invocation_fence_assessor
+        self.invocation_service_stopper = invocation_service_stopper
         self.state_path = Path(
             state_path or self.output_dir / "state" / "two_phase_scheduler_state.json"
         )
@@ -172,7 +211,27 @@ class TwoPhaseFileScheduler:
                 if not self._lease_expired(inflight):
                     remaining.append(inflight)
                     continue
-                result = self._timeout_runtime_result(inflight)
+                reconciliation = reconcile_orphaned_invocation(
+                    self.output_dir,
+                    inflight,
+                    fence_assessor=self.invocation_fence_assessor,
+                    service_stopper=self.invocation_service_stopper,
+                )
+                if reconciliation["reconciliation_status"] in {
+                    "live",
+                    "open_ambiguous",
+                    "service_stop_required",
+                }:
+                    inflight["invocation_reconciliation"] = reconciliation
+                    remaining.append(inflight)
+                    continue
+                result = _runtime_result_from_reconciliation(
+                    inflight,
+                    reconciliation,
+                )
+                if result is None:
+                    result = self._timeout_runtime_result(inflight)
+                    result["output"]["invocation_reconciliation"] = reconciliation
             collected.append(self._collect_result(inflight, result))
 
         self.state["inflight_attempts"] = remaining
@@ -381,6 +440,17 @@ class TwoPhaseFileScheduler:
             created_at,
             self.state["lease_timeout_seconds"],
         )
+        invocation_context = _worker_invocation_context(
+            agent_pool,
+            self.state["backlog"],
+            task,
+            agent,
+            run_id=self.run_id,
+            runtime_execution_session_id=runtime_session_id,
+            lease_id=lease_id,
+            output_dir=self.output_dir,
+            project_root=self.project_root,
+        )
         agent["status"] = "busy"
         agent["lease"] = {
             "lease_id": lease_id,
@@ -428,6 +498,7 @@ class TwoPhaseFileScheduler:
                 "write_scope": task["write_scope"],
                 "input_artifacts": task.get("input_artifacts", []),
                 "expected_output_artifacts": task.get("expected_output_artifacts", []),
+                **invocation_context,
                 **_evidence_policy_fields(task),
                 **_operator_guidance_fields(task),
                 **_permission_grant_fields(task),
@@ -708,7 +779,37 @@ class TwoPhaseFileScheduler:
         result["retry_allowed"] = retry_allowed
         if transition["task_status"] == "retryable":
             result["task_status"] = "ready" if retry_allowed else "blocked"
+        reconciliation = runtime_result.get("output", {}).get(
+            "invocation_reconciliation"
+        )
+        writer_revocation = (
+            reconciliation.get("writer_revocation")
+            if isinstance(reconciliation, dict)
+            else None
+        )
         runtime_events = [
+                *(
+                    [
+                        self._event(
+                            "model_invocation_writer_revoked",
+                            "agent-scheduler",
+                            inflight["agent_id"],
+                            (
+                                "model-invocation-writer-revoked:"
+                                f"{writer_revocation['invocation_id']}"
+                            ),
+                            inflight["correlation_id"],
+                            {
+                                **writer_revocation,
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "lease_id": inflight["lease_id"],
+                            },
+                        )
+                    ]
+                    if isinstance(writer_revocation, dict)
+                    else []
+                ),
                 self._event(
                     "runtime_session_observed",
                     result_actor,
@@ -2047,6 +2148,509 @@ def run_two_phase_scheduler_loop(*args, max_ticks=100, poll_interval_seconds=0.0
     )
 
 
+def supported_worker_invocation_inventory():
+    return deepcopy(list(SUPPORTED_WORKER_INVOCATION_INVENTORY))
+
+
+def _worker_invocation_context(
+    agent_pool,
+    backlog,
+    task,
+    agent,
+    *,
+    run_id,
+    runtime_execution_session_id,
+    lease_id,
+    output_dir,
+    project_root,
+):
+    role = agent.get("role") or task.get("required_role")
+    usage_stage = task.get("usage_stage") or _worker_usage_stage(
+        role,
+        task.get("task_kind"),
+    )
+    profile = _agent_runtime_profile(agent_pool, agent)
+    requested_session = (
+        task.get("requested_provider_session_id")
+        or task.get("provider_session_id")
+        or profile.get("resume_session_id")
+    )
+    resume_last = bool(
+        task.get("provider_resume_mode") == "resume_last"
+        or task.get("provider_resume_last")
+        or profile.get("resume_last")
+    )
+    if requested_session and resume_last:
+        raise ValueError(
+            "provider session id and resume_last are mutually exclusive"
+        )
+    resume_mode = (
+        "explicit"
+        if requested_session
+        else "resume_last"
+        if resume_last
+        else "new"
+    )
+    project_name = (
+        task.get("project")
+        or backlog.get("project")
+        or (Path(project_root).name if project_root else "agentteam")
+    )
+    taskpack_id = (
+        task.get("taskpack_id")
+        or backlog.get("taskpack_id")
+        or backlog.get("backlog_id")
+        or Path(output_dir).name
+    )
+    project_identity = (
+        str(Path(project_root).resolve())
+        if project_root
+        else str(
+            task.get("provider_project_identity")
+            or Path(output_dir).parent.resolve()
+        )
+    )
+    context = {
+        "project": project_name,
+        "run_id": task.get("run_id") or backlog.get("run_id") or run_id,
+        "pursue_id": task.get("pursue_id"),
+        "round_index": task.get("round_index"),
+        "taskpack_id": taskpack_id,
+        "implementation_run_id": task.get("implementation_run_id"),
+        "gate_epoch": task.get("gate_epoch"),
+        "runtime_execution_session_id": runtime_execution_session_id,
+        "requested_provider_session_id": requested_session,
+        "provider_resume_mode": resume_mode,
+        "provider_predecessor_invocation_id": task.get(
+            "provider_predecessor_invocation_id"
+        ),
+        "provider_predecessor_turn_id": task.get(
+            "provider_predecessor_turn_id"
+        ),
+        "provider_predecessor_usage_snapshot": deepcopy(
+            task.get("provider_predecessor_usage_snapshot")
+        ),
+        "lifecycle_owner_token": lease_id,
+        "agent_id": agent["agent_id"],
+        "agent_role": role,
+        "required_role": role,
+        "usage_stage": usage_stage,
+        "provider_usage_scope": task.get("provider_usage_scope"),
+        "provider_session_lock_held": False,
+        "provider_project_binding_valid": False,
+        "provider_lineage_status": task.get("provider_lineage_status"),
+        "previous_provider_session_id": task.get("previous_provider_session_id"),
+        "previous_provider_turn_id": task.get("previous_provider_turn_id"),
+        "previous_invocation_id": task.get("previous_invocation_id"),
+        "model_invocation_authority_root": str(Path(output_dir)),
+        "provider_project_identity": project_identity,
+        "provider_project_lifecycle_root": str(Path(output_dir).parent),
+        "provider_backend_account": task.get("provider_backend_account", "default"),
+        "provider_session_store": task.get("provider_session_store", "default"),
+    }
+    if task.get("provider_session_state_root"):
+        context["provider_session_state_root"] = task["provider_session_state_root"]
+    return context
+
+
+def _worker_usage_stage(role, task_kind):
+    if task_kind == "decompose_backlog":
+        return "planner_or_task_slicer"
+    return WORKER_USAGE_STAGE_BY_ROLE.get(role, "implementation_worker")
+
+
+def _agent_runtime_profile(agent_pool, agent):
+    profile = agent.get("runtime_profile")
+    if isinstance(profile, dict):
+        return profile
+    role_profiles = agent_pool.get("role_runtime_profiles")
+    if isinstance(role_profiles, dict):
+        profile = role_profiles.get(agent.get("role"))
+        if isinstance(profile, dict):
+            return profile
+    return {}
+
+
+def reconcile_orphaned_invocation(
+    authority_root,
+    inflight,
+    *,
+    fence_assessor=None,
+    service_stopper=None,
+):
+    matches = _matching_invocation_starts(authority_root, inflight)
+    if not matches:
+        return {
+            "reconciliation_status": "no_invocation",
+            "proof": "no_durable_start_for_lease",
+        }
+    if len(matches) != 1:
+        return {
+            "reconciliation_status": "open_ambiguous",
+            "proof": "multiple_durable_starts_for_lease",
+            "invocation_ids": [record["invocation_id"] for _, record in matches],
+        }
+    started_path, start = matches[0]
+    terminal_path = started_path.with_name("terminal.json")
+    terminal = _read_json_file_if_exists(terminal_path)
+    if terminal is not None:
+        return _terminal_reconciliation("terminal_available", start, terminal_path, terminal)
+
+    assessor = fence_assessor or _assess_persisted_execution_group
+    assessment = assessor(deepcopy(start))
+    status = assessment.get("fence_status")
+    if status == "live_pinned":
+        pidfd = assessment.get("pidfd")
+        if isinstance(pidfd, int):
+            os.close(pidfd)
+        return {
+            "reconciliation_status": "live",
+            "invocation_id": start["invocation_id"],
+            "proof": assessment.get("proof"),
+        }
+    if status == "exact_service_stop_required":
+        stopper = service_stopper or _stop_exact_transient_service
+        if not stopper(deepcopy(start)):
+            return {
+                "reconciliation_status": "service_stop_required",
+                "invocation_id": start["invocation_id"],
+                "proof": assessment.get("proof"),
+            }
+        terminal = _read_json_file_if_exists(terminal_path)
+        if terminal is not None:
+            return _terminal_reconciliation(
+                "terminal_available",
+                start,
+                terminal_path,
+                terminal,
+            )
+        assessment = (
+            assessor(deepcopy(start))
+            if fence_assessor is not None
+            else _assess_stopped_exact_service(start)
+        )
+        status = assessment.get("fence_status")
+    if status != "death_proven":
+        return {
+            "reconciliation_status": "open_ambiguous",
+            "invocation_id": start["invocation_id"],
+            "proof": assessment.get("proof") or "execution_group_identity_ambiguous",
+        }
+
+    terminal = _read_json_file_if_exists(terminal_path)
+    if terminal is not None:
+        return _terminal_reconciliation("terminal_available", start, terminal_path, terminal)
+    lifecycle = _attach_existing_lifecycle(started_path, start)
+    old_owner = start["lifecycle_owner_token"]
+    lifecycle.context["lifecycle_owner_token"] = (
+        f"RECOVERY-{start['invocation_id']}"
+    )
+    revocation = lifecycle.revoke_writer(
+        old_owner,
+        revoked_by="recovery-controller",
+        reason="worker_process_death_confirmed",
+    )
+    terminal = _read_json_file_if_exists(terminal_path)
+    if terminal is not None:
+        return _terminal_reconciliation("terminal_available", start, terminal_path, terminal)
+    stdout = _read_text_if_exists(lifecycle.stdout_path)
+    stderr = _read_text_if_exists(lifecycle.stderr_path)
+    try:
+        terminal = lifecycle.finalize(
+            "recovered_orphan",
+            stdout=stdout,
+            stderr=stderr,
+            terminal_writer="recovery_controller",
+        )
+    except ModelInvocationIntegrityError:
+        terminal = _read_json_file_if_exists(terminal_path)
+        if terminal is None:
+            raise
+    return {
+        **_terminal_reconciliation("recovered", start, terminal_path, terminal),
+        "proof": assessment.get("proof"),
+        "writer_revocation": revocation,
+        "writer_revocation_path": str(lifecycle.revoked_path),
+    }
+
+
+def _runtime_result_from_reconciliation(inflight, reconciliation):
+    status = reconciliation.get("reconciliation_status")
+    if status not in {"terminal_available", "recovered"}:
+        return None
+    terminal = _read_json_file_if_exists(reconciliation.get("terminal_path"))
+    if terminal is None:
+        return None
+    terminal_status = terminal.get("terminal_status")
+    result_status = (
+        terminal_status
+        if terminal_status in {"completed", "failed", "blocked", "cancelled", "timed_out"}
+        else "timed_out"
+    )
+    changed_files = []
+    if inflight.get("worktree_path"):
+        changed_files = audit_worktree_diff(
+            inflight["worktree_path"],
+            [],
+        ).get("actual_changed_files", [])
+    invocation_dir = Path(reconciliation["terminal_path"]).parent
+    result = {
+        "result_status": result_status,
+        "changed_files": changed_files,
+        "output": {
+            "adapter": "two_phase_scheduler_reconciliation",
+            "invocation_reconciliation": reconciliation,
+            "model_invocation": {
+                "invocation_id": terminal.get("invocation_id"),
+                "usage_event_id": terminal.get("usage_event_id"),
+                "started_path": str(invocation_dir / "started.json"),
+                "terminal_path": str(invocation_dir / "terminal.json"),
+                "stdout_path": str(invocation_dir / "stdout.jsonl"),
+                "stderr_path": str(invocation_dir / "stderr.log"),
+                "replayed_from_terminal": True,
+            },
+            "model_invocation_usage": terminal,
+        },
+    }
+    if terminal.get("usage_status") in {"reported", "partial"}:
+        result["token_usage"] = {
+            **{
+                field: terminal.get(field, 0)
+                for field in (
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "output_tokens",
+                    "reasoning_tokens",
+                    "total_tokens",
+                )
+            },
+            "usage_source": "model_invocation_terminal",
+        }
+    return result
+
+
+def _matching_invocation_starts(authority_root, inflight):
+    matches = []
+    invocation_root = Path(authority_root) / "model_invocations"
+    if not invocation_root.exists():
+        return matches
+    for path in sorted(invocation_root.glob("*/started.json")):
+        record = _read_json_file_if_exists(path)
+        if record is None:
+            continue
+        if record.get("attempt_id") != inflight.get("attempt_id"):
+            continue
+        if record.get("lifecycle_owner_token") != inflight.get("lease_id"):
+            continue
+        if record.get("agent_id") not in {None, inflight.get("agent_id")}:
+            continue
+        matches.append((path, record))
+    return matches
+
+
+def _attach_existing_lifecycle(started_path, start):
+    lifecycle = object.__new__(InvocationLifecycle)
+    lifecycle.authority_root = Path(started_path).parents[2]
+    lifecycle.invocation_id = start["invocation_id"]
+    lifecycle.context = dict(start)
+    lifecycle.started_at = start["started_at"]
+    lifecycle.invocation_dir = Path(started_path).parent
+    lifecycle.started_path = Path(started_path)
+    lifecycle.revoked_path = lifecycle.invocation_dir / "revoked.json"
+    lifecycle.terminal_path = lifecycle.invocation_dir / "terminal.json"
+    lifecycle.terminal_lock_path = lifecycle.invocation_dir / "terminal.lock"
+    lifecycle.stdout_path = lifecycle.invocation_dir / "stdout.jsonl"
+    lifecycle.stderr_path = lifecycle.invocation_dir / "stderr.log"
+    return lifecycle
+
+
+def _terminal_reconciliation(status, start, terminal_path, terminal):
+    return {
+        "reconciliation_status": status,
+        "invocation_id": start["invocation_id"],
+        "usage_event_id": terminal.get("usage_event_id"),
+        "terminal_status": terminal.get("terminal_status"),
+        "terminal_path": str(terminal_path),
+    }
+
+
+def _assess_persisted_execution_group(start):
+    current_boot_id = _read_host_boot_id()
+    if current_boot_id is None:
+        return {
+            "fence_status": "open_ambiguous",
+            "proof": "host_boot_identity_unavailable",
+            "signal_allowed": False,
+        }
+    if current_boot_id != start.get("host_boot_id"):
+        return assess_execution_group_fence(
+            start,
+            current_boot_id=current_boot_id,
+            current_user_service=None,
+            current_manager_identity=None,
+            current_transient_service=None,
+        )
+    user_service = _systemd_show(
+        ["systemctl", "show", f"user@{os.getuid()}.service"],
+        ("InvocationID", "ControlGroup", "KillMode", "ActiveState"),
+    )
+    manager = _systemd_show(
+        ["systemctl", "--user", "show"],
+        ("ManagerTimestampMonotonic",),
+    )
+    manager_value = (
+        manager.get("ManagerTimestampMonotonic")
+        if isinstance(manager, dict)
+        else None
+    )
+    manager_identity = (
+        f"manager-monotonic:{manager_value}" if manager_value else None
+    )
+    transient = _systemd_show(
+        ["systemctl", "--user", "show", start.get("systemd_transient_unit", "")],
+        ("InvocationID", "ControlGroup", "KillMode", "ActiveState"),
+    )
+    return assess_execution_group_fence(
+        start,
+        current_boot_id=current_boot_id,
+        current_user_service=user_service,
+        current_manager_identity=manager_identity,
+        current_transient_service=transient,
+    )
+
+
+def _stop_exact_transient_service(start):
+    unit = start.get("systemd_transient_unit")
+    if (
+        not isinstance(unit, str)
+        or not unit.startswith("agentteam-inv-")
+        or not unit.endswith(".service")
+        or "/" in unit
+    ):
+        return False
+    current = _systemd_show(
+        ["systemctl", "--user", "show", unit],
+        ("InvocationID", "ControlGroup", "KillMode", "ActiveState"),
+    )
+    if (
+        not isinstance(current, dict)
+        or current.get("InvocationID")
+        != start.get("systemd_transient_invocation_id")
+        or current.get("ControlGroup")
+        != start.get("systemd_transient_control_group")
+        or current.get("KillMode")
+        != start.get("systemd_transient_kill_mode")
+    ):
+        return False
+    try:
+        completed = subprocess.run(
+            ["systemctl", "--user", "stop", unit],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0
+
+
+def _assess_stopped_exact_service(start):
+    populated = _persisted_cgroup_populated(
+        start.get("systemd_transient_control_group")
+    )
+    if populated is False:
+        return {
+            "fence_status": "death_proven",
+            "proof": "exact_transient_service_stopped_and_cgroup_empty",
+            "signal_allowed": False,
+        }
+    if populated is True:
+        return {
+            "fence_status": "exact_service_stop_required",
+            "proof": "exact_transient_cgroup_still_populated",
+            "signal_allowed": False,
+        }
+    return {
+        "fence_status": "open_ambiguous",
+        "proof": "transient_cgroup_population_unknown_after_stop",
+        "signal_allowed": False,
+    }
+
+
+def _persisted_cgroup_populated(control_group):
+    if not isinstance(control_group, str) or not control_group.startswith("/"):
+        return None
+    cgroup_root = Path("/sys/fs/cgroup").resolve()
+    events_path = (cgroup_root / control_group.lstrip("/") / "cgroup.events").resolve()
+    try:
+        events_path.relative_to(cgroup_root)
+        values = {
+            key: value
+            for key, value in (
+                line.split(None, 1)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+                if len(line.split(None, 1)) == 2
+            )
+        }
+    except (OSError, ValueError):
+        return None
+    if values.get("populated") == "0":
+        return False
+    if values.get("populated") == "1":
+        return True
+    return None
+
+
+def _systemd_show(command, properties):
+    full_command = list(command)
+    for prop in properties:
+        full_command.append(f"--property={prop}")
+    try:
+        completed = subprocess.run(
+            full_command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    values = {}
+    for line in completed.stdout.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+    return values
+
+
+def _read_host_boot_id():
+    try:
+        value = Path("/proc/sys/kernel/random/boot_id").read_text(
+            encoding="utf-8"
+        ).strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def _read_json_file_if_exists(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+
+
+def _read_text_if_exists(path):
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
 def _decomposition_validation_payload(result):
     payload = {}
     if "decomposition_status" in result:
@@ -2537,6 +3141,8 @@ def _runtime_result_from_outbox(outbox_path, source_message_id):
             "output": payload.get("output", {}),
             "usage": payload.get("usage"),
             "token_usage": payload.get("token_usage"),
+            "model_invocation_context": payload.get("model_invocation_context"),
+            "model_invocation": payload.get("model_invocation"),
         }
     return None
 

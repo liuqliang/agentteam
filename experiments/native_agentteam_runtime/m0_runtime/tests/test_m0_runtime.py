@@ -7,8 +7,10 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -11406,6 +11408,415 @@ class M0RuntimeTests(unittest.TestCase):
                 },
             )
 
+    def test_worker_invocation_inventory_routes_explicit_stage_and_session_context(self):
+        from agentteam_runtime.two_phase_scheduler import (
+            _worker_usage_stage,
+            supported_worker_invocation_inventory,
+        )
+
+        snapshot = {
+            "input_tokens": 100,
+            "cached_input_tokens": 20,
+            "output_tokens": 30,
+            "reasoning_tokens": 5,
+            "total_tokens": 130,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            task = _backlog_task(
+                "TASK-SEMANTIC-001",
+                write_scope=[],
+                required_role="semantic_architecture_agent",
+            )
+            task.update(
+                {
+                    "requested_provider_session_id": "provider-session-1",
+                    "provider_predecessor_invocation_id": "INV-predecessor-1",
+                    "provider_predecessor_turn_id": "turn-1",
+                    "provider_predecessor_usage_snapshot": snapshot,
+                }
+            )
+            backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[task])
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [("agent-semantic", "semantic_architecture_agent")],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+            )
+
+            scheduler.dispatch_ready()
+
+            message = _read_first_jsonl(
+                output_dir
+                / "steps"
+                / "STEP-0001-TASK-SEMANTIC-001"
+                / "mailboxes"
+                / "agent-semantic"
+                / "inbox.jsonl"
+            )
+            payload = message["payload"]
+            inventory = supported_worker_invocation_inventory()
+            worker_routes = [
+                route for route in inventory if route["route"] == "worker"
+            ]
+            self.assertEqual(
+                len({route["role"] for route in worker_routes}),
+                len(worker_routes),
+            )
+            for route in worker_routes:
+                self.assertEqual(
+                    _worker_usage_stage(route["role"], None),
+                    route["usage_stage"],
+                )
+            self.assertEqual(
+                _worker_usage_stage("implementation_worker", "decompose_backlog"),
+                "planner_or_task_slicer",
+            )
+            self.assertIn(
+                {
+                    "route": "worker",
+                    "role": "semantic_architecture_agent",
+                    "usage_stage": "semantic_architecture",
+                },
+                inventory,
+            )
+            self.assertEqual(payload["usage_stage"], "semantic_architecture")
+            self.assertEqual(payload["agent_role"], "semantic_architecture_agent")
+            self.assertEqual(
+                payload["runtime_execution_session_id"],
+                "SESSION-TASK-SEMANTIC-001-ATTEMPT-001",
+            )
+            self.assertEqual(payload["lifecycle_owner_token"], payload["lease_id"])
+            self.assertEqual(payload["provider_resume_mode"], "explicit")
+            self.assertEqual(
+                json.dumps(
+                    payload["provider_predecessor_usage_snapshot"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                json.dumps(snapshot, sort_keys=True, separators=(",", ":")),
+            )
+
+    def test_provider_session_coordinator_is_single_writer_and_rejects_cross_project(self):
+        from agentteam_runtime.mailbox_worker import (
+            ProviderSessionCoordinator,
+            ProviderSessionProjectBindingError,
+        )
+
+        class ExplicitResumeAdapter:
+            resume_session_id = "provider-session-1"
+            resume_last = False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_root = tmp_path / "provider-state"
+            lifecycle_root = tmp_path / "project-a" / "runs"
+            predecessor = InvocationLifecycle(
+                lifecycle_root,
+                _model_invocation_context(
+                    coverage_class="not_applicable_adapter",
+                    provider_session_lock_held=True,
+                    provider_project_binding_valid=True,
+                ),
+                invocation_id="INV-provider-predecessor-001",
+                started_at="2026-07-23T00:00:00Z",
+            )
+            predecessor.publish_start(ExecutionGroupIdentity.not_applicable())
+            predecessor.finalize(
+                "completed",
+                stdout=json.dumps(
+                    {
+                        "type": "turn_completed",
+                        "provider_session_id": "provider-session-1",
+                        "provider_turn_id": "turn-1",
+                        "usage": {
+                            "input_tokens": 100,
+                            "cached_input_tokens": 20,
+                            "output_tokens": 30,
+                            "reasoning_tokens": 5,
+                            "total_tokens": 130,
+                        },
+                    }
+                ),
+                finished_at="2026-07-23T00:00:01Z",
+            )
+            message = _model_invocation_message()
+            message["payload"].update(
+                {
+                    "provider_session_state_root": str(state_root),
+                    "provider_project_identity": "project-a",
+                    "provider_project_lifecycle_root": str(lifecycle_root),
+                }
+            )
+            active = 0
+            maximum_active = 0
+            state_lock = threading.Lock()
+            ready = threading.Barrier(2)
+            observed = []
+
+            def enter_coordinator():
+                nonlocal active, maximum_active
+                coordinator = ProviderSessionCoordinator(state_root)
+                ready.wait()
+                with coordinator.prepare_message(
+                    message,
+                    ExplicitResumeAdapter(),
+                    authority_root=lifecycle_root,
+                ) as prepared:
+                    with state_lock:
+                        active += 1
+                        maximum_active = max(maximum_active, active)
+                    observed.append(
+                        (
+                            prepared["payload"]["provider_session_lock_held"],
+                            prepared["payload"][
+                                "provider_predecessor_invocation_id"
+                            ],
+                            prepared["payload"][
+                                "provider_predecessor_usage_snapshot"
+                            ]["total_tokens"],
+                        )
+                    )
+                    time.sleep(0.03)
+                    with state_lock:
+                        active -= 1
+
+            threads = [threading.Thread(target=enter_coordinator) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(maximum_active, 1)
+            self.assertEqual(
+                observed,
+                [
+                    (True, "INV-provider-predecessor-001", 130),
+                    (True, "INV-provider-predecessor-001", 130),
+                ],
+            )
+
+            other_project = deepcopy(message)
+            other_project["payload"]["provider_project_identity"] = "project-b"
+            with self.assertRaises(ProviderSessionProjectBindingError):
+                with ProviderSessionCoordinator(state_root).prepare_message(
+                    other_project,
+                    ExplicitResumeAdapter(),
+                    authority_root=tmp_path / "project-b" / "runs",
+                ):
+                    pass
+
+    def test_mailbox_terminal_replay_preserves_invocation_and_usage_identity(self):
+        class MustNotRunAdapter:
+            def __init__(self):
+                self.call_count = 0
+
+            def run(self, message, worktree_path=None):
+                self.call_count += 1
+                raise AssertionError("terminal replay must not relaunch provider")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _write_agent_pool_with_agent_roles(
+                agent_pool_path,
+                [("agent-repo-map", "repo_map_agent")],
+            )
+            message = _mailbox_dispatch_message(
+                "MSG-REPLAY-001",
+                "agent-repo-map",
+                [],
+            )
+            predecessor_snapshot = {
+                "input_tokens": 17,
+                "cached_input_tokens": 3,
+                "output_tokens": 5,
+                "reasoning_tokens": 2,
+                "total_tokens": 22,
+            }
+            message["payload"].update(
+                _model_invocation_context(
+                    coverage_class="not_applicable_adapter",
+                    attempt_id="ATTEMPT-MAILBOX-001",
+                    agent_id="agent-repo-map",
+                    agent_role="repo_map_agent",
+                    role="repo_map_agent",
+                    usage_stage="repo_map",
+                    lifecycle_owner_token="LEASE-MAILBOX-001",
+                    lease_id="LEASE-MAILBOX-001",
+                    provider_predecessor_invocation_id="INV-before-replay",
+                    provider_predecessor_turn_id="turn-before-replay",
+                    provider_predecessor_usage_snapshot=predecessor_snapshot,
+                )
+            )
+            message["payload"]["model_invocation_authority_root"] = str(output_dir)
+            lifecycle = InvocationLifecycle(
+                output_dir,
+                message["payload"],
+                invocation_id="INV-mailbox-replay-001",
+                started_at="2026-07-23T00:00:00Z",
+            )
+            lifecycle.publish_start(ExecutionGroupIdentity.not_applicable())
+            terminal = lifecycle.finalize(
+                "completed",
+                finished_at="2026-07-23T00:00:01Z",
+            )
+            inbox = output_dir / "mailboxes" / "agent-repo-map" / "inbox.jsonl"
+            _append_test_jsonl(inbox, [message])
+            adapter = MustNotRunAdapter()
+            worker = FileMailboxWorker(
+                agent_pool_path,
+                output_dir,
+                "agent-repo-map",
+                runtime_adapter=adapter,
+                clock=FixedClock(),
+            )
+
+            summary = worker.poll_once()
+
+            result = _read_first_jsonl(worker.outbox_path)
+            self.assertEqual(summary["poll_status"], "processed")
+            self.assertEqual(adapter.call_count, 0)
+            self.assertEqual(
+                result["payload"]["model_invocation"]["invocation_id"],
+                lifecycle.invocation_id,
+            )
+            self.assertEqual(
+                result["payload"]["model_invocation"]["usage_event_id"],
+                terminal["usage_event_id"],
+            )
+            self.assertTrue(
+                result["payload"]["model_invocation"]["replayed_from_terminal"]
+            )
+            self.assertEqual(
+                json.dumps(
+                    result["payload"]["model_invocation_context"][
+                        "provider_predecessor_usage_snapshot"
+                    ],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                json.dumps(
+                    predecessor_snapshot,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+
+    def test_scheduler_reconciles_dead_orphan_but_keeps_live_expired_lease_open(self):
+        from agentteam_runtime.model_invocation import invocation_context_from_message
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=[],
+                tasks=[_backlog_task("TASK-001", write_scope=[])],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            live_pidfd = os.open("/dev/null", os.O_RDONLY)
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                lease_timeout_seconds=0,
+                invocation_fence_assessor=lambda start: {
+                    "fence_status": "live_pinned",
+                    "proof": "pidfd_and_start_ticks_match",
+                    "signal_allowed": True,
+                    "pidfd": live_pidfd,
+                },
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            message = _read_first_jsonl(
+                output_dir
+                / "steps"
+                / inflight["step_id"]
+                / "mailboxes"
+                / "agent-repo-map"
+                / "inbox.jsonl"
+            )
+            message["payload"]["coverage_class"] = "supported_model_invocation"
+            context = invocation_context_from_message(message)
+            lifecycle = InvocationLifecycle(
+                output_dir,
+                context,
+                invocation_id="INV-orphan-recovery-001",
+                started_at="2026-07-23T00:00:00Z",
+            )
+            lifecycle.publish_start(_supported_execution_group_identity())
+
+            first_collect = scheduler.collect_ready_results()
+
+            self.assertEqual(first_collect["collect_status"], "idle")
+            self.assertEqual(scheduler.summary()["inflight_count"], 1)
+            self.assertFalse(lifecycle.terminal_path.exists())
+            with self.assertRaises(OSError):
+                os.fstat(live_pidfd)
+
+            scheduler.invocation_fence_assessor = lambda start: {
+                "fence_status": "death_proven",
+                "proof": "host_boot_changed",
+                "signal_allowed": False,
+            }
+            second_collect = scheduler.collect_ready_results()
+            terminal = json.loads(
+                lifecycle.terminal_path.read_text(encoding="utf-8")
+            )
+            revocation = json.loads(
+                lifecycle.revoked_path.read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(second_collect["collect_status"], "collected")
+            self.assertEqual(scheduler.summary()["inflight_count"], 0)
+            self.assertEqual(terminal["invocation_id"], lifecycle.invocation_id)
+            self.assertEqual(terminal["terminal_status"], "recovered_orphan")
+            self.assertEqual(terminal["terminal_writer"], "recovery_controller")
+            self.assertEqual(
+                revocation["reason"],
+                "worker_process_death_confirmed",
+            )
+            self.assertEqual(
+                second_collect["results"][0]["runtime_output"][
+                    "invocation_reconciliation"
+                ]["usage_event_id"],
+                terminal["usage_event_id"],
+            )
+            recovery_events = [
+                event
+                for line in (output_dir / "events.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+                if line.strip()
+                for event in [json.loads(line)]
+                if event["event_type"] == "model_invocation_writer_revoked"
+            ]
+            self.assertEqual(len(recovery_events), 1)
+            self.assertEqual(
+                recovery_events[0]["payload"]["invocation_id"],
+                lifecycle.invocation_id,
+            )
+            _validate_model_invocation_record(
+                "model_invocation_usage.schema.json",
+                terminal,
+            )
+            _validate_model_invocation_record(
+                "model_invocation_writer_revoked.schema.json",
+                revocation,
+            )
+
     def test_model_invocation_test_provider_start_is_durable_before_launch(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -11965,6 +12376,27 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertTrue(live["signal_allowed"])
         self.assertEqual(live["pidfd"], pidfd)
         os.close(pidfd)
+
+        recycled_pidfd = os.open("/dev/null", os.O_RDONLY)
+        recycled = assess_execution_group_fence(
+            start,
+            current_boot_id=start["host_boot_id"],
+            current_user_service=user_service,
+            current_manager_identity=start["systemd_user_manager_identity"],
+            current_transient_service=transient,
+            pidfd_open=lambda pid, flags: recycled_pidfd,
+            process_start_ticks=lambda pid: (
+                start["gated_supervisor_start_ticks"] + 1
+            ),
+        )
+        self.assertEqual(recycled["fence_status"], "open_ambiguous")
+        self.assertEqual(
+            recycled["proof"],
+            "pinned_process_start_identity_mismatch",
+        )
+        self.assertFalse(recycled["signal_allowed"])
+        with self.assertRaises(OSError):
+            os.fstat(recycled_pidfd)
 
         ambiguous_manager = assess_execution_group_fence(
             start,
