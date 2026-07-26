@@ -10,6 +10,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
+from .model_invocation import (
+    ModelInvocationCall,
+    ModelInvocationError,
+    ModelInvocationUnavailable,
+    invocation_context_from_message,
+    is_supported_codex_command,
+)
 from .planner_context import build_artifact_context
 from .repo_map import (
     build_repo_context,
@@ -241,6 +248,7 @@ class CodexRuntimeAdapter:
         progress_interval_seconds=30.0,
         resume_session_id=None,
         resume_last=False,
+        systemd_runner_factory=None,
     ):
         if resume_session_id and resume_last:
             raise ValueError("resume_session_id and resume_last are mutually exclusive")
@@ -256,6 +264,7 @@ class CodexRuntimeAdapter:
         self.progress_interval_seconds = max(float(progress_interval_seconds), 0.05)
         self.resume_session_id = resume_session_id
         self.resume_last = bool(resume_last)
+        self.systemd_runner_factory = systemd_runner_factory
 
     def bind_output_dir(self, output_dir):
         return CodexRuntimeAdapter(
@@ -269,6 +278,7 @@ class CodexRuntimeAdapter:
             progress_interval_seconds=self.progress_interval_seconds,
             resume_session_id=self.resume_session_id,
             resume_last=self.resume_last,
+            systemd_runner_factory=self.systemd_runner_factory,
         )
 
     def run(self, message, worktree_path=None, progress_callback=None):
@@ -303,8 +313,83 @@ class CodexRuntimeAdapter:
 
             command = self._build_command(runtime_worktree_path, result_path)
             prompt = self._build_prompt(message)
+            supported = is_supported_codex_command(command)
+            if supported and self.output_dir is None:
+                return {
+                    "result_status": "failed",
+                    "changed_files": [],
+                    "output": {
+                        "adapter": "codex",
+                        "error": "missing_model_invocation_output_root",
+                    },
+                }
+            context = invocation_context_from_message(
+                message,
+                model=self.model,
+                backend="codex",
+            )
+            if self.resume_last:
+                context.update(
+                    {
+                        "provider_resume_mode": "resume_last",
+                        "requested_provider_session_id": None,
+                        "provider_predecessor_invocation_id": None,
+                        "provider_predecessor_turn_id": None,
+                        "provider_predecessor_usage_snapshot": None,
+                    }
+                )
+            elif self.resume_session_id:
+                context.update(
+                    {
+                        "provider_resume_mode": "explicit",
+                        "requested_provider_session_id": self.resume_session_id,
+                    }
+                )
+            else:
+                context.update(
+                    {
+                        "provider_resume_mode": "new",
+                        "requested_provider_session_id": None,
+                        "provider_predecessor_invocation_id": None,
+                        "provider_predecessor_turn_id": None,
+                        "provider_predecessor_usage_snapshot": None,
+                    }
+                )
+            context["coverage_class"] = (
+                "supported_model_invocation"
+                if supported
+                else "not_applicable_adapter"
+            )
+            invocation = ModelInvocationCall(
+                self.output_dir or result_path.parent,
+                context,
+                supported=supported,
+                systemd_runner_factory=self.systemd_runner_factory,
+            )
+
+            def finish(runtime_result, terminal_status, execution):
+                terminal = invocation.finalize(
+                    terminal_status,
+                    execution,
+                    terminal_writer="worker",
+                )
+                output = runtime_result.get("output")
+                if not isinstance(output, dict):
+                    output = {
+                        "adapter": "codex",
+                        "error": "invalid_runtime_output",
+                    }
+                    runtime_result["output"] = output
+                output["model_invocation"] = {
+                    **invocation.lifecycle.summary(),
+                    "usage_event_id": terminal["usage_event_id"],
+                    "terminal_status": terminal["terminal_status"],
+                    "usage_status": terminal["usage_status"],
+                }
+                return _attach_codex_token_usage(runtime_result, execution.stdout)
+
             try:
-                completed = _run_subprocess_with_progress(
+                execution = invocation.execute(
                     command,
                     cwd=runtime_worktree_path,
                     input_text=prompt,
@@ -312,25 +397,67 @@ class CodexRuntimeAdapter:
                     progress_callback=progress_callback,
                     progress_interval_seconds=self.progress_interval_seconds,
                 )
-            except subprocess.TimeoutExpired as exc:
+            except ModelInvocationUnavailable as exc:
                 return {
-                    "result_status": "timed_out",
+                    "result_status": "failed",
                     "changed_files": [],
                     "output": {
                         "adapter": "codex",
-                        "error": "timeout",
-                        "timeout_seconds": self.timeout_seconds,
-                        "stdout": exc.stdout or "",
-                        "stderr": exc.stderr or "",
+                        "error": "model_invocation_execution_group_unavailable",
+                        "reason": _bounded_runtime_text(str(exc), 500),
                     },
                 }
+            except ModelInvocationError as exc:
+                return {
+                    "result_status": "failed",
+                    "changed_files": [],
+                    "output": {
+                        "adapter": "codex",
+                        "error": "model_invocation_lifecycle_error",
+                        "reason": _bounded_runtime_text(str(exc), 500),
+                    },
+                }
+
+            if execution.launch_failed:
+                return finish(
+                    {
+                        "result_status": "failed",
+                        "changed_files": [],
+                        "output": {
+                            "adapter": "codex",
+                            "error": "provider_launch_failed",
+                            "reason": execution.launch_error,
+                            "stdout": execution.stdout,
+                            "stderr": execution.stderr,
+                        },
+                    },
+                    "launch_failed",
+                    execution,
+                )
+            if execution.timed_out:
+                return finish(
+                    {
+                        "result_status": "timed_out",
+                        "changed_files": [],
+                        "output": {
+                            "adapter": "codex",
+                            "error": "timeout",
+                            "timeout_seconds": self.timeout_seconds,
+                            "stdout": execution.stdout,
+                            "stderr": execution.stderr,
+                        },
+                    },
+                    "timed_out",
+                    execution,
+                )
+            completed = execution.completed_process()
 
             fallback_modification = self._fallback_modification_result(
                 runtime_worktree_path,
                 fallback_status_before,
             )
             if fallback_modification:
-                return fallback_modification
+                return finish(fallback_modification, "failed", execution)
 
             if completed.returncode != 0:
                 permission_request = _codex_permission_request_from_failure(
@@ -341,54 +468,85 @@ class CodexRuntimeAdapter:
                     self.sandbox,
                 )
                 if permission_request:
-                    return {
-                        "result_status": "blocked",
+                    return finish(
+                        {
+                            "result_status": "blocked",
+                            "changed_files": [],
+                            "output": {
+                                "adapter": "codex",
+                                "error": "permission_required",
+                                "permission_request": permission_request,
+                                "exit_code": completed.returncode,
+                                "stdout": completed.stdout,
+                                "stderr": completed.stderr,
+                            },
+                        },
+                        "blocked",
+                        execution,
+                    )
+                return finish(
+                    {
+                        "result_status": "failed",
                         "changed_files": [],
                         "output": {
                             "adapter": "codex",
-                            "error": "permission_required",
-                            "permission_request": permission_request,
                             "exit_code": completed.returncode,
                             "stdout": completed.stdout,
                             "stderr": completed.stderr,
                         },
-                    }
-                return {
-                    "result_status": "failed",
-                    "changed_files": [],
-                    "output": {
-                        "adapter": "codex",
-                        "exit_code": completed.returncode,
-                        "stdout": completed.stdout,
-                        "stderr": completed.stderr,
                     },
-                }
+                    "failed",
+                    execution,
+                )
 
             if not result_path.exists():
-                return {
-                    "result_status": "failed",
-                    "changed_files": [],
-                    "output": {
-                        "adapter": "codex",
-                        "error": "missing_output_last_message",
-                        "stdout": completed.stdout,
-                        "stderr": completed.stderr,
+                return finish(
+                    {
+                        "result_status": "failed",
+                        "changed_files": [],
+                        "output": {
+                            "adapter": "codex",
+                            "error": "missing_output_last_message",
+                            "stdout": completed.stdout,
+                            "stderr": completed.stderr,
+                        },
                     },
-                }
+                    "missing_result",
+                    execution,
+                )
 
             try:
                 result = json.loads(result_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                return {
-                    "result_status": "failed",
-                    "changed_files": [],
-                    "output": {
-                        "adapter": "codex",
-                        "error": "invalid_output_last_message_json",
-                        "stdout": completed.stdout,
-                        "stderr": completed.stderr,
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return finish(
+                    {
+                        "result_status": "failed",
+                        "changed_files": [],
+                        "output": {
+                            "adapter": "codex",
+                            "error": "invalid_output_last_message_json",
+                            "stdout": completed.stdout,
+                            "stderr": completed.stderr,
+                        },
                     },
-                }
+                    "invalid_result",
+                    execution,
+                )
+            if not isinstance(result, dict):
+                return finish(
+                    {
+                        "result_status": "failed",
+                        "changed_files": [],
+                        "output": {
+                            "adapter": "codex",
+                            "error": "invalid_output_last_message_shape",
+                            "stdout": completed.stdout,
+                            "stderr": completed.stderr,
+                        },
+                    },
+                    "invalid_result",
+                    execution,
+                )
 
             normalized = _normalize_runtime_result(
                 result,
@@ -396,7 +554,31 @@ class CodexRuntimeAdapter:
                 stderr=completed.stderr,
                 preserve_token_usage=False,
             )
-            return _attach_codex_token_usage(normalized, completed.stdout)
+            terminal_status = normalized.get("result_status")
+            normalized_output = normalized.get("output")
+            invalid_normalized_result = (
+                not isinstance(result.get("output", {}), dict)
+                or (
+                    isinstance(normalized_output, dict)
+                    and normalized_output.get("error") == "invalid_changed_files"
+                )
+            )
+            if invalid_normalized_result:
+                normalized["result_status"] = "failed"
+                terminal_status = "invalid_result"
+            if terminal_status not in {
+                "completed",
+                "failed",
+                "blocked",
+                "cancelled",
+            }:
+                normalized["result_status"] = "failed"
+                if not isinstance(normalized_output, dict):
+                    normalized_output = {"adapter": "codex"}
+                    normalized["output"] = normalized_output
+                normalized_output.setdefault("error", "invalid_result_status")
+                terminal_status = "invalid_result"
+            return finish(normalized, terminal_status, execution)
         finally:
             if temporary_result_dir:
                 temporary_result_dir.cleanup()
@@ -728,9 +910,26 @@ def run_simulation(
             "created_at": clock.now(),
             "lease_expires_at": "2026-05-31T00:15:00Z",
             "payload": {
+                "project": (
+                    backlog.get("project")
+                    or (Path(project_root).name if project_root else "agentteam")
+                ),
+                "run_id": backlog.get("run_id") or output_dir.name,
+                "taskpack_id": (
+                    backlog.get("taskpack_id")
+                    or backlog.get("backlog_id")
+                    or task["task_id"]
+                ),
                 "task_id": task["task_id"],
                 "attempt_id": attempt_id,
                 "lease_id": lease_id,
+                "lifecycle_owner_token": lease_id,
+                "runtime_execution_session_id": runtime_session_id,
+                "agent_id": agent["agent_id"],
+                "usage_stage": _usage_stage_for_agent(
+                    agent.get("role"),
+                    task.get("task_kind"),
+                ),
                 "worktree_id": worktree_id,
                 "worktree_path": str(worktree_path) if worktree_path else None,
                 "branch": branch,
@@ -2496,6 +2695,23 @@ def _role_prompt_fields(agent_pool, agent, task):
     if contract:
         fields["role_prompt_contract"] = contract
     return fields
+
+
+def _usage_stage_for_agent(role, task_kind=None):
+    if task_kind == "decompose_backlog":
+        return "planner_or_task_slicer"
+    return {
+        "taskpack_author": "taskpack_author",
+        "planner": "planner_or_task_slicer",
+        "task_slicer": "planner_or_task_slicer",
+        "repo_map_agent": "repo_map",
+        "repo_map": "repo_map",
+        "implementation_worker": "implementation_worker",
+        "reviewer": "review_or_repair",
+        "repair_worker": "review_or_repair",
+        "follow_up_author": "follow_up_author",
+        "semantic_architecture": "semantic_architecture",
+    }.get(role, "implementation_worker")
 
 
 def _role_prompt_contract(agent_pool, agent):

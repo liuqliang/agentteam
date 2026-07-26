@@ -1,3 +1,5 @@
+import errno
+import hashlib
 import io
 import json
 import os
@@ -50,6 +52,15 @@ from agentteam_runtime.m0_runtime import (
     ensure_integration_baseline_worktree,
     run_integration_verification,
     run_integration_verification_additions,
+)
+from agentteam_runtime.model_invocation import (
+    ExecutionGroupIdentity,
+    InvocationLifecycle,
+    ModelInvocationIntegrityError,
+    ModelInvocationWriterRevoked,
+    ProviderExecution,
+    SystemdGatedExecution,
+    assess_execution_group_fence,
 )
 from agentteam_runtime.two_phase_scheduler import _operator_task_report, _runtime_evidence_summary
 
@@ -11395,6 +11406,579 @@ class M0RuntimeTests(unittest.TestCase):
                 },
             )
 
+    def test_model_invocation_test_provider_start_is_durable_before_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            fake_codex = tmp_path / "fake_codex_start_probe.py"
+            _init_git_repo(repo)
+            fake_codex.write_text(
+                "\n".join(
+                    [
+                        "import json",
+                        "import pathlib",
+                        "import sys",
+                        f"authority = pathlib.Path({str(output_dir)!r})",
+                        "starts = list(authority.glob('model_invocations/*/started.json'))",
+                        "if len(starts) != 1:",
+                        "    raise SystemExit(19)",
+                        "args = sys.argv[1:]",
+                        "sys.stdin.read()",
+                        "result_path = pathlib.Path(args[args.index('--output-last-message') + 1])",
+                        "result_path.parent.mkdir(parents=True, exist_ok=True)",
+                        "result_path.write_text(json.dumps({",
+                        "    'result_status': 'completed',",
+                        "    'changed_files': [],",
+                        "    'output': {'start_was_visible': starts[0].is_file()},",
+                        "}), encoding='utf-8')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = CodexRuntimeAdapter(
+                command=[sys.executable, str(fake_codex)],
+                output_dir=output_dir,
+            ).run(
+                _model_invocation_message(),
+                worktree_path=repo,
+            )
+
+            invocation = result["output"]["model_invocation"]
+            start = json.loads(Path(invocation["started_path"]).read_text(encoding="utf-8"))
+            terminal = json.loads(
+                Path(invocation["terminal_path"]).read_text(encoding="utf-8")
+            )
+            self.assertTrue(result["output"]["start_was_visible"])
+            self.assertEqual(start["invocation_id"], terminal["invocation_id"])
+            self.assertEqual(start["coverage_class"], "not_applicable_adapter")
+            self.assertEqual(terminal["usage_status"], "not_applicable")
+            _validate_model_invocation_record("model_invocation_started.schema.json", start)
+            _validate_model_invocation_record("model_invocation_usage.schema.json", terminal)
+
+    def test_model_invocation_codex_worker_start_precedes_permit_and_terminal(self):
+        observations = []
+
+        class DeterministicGatedExecution:
+            def __init__(
+                self,
+                lifecycle,
+                command,
+                *,
+                cwd,
+                input_text,
+                timeout_seconds,
+            ):
+                self.lifecycle = lifecycle
+                self.command = command
+
+            def prepare(self):
+                observations.append(("prepare", self.lifecycle.started_path.exists()))
+                return _supported_execution_group_identity()
+
+            def permit_and_wait(self, **kwargs):
+                observations.append(("permit", self.lifecycle.started_path.exists()))
+                result_path = Path(
+                    self.command[
+                        self.command.index("--output-last-message") + 1
+                    ]
+                )
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                result_path.write_text(
+                    json.dumps(
+                        {
+                            "result_status": "completed",
+                            "changed_files": [],
+                            "output": {"adapter": "codex"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                stdout = json.dumps(
+                    {
+                        "type": "turn_completed",
+                        "usage": {
+                            "input_tokens": 80,
+                            "cached_input_tokens": 10,
+                            "output_tokens": 20,
+                            "reasoning_tokens": 3,
+                            "total_tokens": 100,
+                        },
+                    }
+                )
+                return ProviderExecution(
+                    list(self.command),
+                    0,
+                    stdout,
+                    "",
+                )
+
+            def abort_before_permit(self):
+                observations.append(("abort", self.lifecycle.started_path.exists()))
+
+            def cleanup_after_terminal(self):
+                observations.append(
+                    ("cleanup", self.lifecycle.terminal_path.exists())
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            _init_git_repo(repo)
+            result = CodexRuntimeAdapter(
+                command=["codex", "exec"],
+                output_dir=output_dir,
+                systemd_runner_factory=DeterministicGatedExecution,
+            ).run(
+                _model_invocation_message(),
+                worktree_path=repo,
+            )
+
+            invocation = result["output"]["model_invocation"]
+            start = json.loads(Path(invocation["started_path"]).read_text(encoding="utf-8"))
+            terminal = json.loads(
+                Path(invocation["terminal_path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                observations,
+                [
+                    ("prepare", False),
+                    ("permit", True),
+                    ("cleanup", True),
+                ],
+            )
+            self.assertEqual(result["result_status"], "completed")
+            self.assertEqual(start["coverage_class"], "supported_model_invocation")
+            self.assertEqual(terminal["usage_status"], "reported")
+            self.assertEqual(terminal["total_tokens"], 100)
+            self.assertEqual(
+                start["lifecycle_owner_token"],
+                terminal["lifecycle_owner_token"],
+            )
+            _validate_model_invocation_record(
+                "model_invocation_started.schema.json",
+                start,
+            )
+            _validate_model_invocation_record(
+                "model_invocation_usage.schema.json",
+                terminal,
+            )
+
+    def test_model_invocation_terminalizer_covers_every_controlled_outcome(self):
+        statuses = [
+            "completed",
+            "failed",
+            "blocked",
+            "cancelled",
+            "timed_out",
+            "launch_failed",
+            "missing_result",
+            "invalid_result",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            for index, status in enumerate(statuses, start=1):
+                lifecycle = InvocationLifecycle(
+                    Path(tmp) / f"case-{index}",
+                    _model_invocation_context(
+                        coverage_class="not_applicable_adapter",
+                        attempt_id=f"ATTEMPT-{index:03d}",
+                    ),
+                    started_at="2026-07-23T00:00:00Z",
+                )
+                lifecycle.publish_start(ExecutionGroupIdentity.not_applicable())
+
+                terminal = lifecycle.finalize(
+                    status,
+                    finished_at="2026-07-23T00:00:01Z",
+                )
+
+                self.assertEqual(terminal["terminal_status"], status)
+                self.assertEqual(terminal["usage_status"], "not_applicable")
+                self.assertTrue(lifecycle.terminal_path.is_file())
+                _validate_model_invocation_record(
+                    "model_invocation_usage.schema.json",
+                    terminal,
+                )
+
+    def test_model_invocation_timeout_preserves_prior_provider_usage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lifecycle = InvocationLifecycle(
+                tmp,
+                _model_invocation_context(
+                    coverage_class="supported_model_invocation",
+                ),
+                started_at="2026-07-23T00:00:00Z",
+            )
+            lifecycle.publish_start(_supported_execution_group_identity())
+            stdout = json.dumps(
+                {
+                    "type": "turn_completed",
+                    "usage": {
+                        "input_tokens": 120,
+                        "cached_input_tokens": 20,
+                        "output_tokens": 30,
+                        "reasoning_tokens": 4,
+                        "total_tokens": 150,
+                    },
+                }
+            )
+
+            terminal = lifecycle.finalize(
+                "timed_out",
+                stdout=stdout,
+                finished_at="2026-07-23T00:00:03Z",
+            )
+
+            self.assertEqual(terminal["terminal_status"], "timed_out")
+            self.assertEqual(terminal["usage_status"], "reported")
+            self.assertEqual(terminal["total_tokens"], 150)
+            self.assertEqual(terminal["accounting_method"], "provider_reported")
+            _validate_model_invocation_record(
+                "model_invocation_usage.schema.json",
+                terminal,
+            )
+
+    def test_model_invocation_resumed_session_uses_authoritative_delta(self):
+        predecessor = "INV-predecessor-001"
+        context = _model_invocation_context(
+            coverage_class="supported_model_invocation",
+            provider_resume_mode="explicit",
+            requested_provider_session_id="provider-session-1",
+            provider_predecessor_invocation_id=predecessor,
+            provider_predecessor_turn_id="turn-1",
+            provider_predecessor_usage_snapshot={
+                "input_tokens": 100,
+                "cached_input_tokens": 20,
+                "output_tokens": 30,
+                "reasoning_tokens": 5,
+                "total_tokens": 130,
+            },
+            provider_usage_scope="session_cumulative",
+            provider_session_lock_held=True,
+            provider_project_binding_valid=True,
+            provider_lineage_status="authoritative",
+            previous_provider_session_id="provider-session-1",
+            previous_invocation_id=predecessor,
+            previous_provider_turn_id="turn-1",
+        )
+        stdout = json.dumps(
+            {
+                "type": "turn_completed",
+                "provider_usage_scope": "session_cumulative",
+                "provider_session_id": "provider-session-1",
+                "provider_turn_id": "turn-2",
+                "provider_predecessor_turn_id": "turn-1",
+                "usage": {
+                    "input_tokens": 145,
+                    "cached_input_tokens": 28,
+                    "output_tokens": 42,
+                    "reasoning_tokens": 9,
+                    "total_tokens": 187,
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            lifecycle = InvocationLifecycle(
+                tmp,
+                context,
+                started_at="2026-07-23T00:00:00Z",
+            )
+            lifecycle.publish_start(_supported_execution_group_identity())
+
+            terminal = lifecycle.finalize(
+                "completed",
+                stdout=stdout,
+                finished_at="2026-07-23T00:00:02Z",
+            )
+
+            self.assertEqual(terminal["accounting_method"], "session_delta")
+            self.assertEqual(terminal["input_tokens"], 45)
+            self.assertEqual(terminal["output_tokens"], 12)
+            self.assertEqual(terminal["total_tokens"], 57)
+            self.assertEqual(terminal["provider_turn_id"], "turn-2")
+            self.assertEqual(
+                terminal["provider_predecessor_invocation_id"],
+                predecessor,
+            )
+            _validate_model_invocation_record(
+                "model_invocation_usage.schema.json",
+                terminal,
+            )
+
+    def test_model_invocation_open_crash_and_retry_identities_are_discoverable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = InvocationLifecycle(
+                tmp,
+                _model_invocation_context(
+                    coverage_class="not_applicable_adapter",
+                    attempt_id="ATTEMPT-001",
+                ),
+            )
+            first.publish_start(ExecutionGroupIdentity.not_applicable())
+            second = InvocationLifecycle(
+                tmp,
+                _model_invocation_context(
+                    coverage_class="not_applicable_adapter",
+                    attempt_id="ATTEMPT-002",
+                ),
+            )
+            second.publish_start(ExecutionGroupIdentity.not_applicable())
+
+            self.assertNotEqual(first.invocation_id, second.invocation_id)
+            self.assertTrue(first.started_path.is_file())
+            self.assertFalse(first.terminal_path.exists())
+            self.assertEqual(
+                len(list((Path(tmp) / "model_invocations").glob("*/started.json"))),
+                2,
+            )
+
+    def test_model_invocation_terminal_is_exclusive_and_revocation_fences_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lifecycle = InvocationLifecycle(
+                Path(tmp) / "normal",
+                _model_invocation_context(
+                    coverage_class="not_applicable_adapter",
+                ),
+                started_at="2026-07-23T00:00:00Z",
+            )
+            lifecycle.publish_start(ExecutionGroupIdentity.not_applicable())
+            first = lifecycle.finalize(
+                "completed",
+                finished_at="2026-07-23T00:00:01Z",
+            )
+            replay = lifecycle.finalize(
+                "completed",
+                finished_at="2026-07-23T00:00:01Z",
+            )
+            self.assertEqual(first, replay)
+            with self.assertRaises(ModelInvocationIntegrityError):
+                lifecycle.finalize(
+                    "failed",
+                    finished_at="2026-07-23T00:00:01Z",
+                )
+
+            revoked = InvocationLifecycle(
+                Path(tmp) / "revoked",
+                _model_invocation_context(
+                    coverage_class="not_applicable_adapter",
+                ),
+            )
+            revoked.publish_start(ExecutionGroupIdentity.not_applicable())
+            revocation = revoked.revoke_writer(
+                "LEASE-001",
+                revoked_by="recovery-controller",
+                reason="worker_process_death_confirmed",
+            )
+            replayed_revocation = revoked.revoke_writer(
+                "LEASE-001",
+                revoked_by="recovery-controller",
+                reason="worker_process_death_confirmed",
+            )
+            self.assertEqual(revocation, replayed_revocation)
+            with self.assertRaises(ModelInvocationWriterRevoked):
+                revoked.finalize("failed")
+            self.assertFalse(revoked.terminal_path.exists())
+
+    def test_model_invocation_systemd_persists_exact_process_group_identity(self):
+        commands = []
+
+        def command_runner(command, **kwargs):
+            commands.append(command)
+            if command[0] == "loginctl":
+                return subprocess.CompletedProcess(command, 0, "yes\n", "")
+            if command[0] == "systemd-run":
+                return subprocess.CompletedProcess(command, 0, "", "")
+            if f"user@{os.getuid()}.service" in command:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    "InvocationID=" + ("a" * 32) + "\n"
+                    "ControlGroup=/user.slice/user-service\n"
+                    "KillMode=mixed\n",
+                    "",
+                )
+            if any(part.startswith("agentteam-inv-") for part in command):
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    "InvocationID=" + ("b" * 32) + "\n"
+                    "ControlGroup=/user.slice/transient-service\n"
+                    "KillMode=control-group\n"
+                    "MainPID=321\n",
+                    "",
+                )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "ManagerTimestampMonotonic=998877\n",
+                "",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lifecycle = InvocationLifecycle(
+                tmp,
+                _model_invocation_context(
+                    coverage_class="supported_model_invocation",
+                ),
+            )
+            execution = SystemdGatedExecution(
+                lifecycle,
+                ["codex", "exec", "--json"],
+                cwd=tmp,
+                input_text="bounded prompt",
+                timeout_seconds=30,
+                command_runner=command_runner,
+            )
+            with (
+                mock.patch(
+                    "agentteam_runtime.model_invocation._wait_for_json",
+                    return_value={"pid": 321, "pgid": 321},
+                ),
+                mock.patch(
+                    "agentteam_runtime.model_invocation._read_boot_id",
+                    return_value="12345678-1234-1234-1234-123456789abc",
+                ),
+                mock.patch(
+                    "agentteam_runtime.model_invocation._proc_start_ticks",
+                    return_value=4567,
+                ),
+            ):
+                identity = execution.prepare()
+
+            self.assertFalse(lifecycle.started_path.exists())
+            self.assertEqual(identity.gated_supervisor_pid, 321)
+            self.assertEqual(identity.gated_supervisor_pgid, 321)
+            self.assertEqual(identity.systemd_transient_kill_mode, "control-group")
+            self.assertEqual(
+                identity.systemd_transient_control_group,
+                "/user.slice/transient-service",
+            )
+            self.assertTrue(
+                any(
+                    "--property=RemainAfterExit=yes" in command
+                    and "--property=KillMode=control-group" in command
+                    for command in commands
+                )
+            )
+            start = lifecycle.publish_start(identity)
+            self.assertEqual(
+                start["launch_nonce_sha256"],
+                hashlib.sha256(execution.nonce.encode("ascii")).hexdigest(),
+            )
+            _validate_model_invocation_record(
+                "model_invocation_started.schema.json",
+                start,
+            )
+
+    def test_model_invocation_execution_fence_fails_closed_on_ambiguity(self):
+        start = {
+            **_model_invocation_context(
+                coverage_class="supported_model_invocation",
+            ),
+            **{
+                name: getattr(_supported_execution_group_identity(), name)
+                for name in ExecutionGroupIdentity.__dataclass_fields__
+            },
+        }
+        user_service = {
+            "InvocationID": start["systemd_user_service_invocation_id"],
+            "ControlGroup": start["systemd_user_service_control_group"],
+            "KillMode": start["systemd_user_service_kill_mode"],
+            "ActiveState": "active",
+        }
+        transient = {
+            "InvocationID": start["systemd_transient_invocation_id"],
+            "ControlGroup": start["systemd_transient_control_group"],
+            "KillMode": "control-group",
+        }
+
+        changed_boot = assess_execution_group_fence(
+            start,
+            current_boot_id="87654321-4321-4321-4321-cba987654321",
+            current_user_service=None,
+            current_manager_identity=None,
+            current_transient_service=None,
+        )
+        self.assertEqual(changed_boot["fence_status"], "death_proven")
+        self.assertFalse(changed_boot["signal_allowed"])
+
+        restarted_service = {
+            **user_service,
+            "InvocationID": "d" * 32,
+        }
+        enclosing_restart = assess_execution_group_fence(
+            start,
+            current_boot_id=start["host_boot_id"],
+            current_user_service=restarted_service,
+            current_manager_identity="new-manager",
+            current_transient_service=None,
+        )
+        self.assertEqual(enclosing_restart["fence_status"], "death_proven")
+        self.assertEqual(
+            enclosing_restart["proof"],
+            "enclosing_user_service_restarted",
+        )
+
+        def esrch_pidfd_open(pid, flags):
+            raise OSError(errno.ESRCH, "reaped")
+
+        reaped_empty = assess_execution_group_fence(
+            start,
+            current_boot_id=start["host_boot_id"],
+            current_user_service=user_service,
+            current_manager_identity=start["systemd_user_manager_identity"],
+            current_transient_service=transient,
+            pidfd_open=esrch_pidfd_open,
+            cgroup_populated=lambda control_group: False,
+        )
+        self.assertEqual(reaped_empty["fence_status"], "death_proven")
+        self.assertEqual(reaped_empty["proof"], "exact_transient_cgroup_empty")
+
+        reaped_populated = assess_execution_group_fence(
+            start,
+            current_boot_id=start["host_boot_id"],
+            current_user_service=user_service,
+            current_manager_identity=start["systemd_user_manager_identity"],
+            current_transient_service=transient,
+            pidfd_open=esrch_pidfd_open,
+            cgroup_populated=lambda control_group: True,
+        )
+        self.assertEqual(
+            reaped_populated["fence_status"],
+            "exact_service_stop_required",
+        )
+        self.assertFalse(reaped_populated["signal_allowed"])
+
+        pidfd = os.open("/dev/null", os.O_RDONLY)
+        live = assess_execution_group_fence(
+            start,
+            current_boot_id=start["host_boot_id"],
+            current_user_service=user_service,
+            current_manager_identity=start["systemd_user_manager_identity"],
+            current_transient_service=transient,
+            pidfd_open=lambda pid, flags: pidfd,
+            process_start_ticks=lambda pid: start["gated_supervisor_start_ticks"],
+        )
+        self.assertEqual(live["fence_status"], "live_pinned")
+        self.assertTrue(live["signal_allowed"])
+        self.assertEqual(live["pidfd"], pidfd)
+        os.close(pidfd)
+
+        ambiguous_manager = assess_execution_group_fence(
+            start,
+            current_boot_id=start["host_boot_id"],
+            current_user_service=user_service,
+            current_manager_identity="unexplained-new-manager",
+            current_transient_service=transient,
+        )
+        self.assertEqual(
+            ambiguous_manager["fence_status"],
+            "open_ambiguous",
+        )
+        self.assertFalse(ambiguous_manager["signal_allowed"])
+
     def test_codex_runtime_adapter_calls_progress_callback_while_subprocess_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -12016,6 +12600,99 @@ class M0RuntimeTests(unittest.TestCase):
             )
             self.assertEqual(recorded["model"], "agent-profile-model")
             self.assertEqual(recorded["sandbox"], "read-only")
+
+
+def _model_invocation_message():
+    return {
+        "message_id": "MSG-0001",
+        "from_agent": "agent-scheduler",
+        "to_agent": "agent-implementation-worker-1",
+        "message_type": "dispatch_task",
+        "correlation_id": "TASK-001:ATTEMPT-001",
+        "payload": _model_invocation_context(
+            coverage_class=None,
+            include_schema_only_fields=False,
+        ),
+    }
+
+
+def _model_invocation_context(
+    *,
+    coverage_class,
+    attempt_id="ATTEMPT-001",
+    include_schema_only_fields=True,
+    **overrides,
+):
+    context = {
+        "project": "agentteam",
+        "run_id": "RUN-001",
+        "pursue_id": None,
+        "round_index": None,
+        "taskpack_id": "TASKPACK-001",
+        "implementation_run_id": None,
+        "gate_epoch": None,
+        "task_id": "TASK-001",
+        "attempt_id": attempt_id,
+        "runtime_execution_session_id": f"SESSION-{attempt_id}",
+        "requested_provider_session_id": None,
+        "provider_resume_mode": "new",
+        "provider_predecessor_invocation_id": None,
+        "provider_predecessor_turn_id": None,
+        "provider_predecessor_usage_snapshot": None,
+        "lifecycle_owner_token": "LEASE-001",
+        "lease_id": "LEASE-001",
+        "agent_id": "agent-implementation-worker-1",
+        "agent_role": "implementation_worker",
+        "role": "implementation_worker",
+        "usage_stage": "implementation_worker",
+        "backend": "codex",
+        "model": None,
+        "coverage_class": coverage_class,
+        "provider_usage_scope": None,
+        "provider_session_lock_held": False,
+        "provider_project_binding_valid": False,
+        "provider_lineage_status": None,
+        "previous_provider_session_id": None,
+        "previous_provider_turn_id": None,
+        "previous_invocation_id": None,
+        "objective": "Exercise model invocation lifecycle.",
+        "read_scope": ["."],
+        "write_scope": [],
+    }
+    context.update(overrides)
+    if not include_schema_only_fields:
+        context.pop("role")
+        context.pop("backend")
+    return context
+
+
+def _supported_execution_group_identity():
+    return ExecutionGroupIdentity(
+        gated_supervisor_pid=321,
+        gated_supervisor_pgid=321,
+        host_boot_id="12345678-1234-1234-1234-123456789abc",
+        gated_supervisor_start_ticks=4567,
+        launch_nonce_sha256="c" * 64,
+        systemd_linger_enabled=True,
+        systemd_transient_unit="agentteam-inv-test.service",
+        systemd_transient_invocation_id="a" * 32,
+        systemd_transient_kill_mode="control-group",
+        systemd_user_manager_identity="manager-monotonic:998877",
+        systemd_transient_control_group="/user.slice/transient-service",
+        systemd_user_service_invocation_id="b" * 32,
+        systemd_user_service_control_group="/user.slice/user-service",
+        systemd_user_service_kill_mode="mixed",
+    )
+
+
+def _validate_model_invocation_record(schema_name, record):
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    schema = json.loads((SCHEMAS / schema_name).read_text(encoding="utf-8"))
+    Draft202012Validator(
+        schema,
+        format_checker=FormatChecker(),
+    ).validate(record)
 
 
 def _init_git_repo(path):
