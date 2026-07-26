@@ -1,6 +1,6 @@
 # Phase 1 Execution Preflight
 
-Status: required runtime prerequisites; not yet implemented.
+Status: implemented and verified; retained as Phase 1 prerequisite authority.
 
 This plan removes five known blockers before the executable package described
 by
@@ -27,10 +27,11 @@ the Phase 1 clean-source commit is recorded.
 
 ## Execution Strategy
 
-The active runtime does not yet support deterministic multi-item blueprint
-materialization. Therefore PRE-00, PRE-01, PRE-02A, PRE-02B, PRE-03A, PRE-03B,
-PRE-03C, PRE-03D, and PRE-04 are executed as ordered, bounded single-item
-taskpacks against successive verified source heads:
+At the start of this preflight, the active runtime did not support
+deterministic multi-item blueprint materialization. PRE-00, PRE-01, PRE-02A,
+PRE-02B, PRE-03A, PRE-03B, PRE-03C, PRE-03D, and PRE-04 were therefore
+executed as ordered, bounded single-item taskpacks against successive verified
+source heads:
 
 ```text
 PRE-00 invocation-supervision host probe
@@ -265,6 +266,9 @@ The implementation must:
 - write a bounded `materialization_manifest.json` beside the draft containing
   blueprint digest, generated artifact digests, task IDs, dependency edges,
   and validation status;
+- before freeze, deterministically regenerate the five blueprint artifacts
+  from the currently approved tracked blueprint and reject byte drift in any
+  draft artifact before creating the frozen directory;
 - remove partial output on failure.
 
 `dry_run=True` may validate and generate into a controller-owned temporary

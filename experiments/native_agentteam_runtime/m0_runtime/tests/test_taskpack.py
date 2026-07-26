@@ -1,6 +1,7 @@
 import json
 import hashlib
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -1153,6 +1154,55 @@ class TaskpackTests(unittest.TestCase):
 
             self.assertFalse((tmp_path / "frozen" / "example-blueprint").exists())
 
+    def test_blueprint_freeze_rejects_each_drifted_materialized_artifact(self):
+        for artifact_name in (
+            "taskpack.yaml",
+            "agent_pool.json",
+            "backlog.json",
+            "verification.json",
+            "README.md",
+        ):
+            with self.subTest(artifact_name=artifact_name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    repo = tmp_path / "repo"
+                    _init_repo(repo)
+                    blueprint_path, _blueprint = _blueprint_fixture(repo)
+                    materialized = (
+                        taskpack_module.materialize_taskpack_blueprint(
+                            repo,
+                            blueprint_path,
+                            tmp_path / "drafts",
+                        )
+                    )
+                    artifact_path = (
+                        Path(materialized["taskpack_dir"]) / artifact_name
+                    )
+                    artifact_path.write_text(
+                        artifact_path.read_text(encoding="utf-8") + "\n",
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(
+                        TaskpackValidationError,
+                        (
+                            "blueprint-materialized taskpack artifact changed "
+                            f"before freeze: {re.escape(artifact_name)}"
+                        ),
+                    ):
+                        freeze_taskpack(
+                            materialized["taskpack_dir"],
+                            tmp_path / "frozen",
+                        )
+
+                    self.assertFalse(
+                        (
+                            tmp_path
+                            / "frozen"
+                            / "example-blueprint"
+                        ).exists()
+                    )
+
     def test_blueprint_release_git_object_binding_and_generation_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1634,6 +1684,51 @@ class TaskpackTests(unittest.TestCase):
                     "bc38dfb753de6424935888439965add16197c351"
                 )
             },
+        )
+        tasks_by_id = {
+            item["task_id"]: item
+            for item in blueprint["tasks"]
+        }
+        self.assertEqual(tasks_by_id["P1-02A"]["depends_on"], [])
+        self.assertEqual(
+            [
+                item["task_id"]
+                for item in blueprint["tasks"]
+                if not item["depends_on"]
+            ],
+            ["P1-02A"],
+        )
+        self.assertTrue(
+            {
+                (
+                    "experiments/native_agentteam_runtime/m0_runtime/"
+                    "agentteam_runtime/token_usage.py"
+                ),
+                (
+                    "experiments/native_agentteam_runtime/m0_runtime/tests/"
+                    "test_model_invocation_usage.py"
+                ),
+                (
+                    "experiments/native_agentteam_runtime/schemas/"
+                    "event.schema.json"
+                ),
+                (
+                    "experiments/native_agentteam_runtime/schemas/"
+                    "model_invocation_started.schema.json"
+                ),
+                (
+                    "experiments/native_agentteam_runtime/schemas/"
+                    "model_invocation_usage.schema.json"
+                ),
+                (
+                    "experiments/native_agentteam_runtime/schemas/"
+                    "model_invocation_writer_revoked.schema.json"
+                ),
+                (
+                    "experiments/native_agentteam_runtime/schemas/"
+                    "model_invocation_live_smoke.schema.json"
+                ),
+            }.issubset(set(tasks_by_id["P1-02A"]["read_scope"]))
         )
 
     def _run_agentteam_json(self, *args):

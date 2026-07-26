@@ -1068,6 +1068,11 @@ The operator compares the generated materialization manifest to the tracked
 blueprint before freeze. Markdown section parsing is not part of
 materialization; the JSON blueprint contains the complete executable fields,
 while this document remains the human-readable semantic authority.
+The freeze operation independently regenerates all five deterministic
+blueprint artifacts from the currently approval-bound tracked blueprint and
+requires byte equality with the retained draft. Any drift in `taskpack.yaml`,
+`agent_pool.json`, `backlog.json`, `verification.json`, or `README.md` fails
+before a frozen directory is created.
 
 ## P1-00 Contract Review
 
@@ -1226,7 +1231,8 @@ terminal cumulative payload without guessing.
 
 **Risk:** L1
 **Role:** `implementation_worker`
-**Depends on:** P1-01
+**Depends on:** recovered P1-01 seed
+`bc38dfb753de6424935888439965add16197c351`; no v2 runtime `depends_on`
 
 ### Objective
 

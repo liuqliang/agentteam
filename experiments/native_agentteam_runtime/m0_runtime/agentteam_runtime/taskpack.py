@@ -30,6 +30,13 @@ TASKPACK_BLUEPRINT_SCHEMA_VERSION = "agentteam_taskpack_blueprint.v1"
 TASKPACK_BLUEPRINT_SCHEMA_PATH = (
     Path(__file__).resolve().parents[2] / "schemas" / "taskpack_blueprint.schema.json"
 )
+TASKPACK_BLUEPRINT_ARTIFACT_NAMES = (
+    "taskpack.yaml",
+    "agent_pool.json",
+    "backlog.json",
+    "verification.json",
+    "README.md",
+)
 TASKPACK_BLUEPRINT_CONTROL_AGENT_IDS = {"agent-scheduler", "agent-integrator"}
 TASKPACK_BLUEPRINT_CONTROL_ROLES = {"scheduler", "integrator"}
 OPTIMIZATION_CODE_WORK_TYPES = {"code_implementation", "code_investigation"}
@@ -1527,16 +1534,9 @@ def _generate_taskpack_blueprint(
     )
     validation = validate_taskpack(taskpack_dir)
 
-    artifact_names = [
-        "taskpack.yaml",
-        "agent_pool.json",
-        "backlog.json",
-        "verification.json",
-        "README.md",
-    ]
     artifact_digests = {
         name: _sha256_file(taskpack_dir / name)
-        for name in artifact_names
+        for name in TASKPACK_BLUEPRINT_ARTIFACT_NAMES
     }
     dependency_edges = [
         {
@@ -2585,7 +2585,7 @@ def freeze_taskpack(taskpack_dir, frozen_root):
     taskpack_dir = Path(taskpack_dir).resolve()
     validation = validate_taskpack(taskpack_dir)
     loaded = load_taskpack(taskpack_dir)
-    _validate_blueprint_taskpack_freeze_approval(loaded)
+    _validate_blueprint_taskpack_freeze_approval(taskpack_dir, loaded)
     taskpack_id = validation["taskpack_id"]
     frozen_root = Path(frozen_root).resolve()
     frozen_dir = (frozen_root / taskpack_id).resolve()
@@ -2617,7 +2617,7 @@ def freeze_taskpack(taskpack_dir, frozen_root):
     return {"frozen_taskpack_dir": str(frozen_dir), "manifest": manifest}
 
 
-def _validate_blueprint_taskpack_freeze_approval(loaded):
+def _validate_blueprint_taskpack_freeze_approval(taskpack_dir, loaded):
     taskpack = loaded.get("taskpack") if isinstance(loaded, dict) else None
     if not isinstance(taskpack, dict) or taskpack.get("authoring_mode") != "blueprint_materialized":
         return
@@ -2653,6 +2653,28 @@ def _validate_blueprint_taskpack_freeze_approval(loaded):
             raise TaskpackValidationError(
                 f"blueprint-materialized taskpack context changed before freeze: {field_name}"
             )
+
+    with tempfile.TemporaryDirectory(
+        prefix="agentteam-blueprint-freeze-verify-"
+    ) as temp_root:
+        expected_dir = Path(temp_root) / blueprint["taskpack"]["taskpack_id"]
+        _generate_taskpack_blueprint(
+            blueprint,
+            project_root=project_root,
+            blueprint_relative_path=blueprint_relative_path,
+            taskpack_dir=expected_dir,
+            context=current_context,
+            freeze_eligible=True,
+            approval_diagnostics=[],
+        )
+        for artifact_name in TASKPACK_BLUEPRINT_ARTIFACT_NAMES:
+            actual_path = taskpack_dir / artifact_name
+            expected_path = expected_dir / artifact_name
+            if actual_path.read_bytes() != expected_path.read_bytes():
+                raise TaskpackValidationError(
+                    "blueprint-materialized taskpack artifact changed before "
+                    f"freeze: {artifact_name}"
+                )
 
 
 def build_taskpack_runtime_args(
