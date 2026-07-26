@@ -5,6 +5,7 @@ import json
 import os
 import time
 import urllib.request
+from pathlib import Path
 
 from .completion_summary import build_completion_summary
 from .token_usage import aggregate_token_usage, format_token_usage
@@ -556,6 +557,14 @@ def _concise_event_text(event, run_dir, project):
             task_id = first_task.get("task_id")
     if task_id:
         lines.append(f"Task: {task_id}")
+    operator_report = payload.get("operator_report")
+    if isinstance(operator_report, dict):
+        report = _notification_report_with_invocation_usage(
+            operator_report,
+            payload,
+            run_dir,
+        )
+        lines.extend(_notification_model_invocation_usage_lines(report))
     if event_type == "manual_gate_required":
         question_id = payload.get("question_id", "unknown")
         lines.append(f"Question id: {question_id}")
@@ -600,7 +609,11 @@ def _event_text(event, run_dir, project):
         lines.append(f"Failure: {failure}")
     operator_report = payload.get("operator_report")
     if isinstance(operator_report, dict):
-        report = dict(operator_report)
+        report = _notification_report_with_invocation_usage(
+            operator_report,
+            payload,
+            run_dir,
+        )
         worker_diagnostics = payload.get("worker_diagnostics")
         if isinstance(worker_diagnostics, dict) and worker_diagnostics:
             report["worker_diagnostics"] = worker_diagnostics
@@ -639,17 +652,19 @@ def _operator_report_text(report):
     if operator_digest:
         lines.append("中文工作汇报:")
         _extend_notification_pursue_recap_lines(lines, report)
+        lines.extend(_notification_model_invocation_usage_lines(report))
+        lines.append(_legacy_notification_token_usage_line(report, task_reports))
         _extend_limited_section_items(lines, operator_digest)
         _extend_notification_worker_diagnostic_lines(lines, report)
-        lines.append(format_token_usage(_notification_token_usage(report, task_reports)))
         return lines
 
     if not task_reports:
         lines.append("工作摘要:")
         lines.append("- 无结构化任务报告；请查看 agentteam report。")
+        lines.extend(_notification_model_invocation_usage_lines(report))
+        lines.append(_legacy_notification_token_usage_line(report, task_reports))
         _extend_notification_pursue_recap_lines(lines, report)
         _extend_notification_worker_diagnostic_lines(lines, report)
-        lines.append(format_token_usage(_notification_token_usage(report, task_reports)))
         return lines
 
     task_count = int(report.get("task_count") or len(task_reports))
@@ -668,11 +683,57 @@ def _operator_report_text(report):
         f"任务：{task_count}；阻塞：{blocked_count}"
     )
     _extend_notification_pursue_recap_lines(lines, report)
+    lines.extend(_notification_model_invocation_usage_lines(report))
+    lines.append(_legacy_notification_token_usage_line(report, task_reports))
     lines.append("中文工作汇报:")
     _extend_limited_section_items(lines, summary.get("operator_digest"))
     _extend_notification_worker_diagnostic_lines(lines, report)
-    lines.append(format_token_usage(_notification_token_usage(report, task_reports)))
     return lines
+
+
+def _notification_report_with_invocation_usage(report, payload, run_dir):
+    enriched = dict(report)
+    summary = enriched.get("model_invocation_usage")
+    if not isinstance(summary, dict):
+        summary = payload.get("model_invocation_usage")
+    if not isinstance(summary, dict):
+        summary = _load_notification_model_invocation_usage(run_dir)
+    if isinstance(summary, dict):
+        enriched["model_invocation_usage"] = summary
+    return enriched
+
+
+def _load_notification_model_invocation_usage(run_dir):
+    try:
+        event_path = Path(run_dir) / "events.jsonl"
+        if not event_path.is_file():
+            return None
+        events = [
+            json.loads(line)
+            for line in event_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        from .operator_report import aggregate_model_invocation_usage
+
+        return aggregate_model_invocation_usage(events)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _notification_model_invocation_usage_lines(report):
+    summary = report.get("model_invocation_usage")
+    if not isinstance(summary, dict):
+        return []
+    from .operator_report import compact_model_invocation_usage_lines
+
+    return compact_model_invocation_usage_lines(summary)
+
+
+def _legacy_notification_token_usage_line(report, task_reports):
+    return (
+        format_token_usage(_notification_token_usage(report, task_reports))
+        + " (legacy task-result aggregate; not benchmark-counted)"
+    )
 
 
 def _extend_notification_worker_diagnostic_lines(lines, report):

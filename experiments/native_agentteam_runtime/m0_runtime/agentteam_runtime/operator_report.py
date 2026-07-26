@@ -14,6 +14,22 @@ TERMINAL_EVENT_TYPES = {
     "run_stopped",
 }
 
+MODEL_INVOCATION_START_EVENT_TYPE = "model_invocation_started"
+MODEL_INVOCATION_USAGE_EVENT_TYPE = "model_invocation_usage_recorded"
+MODEL_INVOCATION_TOKEN_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+)
+MODEL_INVOCATION_USAGE_STATUSES = (
+    "reported",
+    "partial",
+    "unavailable",
+    "not_applicable",
+)
+
 
 def build_run_completion_report(run_dir, project=None, write_files=True):
     run_dir = Path(run_dir).resolve()
@@ -52,6 +68,13 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
     run_status = _run_status(payload, state)
     scheduler_status = _scheduler_status(payload, state)
     run_outcome = _run_outcome(run_status, blocked_count)
+    model_invocation_usage = aggregate_model_invocation_usage(events)
+    if (
+        isinstance(model_invocation_usage, dict)
+        and model_invocation_usage.get("completion_status")
+        == "blocked_open_invocations"
+    ):
+        run_outcome = "blocked_open_invocations"
 
     pursue_recap = (
         _projected_pursue_recap_for_run(run_dir)
@@ -71,6 +94,12 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         "task_count": operator_report.get("task_count", 0),
         "blocked_count": blocked_count,
         "token_usage": token_usage,
+        "model_invocation_usage": model_invocation_usage,
+        "legacy_task_token_usage": {
+            "accounting_scope": "legacy_task_results",
+            "benchmark_counted": False,
+            "usage": token_usage,
+        },
         "completion_summary": build_completion_summary(
             run_id=run_dir.name,
             run_status=run_status,
@@ -89,6 +118,388 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
     if write_files:
         _write_report_files(report)
     return report
+
+
+def aggregate_model_invocation_usage(events):
+    starts = {}
+    terminals_by_event_id = {}
+    integrity_conflicts = 0
+    for event in events if isinstance(events, list) else []:
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("event_type")
+        if event_type not in {
+            MODEL_INVOCATION_START_EVENT_TYPE,
+            MODEL_INVOCATION_USAGE_EVENT_TYPE,
+        }:
+            continue
+        record = _model_invocation_record(event)
+        if not isinstance(record, dict):
+            continue
+        invocation_id = record.get("invocation_id")
+        if not invocation_id:
+            continue
+        if event_type == MODEL_INVOCATION_START_EVENT_TYPE:
+            previous = starts.get(invocation_id)
+            if previous is not None and previous != record:
+                integrity_conflicts += 1
+                continue
+            starts.setdefault(invocation_id, record)
+            continue
+        usage_event_id = record.get("usage_event_id") or event.get("source_event_id")
+        if not usage_event_id:
+            continue
+        previous = terminals_by_event_id.get(usage_event_id)
+        if previous is not None and previous != record:
+            integrity_conflicts += 1
+            continue
+        terminals_by_event_id.setdefault(usage_event_id, record)
+
+    if not starts:
+        return None
+
+    terminals = {}
+    for terminal in terminals_by_event_id.values():
+        invocation_id = terminal.get("invocation_id")
+        previous = terminals.get(invocation_id)
+        if previous is not None and previous != terminal:
+            integrity_conflicts += 1
+            continue
+        terminals.setdefault(invocation_id, terminal)
+
+    usage_status_counts = {
+        status: 0 for status in MODEL_INVOCATION_USAGE_STATUSES
+    }
+    terminal_status_counts = {}
+    stage_breakdown = {}
+    reason_counts = {"partial": {}, "unavailable": {}}
+    reported_records = []
+    eligible_partial_records = []
+    supported_count = 0
+    supported_terminal_count = 0
+    supported_reported_count = 0
+    open_invocation_ids = []
+
+    for invocation_id, start in sorted(starts.items()):
+        terminal = terminals.get(invocation_id)
+        coverage_class = start.get("coverage_class")
+        supported = coverage_class == "supported_model_invocation"
+        if supported:
+            supported_count += 1
+        if terminal is None:
+            open_invocation_ids.append(invocation_id)
+        elif supported:
+            supported_terminal_count += 1
+
+        usage_status = terminal.get("usage_status") if terminal else "open"
+        if usage_status in usage_status_counts:
+            usage_status_counts[usage_status] += 1
+        if terminal:
+            terminal_status = terminal.get("terminal_status") or "unknown"
+            terminal_status_counts[terminal_status] = (
+                terminal_status_counts.get(terminal_status, 0) + 1
+            )
+        if supported and usage_status == "reported":
+            supported_reported_count += 1
+            reported_records.append(terminal)
+        elif usage_status == "partial":
+            _add_usage_reason(reason_counts["partial"], terminal)
+            if (
+                supported
+                and terminal.get("provider_usage_scope") == "invocation"
+                and any(
+                    _is_nonnegative_token_count(terminal.get(field))
+                    for field in MODEL_INVOCATION_TOKEN_FIELDS
+                )
+            ):
+                eligible_partial_records.append(terminal)
+        elif usage_status == "unavailable":
+            _add_usage_reason(reason_counts["unavailable"], terminal)
+
+        stage = (
+            start.get("usage_stage")
+            or (terminal.get("usage_stage") if terminal else None)
+            or "unknown"
+        )
+        stage_summary = stage_breakdown.setdefault(
+            stage,
+            {
+                "invocation_count": 0,
+                "reported": 0,
+                "partial": 0,
+                "unavailable": 0,
+                "not_applicable": 0,
+                "open": 0,
+            },
+        )
+        stage_summary["invocation_count"] += 1
+        if usage_status in stage_summary:
+            stage_summary[usage_status] += 1
+
+    reported_totals = _sum_model_invocation_token_fields(reported_records)
+    partial_lower_bounds = _sum_model_invocation_token_fields(
+        eligible_partial_records
+    )
+    observed_lower_bound = _add_model_invocation_token_totals(
+        reported_totals,
+        partial_lower_bounds,
+    )
+    lifecycle_coverage = _model_invocation_coverage(
+        supported_terminal_count,
+        supported_count,
+    )
+    token_coverage = _model_invocation_coverage(
+        supported_reported_count,
+        supported_count,
+    )
+    open_supported_count = sum(
+        1
+        for invocation_id in open_invocation_ids
+        if starts[invocation_id].get("coverage_class")
+        == "supported_model_invocation"
+    )
+    if integrity_conflicts:
+        completion_status = "blocked_integrity_conflict"
+    elif open_invocation_ids:
+        completion_status = "blocked_open_invocations"
+    else:
+        completion_status = "complete"
+    if supported_count == 0:
+        reported_totals_scope = "not_applicable"
+    elif supported_reported_count == supported_count:
+        reported_totals_scope = "all_supported_invocations"
+    else:
+        reported_totals_scope = "reported_subset"
+
+    return {
+        "summary_schema_version": "model_invocation_usage_summary.v1",
+        "summary_status": "available",
+        "accounting_scope": "full_run_canonical_invocations",
+        "benchmark_counted": True,
+        "invocation_count": len(starts),
+        "terminal_invocation_count": sum(
+            1 for invocation_id in starts if invocation_id in terminals
+        ),
+        "supported_invocation_count": supported_count,
+        "open_invocations": len(open_invocation_ids),
+        "open_supported_invocations": open_supported_count,
+        "usage_status_counts": usage_status_counts,
+        "terminal_status_counts": dict(sorted(terminal_status_counts.items())),
+        "stage_breakdown": dict(sorted(stage_breakdown.items())),
+        "lifecycle_terminal_coverage": lifecycle_coverage,
+        "token_usage_coverage": token_coverage,
+        "reported_totals_scope": reported_totals_scope,
+        "reported_token_totals": {
+            **reported_totals,
+            "contributing_invocation_count": len(reported_records),
+        },
+        "partial_known_token_lower_bounds": {
+            **partial_lower_bounds,
+            "contributing_invocation_count": len(eligible_partial_records),
+        },
+        "observed_token_lower_bound": observed_lower_bound,
+        "reason_counts": {
+            status: _bounded_usage_reason_counts(counts)
+            for status, counts in reason_counts.items()
+        },
+        "completion_status": completion_status,
+        "benchmark_ready": (
+            supported_count > 0
+            and supported_terminal_count == supported_count
+            and supported_reported_count == supported_count
+            and not open_invocation_ids
+            and not integrity_conflicts
+        ),
+        "integrity_conflict_count": integrity_conflicts,
+    }
+
+
+def compact_model_invocation_usage_lines(summary):
+    if not isinstance(summary, dict) or summary.get("summary_status") != "available":
+        return []
+    counts = (
+        summary.get("usage_status_counts")
+        if isinstance(summary.get("usage_status_counts"), dict)
+        else {}
+    )
+    lifecycle = _coverage_text(summary.get("lifecycle_terminal_coverage"))
+    token_coverage = _coverage_text(summary.get("token_usage_coverage"))
+    lines = [
+        (
+            "Model invocations: "
+            f"total={summary.get('invocation_count', 0)} "
+            f"supported={summary.get('supported_invocation_count', 0)} "
+            f"reported={counts.get('reported', 0)} "
+            f"partial={counts.get('partial', 0)} "
+            f"unavailable={counts.get('unavailable', 0)} "
+            f"not_applicable={counts.get('not_applicable', 0)} "
+            f"open={summary.get('open_invocations', 0)}"
+        ),
+        (
+            "Invocation coverage: "
+            f"lifecycle={lifecycle} token_usage={token_coverage} "
+            f"completion={summary.get('completion_status') or 'unknown'}"
+        ),
+        _compact_invocation_tokens_line(
+            "Reported tokens",
+            summary.get("reported_token_totals"),
+            qualifier=(
+                f"exact; scope={summary.get('reported_totals_scope') or 'unknown'}"
+            ),
+        ),
+        _compact_invocation_tokens_line(
+            "Partial known token lower bounds",
+            summary.get("partial_known_token_lower_bounds"),
+            qualifier="invocation-scoped only",
+        ),
+        _compact_invocation_tokens_line(
+            "Observed token lower bound",
+            summary.get("observed_token_lower_bound"),
+            qualifier="not a benchmark total",
+        ),
+    ]
+    stages = summary.get("stage_breakdown")
+    if isinstance(stages, dict) and stages:
+        lines.append(
+            "Invocation stages: "
+            + ", ".join(
+                f"{stage}={details.get('invocation_count', 0)}"
+                for stage, details in sorted(stages.items())
+                if isinstance(details, dict)
+            )
+        )
+    reason_text = _compact_usage_reasons(summary.get("reason_counts"))
+    if reason_text:
+        lines.append(f"Usage reasons: {reason_text}")
+    return lines
+
+
+def _model_invocation_record(event):
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    for key in ("record", "model_invocation", "model_invocation_usage"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            return nested
+    return payload
+
+
+def _add_usage_reason(counts, terminal):
+    reason = terminal.get("unavailable_reason") or "unspecified"
+    reason = " ".join(str(reason).split())
+    if len(reason) > 80:
+        reason = reason[:77] + "..."
+    counts[reason] = counts.get(reason, 0) + 1
+
+
+def _bounded_usage_reason_counts(counts, limit=3):
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    selected = [
+        {"reason": reason, "count": count}
+        for reason, count in ordered[:limit]
+    ]
+    omitted_count = sum(count for _reason, count in ordered[limit:])
+    if omitted_count:
+        selected.append({"reason": "other", "count": omitted_count})
+    return selected
+
+
+def _sum_model_invocation_token_fields(records):
+    totals = {}
+    for field in MODEL_INVOCATION_TOKEN_FIELDS:
+        values = [
+            record.get(field)
+            for record in records
+            if isinstance(record, dict)
+            and _is_nonnegative_token_count(record.get(field))
+        ]
+        totals[field] = sum(values) if values else None
+    return totals
+
+
+def _add_model_invocation_token_totals(exact_totals, partial_totals):
+    combined = {}
+    for field in MODEL_INVOCATION_TOKEN_FIELDS:
+        known = [
+            totals.get(field)
+            for totals in (exact_totals, partial_totals)
+            if _is_nonnegative_token_count(totals.get(field))
+        ]
+        combined[field] = sum(known) if known else None
+    return combined
+
+
+def _is_nonnegative_token_count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _model_invocation_coverage(covered, total):
+    return {
+        "covered": covered,
+        "total": total,
+        "percent": round((covered * 100.0) / total, 2) if total else None,
+        "status": (
+            "not_applicable"
+            if total == 0
+            else "complete"
+            if covered == total
+            else "partial"
+        ),
+    }
+
+
+def _coverage_text(coverage):
+    if not isinstance(coverage, dict):
+        return "unavailable"
+    total = coverage.get("total")
+    covered = coverage.get("covered")
+    if total == 0:
+        return "not_applicable"
+    percent = coverage.get("percent")
+    if covered is None or total is None or percent is None:
+        return "unavailable"
+    return f"{covered}/{total} ({percent:g}%)"
+
+
+def _compact_invocation_tokens_line(label, totals, qualifier):
+    totals = totals if isinstance(totals, dict) else {}
+    parts = []
+    for field, display in (
+        ("total_tokens", "total"),
+        ("input_tokens", "input"),
+        ("output_tokens", "output"),
+        ("cached_input_tokens", "cached"),
+        ("reasoning_tokens", "reasoning"),
+    ):
+        value = totals.get(field)
+        if _is_nonnegative_token_count(value):
+            parts.append(f"{display}={value}")
+    contributing = totals.get("contributing_invocation_count")
+    if _is_nonnegative_token_count(contributing):
+        parts.append(f"invocations={contributing}")
+    values = " ".join(parts) if parts else "unavailable"
+    return f"{label} ({qualifier}): {values}"
+
+
+def _compact_usage_reasons(reason_counts):
+    if not isinstance(reason_counts, dict):
+        return None
+    sections = []
+    for status in ("partial", "unavailable"):
+        values = reason_counts.get(status)
+        if not isinstance(values, list) or not values:
+            continue
+        items = []
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            items.append(
+                f"{item.get('reason') or 'unspecified'}={item.get('count', 0)}"
+            )
+        if items:
+            sections.append(f"{status}[{', '.join(items)}]")
+    return "; ".join(sections) if sections else None
 
 
 def render_run_completion_report(report):
@@ -117,8 +528,17 @@ def render_run_completion_report(report):
             "## Summary",
             f"- Tasks reported: {report.get('task_count', 0)}",
             f"- Blocked tasks: {report.get('blocked_count', 0)}",
-            f"- {format_token_usage(report.get('token_usage'))}",
         ]
+    )
+    invocation_usage = report.get("model_invocation_usage")
+    if isinstance(invocation_usage, dict):
+        lines.extend(
+            f"- {line}"
+            for line in compact_model_invocation_usage_lines(invocation_usage)
+        )
+    lines.append(
+        f"- {format_token_usage(report.get('token_usage'))} "
+        "(legacy task-result aggregate; not benchmark-counted)"
     )
     pursue_recap = report.get("pursue_recap") if isinstance(report.get("pursue_recap"), dict) else {}
     if pursue_recap:
@@ -255,7 +675,10 @@ def render_run_completion_report(report):
                 "- AgentTeam target review: source merge, push, and release activation require operator review."
             )
         if isinstance(task.get("token_usage"), dict):
-            lines.append(f"- {format_token_usage(task.get('token_usage'), label='Tokens')}")
+            lines.append(
+                f"- {format_token_usage(task.get('token_usage'), label='Tokens')} "
+                "(legacy task-result; not benchmark-counted)"
+            )
         _extend_bullets(lines, "Next steps", task.get("next_steps"))
     return "\n".join(lines) + "\n"
 
@@ -276,10 +699,16 @@ def concise_report_lines(report, max_tasks=3):
         else []
     )
     token_usage = report.get("token_usage")
+    invocation_usage = report.get("model_invocation_usage")
+    if isinstance(invocation_usage, dict):
+        lines.extend(compact_model_invocation_usage_lines(invocation_usage))
     if isinstance(token_usage, dict):
-        lines.append(format_token_usage(token_usage, label="tokens"))
+        lines.append(
+            format_token_usage(token_usage, label="legacy_task_tokens")
+            + " (not benchmark-counted)"
+        )
     else:
-        lines.append("tokens: unavailable")
+        lines.append("legacy_task_tokens: unavailable (not benchmark-counted)")
     pursue_recap = report.get("pursue_recap") if isinstance(report.get("pursue_recap"), dict) else {}
     if pursue_recap:
         lines.append(
@@ -460,7 +889,10 @@ def _extend_chinese_work_report_lines(lines, report, summary, pursue_recap):
             if queue.get("next_goal"):
                 lines.append(f"- 投影下一项：{queue['next_goal']}")
     lines.extend(f"- {item}" for item in digest)
-    lines.append(f"- {format_token_usage(report.get('token_usage'))}")
+    lines.append(
+        f"- {format_token_usage(report.get('token_usage'))} "
+        "(legacy task-result aggregate; not benchmark-counted)"
+    )
 
 
 def _pursue_recap_next_step(pursue_recap):
@@ -492,7 +924,10 @@ def _extend_pursue_round_recap_lines(lines, latest_round_recap):
         lines.append(f"- Blockers: {'; '.join(blockers[:3])}")
     token_usage = latest_round_recap.get("token_usage")
     if isinstance(token_usage, dict):
-        lines.append(f"- {format_token_usage(token_usage)}")
+        lines.append(
+            f"- {format_token_usage(token_usage)} "
+            "(legacy task-result aggregate; not benchmark-counted)"
+        )
     if latest_round_recap.get("recommended_next_step"):
         lines.append(f"- Recommended next step: {latest_round_recap['recommended_next_step']}")
 
@@ -542,7 +977,10 @@ def _concise_pursue_round_recap_lines(latest_round_recap):
         lines.append(f"pursue_evidence_path: {evidence_paths[0]}")
     token_usage = latest_round_recap.get("token_usage")
     if isinstance(token_usage, dict):
-        lines.append(format_token_usage(token_usage, label="pursue_token_usage"))
+        lines.append(
+            format_token_usage(token_usage, label="pursue_token_usage")
+            + " (legacy task-result aggregate; not benchmark-counted)"
+        )
     if latest_round_recap.get("recommended_next_step"):
         lines.append(f"pursue_next_step: {latest_round_recap['recommended_next_step']}")
     return lines

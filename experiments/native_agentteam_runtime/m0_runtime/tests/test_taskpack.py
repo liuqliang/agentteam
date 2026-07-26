@@ -55,7 +55,11 @@ from agentteam_runtime.diagnostic_chat import (
 )
 from agentteam_runtime.goal_memory import build_goal_memory, render_goal_memory_prompt_context
 from agentteam_runtime.notifications import FeishuWebhookNotifier, _permission_request_text
-from agentteam_runtime.operator_report import concise_report_lines
+from agentteam_runtime.operator_report import (
+    aggregate_model_invocation_usage,
+    compact_model_invocation_usage_lines,
+    concise_report_lines,
+)
 from agentteam_runtime.profile import build_project_profile, write_project_profile
 from agentteam_runtime.release_manager import (
     AgentTeamReleaseError,
@@ -781,6 +785,166 @@ def _write_completed_operator_run(run_dir):
         ],
     )
     return run_dir
+
+
+def _full_run_model_invocation_events():
+    events = []
+
+    def add_start(
+        invocation_id,
+        stage,
+        *,
+        coverage_class="supported_model_invocation",
+        task_id=None,
+    ):
+        record = {
+            "invocation_schema_version": "model_invocation_started.v1",
+            "invocation_id": invocation_id,
+            "coverage_class": coverage_class,
+            "usage_stage": stage,
+            "task_id": task_id,
+        }
+        events.append(
+            {
+                "event_id": f"EVT-START-{invocation_id}",
+                "event_type": "model_invocation_started",
+                "source_event_id": invocation_id,
+                "payload": record,
+            }
+        )
+        return record
+
+    def add_terminal(
+        invocation_id,
+        stage,
+        usage_status,
+        *,
+        terminal_status="completed",
+        provider_usage_scope="invocation",
+        unavailable_reason=None,
+        input_tokens=None,
+        cached_input_tokens=None,
+        output_tokens=None,
+        reasoning_tokens=None,
+        total_tokens=None,
+    ):
+        record = {
+            "usage_schema_version": "model_invocation_usage.v1",
+            "usage_event_id": f"USAGE-{invocation_id}",
+            "invocation_id": invocation_id,
+            "coverage_class": (
+                "not_applicable_adapter"
+                if usage_status == "not_applicable"
+                else "supported_model_invocation"
+            ),
+            "usage_stage": stage,
+            "terminal_status": terminal_status,
+            "usage_status": usage_status,
+            "provider_usage_scope": provider_usage_scope,
+            "unavailable_reason": unavailable_reason,
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "output_tokens": output_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "total_tokens": total_tokens,
+        }
+        events.append(
+            {
+                "event_id": f"EVT-USAGE-{invocation_id}",
+                "event_type": "model_invocation_usage_recorded",
+                "source_event_id": record["usage_event_id"],
+                "payload": record,
+            }
+        )
+        return record
+
+    author_start = add_start("INV-author", "taskpack_author")
+    author_terminal = add_terminal(
+        "INV-author",
+        "taskpack_author",
+        "reported",
+        input_tokens=100,
+        cached_input_tokens=20,
+        output_tokens=20,
+        total_tokens=120,
+    )
+    add_start(
+        "INV-worker-1",
+        "implementation_worker",
+        task_id="TASK-001",
+    )
+    add_terminal(
+        "INV-worker-1",
+        "implementation_worker",
+        "reported",
+        input_tokens=50,
+        output_tokens=10,
+        reasoning_tokens=3,
+        total_tokens=60,
+    )
+    add_start(
+        "INV-worker-2",
+        "implementation_worker",
+        task_id="TASK-001",
+    )
+    add_terminal(
+        "INV-worker-2",
+        "implementation_worker",
+        "partial",
+        provider_usage_scope="session_cumulative",
+        unavailable_reason="provider_session_lineage_ambiguous",
+        input_tokens=5000,
+        total_tokens=6000,
+    )
+    add_start("INV-diagnostic", "runtime_diagnostic")
+    add_terminal(
+        "INV-diagnostic",
+        "runtime_diagnostic",
+        "partial",
+        unavailable_reason="provider_payload_incomplete",
+        input_tokens=7,
+        total_tokens=9,
+    )
+    add_start("INV-smoke", "development_smoke")
+    add_terminal(
+        "INV-smoke",
+        "development_smoke",
+        "unavailable",
+        terminal_status="timed_out",
+        unavailable_reason="timeout_before_usage",
+    )
+    add_start("INV-acceptance", "acceptance_live_smoke")
+    add_start(
+        "INV-fake",
+        "implementation_worker",
+        coverage_class="not_applicable_adapter",
+        task_id="TASK-FAKE",
+    )
+    add_terminal(
+        "INV-fake",
+        "implementation_worker",
+        "not_applicable",
+    )
+
+    events.extend(
+        [
+            {
+                "event_id": "EVT-START-author-REPLAY",
+                "event_type": "model_invocation_started",
+                "source_event_id": "INV-author",
+                "payload": dict(author_start),
+            },
+            {
+                "event_id": "EVT-USAGE-author-REPLAY",
+                "event_type": "model_invocation_usage_recorded",
+                "source_event_id": "USAGE-INV-author",
+                "payload": dict(author_terminal),
+            },
+        ]
+    )
+    for sequence, event in enumerate(events, start=1):
+        event["sequence"] = sequence
+    return events
 
 
 def _init_agentteam_profile_for_test(repo, work_root, project_key):
@@ -4073,6 +4237,242 @@ class TaskpackTests(unittest.TestCase):
                 "runs/taskpack-7/reports/final_report.md",
                 tracked_completed.stdout.splitlines(),
             )
+
+    def test_model_invocation_usage_aggregation_keeps_exact_partial_and_open_states_separate(self):
+        summary = aggregate_model_invocation_usage(
+            _full_run_model_invocation_events()
+        )
+
+        self.assertEqual(summary["invocation_count"], 7)
+        self.assertEqual(summary["terminal_invocation_count"], 6)
+        self.assertEqual(summary["supported_invocation_count"], 6)
+        self.assertEqual(
+            summary["usage_status_counts"],
+            {
+                "reported": 2,
+                "partial": 2,
+                "unavailable": 1,
+                "not_applicable": 1,
+            },
+        )
+        self.assertEqual(summary["open_invocations"], 1)
+        self.assertEqual(summary["open_supported_invocations"], 1)
+        self.assertEqual(
+            summary["lifecycle_terminal_coverage"],
+            {
+                "covered": 5,
+                "total": 6,
+                "percent": 83.33,
+                "status": "partial",
+            },
+        )
+        self.assertEqual(
+            summary["token_usage_coverage"],
+            {
+                "covered": 2,
+                "total": 6,
+                "percent": 33.33,
+                "status": "partial",
+            },
+        )
+        self.assertEqual(summary["reported_totals_scope"], "reported_subset")
+        self.assertEqual(
+            summary["reported_token_totals"],
+            {
+                "input_tokens": 150,
+                "cached_input_tokens": 20,
+                "output_tokens": 30,
+                "reasoning_tokens": 3,
+                "total_tokens": 180,
+                "contributing_invocation_count": 2,
+            },
+        )
+        self.assertEqual(
+            summary["partial_known_token_lower_bounds"],
+            {
+                "input_tokens": 7,
+                "cached_input_tokens": None,
+                "output_tokens": None,
+                "reasoning_tokens": None,
+                "total_tokens": 9,
+                "contributing_invocation_count": 1,
+            },
+        )
+        self.assertEqual(
+            summary["observed_token_lower_bound"]["total_tokens"],
+            189,
+        )
+        self.assertEqual(
+            summary["stage_breakdown"]["implementation_worker"][
+                "invocation_count"
+            ],
+            3,
+        )
+        self.assertEqual(
+            summary["stage_breakdown"]["runtime_diagnostic"][
+                "invocation_count"
+            ],
+            1,
+        )
+        self.assertEqual(
+            summary["stage_breakdown"]["development_smoke"][
+                "invocation_count"
+            ],
+            1,
+        )
+        self.assertEqual(
+            summary["reason_counts"]["partial"],
+            [
+                {"reason": "provider_payload_incomplete", "count": 1},
+                {
+                    "reason": "provider_session_lineage_ambiguous",
+                    "count": 1,
+                },
+            ],
+        )
+        self.assertEqual(
+            summary["reason_counts"]["unavailable"],
+            [{"reason": "timeout_before_usage", "count": 1}],
+        )
+        self.assertEqual(
+            summary["completion_status"],
+            "blocked_open_invocations",
+        )
+        self.assertFalse(summary["benchmark_ready"])
+
+    def test_legacy_only_report_remains_readable_and_is_not_benchmark_counted(self):
+        from agentteam_runtime.operator_report import (
+            build_run_completion_report,
+            render_run_completion_report,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = _write_completed_operator_run(
+                Path(tmp) / "runs" / "legacy-only"
+            )
+            report = build_run_completion_report(
+                run_dir,
+                project="legacy-project",
+                write_files=False,
+            )
+            markdown = render_run_completion_report(report)
+
+        self.assertIsNone(report["model_invocation_usage"])
+        self.assertEqual(report["token_usage"]["total_tokens"], 1500)
+        self.assertEqual(
+            report["legacy_task_token_usage"],
+            {
+                "accounting_scope": "legacy_task_results",
+                "benchmark_counted": False,
+                "usage": report["token_usage"],
+            },
+        )
+        self.assertIn(
+            "Token usage: total=1500 input=1200 output=300 reported=1/1 "
+            "(legacy task-result aggregate; not benchmark-counted)",
+            markdown,
+        )
+
+    def test_terminal_and_feishu_reports_share_canonical_usage_and_label_legacy_totals(self):
+        from agentteam_runtime.operator_report import (
+            build_run_completion_report,
+            render_run_completion_report,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "runs" / "full-usage"
+            _write_json(
+                run_dir / "state" / "two_phase_scheduler_state.json",
+                {"scheduler_status": "idle", "steps": []},
+            )
+            operator_report = {
+                "task_count": 1,
+                "blocked_count": 0,
+                "task_reports": [],
+                "token_usage": {
+                    "usage_status": "reported",
+                    "reported_attempt_count": 1,
+                    "unreported_attempt_count": 0,
+                    "input_tokens": 900,
+                    "output_tokens": 99,
+                    "total_tokens": 999,
+                },
+            }
+            terminal_event = {
+                "event_id": "EVT-RUN-COMPLETED",
+                "event_type": "run_completed",
+                "sequence": 100,
+                "payload": {
+                    "run_status": "completed",
+                    "scheduler_status": "idle",
+                    "operator_report": operator_report,
+                },
+            }
+            _write_jsonl(
+                run_dir / "events.jsonl",
+                [*_full_run_model_invocation_events(), terminal_event],
+            )
+
+            report = build_run_completion_report(
+                run_dir,
+                project="usage-project",
+                write_files=False,
+            )
+            markdown = render_run_completion_report(report)
+            sent_payloads = []
+
+            def fake_http_post(_url, payload, _timeout_seconds):
+                sent_payloads.append(payload)
+                return {"status_code": 200, "body": {"code": 0}}
+
+            notifier = FeishuWebhookNotifier(
+                webhook_url="https://example.invalid/hook",
+                project="usage-project",
+                http_post=fake_http_post,
+                message_limit=4000,
+            )
+            notification = notifier.notify_event(
+                terminal_event,
+                run_dir=str(run_dir),
+            )
+
+        self.assertEqual(report["task_count"], 1)
+        self.assertEqual(
+            report["model_invocation_usage"]["invocation_count"],
+            7,
+        )
+        self.assertEqual(
+            report["model_invocation_usage"]["reported_token_totals"][
+                "total_tokens"
+            ],
+            180,
+        )
+        self.assertEqual(
+            report["legacy_task_token_usage"]["usage"]["total_tokens"],
+            999,
+        )
+        self.assertFalse(
+            report["legacy_task_token_usage"]["benchmark_counted"]
+        )
+        self.assertEqual(report["run_outcome"], "blocked_open_invocations")
+        self.assertEqual(notification["event_type"], "notification_sent")
+        feishu_text = sent_payloads[0]["content"]["text"]
+        for line in compact_model_invocation_usage_lines(
+            report["model_invocation_usage"]
+        ):
+            self.assertIn(line, markdown)
+            self.assertIn(line, feishu_text)
+        self.assertIn(
+            "Token usage: total=999 input=900 output=99 reported=1/1 "
+            "(legacy task-result aggregate; not benchmark-counted)",
+            markdown,
+        )
+        self.assertIn(
+            "Token usage: total=999 input=900 output=99 reported=1/1 "
+            "(legacy task-result aggregate; not benchmark-counted)",
+            feishu_text,
+        )
+        self.assertNotIn("total=6999", markdown)
 
     def test_concise_report_lines_include_chinese_operator_brief(self):
         lines = concise_report_lines(
