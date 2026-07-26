@@ -1068,12 +1068,14 @@ The operator compares the generated materialization manifest to the tracked
 blueprint before freeze. Markdown section parsing is not part of
 materialization; the JSON blueprint contains the complete executable fields,
 while this document remains the human-readable semantic authority.
-The freeze operation requires the external materialization manifest, rejects
-draft-side provenance downgrade, and independently regenerates all five
-deterministic blueprint artifacts from the currently approval-bound tracked
-blueprint. It requires byte equality with the retained draft, then publishes
-the regenerated snapshot through a staging directory and atomic rename rather
-than rereading the mutable draft. Any drift in `taskpack.yaml`,
+The trusted materialization controller supplies the expected authoring mode to
+freeze. Freeze also requires the external materialization manifest, rejects
+draft-side provenance downgrade or deletion, and independently regenerates all
+five deterministic blueprint artifacts from the currently approval-bound
+tracked blueprint. It requires byte equality with the retained draft, then
+publishes the regenerated snapshot through a staging directory and Linux
+no-replace atomic rename rather than rereading the mutable draft. Any drift in
+`taskpack.yaml`,
 `agent_pool.json`, `backlog.json`, `verification.json`, or `README.md` fails
 before a frozen directory is created, and copy failure leaves no partial
 frozen taskpack.
@@ -2601,8 +2603,9 @@ This taskpack uses risk-proportional evidence:
 
 - P1-00 keeps one L3 contract review artifact because it freezes authority and
   counting semantics.
-- P1-01 through P1-06D return compact structured task results, changed-file
-  lists, and verification additions. They do not write separate prose traces.
+- recovered P1-01 evidence remains attached to its immutable v1 run; v2 tasks
+  P1-02A through P1-06D return compact structured task results, changed-file
+  lists, and verification additions without separate prose traces.
 - P1-LIVE writes one controller-owned structured acceptance artifact outside
   the source tree.
 - P1-06E deterministically renders the milestone's only implementation report,

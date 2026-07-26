@@ -998,6 +998,21 @@ def _add_taskpack_freeze_parser(subcommands):
     parser = subcommands.add_parser("freeze", help="Freeze an accepted taskpack for runtime launch.")
     parser.add_argument("taskpack_dir", help="Draft taskpack directory to freeze.")
     parser.add_argument("--frozen-root", required=True, help="Directory where frozen taskpacks are written.")
+    parser.add_argument(
+        "--expected-authoring-mode",
+        required=True,
+        choices=[
+            "blueprint_materialized",
+            "deterministic_skeleton",
+            "direct_draft",
+            "legacy_direct",
+            "semantic_materialized",
+        ],
+        help=(
+            "Trusted taskpack origin selected by the operator or materializing "
+            "controller; freeze fails if the draft reports a different mode."
+        ),
+    )
     parser.set_defaults(handler=_handle_taskpack_freeze)
 
 
@@ -1694,7 +1709,11 @@ def _handle_taskpack_new(args):
     validation = validate_taskpack(draft["taskpack_dir"])
     frozen = None
     if args.freeze:
-        frozen = freeze_taskpack(draft["taskpack_dir"], frozen_root)
+        frozen = freeze_taskpack(
+            draft["taskpack_dir"],
+            frozen_root,
+            expected_authoring_mode="direct_draft",
+        )
     summary = {
         "new_status": "frozen" if frozen else "draft",
         "taskpack_id": draft["taskpack_id"],
@@ -1787,7 +1806,11 @@ def _write_taskpack_new_text(summary):
 
 
 def _handle_taskpack_freeze(args):
-    return freeze_taskpack(args.taskpack_dir, args.frozen_root)
+    return freeze_taskpack(
+        args.taskpack_dir,
+        args.frozen_root,
+        expected_authoring_mode=args.expected_authoring_mode,
+    )
 
 
 def _handle_taskpack_materialize(args):
@@ -1828,7 +1851,11 @@ def _handle_taskpack_materialize(args):
     validation = validate_taskpack(materialized["taskpack_dir"])
     frozen = None
     if freeze:
-        frozen = freeze_taskpack(materialized["taskpack_dir"], frozen_root)
+        frozen = freeze_taskpack(
+            materialized["taskpack_dir"],
+            frozen_root,
+            expected_authoring_mode="semantic_materialized",
+        )
     summary = {
         "materialize_status": "frozen" if frozen else "draft",
         "taskpack_id": materialized["taskpack_id"],
@@ -1870,7 +1897,11 @@ def _handle_taskpack_blueprint_materialize(
         frozen_dir = (Path(frozen_root).resolve() / manifest["taskpack_id"]).resolve()
         frozen_dir_existed = frozen_dir.exists()
         try:
-            frozen = freeze_taskpack(manifest["taskpack_dir"], frozen_root)
+            frozen = freeze_taskpack(
+                manifest["taskpack_dir"],
+                frozen_root,
+                expected_authoring_mode="blueprint_materialized",
+            )
         except Exception:
             if not frozen_dir_existed and frozen_dir.exists():
                 shutil.rmtree(frozen_dir)
@@ -2887,7 +2918,11 @@ def _handle_submit(args):
             f"{repo_map_handoff_reuse['status']}: {repo_map_handoff_reuse['handoff_path']}",
         )
     validation = validate_taskpack(taskpack_dir)
-    frozen = freeze_taskpack(taskpack_dir, frozen_root)
+    frozen = freeze_taskpack(
+        taskpack_dir,
+        frozen_root,
+        expected_authoring_mode="direct_draft",
+    )
     _progress(progress, f"frozen taskpack created: {frozen['manifest']['taskpack_id']}")
     _progress(progress, f"runtime started: {run_root / frozen['manifest']['taskpack_id']}")
     completed = _run_frozen_taskpack(

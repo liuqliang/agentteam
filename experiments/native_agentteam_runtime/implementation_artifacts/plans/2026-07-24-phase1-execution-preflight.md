@@ -266,10 +266,11 @@ The implementation must:
 - write a bounded `materialization_manifest.json` beside the draft containing
   blueprint digest, generated artifact digests, task IDs, dependency edges,
   and validation status;
-- before freeze, require the external materialization provenance, reject
-  draft-side provenance downgrade, deterministically regenerate the five
-  blueprint artifacts from the currently approved tracked blueprint, reject
-  byte drift, and atomically publish the regenerated staging snapshot;
+- before freeze, require the trusted controller's expected authoring mode and
+  external materialization provenance, reject draft-side provenance downgrade
+  or deletion, deterministically regenerate the five blueprint artifacts from
+  the currently approved tracked blueprint, reject byte drift, and publish the
+  regenerated staging snapshot with no-replace atomic rename;
 - remove partial output on failure.
 
 `dry_run=True` may validate and generate into a controller-owned temporary

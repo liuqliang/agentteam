@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .release_manager import AgentTeamReleaseError, _rename_noreplace
+
 
 TASKPACK_SCHEMA_VERSION = "taskpack.v1"
 TASKPACK_SEMANTIC_CONTRACT_VERSION = "task_semantics.v1"
@@ -37,6 +39,13 @@ TASKPACK_BLUEPRINT_ARTIFACT_NAMES = (
     "verification.json",
     "README.md",
 )
+TASKPACK_AUTHORING_MODES = {
+    "blueprint_materialized",
+    "deterministic_skeleton",
+    "direct_draft",
+    "legacy_direct",
+    "semantic_materialized",
+}
 TASKPACK_BLUEPRINT_CONTROL_AGENT_IDS = {"agent-scheduler", "agent-integrator"}
 TASKPACK_BLUEPRINT_CONTROL_ROLES = {"scheduler", "integrator"}
 OPTIMIZATION_CODE_WORK_TYPES = {"code_implementation", "code_investigation"}
@@ -295,6 +304,7 @@ def draft_taskpack_files(
         "taskpack_schema_version": TASKPACK_SCHEMA_VERSION,
         "taskpack_id": taskpack_id,
         "status": "draft",
+        "authoring_mode": "direct_draft",
         "semantic_contract_version": TASKPACK_SEMANTIC_CONTRACT_VERSION,
         "project_root": str(project_root),
         "goal": goal,
@@ -2581,7 +2591,12 @@ def _write_scope_is_document_path(scope):
     return Path(lowered).suffix in {".md", ".rst", ".txt", ".adoc"}
 
 
-def freeze_taskpack(taskpack_dir, frozen_root):
+def freeze_taskpack(
+    taskpack_dir,
+    frozen_root,
+    *,
+    expected_authoring_mode,
+):
     taskpack_dir = Path(taskpack_dir).resolve()
     validation = validate_taskpack(taskpack_dir)
     loaded = load_taskpack(taskpack_dir)
@@ -2600,6 +2615,7 @@ def freeze_taskpack(taskpack_dir, frozen_root):
             taskpack_dir,
             loaded,
             Path(verification_root),
+            expected_authoring_mode=expected_authoring_mode,
         )
         inventory = _build_taskpack_artifact_inventory(source_taskpack_dir)
         _validate_taskpack_artifact_inventory(source_taskpack_dir, inventory)
@@ -2642,23 +2658,47 @@ def freeze_taskpack(taskpack_dir, frozen_root):
                 "validation": validation,
             }
             _write_json(staged_frozen_dir / "manifest.json", manifest)
-            staged_frozen_dir.rename(frozen_dir)
+            try:
+                _rename_noreplace(staged_frozen_dir, frozen_dir)
+            except AgentTeamReleaseError as exc:
+                raise TaskpackValidationError(
+                    f"frozen taskpack publication failed: {exc}"
+                ) from exc
         finally:
             if staging_root.exists():
                 shutil.rmtree(staging_root)
     return {"frozen_taskpack_dir": str(frozen_dir), "manifest": manifest}
 
 
-def _blueprint_taskpack_freeze_source(taskpack_dir, loaded, verification_root):
+def _blueprint_taskpack_freeze_source(
+    taskpack_dir,
+    loaded,
+    verification_root,
+    *,
+    expected_authoring_mode,
+):
     taskpack = loaded.get("taskpack") if isinstance(loaded, dict) else None
     taskpack = taskpack if isinstance(taskpack, dict) else {}
+    if expected_authoring_mode not in TASKPACK_AUTHORING_MODES:
+        raise TaskpackValidationError(
+            "expected_authoring_mode must identify the trusted freeze route"
+        )
+    actual_authoring_mode = taskpack.get("authoring_mode")
+    if actual_authoring_mode is None:
+        actual_authoring_mode = "legacy_direct"
+    if actual_authoring_mode != expected_authoring_mode:
+        raise TaskpackValidationError(
+            "taskpack authoring provenance changed before freeze: "
+            f"expected {expected_authoring_mode}, found "
+            f"{actual_authoring_mode}"
+        )
     taskpack_id = taskpack.get("taskpack_id")
     manifest_path = (
         taskpack_dir.parent
         / f"{taskpack_dir.name}.materialization_manifest.json"
     )
     manifest_exists = manifest_path.is_file()
-    is_blueprint = taskpack.get("authoring_mode") == "blueprint_materialized"
+    is_blueprint = expected_authoring_mode == "blueprint_materialized"
     if not manifest_exists and not is_blueprint:
         return taskpack_dir
     if not manifest_exists:

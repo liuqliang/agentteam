@@ -23,7 +23,7 @@ from agentteam_runtime import (
     draft_deterministic_taskpack_skeleton,
     draft_taskpack_files,
     draft_taskpack_from_goal,
-    freeze_taskpack,
+    freeze_taskpack as _freeze_taskpack_impl,
     load_taskpack,
     validate_taskpack,
 )
@@ -81,6 +81,24 @@ from agentteam_runtime.taskpack_author import _canonicalize_codex_taskpack_files
 from agentteam_runtime.taskpack_author import _author_prompt
 from agentteam_runtime.taskpack_author import _run_codex_author_command
 from agentteam_runtime.taskpack_author import _write_author_template_bundle
+
+
+def freeze_taskpack(
+    taskpack_dir,
+    frozen_root,
+    *,
+    expected_authoring_mode=None,
+):
+    if expected_authoring_mode is None:
+        taskpack = load_taskpack(taskpack_dir)["taskpack"]
+        expected_authoring_mode = (
+            taskpack.get("authoring_mode") or "legacy_direct"
+        )
+    return _freeze_taskpack_impl(
+        taskpack_dir,
+        frozen_root,
+        expected_authoring_mode=expected_authoring_mode,
+    )
 
 
 def _init_repo(path):
@@ -1102,7 +1120,16 @@ class TaskpackTests(unittest.TestCase):
             _init_repo(repo)
             blueprint_path, _blueprint = _blueprint_fixture(repo)
 
-            def fail_after_partial_freeze(_taskpack_dir, target_root):
+            def fail_after_partial_freeze(
+                _taskpack_dir,
+                target_root,
+                *,
+                expected_authoring_mode,
+            ):
+                self.assertEqual(
+                    expected_authoring_mode,
+                    "blueprint_materialized",
+                )
                 partial = Path(target_root) / "example-blueprint"
                 partial.mkdir(parents=True)
                 (partial / "taskpack.yaml").write_text("partial", encoding="utf-8")
@@ -1224,11 +1251,49 @@ class TaskpackTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 TaskpackValidationError,
-                "blueprint materialization provenance changed before freeze",
+                "taskpack authoring provenance changed before freeze",
             ):
                 freeze_taskpack(
                     materialized["taskpack_dir"],
                     tmp_path / "frozen",
+                    expected_authoring_mode="blueprint_materialized",
+                )
+
+            self.assertFalse(
+                (tmp_path / "frozen" / "example-blueprint").exists()
+            )
+
+    def test_blueprint_freeze_rejects_double_provenance_deletion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, _blueprint = _blueprint_fixture(repo)
+            materialized = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "drafts",
+            )
+            taskpack_path = (
+                Path(materialized["taskpack_dir"]) / "taskpack.yaml"
+            )
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack.pop("authoring_mode")
+            taskpack.pop("context")
+            _write_json(taskpack_path, taskpack)
+            Path(materialized["manifest_path"]).unlink()
+
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                (
+                    "taskpack authoring provenance changed before freeze: "
+                    "expected blueprint_materialized, found legacy_direct"
+                ),
+            ):
+                freeze_taskpack(
+                    materialized["taskpack_dir"],
+                    tmp_path / "frozen",
+                    expected_authoring_mode="blueprint_materialized",
                 )
 
             self.assertFalse(
@@ -1324,6 +1389,92 @@ class TaskpackTests(unittest.TestCase):
             )
             self.assertEqual(
                 list(frozen_root.glob(".transactional-freeze.freezing-*")),
+                [],
+            )
+
+    def test_blueprint_freeze_copy_failure_leaves_no_partial_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, _blueprint = _blueprint_fixture(repo)
+            materialized = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "drafts",
+            )
+            frozen_root = tmp_path / "frozen"
+            original_copy = shutil.copy2
+            copy_count = 0
+
+            def fail_second_copy(*args, **kwargs):
+                nonlocal copy_count
+                copy_count += 1
+                if copy_count == 2:
+                    raise OSError("injected blueprint copy failure")
+                return original_copy(*args, **kwargs)
+
+            with mock.patch.object(
+                taskpack_module.shutil,
+                "copy2",
+                side_effect=fail_second_copy,
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "injected blueprint copy failure",
+                ):
+                    freeze_taskpack(
+                        materialized["taskpack_dir"],
+                        frozen_root,
+                        expected_authoring_mode="blueprint_materialized",
+                    )
+
+            self.assertFalse(
+                (frozen_root / "example-blueprint").exists()
+            )
+            self.assertEqual(
+                list(frozen_root.glob(".example-blueprint.freezing-*")),
+                [],
+            )
+
+    def test_freeze_taskpack_publish_race_does_not_replace_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            draft = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement a bounded change.",
+                draft_root=tmp_path / "drafts",
+                taskpack_id="publish-race",
+                write_scope=["src/"],
+            )
+            frozen_root = tmp_path / "frozen"
+            original_rename = taskpack_module._rename_noreplace
+
+            def create_competing_target(source, target):
+                Path(target).mkdir()
+                return original_rename(source, target)
+
+            with mock.patch.object(
+                taskpack_module,
+                "_rename_noreplace",
+                side_effect=create_competing_target,
+            ):
+                with self.assertRaisesRegex(
+                    TaskpackValidationError,
+                    "frozen taskpack publication failed",
+                ):
+                    freeze_taskpack(
+                        draft["taskpack_dir"],
+                        frozen_root,
+                    )
+
+            competing_target = frozen_root / "publish-race"
+            self.assertTrue(competing_target.is_dir())
+            self.assertEqual(list(competing_target.iterdir()), [])
+            self.assertEqual(
+                list(frozen_root.glob(".publish-race.freezing-*")),
                 [],
             )
 
@@ -13588,6 +13739,8 @@ class TaskpackTests(unittest.TestCase):
                     str(drafts / "cli-freeze"),
                     "--frozen-root",
                     str(frozen_root),
+                    "--expected-authoring-mode",
+                    "direct_draft",
                 ],
                 env=_test_env(),
                 stdout=subprocess.PIPE,

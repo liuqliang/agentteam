@@ -1120,13 +1120,21 @@ agentteam taskpack validate /path/to/taskpack
 
 ### `agentteam taskpack freeze`
 
-Freezes an accepted draft taskpack into a frozen taskpack directory.
+Freezes an accepted draft taskpack into a frozen taskpack directory. The
+operator must state the trusted authoring route; freeze rejects a draft whose
+reported provenance differs.
 
 Example:
 
 ```bash
-agentteam taskpack freeze /path/to/draft --frozen-root ~/.local/share/agentteam/project/frozen
+agentteam taskpack freeze /path/to/draft \
+  --frozen-root ~/.local/share/agentteam/project/frozen \
+  --expected-authoring-mode direct_draft
 ```
+
+Valid modes are `direct_draft`, `deterministic_skeleton`,
+`semantic_materialized`, `blueprint_materialized`, and `legacy_direct`.
+Blueprint materialization with `--freeze` supplies its mode automatically.
 
 ### `agentteam taskpack materialize`
 
