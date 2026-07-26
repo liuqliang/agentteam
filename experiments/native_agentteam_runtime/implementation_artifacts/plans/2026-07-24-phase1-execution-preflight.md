@@ -973,7 +973,11 @@ must exactly match the loaded release and its new binding.
     attempts to reuse the same directory as a version namespace; paths under
     different work roots fail before runtime import;
 16. a release-bound frozen taskpack protects its release from project and
-    global garbage collection before run creation.
+    global garbage collection before run creation;
+17. retained flat and versioned runs with the same taskpack ID use distinct
+    integration and attempt Git refs without renaming either retained run;
+18. a Git-installed release manifest records only final release-root launcher,
+    runtime, and release paths and remains selectable after activation.
 
 ### Acceptance
 

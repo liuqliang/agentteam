@@ -818,9 +818,9 @@ workers.
 
 The current execution approval record is:
 
-`experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase1-model-invocation-usage-contract-review.v3.json`
+`experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase1-model-invocation-usage-contract-review.v4.json`
 
-The immutable v1 and v2 records remain retained as evidence. The v1 frozen
+The immutable v1, v2, and v3 records remain retained as evidence. The v1 frozen
 package and stopped run exposed a pre-Phase-1 runtime defect:
 integration verification correctly selected the candidate worktree through
 `PYTHONPATH` but inherited the outer release launcher's
@@ -844,6 +844,13 @@ preserving earlier artifacts requires bounded `frozen/v2/<taskpack>` and
 `runs/v2/<taskpack>` namespaces. The v3 review binds the launcher correction
 that resolves the enclosing `frozen` and `runs` namespace, requires both paths
 to share one work root, and retains v1 and v2 evidence without moving it.
+
+The v3 approval also produced a valid frozen package and run identity, but
+stopped before provider launch because integration and attempt Git refs still
+used only the taskpack ID and collided with the retained v1 run. The v4 review
+binds namespace-qualified refs for versioned runs without renaming legacy refs.
+It also binds final-root paths in Git-installed release manifests after the v2
+release restoration exposed staging-root paths.
 
 It conforms to:
 
@@ -1015,7 +1022,11 @@ G5 passes only when:
   launch rejects flat/versioned or cross-version mismatches, while an
   identity-marked flat run ID such as `v2` remains a direct run and prevents
   the same path from also becoming a version namespace;
+- integration and attempt Git refs include the version namespace for
+  versioned runs, while existing flat-run refs remain unchanged;
 - manifest or source-commit mismatch fails before any worker/provider action;
+- Git-installed release manifests bind launcher, runtime, and release paths to
+  the final immutable release root rather than a staging directory;
 - release garbage collection protects every valid bound run release and every
   release-bound frozen taskpack release before run creation;
 - changing the active release affects future runs only;

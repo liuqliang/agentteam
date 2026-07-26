@@ -7185,6 +7185,50 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue((baseline_worktree / "generated" / "previous_round.json").exists())
             self.assertEqual(_git_rev_parse(repo, "HEAD"), source_head)
 
+    def test_versioned_run_uses_distinct_integration_and_attempt_refs(self):
+        from agentteam_runtime.m0_runtime import _worktree_branch_name
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            runs_root = tmp_path / "runs"
+            flat_run = runs_root / "same-taskpack"
+            versioned_run = runs_root / "v3" / "same-taskpack"
+            _init_git_repo(repo)
+
+            flat = ensure_integration_baseline_worktree(repo, flat_run)
+            versioned = ensure_integration_baseline_worktree(
+                repo,
+                versioned_run,
+            )
+
+            self.assertEqual(
+                flat["integration_baseline_branch"],
+                "agentteam/run/same-taskpack/integration",
+            )
+            self.assertEqual(
+                versioned["integration_baseline_branch"],
+                "agentteam/run/v3-same-taskpack/integration",
+            )
+            self.assertNotEqual(
+                flat["integration_baseline_worktree_path"],
+                versioned["integration_baseline_worktree_path"],
+            )
+            self.assertEqual(
+                _worktree_branch_name(
+                    flat_run / "steps" / "STEP-0001",
+                    "TASK-001-ATTEMPT-001",
+                ),
+                "agentteam/same-taskpack/TASK-001-ATTEMPT-001",
+            )
+            self.assertEqual(
+                _worktree_branch_name(
+                    versioned_run / "steps" / "STEP-0001",
+                    "TASK-001-ATTEMPT-001",
+                ),
+                "agentteam/v3-same-taskpack/TASK-001-ATTEMPT-001",
+            )
+
     def test_two_phase_failed_integration_verification_does_not_advance_baseline(self):
         class RecordingNotificationSink:
             def __init__(self):

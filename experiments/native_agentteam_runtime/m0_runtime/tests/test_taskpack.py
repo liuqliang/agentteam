@@ -10212,10 +10212,22 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(release["source_ref"], "HEAD")
             self.assertEqual(release["source_commit"], source_commit)
             self.assertEqual(release_root.parent.parent, global_store.resolve())
+            self.assertEqual(
+                Path(release["launcher_path"]),
+                release_root / "agentteam",
+            )
+            self.assertEqual(
+                Path(release["runtime_root"]),
+                release_root
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "m0_runtime",
+            )
             self.assertEqual(summary["active_release"]["release_id"], release_id)
             self.assertEqual(Path(summary["active_release"]["release_root"]), release_root)
             self.assertTrue((release_root / "manifest.json").exists())
             self.assertTrue((release_root / "agentteam").exists())
+            self.assertTrue(Path(release["runtime_root"]).is_dir())
             self.assertTrue(
                 (
                     release_root

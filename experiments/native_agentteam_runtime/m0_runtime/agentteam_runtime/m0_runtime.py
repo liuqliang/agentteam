@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -3601,20 +3602,31 @@ def _create_git_worktree(project_root, output_dir, attempt_id, worktree_id, base
 def _worktree_branch_name(output_dir, attempt_id):
     output_dir = Path(output_dir)
     if output_dir.parent.name == "steps" and output_dir.parent.parent.name:
-        run_component = output_dir.parent.parent.name
+        run_dir = output_dir.parent.parent
     else:
-        run_component = output_dir.name
+        run_dir = output_dir
     return "agentteam/{run}/{attempt}".format(
-        run=_safe_git_ref_component(run_component),
+        run=_run_git_ref_component(run_dir),
         attempt=_safe_git_ref_component(attempt_id),
     )
 
 
 def _integration_baseline_branch_name(output_dir):
-    output_dir = Path(output_dir)
     return "agentteam/run/{run}/integration".format(
-        run=_safe_git_ref_component(output_dir.name),
+        run=_run_git_ref_component(Path(output_dir)),
     )
+
+
+def _run_git_ref_component(run_dir):
+    run_dir = Path(run_dir)
+    if (
+        re.fullmatch(r"v[1-9][0-9]*", run_dir.parent.name)
+        and run_dir.parent.parent.name == "runs"
+    ):
+        return _safe_git_ref_component(
+            f"{run_dir.parent.name}-{run_dir.name}"
+        )
+    return _safe_git_ref_component(run_dir.name)
 
 
 def _safe_git_ref_component(value):

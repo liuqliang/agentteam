@@ -153,7 +153,7 @@ def _install_resolved_git_release(
             _validate_release_root(temp_release_root)
             manifest = _git_release_manifest(
                 release_id,
-                temp_release_root,
+                release_root,
                 source_key,
                 source_repo_identity,
                 source_ref,
@@ -161,8 +161,6 @@ def _install_resolved_git_release(
             )
             _write_json(temp_release_root / "manifest.json", manifest)
             temp_release_root.rename(release_root)
-            manifest = {**manifest, "release_root": str(release_root)}
-            _write_json(release_root / "manifest.json", manifest)
         except Exception:
             if temp_release_root.exists():
                 shutil.rmtree(temp_release_root)
