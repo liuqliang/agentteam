@@ -10,6 +10,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from agentteam_runtime import (
     CodexRuntimeAdapter,
@@ -10893,20 +10894,29 @@ class M0RuntimeTests(unittest.TestCase):
             package_root.mkdir(parents=True)
             (package_root / "__init__.py").write_text("VALUE = 7\n", encoding="utf-8")
 
-            result = run_integration_verification(
-                [
-                    "python3",
-                    "-c",
-                    (
-                        "import agentteam_runtime, os, sys; "
-                        "expected = sys.argv[1]; "
-                        "assert os.environ.get('PYTHONPATH', '').split(os.pathsep)[0] == expected; "
-                        "assert agentteam_runtime.VALUE == 7"
-                    ),
-                    str(runtime_root),
-                ],
-                worktree,
-            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "AGENTTEAM_LAUNCHER_SELECTION": (
+                        '{"selection_version":"launcher_runtime_selection.v1"}'
+                    )
+                },
+            ):
+                result = run_integration_verification(
+                    [
+                        "python3",
+                        "-c",
+                        (
+                            "import agentteam_runtime, os, sys; "
+                            "expected = sys.argv[1]; "
+                            "assert os.environ.get('PYTHONPATH', '').split(os.pathsep)[0] == expected; "
+                            "assert 'AGENTTEAM_LAUNCHER_SELECTION' not in os.environ; "
+                            "assert agentteam_runtime.VALUE == 7"
+                        ),
+                        str(runtime_root),
+                    ],
+                    worktree,
+                )
 
             self.assertEqual(result["integration_verification_status"], "passed")
             self.assertEqual(result["integration_verification_exit_code"], 0)

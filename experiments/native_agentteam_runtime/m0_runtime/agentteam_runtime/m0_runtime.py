@@ -3312,6 +3312,9 @@ def run_integration_verification_additions(additions, integration_worktree_path)
 
 def _integration_verification_env(integration_worktree_path):
     env = os.environ.copy()
+    # Verification intentionally executes candidate code, not the outer
+    # launcher's immutable runtime release.
+    env.pop("AGENTTEAM_LAUNCHER_SELECTION", None)
     native_runtime_path = _native_runtime_pythonpath(integration_worktree_path)
     if native_runtime_path:
         existing = env.get("PYTHONPATH")
