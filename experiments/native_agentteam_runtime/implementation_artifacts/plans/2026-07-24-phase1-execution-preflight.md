@@ -907,7 +907,7 @@ the selected run before importing `agentteam_runtime`, honoring explicit
 binding and release manifest, and imports from the bound runtime root. A
 concurrent `agentteam update` may change future runs but cannot change this
 selection. Release garbage collection treats a valid binding as a protection
-reference. It also treats an approval-bound frozen taskpack as a protection
+reference. It also treats a release-bound frozen taskpack as a protection
 reference before the first run identity can be created.
 
 For an initial `agentteam run`, which currently has no `--project-root`, the
@@ -966,8 +966,10 @@ must exactly match the loaded release and its new binding.
 14. an explicitly selected older implementation run remains available when its
     identity and release binding validate;
 15. `frozen/vN/<taskpack>` and `runs/vN/<taskpack>` resolve to the same work
-    root, while paths under different work roots fail before runtime import;
-16. an approval-bound frozen taskpack protects its release from project and
+    root; explicit-taskpack, explicit-run, and implicit-latest continuation
+    recover the matching frozen namespace; paths under different work roots
+    fail before runtime import;
+16. a release-bound frozen taskpack protects its release from project and
     global garbage collection before run creation.
 
 ### Acceptance
@@ -1022,8 +1024,9 @@ non-freezable mode. Do not retain it as the execution draft or freeze Phase 1
 until its P1-00 approval record is digest-valid.
 
 Before declaring preflight complete, inspect the active release pointer and
-manifest mechanically. Its `source_commit` must equal the reviewed PRE-04
-integration commit. Invoke that release's CLI directly and require its
+manifest mechanically. The reviewed PRE-04 integration commit must be an
+ancestor of the release `source_commit`, and that release commit must be an
+ancestor of the materialization source. Invoke that release's CLI directly and require its
 `taskpack materialize --help` to expose blueprint/dry-run options and its gate
 command family to expose register/status. Run a no-provider binding probe that
 changes the active pointer after run initialization and proves continuation

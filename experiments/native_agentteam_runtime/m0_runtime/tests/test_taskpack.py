@@ -18816,6 +18816,13 @@ class TaskpackTests(unittest.TestCase):
                 _git_head(repo),
                 runtime_source=Path(__file__).resolve().parents[1],
             )
+            older = publish_implementation_run(
+                work_root,
+                project_key="pre04-versioned",
+                run_id="older-run",
+                taskpack_id="run-1",
+                release_identity=release,
+            )
             write_project_profile(
                 repo,
                 build_project_profile(
@@ -18902,9 +18909,96 @@ class TaskpackTests(unittest.TestCase):
                 expected_project_key="pre04-versioned",
             )
             self.assertEqual(
+                validate_run_binding(
+                    older["run_dir"],
+                    expected_project_key="pre04-versioned",
+                )["identity"]["creation_sequence"],
+                1,
+            )
+            self.assertEqual(latest["identity"]["creation_sequence"], 2)
+            self.assertEqual(
                 latest["run_dir"],
                 str(run_root / "run-1"),
             )
+            explicit_selection = launcher["_existing_run_selection"](
+                [
+                    "continue",
+                    "--project-root",
+                    str(repo),
+                    "--run-dir",
+                    str(run_root / "run-1"),
+                ],
+                "continue",
+            )
+            taskpack_selection = launcher["_existing_run_selection"](
+                [
+                    "continue",
+                    "--project-root",
+                    str(repo),
+                    "--taskpack",
+                    "run-1",
+                ],
+                "continue",
+            )
+            latest_selection = launcher["_existing_run_selection"](
+                [
+                    "continue",
+                    "--project-root",
+                    str(repo),
+                ],
+                "continue",
+            )
+            for resume_selection in (
+                explicit_selection,
+                taskpack_selection,
+                latest_selection,
+            ):
+                self.assertEqual(
+                    resume_selection["run_dir"],
+                    str(run_root / "run-1"),
+                )
+                self.assertEqual(
+                    resume_selection["frozen_taskpack_dir"],
+                    str(frozen),
+                )
+
+            for resume_args in (
+                [
+                    "--run-dir",
+                    str(run_root / "run-1"),
+                ],
+                [
+                    "--taskpack",
+                    "run-1",
+                ],
+                [],
+            ):
+                continued = subprocess.run(
+                    [
+                        str(Path(__file__).resolve().parents[4] / "agentteam"),
+                        "continue",
+                        "--project-root",
+                        str(repo),
+                        *resume_args,
+                        "--one-shot",
+                        "--json",
+                    ],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(continued.returncode, 0, continued.stderr)
+                continue_result = json.loads(continued.stdout)
+                self.assertEqual(
+                    continue_result["paths"]["run_dir"],
+                    str(run_root / "run-1"),
+                )
+                self.assertEqual(
+                    continue_result["paths"]["frozen_taskpack_dir"],
+                    str(frozen),
+                )
             with self.assertRaises(launcher["LauncherError"]):
                 launcher["_initial_run_selection"](
                     [

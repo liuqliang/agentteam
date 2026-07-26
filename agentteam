@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 SELECTION_ENV = "AGENTTEAM_LAUNCHER_SELECTION"
+RUN_NAMESPACE_PATTERN = re.compile(r"^v[1-9][0-9]*$")
 RESUMING_COMMANDS = {
     "continue",
     "resume",
@@ -147,6 +148,7 @@ def _initial_run_selection(argv):
         "work_root": str(work_root),
         "project_key": project_key,
         "run_dir": str(run_dir),
+        "frozen_taskpack_dir": str(frozen),
         "identity_sha256": None,
         "release": release,
         "expected_release": expected,
@@ -178,11 +180,22 @@ def _existing_run_selection(argv, command):
     if not project:
         return None
     work_root = project["work_root"]
+    pair = None
     if explicit_run:
         run_dir = Path(explicit_run).expanduser().resolve()
         mode = "explicit_run_dir"
     elif explicit_taskpack:
-        run_dir = (work_root / "runs" / explicit_taskpack).resolve()
+        try:
+            pair = _latest_bound_run(
+                work_root,
+                project["project_key"],
+                taskpack_id=explicit_taskpack,
+            )
+        except LauncherError:
+            if command not in RESUMING_COMMANDS:
+                return None
+            raise
+        run_dir = Path(pair["run_dir"])
         mode = "explicit_taskpack"
     else:
         run_root = work_root / "runs"
@@ -194,7 +207,8 @@ def _existing_run_selection(argv, command):
         run_dir = Path(pair["run_dir"])
         mode = "implicit_latest"
     try:
-        pair = _validate_run_pair(run_dir, project["project_key"])
+        if pair is None:
+            pair = _validate_run_pair(run_dir, project["project_key"])
     except LauncherError:
         if command not in RESUMING_COMMANDS and (explicit_run or explicit_taskpack):
             return None  # explicit legacy runs remain readable, never implicitly adopted
@@ -205,21 +219,20 @@ def _existing_run_selection(argv, command):
         "work_root": str(work_root),
         "project_key": project["project_key"],
         "run_dir": pair["run_dir"],
+        "frozen_taskpack_dir": _frozen_taskpack_dir_for_pair(work_root, pair),
         "identity_sha256": pair["identity_sha256"],
         "release": pair["release"],
         "expected_release": pair["binding"].get("expected_release") or {},
     }
 
 
-def _latest_bound_run(work_root, project_key):
+def _latest_bound_run(work_root, project_key, taskpack_id=None):
     run_root = Path(work_root) / "runs"
     if not run_root.is_dir():
         raise LauncherError("no AgentTeam runs found")
     implementations = []
     sequences = {}
-    for child in sorted(run_root.iterdir(), key=lambda path: path.name):
-        if child.is_symlink() or not child.is_dir():
-            raise LauncherError(f"unsafe run child blocks implicit selection: {child.name}")
+    for child in _iter_run_identity_directories(run_root):
         state_dir = child / "state"
         if state_dir.is_symlink():
             raise LauncherError(f"symlink run state blocks implicit selection: {child.name}")
@@ -234,6 +247,8 @@ def _latest_bound_run(work_root, project_key):
             if (child / "state" / "runtime_release_binding.v1.json").exists():
                 raise LauncherError("acceptance evidence run must not have a release binding")
             continue
+        if taskpack_id is not None and identity["taskpack_id"] != taskpack_id:
+            continue
         pair = _validate_run_pair(child, project_key)
         sequence = identity["creation_sequence"]
         if sequence in sequences:
@@ -241,8 +256,50 @@ def _latest_bound_run(work_root, project_key):
         sequences[sequence] = child.name
         implementations.append(pair)
     if not implementations:
-        raise LauncherError("no bound implementation runs found")
+        detail = f" for taskpack {taskpack_id}" if taskpack_id else ""
+        raise LauncherError(f"no bound implementation runs found{detail}")
     return max(implementations, key=lambda item: item["identity"]["creation_sequence"])
+
+
+def _iter_run_identity_directories(run_root):
+    for child in sorted(Path(run_root).iterdir(), key=lambda path: path.name):
+        if child.is_symlink() or not child.is_dir():
+            raise LauncherError(
+                f"unsafe run child blocks implicit selection: {child.name}"
+            )
+        if not RUN_NAMESPACE_PATTERN.fullmatch(child.name):
+            yield child
+            continue
+        for nested in sorted(child.iterdir(), key=lambda path: path.name):
+            if nested.is_symlink() or not nested.is_dir():
+                raise LauncherError(
+                    "unsafe versioned run child blocks implicit selection: "
+                    f"{child.name}/{nested.name}"
+                )
+            yield nested
+
+
+def _frozen_taskpack_dir_for_pair(work_root, pair):
+    work_root = Path(work_root).resolve()
+    run_dir = Path(pair["run_dir"]).resolve()
+    try:
+        relative = run_dir.relative_to(work_root / "runs")
+    except ValueError as exc:
+        raise LauncherError("selected run is outside the project run namespace") from exc
+    if len(relative.parts) == 1:
+        namespace = ()
+    elif len(relative.parts) == 2 and RUN_NAMESPACE_PATTERN.fullmatch(
+        relative.parts[0]
+    ):
+        namespace = (relative.parts[0],)
+    else:
+        raise LauncherError("selected run has an unsupported namespace")
+    return str(
+        work_root
+        / "frozen"
+        / Path(*namespace)
+        / pair["identity"]["taskpack_id"]
+    )
 
 
 def _validate_run_pair(run_dir, project_key):

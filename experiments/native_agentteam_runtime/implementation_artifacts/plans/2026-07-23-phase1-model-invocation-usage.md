@@ -1010,10 +1010,11 @@ G5 passes only when:
   for `continue`;
 - bounded version subdirectories below the same `frozen` and `runs`
   namespaces resolve to one work root without moving immutable earlier
-  taskpack or run evidence;
+  taskpack or run evidence, and explicit-taskpack, explicit-run, and implicit
+  latest continuation all recover the matching frozen namespace;
 - manifest or source-commit mismatch fails before any worker/provider action;
 - release garbage collection protects every valid bound run release and every
-  approval-bound frozen taskpack release before run creation;
+  release-bound frozen taskpack release before run creation;
 - changing the active release affects future runs only;
 - the reviewed launcher is installed into the actual machine command path and
   its digest plus bound-continuation behavior are verified there.

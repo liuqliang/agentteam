@@ -6,6 +6,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import select
 import shutil
 import signal
@@ -3084,11 +3085,38 @@ def _handle_continue(args):
     profile = load_project_profile(project_root)
     work_root = Path(profile["work_root"]).resolve()
     taskpack_id = _continue_taskpack_id(args, profile)
-    frozen_dir = (work_root / "frozen" / taskpack_id).resolve()
-    run_dir = Path(args.run_dir).resolve() if args.run_dir else (work_root / "runs" / taskpack_id).resolve()
+    selection = _launcher_runtime_selection()
+    selected_run_dir = selection.get("run_dir") if selection else None
+    if args.run_dir:
+        run_dir = Path(args.run_dir).resolve()
+    elif selected_run_dir:
+        run_dir = Path(selected_run_dir).resolve()
+    else:
+        run_dir = (work_root / "runs" / taskpack_id).resolve()
+    run_dir = _canonical_run_dir(run_dir)
+    frozen_dir = _frozen_taskpack_dir_for_run(
+        work_root,
+        run_dir,
+        taskpack_id,
+    )
+    selected_frozen_dir = (
+        selection.get("frozen_taskpack_dir")
+        if selection
+        else None
+    )
+    if (
+        selected_frozen_dir
+        and Path(selected_frozen_dir).resolve() != frozen_dir
+    ):
+        raise AgentTeamCliError(
+            "launcher-selected frozen taskpack does not match run namespace",
+            selected_frozen_taskpack_dir=str(
+                Path(selected_frozen_dir).resolve()
+            ),
+            inferred_frozen_taskpack_dir=str(frozen_dir),
+        )
     run_root = run_dir.parent.resolve()
     _require_existing_frozen_and_run(taskpack_id, frozen_dir, run_dir)
-    selection = _launcher_runtime_selection()
     if selection and selection.get("selection_mode") == "implicit_latest":
         state = _read_json_if_exists(run_dir / "state" / "two_phase_scheduler_state.json")
         if not state:
@@ -3175,6 +3203,38 @@ def _handle_continue(args):
         return result
     _write_execution_result_text(result)
     return 0
+
+
+def _frozen_taskpack_dir_for_run(work_root, run_dir, taskpack_id):
+    work_root = Path(work_root).resolve()
+    run_dir = Path(run_dir).resolve()
+    run_namespace_root = work_root / "runs"
+    try:
+        relative = run_dir.relative_to(run_namespace_root)
+    except ValueError as exc:
+        raise AgentTeamCliError(
+            "run directory is outside the project run namespace",
+            run_dir=str(run_dir),
+            run_namespace_root=str(run_namespace_root),
+        ) from exc
+    if len(relative.parts) == 1:
+        namespace = ()
+    elif len(relative.parts) == 2 and re.fullmatch(
+        r"v[1-9][0-9]*",
+        relative.parts[0],
+    ):
+        namespace = (relative.parts[0],)
+    else:
+        raise AgentTeamCliError(
+            "run directory has an unsupported namespace",
+            run_dir=str(run_dir),
+        )
+    return (
+        work_root
+        / "frozen"
+        / Path(*namespace)
+        / taskpack_id
+    ).resolve()
 
 
 def _continue_taskpack_id(args, profile):
