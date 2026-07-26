@@ -45,7 +45,7 @@
     },
     "profile_candidate_root_policy": "explicit_distinct_roots_same_git_common_directory",
     "runtime_release_policy": "immutable_prelaunch_run_binding",
-    "blueprint_freeze_integrity_policy": "deterministic_five_artifact_rematerialization_and_byte_comparison",
+    "blueprint_freeze_integrity_policy": "external_materialization_provenance_deterministic_five_artifact_regeneration_and_atomic_staging_publish",
     "preflight_release_ancestry_policy": "pre04_ancestor_of_release_source_ancestor_of_materialization_source",
     "candidate_integration_verification_environment": "candidate_runtime_pythonpath_first_and_outer_launcher_selection_removed",
     "latest_implementation_run_policy": "launcher_selected_max_unique_creation_sequence",

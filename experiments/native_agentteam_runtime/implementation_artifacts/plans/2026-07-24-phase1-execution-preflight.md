@@ -2,24 +2,24 @@
 
 Status: implemented and verified; retained as Phase 1 prerequisite authority.
 
-This plan removes five known blockers before the executable package described
+This plan removed five known blockers before the executable package described
 by
 [`2026-07-23-phase1-model-invocation-usage.md`](2026-07-23-phase1-model-invocation-usage.md)
 is retained, frozen, or executed:
 
-1. integration verification failure can currently leave a task marked `done`
-   and allow invalid downstream dispatch;
-2. semantic taskpack materialization currently retains only the first backlog
-   item and cannot faithfully construct the Phase 1 dependency graph;
-3. `agentteam integrate` can currently merge an idle integration baseline
-   without enforcing required gates that run after the backlog, while existing
-   completion/report surfaces can still call that intermediate state complete;
-4. a run records its active runtime release only after execution and the
-   launcher resolves the current active release on every command, so
-   `continue` can silently switch a reviewed run to different code.
-5. crash-safe invocation recovery needs Linux pidfd plus a persistent,
-   queryable systemd user transient-service control group; the current runtime
-   has no deterministic no-provider host capability probe.
+1. integration verification failure could leave a task marked `done` and allow
+   invalid downstream dispatch;
+2. semantic taskpack materialization retained only the first backlog item and
+   could not faithfully construct the Phase 1 dependency graph;
+3. `agentteam integrate` could merge an idle integration baseline without
+   enforcing required gates that run after the backlog, while existing
+   completion/report surfaces could call that intermediate state complete;
+4. a run recorded its active runtime release only after execution and the
+   launcher resolved the current active release on every command, so
+   `continue` could silently switch a reviewed run to different code;
+5. crash-safe invocation recovery needed Linux pidfd plus a persistent,
+   queryable systemd user transient-service control group, while the runtime
+   lacked a deterministic no-provider host capability probe.
 
 These are runtime correctness prerequisites, not part of the token-attribution
 experiment. They must be implemented, reviewed, merged, and activated before
@@ -266,9 +266,10 @@ The implementation must:
 - write a bounded `materialization_manifest.json` beside the draft containing
   blueprint digest, generated artifact digests, task IDs, dependency edges,
   and validation status;
-- before freeze, deterministically regenerate the five blueprint artifacts
-  from the currently approved tracked blueprint and reject byte drift in any
-  draft artifact before creating the frozen directory;
+- before freeze, require the external materialization provenance, reject
+  draft-side provenance downgrade, deterministically regenerate the five
+  blueprint artifacts from the currently approved tracked blueprint, reject
+  byte drift, and atomically publish the regenerated staging snapshot;
 - remove partial output on failure.
 
 `dry_run=True` may validate and generate into a controller-owned temporary

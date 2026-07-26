@@ -1203,6 +1203,130 @@ class TaskpackTests(unittest.TestCase):
                         ).exists()
                     )
 
+    def test_blueprint_freeze_rejects_authoring_mode_downgrade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, _blueprint = _blueprint_fixture(repo)
+            materialized = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "drafts",
+            )
+            taskpack_path = (
+                Path(materialized["taskpack_dir"]) / "taskpack.yaml"
+            )
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack.pop("authoring_mode")
+            taskpack.pop("context")
+            _write_json(taskpack_path, taskpack)
+
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "blueprint materialization provenance changed before freeze",
+            ):
+                freeze_taskpack(
+                    materialized["taskpack_dir"],
+                    tmp_path / "frozen",
+                )
+
+            self.assertFalse(
+                (tmp_path / "frozen" / "example-blueprint").exists()
+            )
+
+    def test_blueprint_freeze_publishes_regenerated_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            materialized = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "drafts",
+            )
+            original_prepare = (
+                taskpack_module._blueprint_taskpack_freeze_source
+            )
+
+            def mutate_draft_after_verification(*args, **kwargs):
+                source_dir = original_prepare(*args, **kwargs)
+                backlog_path = (
+                    Path(materialized["taskpack_dir"]) / "backlog.json"
+                )
+                backlog = json.loads(
+                    backlog_path.read_text(encoding="utf-8")
+                )
+                backlog["items"][0]["objective"] = "Unapproved objective."
+                _write_json(backlog_path, backlog)
+                return source_dir
+
+            with mock.patch.object(
+                taskpack_module,
+                "_blueprint_taskpack_freeze_source",
+                side_effect=mutate_draft_after_verification,
+            ):
+                frozen = freeze_taskpack(
+                    materialized["taskpack_dir"],
+                    tmp_path / "frozen",
+                )
+
+            frozen_backlog = json.loads(
+                (
+                    Path(frozen["frozen_taskpack_dir"]) / "backlog.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                frozen_backlog["items"][0]["objective"],
+                blueprint["tasks"][0]["objective"],
+            )
+
+    def test_freeze_taskpack_copy_failure_leaves_no_partial_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            draft = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement a bounded change.",
+                draft_root=tmp_path / "drafts",
+                taskpack_id="transactional-freeze",
+                write_scope=["src/"],
+            )
+            frozen_root = tmp_path / "frozen"
+            original_copy = shutil.copy2
+            copy_count = 0
+
+            def fail_second_copy(*args, **kwargs):
+                nonlocal copy_count
+                copy_count += 1
+                if copy_count == 2:
+                    raise OSError("injected copy failure")
+                return original_copy(*args, **kwargs)
+
+            with mock.patch.object(
+                taskpack_module.shutil,
+                "copy2",
+                side_effect=fail_second_copy,
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "injected copy failure",
+                ):
+                    freeze_taskpack(
+                        draft["taskpack_dir"],
+                        frozen_root,
+                    )
+
+            self.assertFalse(
+                (frozen_root / "transactional-freeze").exists()
+            )
+            self.assertEqual(
+                list(frozen_root.glob(".transactional-freeze.freezing-*")),
+                [],
+            )
+
     def test_blueprint_release_git_object_binding_and_generation_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

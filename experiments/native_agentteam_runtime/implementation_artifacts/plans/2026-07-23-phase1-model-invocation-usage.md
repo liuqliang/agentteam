@@ -1068,11 +1068,15 @@ The operator compares the generated materialization manifest to the tracked
 blueprint before freeze. Markdown section parsing is not part of
 materialization; the JSON blueprint contains the complete executable fields,
 while this document remains the human-readable semantic authority.
-The freeze operation independently regenerates all five deterministic
-blueprint artifacts from the currently approval-bound tracked blueprint and
-requires byte equality with the retained draft. Any drift in `taskpack.yaml`,
+The freeze operation requires the external materialization manifest, rejects
+draft-side provenance downgrade, and independently regenerates all five
+deterministic blueprint artifacts from the currently approval-bound tracked
+blueprint. It requires byte equality with the retained draft, then publishes
+the regenerated snapshot through a staging directory and atomic rename rather
+than rereading the mutable draft. Any drift in `taskpack.yaml`,
 `agent_pool.json`, `backlog.json`, `verification.json`, or `README.md` fails
-before a frozen directory is created.
+before a frozen directory is created, and copy failure leaves no partial
+frozen taskpack.
 
 ## P1-00 Contract Review
 

@@ -2585,42 +2585,100 @@ def freeze_taskpack(taskpack_dir, frozen_root):
     taskpack_dir = Path(taskpack_dir).resolve()
     validation = validate_taskpack(taskpack_dir)
     loaded = load_taskpack(taskpack_dir)
-    _validate_blueprint_taskpack_freeze_approval(taskpack_dir, loaded)
     taskpack_id = validation["taskpack_id"]
     frozen_root = Path(frozen_root).resolve()
     frozen_dir = (frozen_root / taskpack_id).resolve()
     _require_contained_path(frozen_dir, frozen_root, "frozen_taskpack_dir")
     if frozen_dir.exists():
         raise TaskpackValidationError(f"frozen taskpack already exists: {frozen_dir}")
-    inventory = _build_taskpack_artifact_inventory(taskpack_dir)
-    _validate_taskpack_artifact_inventory(taskpack_dir, inventory)
+    frozen_root.mkdir(parents=True, exist_ok=True)
 
-    for relative_path, source_path in inventory:
-        destination_path = frozen_dir / relative_path
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, destination_path)
+    with tempfile.TemporaryDirectory(
+        prefix="agentteam-freeze-source-"
+    ) as verification_root:
+        source_taskpack_dir = _blueprint_taskpack_freeze_source(
+            taskpack_dir,
+            loaded,
+            Path(verification_root),
+        )
+        inventory = _build_taskpack_artifact_inventory(source_taskpack_dir)
+        _validate_taskpack_artifact_inventory(source_taskpack_dir, inventory)
+        staging_root = Path(
+            tempfile.mkdtemp(
+                prefix=f".{taskpack_id}.freezing-",
+                dir=frozen_root,
+            )
+        )
+        staged_frozen_dir = staging_root / taskpack_id
+        try:
+            for relative_path, source_path in inventory:
+                destination_path = staged_frozen_dir / relative_path
+                destination_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, destination_path)
 
-    frozen_taskpack = _read_json(frozen_dir / "taskpack.yaml")
-    frozen_taskpack["status"] = "frozen"
-    _write_json(frozen_dir / "taskpack.yaml", frozen_taskpack)
+            validate_taskpack(staged_frozen_dir)
+            frozen_taskpack = _read_json(
+                staged_frozen_dir / "taskpack.yaml"
+            )
+            frozen_taskpack["status"] = "frozen"
+            _write_json(
+                staged_frozen_dir / "taskpack.yaml",
+                frozen_taskpack,
+            )
 
-    digest = _digest_taskpack_files(frozen_dir, [relative_path for relative_path, _source_path in inventory])
-    manifest = {
-        "manifest_schema_version": "taskpack_manifest.v1",
-        "taskpack_id": taskpack_id,
-        "status": "frozen",
-        "digest_sha256": digest,
-        "source_taskpack_dir": str(Path(taskpack_dir).resolve()),
-        "validation": validation,
-    }
-    _write_json(frozen_dir / "manifest.json", manifest)
+            digest = _digest_taskpack_files(
+                staged_frozen_dir,
+                [
+                    relative_path
+                    for relative_path, _source_path in inventory
+                ],
+            )
+            manifest = {
+                "manifest_schema_version": "taskpack_manifest.v1",
+                "taskpack_id": taskpack_id,
+                "status": "frozen",
+                "digest_sha256": digest,
+                "source_taskpack_dir": str(taskpack_dir),
+                "validation": validation,
+            }
+            _write_json(staged_frozen_dir / "manifest.json", manifest)
+            staged_frozen_dir.rename(frozen_dir)
+        finally:
+            if staging_root.exists():
+                shutil.rmtree(staging_root)
     return {"frozen_taskpack_dir": str(frozen_dir), "manifest": manifest}
 
 
-def _validate_blueprint_taskpack_freeze_approval(taskpack_dir, loaded):
+def _blueprint_taskpack_freeze_source(taskpack_dir, loaded, verification_root):
     taskpack = loaded.get("taskpack") if isinstance(loaded, dict) else None
-    if not isinstance(taskpack, dict) or taskpack.get("authoring_mode") != "blueprint_materialized":
-        return
+    taskpack = taskpack if isinstance(taskpack, dict) else {}
+    taskpack_id = taskpack.get("taskpack_id")
+    manifest_path = (
+        taskpack_dir.parent
+        / f"{taskpack_dir.name}.materialization_manifest.json"
+    )
+    manifest_exists = manifest_path.is_file()
+    is_blueprint = taskpack.get("authoring_mode") == "blueprint_materialized"
+    if not manifest_exists and not is_blueprint:
+        return taskpack_dir
+    if not manifest_exists:
+        raise TaskpackValidationError(
+            "blueprint materialization manifest is required before freeze"
+        )
+    bound_manifest = _read_json(manifest_path)
+    if (
+        bound_manifest.get("manifest_schema_version")
+        != "taskpack_blueprint_materialization.v1"
+        or bound_manifest.get("taskpack_id") != taskpack_id
+        or bound_manifest.get("freeze_eligible") is not True
+    ):
+        raise TaskpackValidationError(
+            "blueprint materialization manifest is invalid before freeze"
+        )
+    if not is_blueprint:
+        raise TaskpackValidationError(
+            "blueprint materialization provenance changed before freeze"
+        )
     project_root = Path(taskpack.get("project_root") or "").resolve()
     context = taskpack.get("context")
     if not isinstance(context, dict):
@@ -2654,27 +2712,31 @@ def _validate_blueprint_taskpack_freeze_approval(taskpack_dir, loaded):
                 f"blueprint-materialized taskpack context changed before freeze: {field_name}"
             )
 
-    with tempfile.TemporaryDirectory(
-        prefix="agentteam-blueprint-freeze-verify-"
-    ) as temp_root:
-        expected_dir = Path(temp_root) / blueprint["taskpack"]["taskpack_id"]
-        _generate_taskpack_blueprint(
-            blueprint,
-            project_root=project_root,
-            blueprint_relative_path=blueprint_relative_path,
-            taskpack_dir=expected_dir,
-            context=current_context,
-            freeze_eligible=True,
-            approval_diagnostics=[],
+    expected_dir = (
+        verification_root / blueprint["taskpack"]["taskpack_id"]
+    )
+    expected_manifest = _generate_taskpack_blueprint(
+        blueprint,
+        project_root=project_root,
+        blueprint_relative_path=blueprint_relative_path,
+        taskpack_dir=expected_dir,
+        context=current_context,
+        freeze_eligible=True,
+        approval_diagnostics=[],
+    )
+    if bound_manifest != expected_manifest:
+        raise TaskpackValidationError(
+            "blueprint materialization manifest changed before freeze"
         )
-        for artifact_name in TASKPACK_BLUEPRINT_ARTIFACT_NAMES:
-            actual_path = taskpack_dir / artifact_name
-            expected_path = expected_dir / artifact_name
-            if actual_path.read_bytes() != expected_path.read_bytes():
-                raise TaskpackValidationError(
-                    "blueprint-materialized taskpack artifact changed before "
-                    f"freeze: {artifact_name}"
-                )
+    for artifact_name in TASKPACK_BLUEPRINT_ARTIFACT_NAMES:
+        actual_path = taskpack_dir / artifact_name
+        expected_path = expected_dir / artifact_name
+        if actual_path.read_bytes() != expected_path.read_bytes():
+            raise TaskpackValidationError(
+                "blueprint-materialized taskpack artifact changed before "
+                f"freeze: {artifact_name}"
+            )
+    return expected_dir
 
 
 def build_taskpack_runtime_args(
