@@ -6,7 +6,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+from .live_codex_smoke import DevelopmentSmokeCodexRuntimeAdapter
 from .live_codex_scheduler_smoke import ENV_GATE, _find_runtime_event, _init_git_repo, _print_json
+from .m0_runtime import run_scheduler_loop
 
 
 EXPECTED_FILE = "generated/live_codex_cli_smoke.json"
@@ -117,26 +119,17 @@ def _run_scheduler_cli(
     codex_command,
     timeout_seconds,
 ):
-    command = [
-        sys.executable,
-        "-m",
-        "agentteam_runtime.cli",
-        "--agent-pool",
-        str(agent_pool_path),
-        "--backlog",
-        str(backlog_path),
-        "--output-dir",
-        str(run_dir),
-        "--project-root",
-        str(repo_path),
-        "--run-until-idle",
-        "--runtime",
-        "codex",
-    ]
-    if codex_command:
-        command.extend(["--codex-command", *codex_command])
-    completed = _run_cli_subprocess(command, timeout_seconds)
-    return _read_cli_json(completed, "scheduler CLI")
+    adapter = DevelopmentSmokeCodexRuntimeAdapter(
+        command=codex_command or None,
+        timeout_seconds=timeout_seconds,
+    )
+    return run_scheduler_loop(
+        agent_pool_path,
+        backlog_path,
+        run_dir,
+        project_root=repo_path,
+        runtime_adapter=adapter,
+    )
 
 
 def _read_state_index_through_cli(run_dir, timeout_seconds):

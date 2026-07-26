@@ -1599,6 +1599,11 @@ def _handle_taskpack_draft(args):
         taskpack_id=args.taskpack_id,
         codex_command=args.codex_command,
         codex_timeout_seconds=args.codex_timeout_seconds,
+        codex_model=getattr(args, "codex_model", None),
+        author_invocation_context={
+            "project": default_project_key(Path(args.project_root).resolve()),
+            "usage_stage": "taskpack_author",
+        },
     )
 
 
@@ -2264,6 +2269,10 @@ def _handle_pursue(args):
 
 def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
     rounds = []
+    args._active_pursue_id = (
+        getattr(args, "taskpack_id", None)
+        or f"pursue-{int(time.time())}"
+    )
     work_root = Path(args.work_root or profile["work_root"]).resolve()
     current_goal = goal
     source_report = None
@@ -2283,6 +2292,16 @@ def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
         submit_args.initial_integration_base_ref = initial_integration_base_ref
         submit_args.reuse_repo_map_handoff_path = reusable_repo_map_handoff
         submit_args.progress = not bool(args.json)
+        submit_args.author_invocation_context = {
+            "project": profile.get("project_key") or project_root.name,
+            "pursue_id": args._active_pursue_id,
+            "round_index": round_index,
+            "usage_stage": (
+                "taskpack_author"
+                if round_index == 1
+                else "follow_up_author"
+            ),
+        }
         run_result = _handle_submit(submit_args)
         round_record = _pursue_round_record(round_index, run_result, work_root)
         if initial_integration_base_ref:
@@ -2381,6 +2400,8 @@ def _run_pursue_loop(args, *, project_root, profile, goal, max_rounds):
 
 
 def _pursue_id(args, rounds):
+    if getattr(args, "_active_pursue_id", None):
+        return args._active_pursue_id
     if getattr(args, "taskpack_id", None):
         return args.taskpack_id
     if rounds and rounds[0].get("taskpack_id"):
@@ -2617,6 +2638,10 @@ def _handle_next(args):
     submit_args.goal = followup_goal
     submit_args.progress = True
     submit_args.reuse_repo_map_handoff_path = reusable_repo_map_handoff
+    submit_args.author_invocation_context = {
+        "project": profile.get("project_key") or project_root.name,
+        "usage_stage": "follow_up_author",
+    }
     result = _handle_submit(submit_args)
     result["follow_up"] = {
         "source_taskpack_id": source_run_dir.name,
@@ -2892,6 +2917,17 @@ def _handle_submit(args):
         codex_timeout_seconds=args.codex_timeout_seconds,
         verification_profile=getattr(args, "verification_profile", None),
         progress_callback=_author_progress_callback(progress),
+        codex_model=getattr(args, "codex_model", None),
+        author_invocation_context=(
+            getattr(args, "author_invocation_context", None)
+            or {
+                "project": (
+                    args.notification_project
+                    or default_project_key(Path(args.project_root).resolve())
+                ),
+                "usage_stage": "taskpack_author",
+            }
+        ),
     )
     _progress(progress, f"draft accepted: {draft['taskpack_id']}")
     taskpack_dir = Path(draft["taskpack_dir"])
@@ -2933,6 +2969,7 @@ def _handle_submit(args):
         feishu_signing_secret_env=args.feishu_signing_secret_env,
         progress=progress,
         initial_integration_base_ref=getattr(args, "initial_integration_base_ref", None),
+        author_lifecycle=draft.get("author_lifecycle"),
     )
     if completed.returncode != 0:
         raise AgentTeamCliError(
@@ -5031,6 +5068,11 @@ def _handle_chat(args):
     if not run_dir.exists():
         raise AgentTeamCliError("run not found", run_dir=str(run_dir))
     context = build_runtime_diagnostic_context(run_dir, topic=args.topic)
+    context["project"] = (
+        profile.get("project_key")
+        if isinstance(profile, dict)
+        else None
+    ) or "agentteam"
     if args.interactive:
         result = run_runtime_diagnostic_chat(
             context,
@@ -10085,6 +10127,7 @@ def _run_frozen_taskpack(
     progress=False,
     progress_interval_seconds=2.0,
     initial_integration_base_ref=None,
+    author_lifecycle=None,
 ):
     loaded_taskpack = load_taskpack(frozen_taskpack_dir)["taskpack"]
     post_backlog_gates = loaded_taskpack.get("post_backlog_gates")
@@ -10110,6 +10153,12 @@ def _run_frozen_taskpack(
         run_paths=run_paths,
         work_root=inferred_work_root,
     )
+    if author_lifecycle:
+        _publish_author_lifecycle_bootstrap(
+            run_paths["run_dir"],
+            inferred_work_root,
+            author_lifecycle,
+        )
     runtime_args = build_taskpack_runtime_args(
         frozen_taskpack_dir,
         run_root=run_paths["run_root"],
@@ -10139,6 +10188,82 @@ def _run_frozen_taskpack(
         progress_interval_seconds=progress_interval_seconds,
         progress_stream=sys.stderr,
     )
+
+
+def _publish_author_lifecycle_bootstrap(
+    run_dir,
+    work_root,
+    author_lifecycle,
+):
+    run_dir = Path(run_dir).resolve()
+    work_root = Path(work_root).resolve()
+    if not isinstance(author_lifecycle, dict):
+        raise AgentTeamCliError("author lifecycle must be an object")
+    started_path = Path(author_lifecycle.get("started_path") or "").resolve()
+    terminal_path = Path(author_lifecycle.get("terminal_path") or "").resolve()
+    author_context = started_path.parents[2]
+    for label, path in (
+        ("author_context", author_context),
+        ("started_path", started_path),
+        ("terminal_path", terminal_path),
+    ):
+        if not path.is_relative_to(work_root):
+            raise AgentTeamCliError(
+                "author lifecycle path escapes work root",
+                field=label,
+                path=str(path),
+                work_root=str(work_root),
+            )
+    if started_path.parent != terminal_path.parent:
+        raise AgentTeamCliError(
+            "author lifecycle records must share one invocation directory"
+        )
+    if not started_path.is_file() or not terminal_path.is_file():
+        raise AgentTeamCliError(
+            "author lifecycle bootstrap requires start and terminal records",
+            started_path=str(started_path),
+            terminal_path=str(terminal_path),
+        )
+    started = json.loads(started_path.read_text(encoding="utf-8"))
+    terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
+    if (
+        started.get("invocation_id") != terminal.get("invocation_id")
+        or started.get("invocation_id") != author_lifecycle.get("invocation_id")
+    ):
+        raise AgentTeamCliError(
+            "author lifecycle bootstrap invocation identity mismatch"
+        )
+    payload = {
+        "bootstrap_schema_version": "author_lifecycle_bootstrap.v1",
+        "invocation_id": started["invocation_id"],
+        "usage_event_id": terminal.get("usage_event_id"),
+        "author_context_path": str(author_context.relative_to(work_root)),
+        "started_path": str(started_path.relative_to(work_root)),
+        "terminal_path": str(terminal_path.relative_to(work_root)),
+        "started_sha256": hashlib.sha256(started_path.read_bytes()).hexdigest(),
+        "terminal_sha256": hashlib.sha256(terminal_path.read_bytes()).hexdigest(),
+    }
+    bootstrap_path = (
+        run_dir / "state" / "author_lifecycle_bootstrap.v1.json"
+    )
+    bootstrap_path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) + "\n"
+    if bootstrap_path.exists():
+        if bootstrap_path.read_text(encoding="utf-8") != encoded:
+            raise AgentTeamCliError(
+                "conflicting author lifecycle bootstrap",
+                bootstrap_path=str(bootstrap_path),
+            )
+        return payload
+    with bootstrap_path.open("x", encoding="utf-8") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return payload
 
 
 def _run_runtime_command_with_progress(

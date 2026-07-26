@@ -7,7 +7,8 @@ import tempfile
 from pathlib import Path
 
 from .integration_batch import verify_integration_batch
-from .m0_runtime import CodexRuntimeAdapter, read_scheduler_state_index, run_simulation
+from .live_codex_smoke import DevelopmentSmokeCodexRuntimeAdapter
+from .m0_runtime import read_scheduler_state_index, run_simulation
 
 
 ENV_GATE = "AGENTTEAM_RUN_LIVE_CODEX"
@@ -65,7 +66,7 @@ def run_live_pipeline_smoke(output_dir, codex_command=None, timeout_seconds=300)
     output_dir.mkdir(parents=True, exist_ok=True)
     _init_git_repo(repo_path)
     agent_pool_path, backlog_path = _write_pipeline_smoke_fixtures(fixture_dir)
-    adapter = CodexRuntimeAdapter(
+    adapter = DevelopmentSmokeCodexRuntimeAdapter(
         command=codex_command or None,
         timeout_seconds=timeout_seconds,
     )

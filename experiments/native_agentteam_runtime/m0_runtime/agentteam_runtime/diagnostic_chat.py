@@ -1,7 +1,14 @@
 import json
 import re
-import subprocess
+import sys
+import uuid
 from pathlib import Path
+
+from .model_invocation import (
+    ModelInvocationCall,
+    ModelInvocationError,
+    is_supported_codex_command,
+)
 
 
 DEFAULT_TOPIC = "runtime-diagnostic"
@@ -134,21 +141,119 @@ def run_runtime_diagnostic_chat(
         codex_command=codex_command,
         model=model,
     )
+    run_dir = Path(context["run_dir"]).resolve()
+    runtime_session_id = f"DIAGNOSTIC-SESSION-{uuid.uuid4().hex}"
+    lifecycle_owner_token = f"DIAGNOSTIC-OWNER-{uuid.uuid4().hex}"
+    authority_root = (
+        run_dir
+        / "state"
+        / "controller_invocations"
+        / "runtime_diagnostic"
+        / runtime_session_id
+    )
+    authority_root.mkdir(parents=True, exist_ok=False)
+    claim = {
+        "claim_schema_version": "model_invocation_controller_claim.v1",
+        "project": context.get("project") or "agentteam",
+        "run_id": context.get("run_id") or run_dir.name,
+        "taskpack_id": context.get("taskpack_id") or run_dir.name,
+        "usage_stage": "runtime_diagnostic",
+        "runtime_execution_session_id": runtime_session_id,
+        "lifecycle_owner_token": lifecycle_owner_token,
+        "authority_root": str(authority_root),
+    }
+    _write_exclusive_json(authority_root / "controller_claim.json", claim)
+    supported = is_supported_codex_command(command)
+    invocation_context = {
+        "project": claim["project"],
+        "run_id": claim["run_id"],
+        "pursue_id": context.get("pursue_id"),
+        "round_index": context.get("round_index"),
+        "taskpack_id": claim["taskpack_id"],
+        "implementation_run_id": None,
+        "gate_epoch": None,
+        "task_id": None,
+        "attempt_id": None,
+        "runtime_execution_session_id": runtime_session_id,
+        "requested_provider_session_id": None,
+        "provider_resume_mode": "new",
+        "provider_predecessor_invocation_id": None,
+        "provider_predecessor_turn_id": None,
+        "provider_predecessor_usage_snapshot": None,
+        "lifecycle_owner_token": lifecycle_owner_token,
+        "agent_id": "runtime-diagnostic-controller",
+        "role": "runtime_diagnostic_agent",
+        "usage_stage": "runtime_diagnostic",
+        "backend": "codex",
+        "model": model,
+        "coverage_class": (
+            "supported_model_invocation"
+            if supported
+            else "not_applicable_adapter"
+        ),
+        "provider_usage_scope": None,
+    }
+    invocation = ModelInvocationCall(
+        authority_root,
+        invocation_context,
+        supported=supported,
+    )
     try:
-        exit_code = subprocess.call(command, cwd=context["run_dir"], timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
+        execution = invocation.execute(
+            command,
+            cwd=run_dir,
+            input_text="",
+            timeout_seconds=timeout_seconds,
+        )
+    except ModelInvocationError as exc:
         return {
-            "chat_status": "timed_out",
+            "chat_status": "failed",
             "agent_role": "runtime_diagnostic_agent",
             "exit_code": None,
-            "run_dir": context["run_dir"],
+            "run_dir": str(run_dir),
             "timeout_seconds": timeout_seconds,
+            "runtime_execution_session_id": runtime_session_id,
+            "controller_claim_path": str(
+                authority_root / "controller_claim.json"
+            ),
+            "error": str(exc)[:500],
         }
+    if execution.launch_failed:
+        terminal_status = "launch_failed"
+        chat_status = "failed"
+        exit_code = None
+    elif execution.timed_out:
+        terminal_status = "timed_out"
+        chat_status = "timed_out"
+        exit_code = None
+    else:
+        exit_code = execution.returncode
+        terminal_status = "completed" if exit_code == 0 else "failed"
+        chat_status = terminal_status
+    terminal = invocation.finalize(
+        terminal_status,
+        execution,
+        terminal_writer="runtime_diagnostic_controller",
+    )
+    if execution.stdout:
+        sys.stdout.write(execution.stdout)
+        sys.stdout.flush()
+    if execution.stderr:
+        sys.stderr.write(execution.stderr)
+        sys.stderr.flush()
     return {
-        "chat_status": "completed" if exit_code == 0 else "failed",
+        "chat_status": chat_status,
         "agent_role": "runtime_diagnostic_agent",
         "exit_code": exit_code,
-        "run_dir": context["run_dir"],
+        "run_dir": str(run_dir),
+        "runtime_execution_session_id": runtime_session_id,
+        "controller_claim_path": str(authority_root / "controller_claim.json"),
+        "model_invocation": {
+            **invocation.lifecycle.summary(),
+            "usage_event_id": terminal["usage_event_id"],
+            "terminal_status": terminal["terminal_status"],
+            "usage_status": terminal["usage_status"],
+        },
     }
 
 
@@ -340,3 +445,16 @@ def _codex_command(codex_command):
     if not command or not all(isinstance(item, str) and item for item in command):
         raise ValueError("codex_command must be a non-empty string array")
     return command
+
+
+def _write_exclusive_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+    except FileExistsError:
+        if path.read_text(encoding="utf-8") != payload:
+            raise RuntimeError(f"conflicting controller claim: {path}")

@@ -1,11 +1,19 @@
 import json
+import os
 import re
 import subprocess
-import tempfile
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .model_invocation import (
+    InvocationLifecycle,
+    ModelInvocationCall,
+    ModelInvocationError,
+    ModelInvocationIntegrityError,
+    is_supported_codex_command,
+)
 from .repo_grounding import build_repo_grounding
 from .repo_map import build_repository_map
 from .taskpack import (
@@ -55,6 +63,9 @@ def draft_taskpack_from_goal(
     verification_profile=None,
     progress_callback=None,
     progress_interval_seconds=30.0,
+    codex_model=None,
+    author_invocation_context=None,
+    systemd_runner_factory=None,
 ):
     if author_runtime == "fake":
         return draft_taskpack_files(
@@ -88,6 +99,9 @@ def draft_taskpack_from_goal(
             verification_profile=verification_profile,
             progress_callback=progress_callback,
             progress_interval_seconds=progress_interval_seconds,
+            codex_model=codex_model,
+            author_invocation_context=author_invocation_context,
+            systemd_runner_factory=systemd_runner_factory,
         )
     raise TaskpackValidationError(f"unsupported taskpack author runtime: {author_runtime}")
 
@@ -529,6 +543,9 @@ def _draft_with_codex(
     verification_profile=None,
     progress_callback=None,
     progress_interval_seconds=30.0,
+    codex_model=None,
+    author_invocation_context=None,
+    systemd_runner_factory=None,
 ):
     project_root = Path(project_root).resolve()
     draft_root = Path(draft_root).resolve()
@@ -581,7 +598,10 @@ def _draft_with_codex(
     prompt_path = author_context_dir / "author_prompt.md"
     prompt_path.write_text(prompt, encoding="utf-8")
 
-    command = _command_list(codex_command)
+    command = _codex_author_jsonl_command(
+        _command_list(codex_command),
+        model=codex_model,
+    )
     result_path = author_context_dir / "author_result.json"
     state_path = author_context_dir / "author_state.json"
     completed = _run_codex_author_command(
@@ -597,6 +617,9 @@ def _draft_with_codex(
         prompt_path=prompt_path,
         progress_callback=progress_callback,
         progress_interval_seconds=progress_interval_seconds,
+        model=codex_model,
+        author_invocation_context=author_invocation_context,
+        systemd_runner_factory=systemd_runner_factory,
     )
     if completed.returncode != -9:
         existing_result = _read_json(result_path)
@@ -626,6 +649,7 @@ def _draft_with_codex(
                 "author_result_path": str(result_path),
                 "author_timeout_salvaged": True,
                 "author_salvage": salvage,
+                "author_lifecycle": _author_lifecycle_result(result_path),
             }
         raise TaskpackValidationError(
             _codex_author_failure_message(
@@ -653,6 +677,7 @@ def _draft_with_codex(
         "author_context_path": str(author_context_dir),
         "author_result_path": str(result_path),
         "author_timeout_salvaged": False,
+        "author_lifecycle": _author_lifecycle_result(result_path),
     }
 
 
@@ -669,94 +694,421 @@ def _run_codex_author_command(
     prompt_path,
     progress_callback=None,
     progress_interval_seconds=30.0,
+    model=None,
+    author_invocation_context=None,
+    systemd_runner_factory=None,
 ):
     started_at = _utc_now()
     started_monotonic = time.monotonic()
-    interval = max(float(progress_interval_seconds or 0), 0.5)
     input_metrics = _codex_author_input_metrics(
         prompt=prompt,
         author_context_dir=author_context_dir,
     )
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file:
-        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
-            with subprocess.Popen(
-                command,
-                cwd=draft_root,
-                stdin=subprocess.PIPE,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                text=True,
-            ) as process:
-                base_state = {
-                    "author_status": "running",
-                    "taskpack_id": taskpack_id,
-                    "pid": process.pid,
-                    "command": command,
-                    "started_at": started_at,
-                    "taskpack_dir": str(taskpack_dir),
-                    "author_context_dir": str(author_context_dir),
-                    "prompt_path": str(prompt_path),
-                    "result_path": str(result_path),
-                    "timeout_seconds": timeout_seconds,
-                    "input_metrics": input_metrics,
-                }
-                _write_author_state(state_path, base_state, started_monotonic, progress_callback)
-                if process.stdin:
-                    try:
-                        process.stdin.write(prompt)
-                        process.stdin.close()
-                    except (BrokenPipeError, OSError):
-                        pass
-                next_progress_at = time.monotonic() + interval
-                timed_out = False
-                while process.poll() is None:
-                    now = time.monotonic()
-                    elapsed = now - started_monotonic
-                    if timeout_seconds is not None and elapsed >= timeout_seconds:
-                        timed_out = True
-                        process.terminate()
-                        try:
-                            process.wait(timeout=2)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            process.wait(timeout=2)
-                        break
-                    if now >= next_progress_at:
-                        _write_author_state(state_path, base_state, started_monotonic, progress_callback)
-                        next_progress_at = now + interval
-                    time.sleep(min(interval, 0.2))
-                stdout_file.seek(0)
-                stderr_file.seek(0)
-                stdout = stdout_file.read()
-                stderr = stderr_file.read()
-                returncode = -9 if timed_out else process.returncode
-                status = "timed_out" if timed_out else ("completed" if returncode == 0 else "failed")
-                completed = subprocess.CompletedProcess(command, returncode, stdout, stderr)
-                output = _write_author_output_summary(author_context_dir, stdout, stderr)
-                diagnostic = _codex_author_diagnostic(taskpack_dir, stdout, stderr)
-                _write_json(
-                    result_path,
-                    {
-                        "status": status,
-                        "exit_code": returncode,
-                        "timeout_seconds": timeout_seconds,
-                        "input_metrics": input_metrics,
-                        "output": output,
-                        "diagnostic": diagnostic,
-                    },
+    supported = is_supported_codex_command(command)
+    context = _author_model_invocation_context(
+        taskpack_id=taskpack_id,
+        draft_root=draft_root,
+        model=model or _codex_command_model(command),
+        supported=supported,
+        supplied=author_invocation_context,
+    )
+    invocation = ModelInvocationCall(
+        author_context_dir,
+        context,
+        supported=supported,
+        systemd_runner_factory=systemd_runner_factory,
+    )
+    base_state = {
+        "author_status": "running",
+        "taskpack_id": taskpack_id,
+        "pid": os.getpid(),
+        "command": command,
+        "started_at": started_at,
+        "taskpack_dir": str(taskpack_dir),
+        "author_context_dir": str(author_context_dir),
+        "prompt_path": str(prompt_path),
+        "result_path": str(result_path),
+        "timeout_seconds": timeout_seconds,
+        "input_metrics": input_metrics,
+        "active_model_invocation_id": invocation.lifecycle.invocation_id,
+        "model_invocation": invocation.lifecycle.summary(),
+        "runtime_execution_session_id": context["runtime_execution_session_id"],
+        "usage_stage": context["usage_stage"],
+        "round_index": context.get("round_index"),
+        "pursue_id": context.get("pursue_id"),
+    }
+    _write_author_state(
+        state_path,
+        base_state,
+        started_monotonic,
+        progress_callback,
+    )
+
+    try:
+        execution = invocation.execute(
+            command,
+            cwd=draft_root,
+            input_text=prompt,
+            timeout_seconds=timeout_seconds,
+            progress_callback=(
+                lambda: _write_author_state(
+                    state_path,
+                    base_state,
+                    started_monotonic,
+                    progress_callback,
                 )
-                final_state = {
-                    **base_state,
-                    "author_status": status,
-                    "exit_code": returncode,
-                    "stdout_bytes": output["stdout_bytes"],
-                    "stderr_bytes": output["stderr_bytes"],
-                    "output": output,
-                    "diagnostic": diagnostic,
-                    "finished_at": _utc_now(),
+            ),
+            progress_interval_seconds=progress_interval_seconds,
+        )
+    except ModelInvocationError as exc:
+        failure = {
+            "status": "launch_failed",
+            "exit_code": None,
+            "timeout_seconds": timeout_seconds,
+            "input_metrics": input_metrics,
+            "output": {
+                "stdout_bytes": 0,
+                "stderr_bytes": 0,
+                "stdout_excerpt": "",
+                "stderr_excerpt": str(exc)[:AUTHOR_OUTPUT_EXCERPT_CHARS],
+                "stdout_path": None,
+                "stderr_path": None,
+            },
+            "diagnostic": _codex_author_diagnostic(taskpack_dir, "", str(exc)),
+            "model_invocation": invocation.lifecycle.summary(),
+        }
+        _write_json(result_path, failure)
+        _write_author_state(
+            state_path,
+            {
+                **base_state,
+                "author_status": "launch_failed",
+                "launch_error": str(exc)[:AUTHOR_OUTPUT_EXCERPT_CHARS],
+                "finished_at": _utc_now(),
+            },
+            started_monotonic,
+            progress_callback,
+        )
+        raise TaskpackValidationError(
+            f"codex taskpack author launch failed: {str(exc)[:500]}"
+        ) from exc
+
+    if execution.launch_failed:
+        terminal_status = "launch_failed"
+        status = "launch_failed"
+        returncode = 127
+    elif execution.timed_out:
+        terminal_status = "timed_out"
+        status = "timed_out"
+        returncode = -9
+    else:
+        returncode = execution.returncode
+        terminal_status = "completed" if returncode == 0 else "failed"
+        status = terminal_status
+    terminal = invocation.finalize(
+        terminal_status,
+        execution,
+        terminal_writer="taskpack_author",
+    )
+    completed = subprocess.CompletedProcess(
+        command,
+        returncode,
+        execution.stdout,
+        execution.stderr,
+    )
+    output = _write_author_output_summary(
+        author_context_dir,
+        execution.stdout,
+        execution.stderr,
+    )
+    diagnostic = _codex_author_diagnostic(
+        taskpack_dir,
+        execution.stdout,
+        execution.stderr,
+    )
+    lifecycle_summary = {
+        **invocation.lifecycle.summary(),
+        "usage_event_id": terminal["usage_event_id"],
+        "terminal_status": terminal["terminal_status"],
+        "usage_status": terminal["usage_status"],
+    }
+    _write_json(
+        result_path,
+        {
+            "status": status,
+            "exit_code": returncode,
+            "timeout_seconds": timeout_seconds,
+            "input_metrics": input_metrics,
+            "output": output,
+            "diagnostic": diagnostic,
+            "model_invocation": lifecycle_summary,
+            "model_invocation_usage": terminal,
+        },
+    )
+    final_state = {
+        **base_state,
+        "author_status": status,
+        "exit_code": returncode,
+        "stdout_bytes": output["stdout_bytes"],
+        "stderr_bytes": output["stderr_bytes"],
+        "output": output,
+        "diagnostic": diagnostic,
+        "model_invocation": lifecycle_summary,
+        "finished_at": _utc_now(),
+    }
+    _write_author_state(
+        state_path,
+        final_state,
+        started_monotonic,
+        progress_callback,
+    )
+    return completed
+
+
+def _codex_author_jsonl_command(command, *, model=None):
+    command = list(command)
+    if not is_supported_codex_command(command):
+        return command
+    if "--json" not in command:
+        command.append("--json")
+    if model and "-m" not in command and "--model" not in command:
+        command.extend(["-m", str(model)])
+    return command
+
+
+def _codex_command_model(command):
+    command = list(command)
+    for flag in ("-m", "--model"):
+        try:
+            value = command[command.index(flag) + 1]
+        except (ValueError, IndexError):
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _author_model_invocation_context(
+    *,
+    taskpack_id,
+    draft_root,
+    model,
+    supported,
+    supplied=None,
+):
+    supplied = dict(supplied or {})
+    stage = supplied.get("usage_stage") or "taskpack_author"
+    role = (
+        "follow_up_author"
+        if stage == "follow_up_author"
+        else "taskpack_author"
+    )
+    runtime_session = (
+        supplied.get("runtime_execution_session_id")
+        or f"AUTHOR-SESSION-{uuid.uuid4().hex}"
+    )
+    owner = (
+        supplied.get("lifecycle_owner_token")
+        or f"AUTHOR-OWNER-{uuid.uuid4().hex}"
+    )
+    project = supplied.get("project") or Path(draft_root).parent.name or "agentteam"
+    return {
+        "project": str(project),
+        "run_id": str(supplied.get("run_id") or taskpack_id),
+        "pursue_id": supplied.get("pursue_id"),
+        "round_index": supplied.get("round_index"),
+        "taskpack_id": str(taskpack_id),
+        "implementation_run_id": None,
+        "gate_epoch": None,
+        "task_id": None,
+        "attempt_id": supplied.get("attempt_id"),
+        "runtime_execution_session_id": str(runtime_session),
+        "requested_provider_session_id": None,
+        "provider_resume_mode": "new",
+        "provider_predecessor_invocation_id": None,
+        "provider_predecessor_turn_id": None,
+        "provider_predecessor_usage_snapshot": None,
+        "lifecycle_owner_token": str(owner),
+        "agent_id": str(
+            supplied.get("agent_id") or "taskpack-author-controller"
+        ),
+        "role": role,
+        "usage_stage": stage,
+        "backend": "codex",
+        "model": model,
+        "coverage_class": (
+            "supported_model_invocation"
+            if supported
+            else "not_applicable_adapter"
+        ),
+        "provider_usage_scope": supplied.get("provider_usage_scope"),
+    }
+
+
+def _author_lifecycle_result(result_path):
+    result = _read_json(result_path)
+    lifecycle = result.get("model_invocation")
+    return lifecycle if isinstance(lifecycle, dict) else None
+
+
+def recover_open_author_invocations(
+    author_context_dir,
+    *,
+    fence_assessor=None,
+    service_stopper=None,
+):
+    """Reconcile dead author controllers without guessing from a numeric PID."""
+    author_context_dir = Path(author_context_dir).resolve()
+    invocation_root = author_context_dir / "model_invocations"
+    if not invocation_root.exists():
+        return []
+    custom_fence_assessor = fence_assessor is not None
+    stopped_service_assessor = None
+    if fence_assessor is None or service_stopper is None:
+        from .two_phase_scheduler import (
+            _assess_persisted_execution_group,
+            _assess_stopped_exact_service,
+            _stop_exact_transient_service,
+        )
+
+        fence_assessor = fence_assessor or _assess_persisted_execution_group
+        service_stopper = service_stopper or _stop_exact_transient_service
+        stopped_service_assessor = _assess_stopped_exact_service
+
+    results = []
+    for started_path in sorted(invocation_root.glob("*/started.json")):
+        terminal_path = started_path.with_name("terminal.json")
+        start = _read_json(started_path)
+        if terminal_path.exists():
+            terminal = _read_json(terminal_path)
+            results.append(
+                {
+                    "reconciliation_status": "terminal_available",
+                    "invocation_id": start["invocation_id"],
+                    "usage_event_id": terminal.get("usage_event_id"),
+                    "terminal_path": str(terminal_path),
                 }
-                _write_author_state(state_path, final_state, started_monotonic, progress_callback)
-                return completed
+            )
+            continue
+        assessment = fence_assessor(dict(start))
+        status = assessment.get("fence_status")
+        pidfd = assessment.get("pidfd")
+        if status == "live_pinned":
+            if isinstance(pidfd, int):
+                os.close(pidfd)
+            results.append(
+                {
+                    "reconciliation_status": "live",
+                    "invocation_id": start["invocation_id"],
+                    "proof": assessment.get("proof"),
+                }
+            )
+            continue
+        if status == "exact_service_stop_required":
+            if not service_stopper(dict(start)):
+                results.append(
+                    {
+                        "reconciliation_status": "service_stop_required",
+                        "invocation_id": start["invocation_id"],
+                        "proof": assessment.get("proof"),
+                    }
+                )
+                continue
+            if terminal_path.exists():
+                terminal = _read_json(terminal_path)
+                results.append(
+                    {
+                        "reconciliation_status": "terminal_available",
+                        "invocation_id": start["invocation_id"],
+                        "usage_event_id": terminal.get("usage_event_id"),
+                        "terminal_path": str(terminal_path),
+                    }
+                )
+                continue
+            assessment = (
+                fence_assessor(dict(start))
+                if custom_fence_assessor
+                else stopped_service_assessor(dict(start))
+            )
+            status = assessment.get("fence_status")
+        if status != "death_proven":
+            results.append(
+                {
+                    "reconciliation_status": "open_ambiguous",
+                    "invocation_id": start["invocation_id"],
+                    "proof": assessment.get("proof"),
+                }
+            )
+            continue
+
+        lifecycle = _attach_author_lifecycle(started_path, start)
+        old_owner = start["lifecycle_owner_token"]
+        lifecycle.context["lifecycle_owner_token"] = (
+            f"AUTHOR-RECOVERY-{start['invocation_id']}"
+        )
+        revocation = lifecycle.revoke_writer(
+            old_owner,
+            revoked_by="author-recovery-controller",
+            reason="author_process_death_confirmed",
+        )
+        supervisor_result = _read_json_if_exists(
+            started_path.with_name("supervisor-result.json")
+        )
+        stdout = (
+            supervisor_result.get("stdout", "")
+            if isinstance(supervisor_result, dict)
+            else ""
+        )
+        stderr = (
+            supervisor_result.get("stderr", "")
+            if isinstance(supervisor_result, dict)
+            else ""
+        )
+        try:
+            terminal = lifecycle.finalize(
+                "recovered_orphan",
+                stdout=stdout,
+                stderr=stderr,
+                terminal_writer="recovery_controller",
+            )
+        except ModelInvocationIntegrityError:
+            terminal = _read_json_if_exists(terminal_path)
+            if terminal is None:
+                raise
+        results.append(
+            {
+                "reconciliation_status": "recovered",
+                "invocation_id": start["invocation_id"],
+                "usage_event_id": terminal.get("usage_event_id"),
+                "terminal_path": str(terminal_path),
+                "proof": assessment.get("proof"),
+                "writer_revocation": revocation,
+            }
+        )
+    return results
+
+
+def _attach_author_lifecycle(started_path, start):
+    lifecycle = object.__new__(InvocationLifecycle)
+    lifecycle.authority_root = Path(started_path).parents[2]
+    lifecycle.invocation_id = start["invocation_id"]
+    lifecycle.context = dict(start)
+    lifecycle.started_at = start["started_at"]
+    lifecycle.invocation_dir = Path(started_path).parent
+    lifecycle.started_path = Path(started_path)
+    lifecycle.revoked_path = lifecycle.invocation_dir / "revoked.json"
+    lifecycle.terminal_path = lifecycle.invocation_dir / "terminal.json"
+    lifecycle.terminal_lock_path = lifecycle.invocation_dir / "terminal.lock"
+    lifecycle.stdout_path = lifecycle.invocation_dir / "stdout.jsonl"
+    lifecycle.stderr_path = lifecycle.invocation_dir / "stderr.log"
+    return lifecycle
+
+
+def _read_json_if_exists(path):
+    try:
+        return _read_json(path)
+    except FileNotFoundError:
+        return None
 
 
 def _codex_author_input_metrics(*, prompt, author_context_dir):

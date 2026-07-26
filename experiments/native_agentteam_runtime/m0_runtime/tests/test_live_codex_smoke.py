@@ -6,6 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agentteam_runtime.live_codex_smoke import (
+    SUPPORTED_NON_WORKER_INVOCATION_INVENTORY,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -73,6 +77,87 @@ class LiveCodexSmokeTests(unittest.TestCase):
             self.assertTrue(
                 (Path(summary["worktree_path"]) / "generated" / "live_codex_smoke.json").exists()
             )
+            controller_roots = list(
+                (
+                    output_dir
+                    / "run"
+                    / "state"
+                    / "controller_invocations"
+                    / "development_smoke"
+                ).glob("DEVELOPMENT-SMOKE-SESSION-*")
+            )
+            self.assertEqual(len(controller_roots), 1)
+            claim = json.loads(
+                (controller_roots[0] / "controller_claim.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            invocation_dirs = list(
+                (controller_roots[0] / "model_invocations").glob("INV-*")
+            )
+            self.assertEqual(len(invocation_dirs), 1)
+            started = json.loads(
+                (invocation_dirs[0] / "started.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            terminal = json.loads(
+                (invocation_dirs[0] / "terminal.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(claim["usage_stage"], "development_smoke")
+            self.assertEqual(started["usage_stage"], "development_smoke")
+            self.assertEqual(
+                started["runtime_execution_session_id"],
+                claim["runtime_execution_session_id"],
+            )
+            self.assertEqual(
+                terminal["terminal_writer"],
+                "development_smoke_controller",
+            )
+
+    def test_supported_non_worker_inventory_matches_tracked_smoke_sources(self):
+        runtime_dir = ROOT / "m0_runtime" / "agentteam_runtime"
+        tracked_smokes = {
+            path.name
+            for path in runtime_dir.glob("live_codex*_smoke.py")
+            if path.name != "usage_live_smoke.py"
+        }
+        inventory_smokes = {
+            reference.split(":", 1)[0]
+            for key, reference in SUPPORTED_NON_WORKER_INVOCATION_INVENTORY.items()
+            if key.startswith("development_smoke_")
+        }
+
+        self.assertEqual(
+            tracked_smokes,
+            {
+                "live_codex_smoke.py",
+                "live_codex_scheduler_smoke.py",
+                "live_codex_repo_context_smoke.py",
+                "live_codex_pipeline_smoke.py",
+                "live_codex_multifile_pipeline_smoke.py",
+                "live_codex_cli_smoke.py",
+            },
+        )
+        self.assertEqual(inventory_smokes, tracked_smokes)
+        self.assertEqual(
+            {
+                "taskpack_author",
+                "follow_up_author",
+                "runtime_diagnostic",
+            },
+            set(SUPPORTED_NON_WORKER_INVOCATION_INVENTORY)
+            - {
+                key
+                for key in SUPPORTED_NON_WORKER_INVOCATION_INVENTORY
+                if key.startswith("development_smoke_")
+            },
+        )
+        for filename in sorted(tracked_smokes):
+            source = (runtime_dir / filename).read_text(encoding="utf-8")
+            self.assertIn("DevelopmentSmokeCodexRuntimeAdapter", source)
 
     def test_live_codex_scheduler_smoke_skips_without_env_gate(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -38,6 +38,7 @@ from agentteam_runtime.agentteam import (
     _pursue_next_goal,
     _pursue_next_integration_base_ref,
     _pursue_stop_reason,
+    _publish_author_lifecycle_bootstrap,
     _set_taskpack_runtime_backend,
     _submit_args_from_profile,
     _stop_authoring,
@@ -78,6 +79,16 @@ from agentteam_runtime.taskpack_author import REQUIRED_TASKPACK_FILES
 from agentteam_runtime.taskpack_author import _apply_verification_profile_to_taskpack
 from agentteam_runtime.taskpack_author import _command_list
 from agentteam_runtime.taskpack_author import _canonicalize_codex_taskpack_files
+from agentteam_runtime.taskpack_author import (
+    _author_model_invocation_context,
+    _run_codex_author_command,
+    recover_open_author_invocations,
+)
+from agentteam_runtime.model_invocation import (
+    ExecutionGroupIdentity,
+    InvocationLifecycle,
+    ProviderExecution,
+)
 from agentteam_runtime.taskpack_author import _author_prompt
 from agentteam_runtime.taskpack_author import _run_codex_author_command
 from agentteam_runtime.taskpack_author import _write_author_template_bundle
@@ -821,6 +832,89 @@ def _start_fake_agentteam_run_for_test(repo, goal, taskpack_id):
     if completed.returncode != 0:
         raise AssertionError(completed.stderr)
     return completed
+
+
+class _AuthorFakeGatedExecution:
+    def __init__(
+        self,
+        lifecycle,
+        command,
+        *,
+        cwd,
+        input_text,
+        timeout_seconds,
+    ):
+        self.command = list(command)
+        self.cwd = str(cwd)
+        self.input_text = input_text
+        self.timeout_seconds = timeout_seconds
+
+    def prepare(self):
+        return ExecutionGroupIdentity(
+            gated_supervisor_pid=4242,
+            gated_supervisor_pgid=4242,
+            host_boot_id="12345678-1234-1234-1234-123456789abc",
+            gated_supervisor_start_ticks=9001,
+            launch_nonce_sha256="a" * 64,
+            systemd_linger_enabled=True,
+            systemd_transient_unit="agentteam-inv-author-test.service",
+            systemd_transient_invocation_id="b" * 32,
+            systemd_transient_kill_mode="control-group",
+            systemd_user_manager_identity="manager:test",
+            systemd_transient_control_group=(
+                "/user.slice/user-1000.slice/user@1000.service/"
+                "app.slice/agentteam-inv-author-test.service"
+            ),
+            systemd_user_service_invocation_id="c" * 32,
+            systemd_user_service_control_group=(
+                "/user.slice/user-1000.slice/user@1000.service"
+            ),
+            systemd_user_service_kill_mode="control-group",
+        )
+
+    def permit_and_wait(
+        self,
+        *,
+        progress_callback=None,
+        progress_interval_seconds=30.0,
+    ):
+        try:
+            completed = subprocess.run(
+                self.command,
+                cwd=self.cwd,
+                input=self.input_text,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return ProviderExecution(
+                self.command,
+                -9,
+                _timeout_text(exc.stdout),
+                _timeout_text(exc.stderr),
+                timed_out=True,
+            )
+        return ProviderExecution(
+            self.command,
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+        )
+
+    def abort_before_permit(self):
+        return None
+
+    def cleanup_after_terminal(self):
+        return None
+
+
+def _timeout_text(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -3857,6 +3951,44 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("--no-alt-screen", argv)
             self.assertIn("runtime_diagnostic_agent", argv[-1])
             self.assertIn("test_host_c_model_matches_exported_python_reference_exactly", argv[-1])
+            controller_roots = list(
+                (
+                    run_dir
+                    / "state"
+                    / "controller_invocations"
+                    / "runtime_diagnostic"
+                ).glob("DIAGNOSTIC-SESSION-*")
+            )
+            self.assertEqual(len(controller_roots), 1)
+            claim = json.loads(
+                (controller_roots[0] / "controller_claim.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            invocation_dirs = list(
+                (controller_roots[0] / "model_invocations").glob("INV-*")
+            )
+            self.assertEqual(len(invocation_dirs), 1)
+            started = json.loads(
+                (invocation_dirs[0] / "started.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            terminal = json.loads(
+                (invocation_dirs[0] / "terminal.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(claim["usage_stage"], "runtime_diagnostic")
+            self.assertEqual(started["usage_stage"], "runtime_diagnostic")
+            self.assertEqual(
+                started["runtime_execution_session_id"],
+                claim["runtime_execution_session_id"],
+            )
+            self.assertEqual(
+                terminal["terminal_writer"],
+                "runtime_diagnostic_controller",
+            )
 
     def test_agentteam_cli_report_renders_operator_summary_and_writes_report_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14724,6 +14856,307 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("repo_grounding_context", prompt)
             self.assertIn("language, tool, test-entrypoint, and candidate verification-command", prompt)
 
+    def test_codex_taskpack_author_captures_supported_usage_separately_from_estimates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            draft_root = tmp_path / "drafts"
+            taskpack_dir = draft_root / "usage-author"
+            author_context_dir = draft_root / ".usage-author-author"
+            taskpack_dir.mkdir(parents=True)
+            author_context_dir.mkdir(parents=True)
+            prompt_path = author_context_dir / "author_prompt.md"
+            prompt_path.write_text("short prompt", encoding="utf-8")
+            fake_codex = tmp_path / "codex"
+            fake_codex.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json, sys",
+                        "sys.stdin.read()",
+                        "print(json.dumps({",
+                        "  'type': 'turn.completed',",
+                        "  'usage': {",
+                        "    'input_tokens': 101,",
+                        "    'cached_input_tokens': 11,",
+                        "    'output_tokens': 23,",
+                        "    'total_tokens': 124,",
+                        "  },",
+                        "}))",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            result_path = author_context_dir / "author_result.json"
+            state_path = author_context_dir / "author_state.json"
+
+            completed = _run_codex_author_command(
+                [str(fake_codex), "exec", "--json"],
+                draft_root=draft_root,
+                prompt="short prompt",
+                timeout_seconds=5,
+                state_path=state_path,
+                result_path=result_path,
+                taskpack_id="usage-author",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                prompt_path=prompt_path,
+                model="test-model",
+                author_invocation_context={
+                    "project": "usage-project",
+                    "pursue_id": "PURSUE-1",
+                    "round_index": 2,
+                    "usage_stage": "follow_up_author",
+                },
+                systemd_runner_factory=_AuthorFakeGatedExecution,
+            )
+
+            self.assertEqual(completed.returncode, 0)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            started = json.loads(
+                Path(result["model_invocation"]["started_path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            terminal = result["model_invocation_usage"]
+            self.assertEqual(started["usage_stage"], "follow_up_author")
+            self.assertEqual(started["round_index"], 2)
+            self.assertEqual(started["pursue_id"], "PURSUE-1")
+            self.assertEqual(started["coverage_class"], "supported_model_invocation")
+            self.assertEqual(terminal["terminal_writer"], "taskpack_author")
+            self.assertEqual(terminal["usage_status"], "reported")
+            self.assertEqual(terminal["input_tokens"], 101)
+            self.assertEqual(terminal["total_tokens"], 124)
+            self.assertEqual(result["input_metrics"]["prompt_estimated_tokens"], 3)
+            self.assertNotEqual(
+                result["input_metrics"]["prompt_estimated_tokens"],
+                terminal["input_tokens"],
+            )
+
+    def test_author_stage_context_distinguishes_initial_and_follow_up_rounds(self):
+        initial = _author_model_invocation_context(
+            taskpack_id="round-one",
+            draft_root="/tmp/work/drafts",
+            model=None,
+            supported=False,
+            supplied={
+                "project": "project",
+                "pursue_id": "PURSUE-1",
+                "round_index": 1,
+                "usage_stage": "taskpack_author",
+            },
+        )
+        follow_up = _author_model_invocation_context(
+            taskpack_id="round-two",
+            draft_root="/tmp/work/drafts",
+            model=None,
+            supported=False,
+            supplied={
+                "project": "project",
+                "pursue_id": "PURSUE-1",
+                "round_index": 2,
+                "usage_stage": "follow_up_author",
+            },
+        )
+
+        self.assertEqual(initial["usage_stage"], "taskpack_author")
+        self.assertEqual(initial["round_index"], 1)
+        self.assertEqual(follow_up["usage_stage"], "follow_up_author")
+        self.assertEqual(follow_up["role"], "follow_up_author")
+        self.assertEqual(follow_up["round_index"], 2)
+
+    def test_author_lifecycle_bootstrap_uses_contained_relative_digest_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp) / "work"
+            authority_root = work_root / "drafts" / ".bootstrap-author"
+            context = _author_model_invocation_context(
+                taskpack_id="bootstrap",
+                draft_root=work_root / "drafts",
+                model=None,
+                supported=False,
+                supplied={"project": "project"},
+            )
+            lifecycle = InvocationLifecycle(authority_root, context)
+            lifecycle.publish_start(ExecutionGroupIdentity.not_applicable())
+            terminal = lifecycle.finalize(
+                "completed",
+                terminal_writer="taskpack_author",
+            )
+
+            bootstrap = _publish_author_lifecycle_bootstrap(
+                work_root / "runs" / "bootstrap",
+                work_root,
+                {
+                    **lifecycle.summary(),
+                    "usage_event_id": terminal["usage_event_id"],
+                },
+            )
+
+            self.assertFalse(Path(bootstrap["started_path"]).is_absolute())
+            self.assertFalse(Path(bootstrap["terminal_path"]).is_absolute())
+            self.assertEqual(len(bootstrap["started_sha256"]), 64)
+            self.assertEqual(len(bootstrap["terminal_sha256"]), 64)
+            self.assertEqual(
+                bootstrap,
+                json.loads(
+                    (
+                        work_root
+                        / "runs"
+                        / "bootstrap"
+                        / "state"
+                        / "author_lifecycle_bootstrap.v1.json"
+                    ).read_text(encoding="utf-8")
+                ),
+            )
+
+    def test_author_recovery_preserves_live_and_reconciles_proven_death_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            live_root = tmp_path / "live-author"
+            live_lifecycle = InvocationLifecycle(
+                live_root,
+                _author_model_invocation_context(
+                    taskpack_id="live-author",
+                    draft_root=tmp_path,
+                    model=None,
+                    supported=False,
+                    supplied={"project": "project"},
+                ),
+            )
+            live_lifecycle.publish_start(ExecutionGroupIdentity.not_applicable())
+            read_fd, write_fd = os.pipe()
+            try:
+                live = recover_open_author_invocations(
+                    live_root,
+                    fence_assessor=lambda _start: {
+                        "fence_status": "live_pinned",
+                        "proof": "pidfd_and_start_ticks_match",
+                        "pidfd": read_fd,
+                    },
+                    service_stopper=lambda _start: False,
+                )
+            finally:
+                os.close(write_fd)
+            self.assertEqual(live[0]["reconciliation_status"], "live")
+            self.assertFalse(live_lifecycle.terminal_path.exists())
+
+            changed_boot_root = tmp_path / "changed-boot-author"
+            changed_boot_lifecycle = InvocationLifecycle(
+                changed_boot_root,
+                _author_model_invocation_context(
+                    taskpack_id="changed-boot-author",
+                    draft_root=tmp_path,
+                    model=None,
+                    supported=False,
+                    supplied={"project": "project"},
+                ),
+            )
+            changed_boot_lifecycle.publish_start(
+                ExecutionGroupIdentity.not_applicable()
+            )
+            recovered = recover_open_author_invocations(
+                changed_boot_root,
+                fence_assessor=lambda _start: {
+                    "fence_status": "death_proven",
+                    "proof": "host_boot_changed",
+                },
+                service_stopper=lambda _start: False,
+            )
+            self.assertEqual(
+                recovered[0]["reconciliation_status"],
+                "recovered",
+            )
+            terminal = json.loads(
+                changed_boot_lifecycle.terminal_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(terminal["terminal_status"], "recovered_orphan")
+            self.assertEqual(terminal["terminal_writer"], "recovery_controller")
+            replay = recover_open_author_invocations(
+                changed_boot_root,
+                fence_assessor=lambda _start: {
+                    "fence_status": "death_proven",
+                    "proof": "host_boot_changed",
+                },
+                service_stopper=lambda _start: False,
+            )
+            self.assertEqual(
+                replay[0]["reconciliation_status"],
+                "terminal_available",
+            )
+
+            service_root = tmp_path / "service-author"
+            service_lifecycle = InvocationLifecycle(
+                service_root,
+                _author_model_invocation_context(
+                    taskpack_id="service-author",
+                    draft_root=tmp_path,
+                    model=None,
+                    supported=False,
+                    supplied={"project": "project"},
+                ),
+            )
+            service_lifecycle.publish_start(
+                ExecutionGroupIdentity.not_applicable()
+            )
+            assessments = iter(
+                [
+                    {
+                        "fence_status": "exact_service_stop_required",
+                        "proof": "exact_transient_cgroup_populated",
+                    },
+                    {
+                        "fence_status": "death_proven",
+                        "proof": "exact_transient_cgroup_empty",
+                    },
+                ]
+            )
+            stopped = []
+            exact = recover_open_author_invocations(
+                service_root,
+                fence_assessor=lambda _start: next(assessments),
+                service_stopper=lambda start: stopped.append(
+                    start["invocation_id"]
+                )
+                or True,
+            )
+            self.assertEqual(exact[0]["reconciliation_status"], "recovered")
+            self.assertEqual(stopped, [service_lifecycle.invocation_id])
+
+    def test_ordinary_taskpack_delete_preserves_author_lifecycle_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp) / "work"
+            taskpack_id = "preserved-author"
+            draft_dir = work_root / "drafts" / taskpack_id
+            author_dir = work_root / "drafts" / f".{taskpack_id}-author"
+            draft_dir.mkdir(parents=True)
+            author_dir.mkdir(parents=True)
+            context = _author_model_invocation_context(
+                taskpack_id=taskpack_id,
+                draft_root=work_root / "drafts",
+                model=None,
+                supported=False,
+                supplied={"project": "project"},
+            )
+            lifecycle = InvocationLifecycle(author_dir, context)
+            lifecycle.publish_start(ExecutionGroupIdentity.not_applicable())
+            lifecycle.finalize(
+                "failed",
+                terminal_writer="taskpack_author",
+            )
+
+            deleted = agentteam_module._delete_taskpack_from_profile(
+                {"work_root": str(work_root)},
+                taskpack_id,
+                force=True,
+            )
+
+            self.assertEqual(deleted["deleted_count"], 1)
+            self.assertFalse(draft_dir.exists())
+            self.assertTrue(author_dir.exists())
+            self.assertTrue(lifecycle.started_path.exists())
+            self.assertTrue(lifecycle.terminal_path.exists())
+
     def test_codex_taskpack_author_timeout_result_includes_file_diagnostic(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -14768,6 +15201,10 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(set(diagnostic["missing_required_files"]), set(REQUIRED_TASKPACK_FILES))
             self.assertEqual(diagnostic["largest_stream"], "stderr")
             self.assertIn("author-direct", diagnostic["next_action"])
+            terminal = result["model_invocation_usage"]
+            self.assertEqual(terminal["terminal_status"], "timed_out")
+            self.assertEqual(terminal["terminal_writer"], "taskpack_author")
+            self.assertEqual(terminal["usage_status"], "not_applicable")
 
     def test_codex_taskpack_author_spools_raw_output_outside_result_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14917,6 +15354,16 @@ class TaskpackTests(unittest.TestCase):
             result = json.loads(result_path.read_text(encoding="utf-8"))
             self.assertIn("output", result)
             self.assertNotIn("stderr", result)
+            self.assertEqual(
+                result["model_invocation_usage"]["terminal_status"],
+                "failed",
+            )
+            self.assertTrue(
+                Path(result["model_invocation"]["started_path"]).is_file()
+            )
+            self.assertTrue(
+                Path(result["model_invocation"]["terminal_path"]).is_file()
+            )
 
     def test_fake_taskpack_author_draft_can_be_frozen(self):
         with tempfile.TemporaryDirectory() as tmp:
