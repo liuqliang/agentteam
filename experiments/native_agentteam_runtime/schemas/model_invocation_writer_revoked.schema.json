@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/model_invocation_writer_revoked.schema.json",
+  "title": "AgentTeam immutable model invocation writer revocation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "revocation_schema_version",
+    "invocation_id",
+    "lifecycle_owner_token",
+    "revoked_by",
+    "revoked_at",
+    "reason"
+  ],
+  "properties": {
+    "revocation_schema_version": {
+      "const": "model_invocation_writer_revoked.v1"
+    },
+    "invocation_id": {
+      "type": "string",
+      "pattern": "^INV-[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "lifecycle_owner_token": {
+      "type": "string",
+      "minLength": 1
+    },
+    "revoked_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "revoked_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

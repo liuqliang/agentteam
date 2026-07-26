@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/model_invocation_live_smoke.schema.json",
+  "title": "AgentTeam controller-validated model invocation live smoke",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project",
+    "run_id",
+    "run_kind",
+    "taskpack_id",
+    "implementation_run_id",
+    "gate_epoch",
+    "acceptance_series_id",
+    "acceptance_attempt_id",
+    "git_object_format",
+    "candidate_commit_sha",
+    "validated_code_sha",
+    "candidate_runtime_root",
+    "terminal_status",
+    "invocation_start_record",
+    "invocation_usage_record",
+    "provider_terminal_snapshot_sha256",
+    "provider_totals",
+    "reconciliation_status",
+    "controller_validation_status",
+    "started_at",
+    "finished_at",
+    "bounded_raw_spool_path"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "model_invocation_live_smoke.v1"
+    },
+    "project": {
+      "$ref": "#/$defs/identifier"
+    },
+    "run_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "run_kind": {
+      "const": "acceptance_evidence"
+    },
+    "taskpack_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "implementation_run_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "gate_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "acceptance_series_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "acceptance_attempt_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "git_object_format": {
+      "enum": [
+        "sha1",
+        "sha256"
+      ]
+    },
+    "candidate_commit_sha": {
+      "$ref": "#/$defs/gitOid"
+    },
+    "validated_code_sha": {
+      "$ref": "#/$defs/gitOid"
+    },
+    "candidate_runtime_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "terminal_status": {
+      "const": "completed"
+    },
+    "invocation_start_record": {
+      "$ref": "https://agentteam.local/schemas/model_invocation_started.schema.json"
+    },
+    "invocation_usage_record": {
+      "$ref": "https://agentteam.local/schemas/model_invocation_usage.schema.json"
+    },
+    "provider_terminal_snapshot_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "provider_totals": {
+      "$ref": "#/$defs/reportedTokenTotals"
+    },
+    "reconciliation_status": {
+      "const": "matched"
+    },
+    "controller_validation_status": {
+      "const": "passed"
+    },
+    "started_at": {
+      "$ref": "#/$defs/utcTimestamp"
+    },
+    "finished_at": {
+      "$ref": "#/$defs/utcTimestamp"
+    },
+    "bounded_raw_spool_path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha1"
+          }
+        },
+        "required": [
+          "git_object_format"
+        ]
+      },
+      "then": {
+        "properties": {
+          "candidate_commit_sha": {
+            "$ref": "#/$defs/sha1"
+          },
+          "validated_code_sha": {
+            "$ref": "#/$defs/sha1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha256"
+          }
+        },
+        "required": [
+          "git_object_format"
+        ]
+      },
+      "then": {
+        "properties": {
+          "candidate_commit_sha": {
+            "$ref": "#/$defs/sha256"
+          },
+          "validated_code_sha": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha1": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitOid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "utcTimestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "nullableToken": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "reportedTokenTotals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "total_tokens"
+      ],
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cached_input_tokens": {
+          "$ref": "#/$defs/nullableToken"
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reasoning_tokens": {
+          "$ref": "#/$defs/nullableToken"
+        },
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,549 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/model_invocation_started.schema.json",
+  "title": "AgentTeam immutable model invocation start",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "start_schema_version",
+    "invocation_id",
+    "project",
+    "run_id",
+    "pursue_id",
+    "round_index",
+    "taskpack_id",
+    "implementation_run_id",
+    "gate_epoch",
+    "task_id",
+    "attempt_id",
+    "runtime_execution_session_id",
+    "requested_provider_session_id",
+    "provider_resume_mode",
+    "provider_predecessor_invocation_id",
+    "provider_predecessor_turn_id",
+    "provider_predecessor_usage_snapshot",
+    "lifecycle_owner_token",
+    "agent_id",
+    "role",
+    "usage_stage",
+    "backend",
+    "model",
+    "coverage_class",
+    "gated_supervisor_pid",
+    "gated_supervisor_pgid",
+    "host_boot_id",
+    "gated_supervisor_start_ticks",
+    "launch_nonce_sha256",
+    "systemd_linger_enabled",
+    "systemd_transient_unit",
+    "systemd_transient_invocation_id",
+    "systemd_transient_kill_mode",
+    "systemd_user_manager_identity",
+    "systemd_transient_control_group",
+    "systemd_user_service_invocation_id",
+    "systemd_user_service_control_group",
+    "systemd_user_service_kill_mode",
+    "started_at"
+  ],
+  "properties": {
+    "start_schema_version": {
+      "const": "model_invocation_started.v1"
+    },
+    "invocation_id": {
+      "$ref": "#/$defs/invocationId"
+    },
+    "project": {
+      "$ref": "#/$defs/identifier"
+    },
+    "run_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "pursue_id": {
+      "$ref": "#/$defs/nullableIdentifier"
+    },
+    "round_index": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "taskpack_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "implementation_run_id": {
+      "$ref": "#/$defs/nullableIdentifier"
+    },
+    "gate_epoch": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "task_id": {
+      "$ref": "#/$defs/nullableIdentifier"
+    },
+    "attempt_id": {
+      "$ref": "#/$defs/nullableIdentifier"
+    },
+    "runtime_execution_session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requested_provider_session_id": {
+      "$ref": "#/$defs/nullableIdentifier"
+    },
+    "provider_resume_mode": {
+      "enum": [
+        "new",
+        "explicit",
+        "resume_last"
+      ]
+    },
+    "provider_predecessor_invocation_id": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/invocationId"
+        }
+      ]
+    },
+    "provider_predecessor_turn_id": {
+      "$ref": "#/$defs/nullableIdentifier"
+    },
+    "provider_predecessor_usage_snapshot": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/tokenSnapshot"
+        }
+      ]
+    },
+    "lifecycle_owner_token": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent_id": {
+      "$ref": "#/$defs/nullableIdentifier"
+    },
+    "role": {
+      "$ref": "#/$defs/nullableIdentifier"
+    },
+    "usage_stage": {
+      "$ref": "#/$defs/usageStage"
+    },
+    "backend": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model": {
+      "$ref": "#/$defs/nullableIdentifier"
+    },
+    "coverage_class": {
+      "enum": [
+        "supported_model_invocation",
+        "not_applicable_adapter"
+      ]
+    },
+    "gated_supervisor_pid": {
+      "$ref": "#/$defs/nullablePositiveInteger"
+    },
+    "gated_supervisor_pgid": {
+      "$ref": "#/$defs/nullablePositiveInteger"
+    },
+    "host_boot_id": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      ]
+    },
+    "gated_supervisor_start_ticks": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "launch_nonce_sha256": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/sha256"
+        }
+      ]
+    },
+    "systemd_linger_enabled": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "systemd_transient_unit": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.@:-]+\\.service$"
+        }
+      ]
+    },
+    "systemd_transient_invocation_id": {
+      "$ref": "#/$defs/nullableSystemdInvocationId"
+    },
+    "systemd_transient_kill_mode": {
+      "enum": [
+        "control-group",
+        null
+      ]
+    },
+    "systemd_user_manager_identity": {
+      "$ref": "#/$defs/nullableIdentifier"
+    },
+    "systemd_transient_control_group": {
+      "$ref": "#/$defs/nullableControlGroup"
+    },
+    "systemd_user_service_invocation_id": {
+      "$ref": "#/$defs/nullableSystemdInvocationId"
+    },
+    "systemd_user_service_control_group": {
+      "$ref": "#/$defs/nullableControlGroup"
+    },
+    "systemd_user_service_kill_mode": {
+      "enum": [
+        "control-group",
+        "mixed",
+        null
+      ]
+    },
+    "started_at": {
+      "$ref": "#/$defs/utcTimestamp"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "coverage_class": {
+            "const": "supported_model_invocation"
+          }
+        },
+        "required": [
+          "coverage_class"
+        ]
+      },
+      "then": {
+        "properties": {
+          "gated_supervisor_pid": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "gated_supervisor_pgid": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "host_boot_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "gated_supervisor_start_ticks": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "launch_nonce_sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "systemd_linger_enabled": {
+            "const": true
+          },
+          "systemd_transient_unit": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.@:-]+\\.service$"
+          },
+          "systemd_transient_invocation_id": {
+            "$ref": "#/$defs/systemdInvocationId"
+          },
+          "systemd_transient_kill_mode": {
+            "const": "control-group"
+          },
+          "systemd_user_manager_identity": {
+            "$ref": "#/$defs/identifier"
+          },
+          "systemd_transient_control_group": {
+            "$ref": "#/$defs/controlGroup"
+          },
+          "systemd_user_service_invocation_id": {
+            "$ref": "#/$defs/systemdInvocationId"
+          },
+          "systemd_user_service_control_group": {
+            "$ref": "#/$defs/controlGroup"
+          },
+          "systemd_user_service_kill_mode": {
+            "enum": [
+              "control-group",
+              "mixed"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "gated_supervisor_pid": {
+            "type": "null"
+          },
+          "gated_supervisor_pgid": {
+            "type": "null"
+          },
+          "host_boot_id": {
+            "type": "null"
+          },
+          "gated_supervisor_start_ticks": {
+            "type": "null"
+          },
+          "launch_nonce_sha256": {
+            "type": "null"
+          },
+          "systemd_linger_enabled": {
+            "type": "null"
+          },
+          "systemd_transient_unit": {
+            "type": "null"
+          },
+          "systemd_transient_invocation_id": {
+            "type": "null"
+          },
+          "systemd_transient_kill_mode": {
+            "type": "null"
+          },
+          "systemd_user_manager_identity": {
+            "type": "null"
+          },
+          "systemd_transient_control_group": {
+            "type": "null"
+          },
+          "systemd_user_service_invocation_id": {
+            "type": "null"
+          },
+          "systemd_user_service_control_group": {
+            "type": "null"
+          },
+          "systemd_user_service_kill_mode": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "usage_stage": {
+            "const": "acceptance_live_smoke"
+          }
+        },
+        "required": [
+          "usage_stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "implementation_run_id": {
+            "$ref": "#/$defs/identifier"
+          },
+          "gate_epoch": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "implementation_run_id": {
+            "type": "null"
+          },
+          "gate_epoch": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider_resume_mode": {
+            "const": "new"
+          }
+        },
+        "required": [
+          "provider_resume_mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "requested_provider_session_id": {
+            "type": "null"
+          },
+          "provider_predecessor_invocation_id": {
+            "type": "null"
+          },
+          "provider_predecessor_turn_id": {
+            "type": "null"
+          },
+          "provider_predecessor_usage_snapshot": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider_resume_mode": {
+            "const": "resume_last"
+          }
+        },
+        "required": [
+          "provider_resume_mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "requested_provider_session_id": {
+            "type": "null"
+          },
+          "provider_predecessor_invocation_id": {
+            "type": "null"
+          },
+          "provider_predecessor_turn_id": {
+            "type": "null"
+          },
+          "provider_predecessor_usage_snapshot": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nullableIdentifier": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "invocationId": {
+      "type": "string",
+      "pattern": "^INV-[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "nullablePositiveInteger": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "systemdInvocationId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "nullableSystemdInvocationId": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/systemdInvocationId"
+        }
+      ]
+    },
+    "controlGroup": {
+      "type": "string",
+      "pattern": "^/(?:[^/\\u0000]+/?)*$"
+    },
+    "nullableControlGroup": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/controlGroup"
+        }
+      ]
+    },
+    "utcTimestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "usageStage": {
+      "enum": [
+        "taskpack_author",
+        "planner_or_task_slicer",
+        "repo_map",
+        "implementation_worker",
+        "review_or_repair",
+        "follow_up_author",
+        "semantic_architecture",
+        "runtime_diagnostic",
+        "development_smoke",
+        "acceptance_live_smoke"
+      ]
+    },
+    "tokenSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "total_tokens"
+      ],
+      "properties": {
+        "input_tokens": {
+          "$ref": "#/$defs/nullableToken"
+        },
+        "cached_input_tokens": {
+          "$ref": "#/$defs/nullableToken"
+        },
+        "output_tokens": {
+          "$ref": "#/$defs/nullableToken"
+        },
+        "reasoning_tokens": {
+          "$ref": "#/$defs/nullableToken"
+        },
+        "total_tokens": {
+          "$ref": "#/$defs/nullableToken"
+        }
+      }
+    },
+    "nullableToken": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    }
+  }
+}

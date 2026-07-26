@@ -75,7 +75,10 @@
         "notification_failed",
         "attempt_timed_out",
         "attempt_cancelled",
-        "recovery_routed"
+        "recovery_routed",
+        "model_invocation_started",
+        "model_invocation_writer_revoked",
+        "model_invocation_usage_recorded"
       ]
     },
     "actor": {
