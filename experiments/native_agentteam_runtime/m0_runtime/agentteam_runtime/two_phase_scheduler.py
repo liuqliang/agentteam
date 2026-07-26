@@ -39,7 +39,12 @@ from .planner_context import build_planner_context
 from .model_invocation import (
     InvocationLifecycle,
     ModelInvocationIntegrityError,
+    append_canonical_events,
     assess_execution_group_fence,
+    hydrate_provider_predecessor_context,
+    import_author_lifecycle_bootstrap,
+    import_model_invocation_lifecycle,
+    import_registered_controller_lifecycles,
 )
 from .task_proposal import normalize_evidence_summary, normalize_task_proposal
 from .token_usage import aggregate_token_usage, token_usage_from_result
@@ -159,6 +164,8 @@ class TwoPhaseFileScheduler:
     def dispatch_ready(self):
         if self.stop_if_requested():
             return self._stopped_dispatch_result()
+        import_author_lifecycle_bootstrap(self.output_dir)
+        import_registered_controller_lifecycles(self.output_dir)
         self._ensure_decomposition_task()
         capacity = self.max_inflight - len(self.state["inflight_attempts"])
         if capacity <= 0:
@@ -200,9 +207,11 @@ class TwoPhaseFileScheduler:
     def collect_ready_results(self):
         if self.stop_if_requested():
             return self._stopped_collect_result()
+        import_registered_controller_lifecycles(self.output_dir)
         collected = []
         remaining = []
         for inflight in self.state["inflight_attempts"]:
+            self._import_worker_lifecycles(inflight)
             result = _runtime_result_from_outbox(
                 inflight["outbox_path"],
                 inflight["message_id"],
@@ -451,6 +460,10 @@ class TwoPhaseFileScheduler:
             output_dir=self.output_dir,
             project_root=self.project_root,
         )
+        invocation_context = hydrate_provider_predecessor_context(
+            invocation_context,
+            self.events_path,
+        )
         agent["status"] = "busy"
         agent["lease"] = {
             "lease_id": lease_id,
@@ -661,6 +674,7 @@ class TwoPhaseFileScheduler:
         return {"task_id": task["task_id"], "step_id": step_id}
 
     def _collect_result(self, inflight, runtime_result):
+        self._import_worker_lifecycles(inflight)
         task = self._task_by_id(inflight["task_id"])
         diff_audit = (
             audit_worktree_diff(inflight["worktree_path"], runtime_result["changed_files"])
@@ -779,37 +793,7 @@ class TwoPhaseFileScheduler:
         result["retry_allowed"] = retry_allowed
         if transition["task_status"] == "retryable":
             result["task_status"] = "ready" if retry_allowed else "blocked"
-        reconciliation = runtime_result.get("output", {}).get(
-            "invocation_reconciliation"
-        )
-        writer_revocation = (
-            reconciliation.get("writer_revocation")
-            if isinstance(reconciliation, dict)
-            else None
-        )
         runtime_events = [
-                *(
-                    [
-                        self._event(
-                            "model_invocation_writer_revoked",
-                            "agent-scheduler",
-                            inflight["agent_id"],
-                            (
-                                "model-invocation-writer-revoked:"
-                                f"{writer_revocation['invocation_id']}"
-                            ),
-                            inflight["correlation_id"],
-                            {
-                                **writer_revocation,
-                                "task_id": inflight["task_id"],
-                                "attempt_id": inflight["attempt_id"],
-                                "lease_id": inflight["lease_id"],
-                            },
-                        )
-                    ]
-                    if isinstance(writer_revocation, dict)
-                    else []
-                ),
                 self._event(
                     "runtime_session_observed",
                     result_actor,
@@ -1889,33 +1873,30 @@ class TwoPhaseFileScheduler:
         return f"STEP-{step_number:04d}-{task_id}"
 
     def _append_events(self, step_id, events):
-        sequence = self._next_sequence()
-        canonical = []
-        existing_idempotency_keys = set()
-        if self.events_path.exists():
-            for line in self.events_path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                existing_idempotency_keys.add(
-                    json.loads(line).get("idempotency_key")
+        return append_canonical_events(
+            self.events_path,
+            events,
+            run_id=self.run_id,
+            step_id=step_id,
+        )
+
+    def _import_worker_lifecycles(self, inflight):
+        imported = []
+        for started_path, start in _matching_invocation_starts(
+            self.output_dir,
+            inflight,
+        ):
+            imported.extend(
+                import_model_invocation_lifecycle(
+                    self.events_path,
+                    started_path,
+                    actor="agent-scheduler",
+                    run_id=start.get("run_id") or self.run_id,
+                    step_id=inflight["step_id"],
+                    source_root=self.output_dir,
                 )
-        for event in events:
-            idempotency_key = event.get("idempotency_key")
-            if idempotency_key in existing_idempotency_keys:
-                continue
-            canonical.append(
-                {
-                    **event,
-                    "event_id": f"EVT-{sequence:04d}",
-                    "sequence": sequence,
-                    "run_id": self.run_id,
-                    "step_id": step_id,
-                }
             )
-            existing_idempotency_keys.add(idempotency_key)
-            sequence += 1
-        _append_jsonl(self.events_path, canonical)
-        return canonical
+        return imported
 
     def _notify_canonical_events(self, step_id, events):
         if not self.notification_sink:
@@ -2049,15 +2030,6 @@ class TwoPhaseFileScheduler:
             correlation_id,
             payload,
         )
-
-    def _next_sequence(self):
-        if not self.events_path.exists():
-            return 1
-        existing = [
-            event["sequence"]
-            for event in _read_jsonl_if_exists(self.events_path)
-        ]
-        return max(existing) + 1 if existing else 1
 
     def _load_or_create_state(self):
         if self.state_path.exists():

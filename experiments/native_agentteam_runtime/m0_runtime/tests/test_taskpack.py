@@ -87,7 +87,11 @@ from agentteam_runtime.taskpack_author import (
 from agentteam_runtime.model_invocation import (
     ExecutionGroupIdentity,
     InvocationLifecycle,
+    ModelInvocationIntegrityError,
     ProviderExecution,
+    import_author_lifecycle_bootstrap,
+    import_registered_controller_lifecycles,
+    replay_model_invocation_events,
 )
 from agentteam_runtime.taskpack_author import _author_prompt
 from agentteam_runtime.taskpack_author import _run_codex_author_command
@@ -15008,6 +15012,172 @@ class TaskpackTests(unittest.TestCase):
                     ).read_text(encoding="utf-8")
                 ),
             )
+
+    def test_author_bootstrap_import_is_idempotent_and_rejects_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp) / "work"
+            run_dir = work_root / "runs" / "bootstrap-import"
+            authority_root = work_root / "drafts" / ".bootstrap-import-author"
+            context = _author_model_invocation_context(
+                taskpack_id="bootstrap-import",
+                draft_root=work_root / "drafts",
+                model=None,
+                supported=False,
+                supplied={
+                    "project": "project",
+                    "run_id": "bootstrap-import",
+                },
+            )
+            lifecycle = InvocationLifecycle(
+                authority_root,
+                context,
+                invocation_id="INV-author-bootstrap-import",
+                started_at="2026-07-23T00:00:00Z",
+            )
+            lifecycle.publish_start(ExecutionGroupIdentity.not_applicable())
+            terminal = lifecycle.finalize(
+                "completed",
+                terminal_writer="taskpack_author",
+                finished_at="2026-07-23T00:00:01Z",
+            )
+            _publish_author_lifecycle_bootstrap(
+                run_dir,
+                work_root,
+                {
+                    **lifecycle.summary(),
+                    "usage_event_id": terminal["usage_event_id"],
+                },
+            )
+
+            first = import_author_lifecycle_bootstrap(run_dir)
+            second = import_author_lifecycle_bootstrap(run_dir)
+            projection = replay_model_invocation_events(
+                run_dir / "events.jsonl"
+            )
+
+            self.assertEqual(len(first), 2)
+            self.assertEqual(second, [])
+            self.assertEqual(projection["invocation_count"], 1)
+            self.assertEqual(projection["terminal_count"], 1)
+            self.assertEqual(projection["open_invocation_ids"], [])
+            start_event = next(
+                event
+                for event in _read_jsonl(run_dir / "events.jsonl")
+                if event["event_type"] == "model_invocation_started"
+            )
+            self.assertEqual(
+                start_event["source_event_id"],
+                lifecycle.invocation_id,
+            )
+
+            bootstrap_path = (
+                run_dir
+                / "state"
+                / "author_lifecycle_bootstrap.v1.json"
+            )
+            bootstrap = json.loads(
+                bootstrap_path.read_text(encoding="utf-8")
+            )
+            bootstrap["started_sha256"] = "0" * 64
+            bootstrap_path.write_text(
+                json.dumps(bootstrap, sort_keys=True),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ModelInvocationIntegrityError):
+                import_author_lifecycle_bootstrap(run_dir)
+
+    def test_registered_controller_import_preserves_open_and_detects_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "work" / "runs" / "controller-import"
+            session_id = "SMOKE-SESSION-001"
+            authority_root = (
+                run_dir
+                / "state"
+                / "controller_invocations"
+                / "development_smoke"
+                / session_id
+            )
+            authority_root.mkdir(parents=True)
+            claim = {
+                "claim_schema_version": "model_invocation_controller_claim.v1",
+                "project": "project",
+                "run_id": "controller-import",
+                "taskpack_id": "controller-import",
+                "usage_stage": "development_smoke",
+                "runtime_execution_session_id": session_id,
+                "lifecycle_owner_token": "SMOKE-OWNER-001",
+                "authority_root": str(authority_root.resolve()),
+            }
+            (authority_root / "controller_claim.json").write_text(
+                json.dumps(claim, sort_keys=True),
+                encoding="utf-8",
+            )
+            context = _author_model_invocation_context(
+                taskpack_id="controller-import",
+                draft_root=run_dir,
+                model=None,
+                supported=False,
+                supplied={
+                    "project": "project",
+                    "run_id": "controller-import",
+                    "usage_stage": "development_smoke",
+                },
+            )
+            context.update(
+                {
+                    "runtime_execution_session_id": session_id,
+                    "lifecycle_owner_token": "SMOKE-OWNER-001",
+                    "agent_id": "development-smoke-controller",
+                    "role": "development_smoke",
+                    "usage_stage": "development_smoke",
+                }
+            )
+            lifecycle = InvocationLifecycle(
+                authority_root,
+                context,
+                invocation_id="INV-development-smoke-controller",
+                started_at="2026-07-23T00:00:00Z",
+            )
+            lifecycle.publish_start(ExecutionGroupIdentity.not_applicable())
+
+            imported_open = import_registered_controller_lifecycles(run_dir)
+            open_projection = replay_model_invocation_events(
+                run_dir / "events.jsonl"
+            )
+
+            self.assertEqual(len(imported_open), 1)
+            self.assertEqual(
+                open_projection["open_invocation_ids"],
+                [lifecycle.invocation_id],
+            )
+            lifecycle.finalize(
+                "completed",
+                terminal_writer="development_smoke_controller",
+                finished_at="2026-07-23T00:00:01Z",
+            )
+            self.assertEqual(
+                len(import_registered_controller_lifecycles(run_dir)),
+                1,
+            )
+            self.assertEqual(
+                import_registered_controller_lifecycles(run_dir),
+                [],
+            )
+            closed_projection = replay_model_invocation_events(
+                run_dir / "events.jsonl"
+            )
+            self.assertEqual(closed_projection["terminal_count"], 1)
+
+            conflicting = json.loads(
+                lifecycle.terminal_path.read_text(encoding="utf-8")
+            )
+            conflicting["terminal_status"] = "failed"
+            lifecycle.terminal_path.write_text(
+                json.dumps(conflicting, sort_keys=True),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ModelInvocationIntegrityError):
+                import_registered_controller_lifecycles(run_dir)
 
     def test_author_recovery_preserves_live_and_reconciles_proven_death_once(self):
         with tempfile.TemporaryDirectory() as tmp:

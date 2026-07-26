@@ -39,6 +39,32 @@ MAX_PROVIDER_STREAM_BYTES = 4 * 1024 * 1024
 HANDSHAKE_TIMEOUT_SECONDS = 30.0
 SYSTEMD_IDENTITY_TIMEOUT_SECONDS = 10.0
 PARENT_DEATH_SIGNAL = signal.SIGKILL
+CANONICAL_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        "model_invocation_started",
+        "model_invocation_writer_revoked",
+        "model_invocation_usage_recorded",
+    }
+)
+_CANONICAL_SOURCE_METADATA_FIELDS = frozenset(
+    {
+        "_source_artifact_path",
+        "_source_record_sha256",
+    }
+)
+_TOKEN_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+)
+_CONTROLLER_USAGE_STAGES = frozenset(
+    {
+        "runtime_diagnostic",
+        "development_smoke",
+    }
+)
 
 
 class ModelInvocationError(RuntimeError):
@@ -55,6 +81,603 @@ class ModelInvocationIntegrityError(ModelInvocationError):
 
 class ModelInvocationWriterRevoked(ModelInvocationError):
     """The lifecycle owner no longer has terminal-write authority."""
+
+
+def append_canonical_events(
+    events_path,
+    events,
+    *,
+    run_id=None,
+    step_id=None,
+    detect_conflicts=False,
+):
+    """Append canonical events under one file lock without rewriting history.
+
+    Ordinary scheduler events retain the historical "first idempotency key
+    wins" behavior.  Lifecycle import opts into content comparison so a
+    duplicate immutable source ID is accepted only when its source record is
+    byte-equivalent.
+    """
+    events_path = Path(events_path)
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    with events_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            existing = _read_canonical_events(events_path)
+            existing_by_key = {}
+            for event in existing:
+                key = event.get("idempotency_key")
+                if not isinstance(key, str) or not key:
+                    continue
+                prior = existing_by_key.get(key)
+                if (
+                    detect_conflicts
+                    and prior is not None
+                    and not _canonical_events_are_equivalent(prior, event)
+                ):
+                    raise ModelInvocationIntegrityError(
+                        f"conflicting canonical idempotency key: {key}"
+                    )
+                existing_by_key.setdefault(key, event)
+
+            sequence = max(
+                (
+                    event.get("sequence", 0)
+                    for event in existing
+                    if isinstance(event.get("sequence"), int)
+                ),
+                default=0,
+            ) + 1
+            appended = []
+            for event in events:
+                candidate = dict(event)
+                key = candidate.get("idempotency_key")
+                if not isinstance(key, str) or not key:
+                    raise ModelInvocationIntegrityError(
+                        "canonical event requires a nonempty idempotency key"
+                    )
+                prior = existing_by_key.get(key)
+                if prior is not None:
+                    if (
+                        detect_conflicts
+                        and not _canonical_events_are_equivalent(
+                            prior,
+                            candidate,
+                        )
+                    ):
+                        raise ModelInvocationIntegrityError(
+                            f"conflicting canonical idempotency key: {key}"
+                        )
+                    continue
+                canonical = {
+                    **candidate,
+                    "event_id": f"EVT-{sequence:04d}",
+                    "sequence": sequence,
+                    "run_id": candidate.get("run_id", run_id),
+                    "step_id": candidate.get("step_id", step_id),
+                }
+                appended.append(canonical)
+                existing_by_key[key] = canonical
+                sequence += 1
+            _append_canonical_event_bytes(events_path, appended)
+            return appended
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def import_model_invocation_lifecycle(
+    events_path,
+    started_path,
+    *,
+    revoked_path=None,
+    terminal_path=None,
+    actor="agent-scheduler",
+    run_id=None,
+    step_id=None,
+    source_root=None,
+    require_terminal=False,
+):
+    """Import one immutable lifecycle into a canonical append-only event log."""
+    started_path = Path(started_path)
+    invocation_dir = started_path.parent
+    revoked_path = Path(revoked_path or invocation_dir / "revoked.json")
+    terminal_path = Path(terminal_path or invocation_dir / "terminal.json")
+    start, start_digest = _read_lifecycle_record(started_path, "start")
+    invocation_id = _required_record_text(start, "invocation_id", "start")
+    if start.get("start_schema_version") != "model_invocation_started.v1":
+        raise ModelInvocationIntegrityError(
+            f"unsupported start record schema for {invocation_id}"
+        )
+
+    records = [
+        _canonical_lifecycle_event(
+            "model_invocation_started",
+            start,
+            start_digest,
+            started_path,
+            actor=actor,
+            run_id=run_id,
+            step_id=step_id,
+            source_root=source_root,
+        )
+    ]
+    if revoked_path.is_file():
+        revocation, revocation_digest = _read_lifecycle_record(
+            revoked_path,
+            "writer revocation",
+        )
+        if revocation.get("invocation_id") != invocation_id:
+            raise ModelInvocationIntegrityError(
+                f"writer revocation invocation mismatch for {invocation_id}"
+            )
+        if (
+            revocation.get("revocation_schema_version")
+            != "model_invocation_writer_revoked.v1"
+        ):
+            raise ModelInvocationIntegrityError(
+                f"unsupported writer revocation schema for {invocation_id}"
+            )
+        _required_record_text(
+            revocation,
+            "lifecycle_owner_token",
+            "writer revocation",
+        )
+        records.append(
+            _canonical_lifecycle_event(
+                "model_invocation_writer_revoked",
+                revocation,
+                revocation_digest,
+                revoked_path,
+                actor=actor,
+                run_id=run_id,
+                step_id=step_id,
+                source_root=source_root,
+            )
+        )
+    if terminal_path.is_file():
+        terminal, terminal_digest = _read_lifecycle_record(
+            terminal_path,
+            "terminal usage",
+        )
+        if terminal.get("invocation_id") != invocation_id:
+            raise ModelInvocationIntegrityError(
+                f"terminal invocation mismatch for {invocation_id}"
+            )
+        if terminal.get("usage_schema_version") != "model_invocation_usage.v1":
+            raise ModelInvocationIntegrityError(
+                f"unsupported terminal usage schema for {invocation_id}"
+            )
+        _required_record_text(terminal, "usage_event_id", "terminal usage")
+        records.append(
+            _canonical_lifecycle_event(
+                "model_invocation_usage_recorded",
+                terminal,
+                terminal_digest,
+                terminal_path,
+                actor=actor,
+                run_id=run_id,
+                step_id=step_id,
+                source_root=source_root,
+            )
+        )
+    elif require_terminal:
+        raise ModelInvocationIntegrityError(
+            f"required terminal usage record is missing for {invocation_id}"
+        )
+
+    return append_canonical_events(
+        events_path,
+        records,
+        run_id=run_id or start.get("run_id"),
+        step_id=step_id,
+        detect_conflicts=True,
+    )
+
+
+def import_author_lifecycle_bootstrap(run_dir):
+    """Validate and import the successful author lifecycle bootstrap."""
+    run_dir = Path(run_dir).resolve()
+    bootstrap_path = (
+        run_dir / "state" / "author_lifecycle_bootstrap.v1.json"
+    )
+    if not bootstrap_path.is_file():
+        return []
+    bootstrap = _read_json_record(bootstrap_path, "author bootstrap")
+    if (
+        bootstrap.get("bootstrap_schema_version")
+        != "author_lifecycle_bootstrap.v1"
+    ):
+        raise ModelInvocationIntegrityError(
+            "unsupported author lifecycle bootstrap schema"
+        )
+    work_root = _work_root_for_run(run_dir)
+    started_path = _contained_bootstrap_path(
+        work_root,
+        bootstrap.get("started_path"),
+        "started_path",
+    )
+    terminal_path = _contained_bootstrap_path(
+        work_root,
+        bootstrap.get("terminal_path"),
+        "terminal_path",
+    )
+    _validate_file_digest(
+        started_path,
+        bootstrap.get("started_sha256"),
+        "author start",
+    )
+    _validate_file_digest(
+        terminal_path,
+        bootstrap.get("terminal_sha256"),
+        "author terminal",
+    )
+    start = _read_json_record(started_path, "author start")
+    terminal = _read_json_record(terminal_path, "author terminal")
+    invocation_id = _required_record_text(
+        bootstrap,
+        "invocation_id",
+        "author bootstrap",
+    )
+    usage_event_id = _required_record_text(
+        bootstrap,
+        "usage_event_id",
+        "author bootstrap",
+    )
+    if (
+        start.get("invocation_id") != invocation_id
+        or terminal.get("invocation_id") != invocation_id
+        or terminal.get("usage_event_id") != usage_event_id
+    ):
+        raise ModelInvocationIntegrityError(
+            "author bootstrap source IDs do not match immutable records"
+        )
+    if terminal.get("terminal_status") != "completed":
+        raise ModelInvocationIntegrityError(
+            "author bootstrap must reference a successful terminal record"
+        )
+    author_context_path = _contained_bootstrap_path(
+        work_root,
+        bootstrap.get("author_context_path"),
+        "author_context_path",
+        require_file=False,
+    )
+    if started_path.parents[2] != author_context_path:
+        raise ModelInvocationIntegrityError(
+            "author bootstrap context does not contain the start record"
+        )
+    return import_model_invocation_lifecycle(
+        run_dir / "events.jsonl",
+        started_path,
+        terminal_path=terminal_path,
+        actor="taskpack-author-importer",
+        run_id=start.get("run_id"),
+        step_id="STEP-AUTHOR-BOOTSTRAP",
+        source_root=work_root,
+        require_terminal=True,
+    )
+
+
+def import_registered_controller_lifecycles(run_dir):
+    """Import fixed-root diagnostic and development-smoke controller records."""
+    run_dir = Path(run_dir).resolve()
+    controller_root = (
+        run_dir / "state" / "controller_invocations"
+    ).resolve()
+    if not controller_root.is_dir():
+        return []
+    imported = []
+    for claim_path in sorted(
+        controller_root.glob("*/*/controller_claim.json")
+    ):
+        claim_dir = claim_path.parent.resolve()
+        if not _is_relative_to(claim_dir, controller_root):
+            raise ModelInvocationIntegrityError(
+                f"controller claim escapes registered root: {claim_path}"
+            )
+        claim = _read_json_record(claim_path, "controller claim")
+        if (
+            claim.get("claim_schema_version")
+            != "model_invocation_controller_claim.v1"
+        ):
+            raise ModelInvocationIntegrityError(
+                f"unsupported controller claim schema: {claim_path}"
+            )
+        stage = _required_record_text(
+            claim,
+            "usage_stage",
+            "controller claim",
+        )
+        if stage not in _CONTROLLER_USAGE_STAGES:
+            raise ModelInvocationIntegrityError(
+                f"unregistered controller usage stage: {stage}"
+            )
+        if claim_path.parents[1].name != stage:
+            raise ModelInvocationIntegrityError(
+                f"controller claim stage path mismatch: {claim_path}"
+            )
+        claimed_root = Path(
+            _required_record_text(
+                claim,
+                "authority_root",
+                "controller claim",
+            )
+        ).resolve()
+        if claimed_root != claim_dir:
+            raise ModelInvocationIntegrityError(
+                f"controller claim authority root mismatch: {claim_path}"
+            )
+        for started_path in sorted(
+            claim_dir.glob("model_invocations/*/started.json")
+        ):
+            start = _read_json_record(started_path, "controller start")
+            for field in (
+                "project",
+                "run_id",
+                "taskpack_id",
+                "usage_stage",
+                "runtime_execution_session_id",
+                "lifecycle_owner_token",
+            ):
+                if start.get(field) != claim.get(field):
+                    raise ModelInvocationIntegrityError(
+                        f"controller claim {field} mismatch: {started_path}"
+                    )
+            imported.extend(
+                import_model_invocation_lifecycle(
+                    run_dir / "events.jsonl",
+                    started_path,
+                    actor=f"{stage}-controller-importer",
+                    run_id=start.get("run_id"),
+                    step_id="STEP-CONTROLLER",
+                    source_root=run_dir,
+                )
+            )
+    return imported
+
+
+def replay_model_invocation_events(events):
+    """Project unique lifecycle authority and deterministic usage accounting."""
+    records = _coerce_canonical_events(events)
+    seen_event_ids = {}
+    starts = {}
+    revocations = {}
+    usages = {}
+    for event in records:
+        event_type = event.get("event_type")
+        if event_type not in CANONICAL_LIFECYCLE_EVENT_TYPES:
+            continue
+        event_id = event.get("event_id")
+        if isinstance(event_id, str) and event_id:
+            prior_event = seen_event_ids.get(event_id)
+            if (
+                prior_event is not None
+                and not _canonical_events_are_equivalent(prior_event, event)
+            ):
+                raise ModelInvocationIntegrityError(
+                    f"conflicting canonical event ID: {event_id}"
+                )
+            if prior_event is not None:
+                continue
+            seen_event_ids[event_id] = event
+        record = _canonical_source_record(event.get("payload"))
+        if not isinstance(record, dict):
+            raise ModelInvocationIntegrityError(
+                f"{event_type} payload is not an immutable record"
+            )
+        invocation_id = _required_record_text(
+            record,
+            "invocation_id",
+            event_type,
+        )
+        if event_type == "model_invocation_started":
+            _insert_replayed_record(
+                starts,
+                invocation_id,
+                record,
+                "invocation start",
+            )
+        elif event_type == "model_invocation_writer_revoked":
+            owner_token = _required_record_text(
+                record,
+                "lifecycle_owner_token",
+                "writer revocation",
+            )
+            _insert_replayed_record(
+                revocations,
+                (invocation_id, owner_token),
+                record,
+                "writer revocation",
+            )
+        else:
+            usage_event_id = _required_record_text(
+                record,
+                "usage_event_id",
+                "terminal usage",
+            )
+            _insert_replayed_record(
+                usages,
+                usage_event_id,
+                record,
+                "terminal usage",
+            )
+
+    usage_by_invocation = {}
+    for usage_event_id, usage in usages.items():
+        invocation_id = usage["invocation_id"]
+        if invocation_id not in starts:
+            raise ModelInvocationIntegrityError(
+                f"terminal usage has no canonical start: {usage_event_id}"
+            )
+        prior = usage_by_invocation.get(invocation_id)
+        if prior is not None and prior != usage:
+            raise ModelInvocationIntegrityError(
+                f"multiple terminal usage records for {invocation_id}"
+            )
+        usage_by_invocation[invocation_id] = usage
+
+    reported_totals = {field: 0 for field in _TOKEN_FIELDS}
+    reported_invocation_count = 0
+    for usage in usage_by_invocation.values():
+        if usage.get("usage_status") != "reported":
+            continue
+        reported_invocation_count += 1
+        for field in _TOKEN_FIELDS:
+            value = usage.get(field)
+            if isinstance(value, int) and not isinstance(value, bool):
+                reported_totals[field] += value
+
+    open_invocation_ids = sorted(set(starts) - set(usage_by_invocation))
+    return {
+        "invocation_count": len(starts),
+        "terminal_count": len(usage_by_invocation),
+        "open_invocation_ids": open_invocation_ids,
+        "reported_invocation_count": reported_invocation_count,
+        "reported_token_totals": reported_totals,
+        "start_records": starts,
+        "usage_records": usages,
+        "usage_by_invocation": usage_by_invocation,
+        "writer_revocations": revocations,
+    }
+
+
+def authoritative_provider_snapshot(events, provider_session_id):
+    """Return a graph-derived unique provider predecessor, never event order."""
+    if not isinstance(provider_session_id, str) or not provider_session_id:
+        return None
+    projection = replay_model_invocation_events(events)
+    nodes = {
+        record["invocation_id"]: record
+        for record in projection["usage_records"].values()
+        if record.get("provider_session_id") == provider_session_id
+    }
+    if not nodes:
+        return None
+
+    referenced = set()
+    child_counts = {}
+    for invocation_id, record in nodes.items():
+        predecessor = record.get("provider_predecessor_invocation_id")
+        predecessor_turn = record.get("provider_predecessor_turn_id")
+        if predecessor is None:
+            if predecessor_turn is not None:
+                return _unavailable_provider_lineage(
+                    "provider_predecessor_invocation_missing",
+                )
+            continue
+        if predecessor not in nodes:
+            return _unavailable_provider_lineage(
+                "provider_predecessor_record_missing",
+            )
+        if not predecessor_turn:
+            return _unavailable_provider_lineage(
+                "provider_predecessor_turn_missing",
+            )
+        if nodes[predecessor].get("provider_turn_id") != predecessor_turn:
+            return _unavailable_provider_lineage(
+                "provider_predecessor_turn_mismatch",
+            )
+        referenced.add(predecessor)
+        child_counts[predecessor] = child_counts.get(predecessor, 0) + 1
+        if child_counts[predecessor] > 1:
+            return _unavailable_provider_lineage(
+                "provider_session_lineage_forked",
+            )
+
+    tips = sorted(set(nodes) - referenced)
+    if len(tips) != 1:
+        return _unavailable_provider_lineage(
+            "provider_session_predecessor_ambiguous",
+        )
+    tip_id = tips[0]
+    visited = set()
+    cursor = tip_id
+    while cursor is not None:
+        if cursor in visited:
+            return _unavailable_provider_lineage(
+                "provider_session_lineage_cycle",
+            )
+        visited.add(cursor)
+        cursor = nodes[cursor].get("provider_predecessor_invocation_id")
+    if visited != set(nodes):
+        return _unavailable_provider_lineage(
+            "provider_session_lineage_disconnected",
+        )
+
+    tip = nodes[tip_id]
+    provider_turn_id = tip.get("provider_turn_id")
+    snapshot = tip.get("provider_usage_snapshot")
+    if not provider_turn_id:
+        return _unavailable_provider_lineage(
+            "provider_turn_id_missing",
+        )
+    if not isinstance(snapshot, dict):
+        return _unavailable_provider_lineage(
+            "provider_usage_snapshot_missing",
+        )
+    compact_snapshot = {
+        field: snapshot.get(field)
+        for field in _TOKEN_FIELDS
+        if isinstance(snapshot.get(field), int)
+        and not isinstance(snapshot.get(field), bool)
+    }
+    if not compact_snapshot:
+        return _unavailable_provider_lineage(
+            "provider_usage_snapshot_empty",
+        )
+    return {
+        "provider_lineage_status": "authoritative",
+        "provider_predecessor_invocation_id": tip_id,
+        "provider_predecessor_turn_id": provider_turn_id,
+        "provider_predecessor_usage_snapshot": compact_snapshot,
+        "previous_provider_session_id": provider_session_id,
+        "previous_invocation_id": tip_id,
+        "previous_provider_turn_id": provider_turn_id,
+    }
+
+
+def hydrate_provider_predecessor_context(context, events):
+    """Supply a canonical predecessor for one explicit provider resume."""
+    hydrated = dict(context)
+    if (
+        hydrated.get("provider_resume_mode") != "explicit"
+        or not hydrated.get("requested_provider_session_id")
+    ):
+        return hydrated
+    predecessor = authoritative_provider_snapshot(
+        events,
+        hydrated["requested_provider_session_id"],
+    )
+    if predecessor is None:
+        return hydrated
+    if predecessor.get("provider_lineage_status") != "authoritative":
+        for field in (
+            "provider_predecessor_invocation_id",
+            "provider_predecessor_turn_id",
+            "provider_predecessor_usage_snapshot",
+            "previous_provider_session_id",
+            "previous_invocation_id",
+            "previous_provider_turn_id",
+        ):
+            hydrated[field] = None
+        hydrated["provider_lineage_status"] = predecessor[
+            "provider_lineage_status"
+        ]
+        hydrated["provider_lineage_error"] = predecessor.get(
+            "provider_lineage_error"
+        )
+        return hydrated
+    for field in (
+        "provider_predecessor_invocation_id",
+        "provider_predecessor_turn_id",
+        "provider_predecessor_usage_snapshot",
+    ):
+        supplied = hydrated.get(field)
+        if supplied is not None and supplied != predecessor[field]:
+            raise ModelInvocationIntegrityError(
+                f"supplied {field} conflicts with canonical provider lineage"
+            )
+    hydrated.update(predecessor)
+    return hydrated
 
 
 @dataclass(frozen=True)
@@ -1391,6 +2014,305 @@ def _exclusive_or_idempotent_bytes(path, data):
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def _read_canonical_events(path):
+    path = Path(path)
+    if not path.exists():
+        return []
+    records = []
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ModelInvocationIntegrityError(
+                f"invalid canonical event JSON at line {line_number}"
+            ) from exc
+        if not isinstance(record, dict):
+            raise ModelInvocationIntegrityError(
+                f"canonical event at line {line_number} is not an object"
+            )
+        records.append(record)
+    return records
+
+
+def _append_canonical_event_bytes(path, records):
+    if not records:
+        return
+    path = Path(path)
+    with path.open("ab") as stream:
+        for record in records:
+            stream.write(
+                (
+                    json.dumps(
+                        record,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+        stream.flush()
+        os.fsync(stream.fileno())
+    _fsync_directory(path.parent)
+
+
+def _canonical_events_are_equivalent(left, right):
+    if left.get("event_type") != right.get("event_type"):
+        return False
+    if left.get("event_type") in CANONICAL_LIFECYCLE_EVENT_TYPES:
+        left_payload = left.get("payload")
+        right_payload = right.get("payload")
+        left_digest = (
+            left_payload.get("_source_record_sha256")
+            if isinstance(left_payload, dict)
+            else None
+        )
+        right_digest = (
+            right_payload.get("_source_record_sha256")
+            if isinstance(right_payload, dict)
+            else None
+        )
+        if (
+            left_digest is not None
+            and right_digest is not None
+            and left_digest != right_digest
+        ):
+            return False
+        return (
+            left.get("source_event_id") == right.get("source_event_id")
+            and _canonical_source_record(left_payload)
+            == _canonical_source_record(right_payload)
+        )
+    return True
+
+
+def _canonical_source_record(payload):
+    if not isinstance(payload, dict):
+        return payload
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in _CANONICAL_SOURCE_METADATA_FIELDS
+    }
+
+
+def _read_lifecycle_record(path, label):
+    path = Path(path)
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError as exc:
+        raise ModelInvocationIntegrityError(
+            f"missing immutable {label} record: {path}"
+        ) from exc
+    try:
+        record = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ModelInvocationIntegrityError(
+            f"invalid immutable {label} record: {path}"
+        ) from exc
+    if not isinstance(record, dict):
+        raise ModelInvocationIntegrityError(
+            f"immutable {label} record is not an object: {path}"
+        )
+    return record, hashlib.sha256(data).hexdigest()
+
+
+def _required_record_text(record, field, label):
+    value = record.get(field) if isinstance(record, dict) else None
+    if not isinstance(value, str) or not value:
+        raise ModelInvocationIntegrityError(
+            f"{label} requires nonempty {field}"
+        )
+    return value
+
+
+def _canonical_lifecycle_event(
+    event_type,
+    record,
+    record_digest,
+    source_path,
+    *,
+    actor,
+    run_id,
+    step_id,
+    source_root,
+):
+    invocation_id = _required_record_text(
+        record,
+        "invocation_id",
+        event_type,
+    )
+    if event_type == "model_invocation_started":
+        source_event_id = invocation_id
+        idempotency_key = f"model-invocation-started:{invocation_id}"
+        event_time = record.get("started_at")
+    elif event_type == "model_invocation_writer_revoked":
+        owner_token = _required_record_text(
+            record,
+            "lifecycle_owner_token",
+            "writer revocation",
+        )
+        source_event_id = (
+            f"{invocation_id}:{owner_token}"
+        )
+        idempotency_key = (
+            "model-invocation-writer-revoked:"
+            f"{invocation_id}:{owner_token}"
+        )
+        event_time = record.get("revoked_at")
+    elif event_type == "model_invocation_usage_recorded":
+        source_event_id = _required_record_text(
+            record,
+            "usage_event_id",
+            "terminal usage",
+        )
+        idempotency_key = source_event_id
+        event_time = record.get("finished_at")
+    else:  # pragma: no cover - guarded by internal callers
+        raise ModelInvocationIntegrityError(
+            f"unsupported canonical lifecycle event type: {event_type}"
+        )
+    if not isinstance(event_time, str) or not event_time:
+        raise ModelInvocationIntegrityError(
+            f"{event_type} requires its immutable source timestamp"
+        )
+    payload = {
+        **record,
+        "_source_artifact_path": _source_artifact_label(
+            source_path,
+            source_root,
+        ),
+        "_source_record_sha256": record_digest,
+    }
+    return {
+        "event_id": None,
+        "sequence": 0,
+        "time": event_time,
+        "event_type": event_type,
+        "actor": actor,
+        "target_agent_id": record.get("agent_id"),
+        "idempotency_key": idempotency_key,
+        "correlation_id": f"model-invocation:{invocation_id}",
+        "payload": payload,
+        "run_id": run_id or record.get("run_id"),
+        "step_id": step_id,
+        "source_event_id": source_event_id,
+        "source_event_sequence": None,
+    }
+
+
+def _source_artifact_label(path, source_root):
+    path = Path(path).resolve()
+    if source_root is not None:
+        source_root = Path(source_root).resolve()
+        if _is_relative_to(path, source_root):
+            return path.relative_to(source_root).as_posix()
+    return str(path)
+
+
+def _read_json_record(path, label):
+    record, _digest = _read_lifecycle_record(path, label)
+    return record
+
+
+def _work_root_for_run(run_dir):
+    run_dir = Path(run_dir).resolve()
+    for parent in (run_dir, *run_dir.parents):
+        if parent.name == "runs":
+            return parent.parent.resolve()
+    raise ModelInvocationIntegrityError(
+        f"author bootstrap run is not below a work-root runs directory: {run_dir}"
+    )
+
+
+def _contained_bootstrap_path(
+    root,
+    relative_path,
+    label,
+    *,
+    require_file=True,
+):
+    if not isinstance(relative_path, str) or not relative_path:
+        raise ModelInvocationIntegrityError(
+            f"author bootstrap requires nonempty {label}"
+        )
+    relative = Path(relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ModelInvocationIntegrityError(
+            f"author bootstrap {label} must be a contained relative path"
+        )
+    candidate = (Path(root) / relative).resolve()
+    if not _is_relative_to(candidate, Path(root).resolve()):
+        raise ModelInvocationIntegrityError(
+            f"author bootstrap {label} escapes the work root"
+        )
+    if require_file and not candidate.is_file():
+        raise ModelInvocationIntegrityError(
+            f"author bootstrap {label} is not a file"
+        )
+    if not require_file and not candidate.is_dir():
+        raise ModelInvocationIntegrityError(
+            f"author bootstrap {label} is not a directory"
+        )
+    return candidate
+
+
+def _validate_file_digest(path, expected_digest, label):
+    if (
+        not isinstance(expected_digest, str)
+        or len(expected_digest) != 64
+        or any(character not in "0123456789abcdef" for character in expected_digest)
+    ):
+        raise ModelInvocationIntegrityError(
+            f"author bootstrap has invalid {label} SHA-256"
+        )
+    actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    if not secrets.compare_digest(actual, expected_digest):
+        raise ModelInvocationIntegrityError(
+            f"author bootstrap {label} digest mismatch"
+        )
+
+
+def _is_relative_to(path, root):
+    try:
+        Path(path).relative_to(Path(root))
+    except ValueError:
+        return False
+    return True
+
+
+def _coerce_canonical_events(events):
+    if isinstance(events, (str, os.PathLike, Path)):
+        return _read_canonical_events(events)
+    if not isinstance(events, (list, tuple)):
+        events = list(events)
+    if not all(isinstance(event, dict) for event in events):
+        raise ModelInvocationIntegrityError(
+            "canonical event replay requires event objects"
+        )
+    return list(events)
+
+
+def _insert_replayed_record(target, key, record, label):
+    prior = target.get(key)
+    if prior is not None and prior != record:
+        raise ModelInvocationIntegrityError(
+            f"conflicting duplicate {label} ID: {key}"
+        )
+    target.setdefault(key, record)
+
+
+def _unavailable_provider_lineage(reason):
+    return {
+        "provider_lineage_status": "unavailable",
+        "provider_lineage_error": reason,
+    }
 
 
 def _read_json_if_exists(path):

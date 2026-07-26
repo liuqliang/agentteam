@@ -63,6 +63,9 @@ from agentteam_runtime.model_invocation import (
     ProviderExecution,
     SystemdGatedExecution,
     assess_execution_group_fence,
+    authoritative_provider_snapshot,
+    import_model_invocation_lifecycle,
+    replay_model_invocation_events,
 )
 from agentteam_runtime.two_phase_scheduler import _operator_task_report, _runtime_evidence_summary
 
@@ -12145,6 +12148,457 @@ class M0RuntimeTests(unittest.TestCase):
                 2,
             )
 
+    def test_canonical_lifecycle_import_replay_is_idempotent_and_conflict_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / "events.jsonl"
+            first = InvocationLifecycle(
+                root,
+                _model_invocation_context(
+                    coverage_class="supported_model_invocation",
+                    attempt_id="ATTEMPT-RETRY-001",
+                ),
+                invocation_id="INV-canonical-retry-001",
+                started_at="2026-07-23T00:00:00Z",
+            )
+            first.publish_start(_supported_execution_group_identity())
+
+            imported_open = import_model_invocation_lifecycle(
+                events_path,
+                first.started_path,
+                source_root=root,
+            )
+            replayed_open = replay_model_invocation_events(events_path)
+
+            self.assertEqual(len(imported_open), 1)
+            self.assertEqual(replayed_open["invocation_count"], 1)
+            self.assertEqual(
+                replayed_open["open_invocation_ids"],
+                ["INV-canonical-retry-001"],
+            )
+
+            first.finalize(
+                "completed",
+                stdout=json.dumps(
+                    {
+                        "type": "turn_completed",
+                        "usage": {
+                            "input_tokens": 8,
+                            "cached_input_tokens": 2,
+                            "output_tokens": 3,
+                            "reasoning_tokens": 1,
+                            "total_tokens": 11,
+                        },
+                    }
+                ),
+                finished_at="2026-07-23T00:00:01Z",
+            )
+            self.assertEqual(
+                len(
+                    import_model_invocation_lifecycle(
+                        events_path,
+                        first.started_path,
+                        source_root=root,
+                    )
+                ),
+                1,
+            )
+            self.assertEqual(
+                import_model_invocation_lifecycle(
+                    events_path,
+                    first.started_path,
+                    source_root=root,
+                ),
+                [],
+            )
+
+            second = InvocationLifecycle(
+                root,
+                _model_invocation_context(
+                    coverage_class="supported_model_invocation",
+                    attempt_id="ATTEMPT-RETRY-001",
+                ),
+                invocation_id="INV-canonical-retry-002",
+                started_at="2026-07-23T00:00:02Z",
+            )
+            second.publish_start(_supported_execution_group_identity())
+            second.finalize(
+                "completed",
+                stdout=json.dumps(
+                    {
+                        "type": "turn_completed",
+                        "usage": {
+                            "input_tokens": 13,
+                            "cached_input_tokens": 4,
+                            "output_tokens": 6,
+                            "reasoning_tokens": 2,
+                            "total_tokens": 19,
+                        },
+                    }
+                ),
+                finished_at="2026-07-23T00:00:03Z",
+            )
+            import_model_invocation_lifecycle(
+                events_path,
+                second.started_path,
+                source_root=root,
+            )
+            events = _read_jsonl_for_test(events_path)
+            projection = replay_model_invocation_events(events + events)
+
+            self.assertEqual(projection["invocation_count"], 2)
+            self.assertEqual(projection["terminal_count"], 2)
+            self.assertEqual(projection["open_invocation_ids"], [])
+            self.assertEqual(
+                projection["reported_token_totals"]["total_tokens"],
+                30,
+            )
+            usage_event = next(
+                event
+                for event in events
+                if event["event_type"] == "model_invocation_usage_recorded"
+            )
+            self.assertEqual(
+                usage_event["idempotency_key"],
+                usage_event["payload"]["usage_event_id"],
+            )
+            conflicting = deepcopy(usage_event)
+            conflicting["event_id"] = "EVT-9999"
+            conflicting["sequence"] = 9999
+            conflicting["payload"]["terminal_status"] = "failed"
+            with self.assertRaises(ModelInvocationIntegrityError):
+                replay_model_invocation_events([*events, conflicting])
+
+            revoked = InvocationLifecycle(
+                root / "revoked-authority",
+                _model_invocation_context(
+                    coverage_class="not_applicable_adapter",
+                ),
+                invocation_id="INV-canonical-revoked-001",
+                started_at="2026-07-23T00:00:04Z",
+            )
+            revoked.publish_start(ExecutionGroupIdentity.not_applicable())
+            revocation = revoked.revoke_writer(
+                "LEASE-001",
+                revoked_by="recovery-controller",
+                reason="worker_process_death_confirmed",
+                revoked_at="2026-07-23T00:00:05Z",
+            )
+            revoked_events_path = root / "revoked-events.jsonl"
+            import_model_invocation_lifecycle(
+                revoked_events_path,
+                revoked.started_path,
+                source_root=root,
+            )
+            revocation_event = next(
+                event
+                for event in _read_jsonl_for_test(revoked_events_path)
+                if event["event_type"]
+                == "model_invocation_writer_revoked"
+            )
+            self.assertEqual(
+                revocation_event["idempotency_key"],
+                (
+                    "model-invocation-writer-revoked:"
+                    f"{revocation['invocation_id']}:"
+                    f"{revocation['lifecycle_owner_token']}"
+                ),
+            )
+
+    def test_scheduler_collect_imports_every_worker_retry_lifecycle_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=[],
+                tasks=[_backlog_task("TASK-001", write_scope=[])],
+            )
+            _write_agent_pool_with_agent_ids(
+                agent_pool_path,
+                ["agent-repo-map"],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            for index in (1, 2):
+                lifecycle = InvocationLifecycle(
+                    output_dir,
+                    _model_invocation_context(
+                        coverage_class="not_applicable_adapter",
+                        attempt_id=inflight["attempt_id"],
+                        runtime_execution_session_id=inflight[
+                            "runtime_session_id"
+                        ],
+                        lifecycle_owner_token=inflight["lease_id"],
+                        lease_id=inflight["lease_id"],
+                        agent_id=inflight["agent_id"],
+                    ),
+                    invocation_id=f"INV-worker-retry-{index:03d}",
+                    started_at=f"2026-07-23T00:00:0{index}Z",
+                )
+                lifecycle.publish_start(
+                    ExecutionGroupIdentity.not_applicable()
+                )
+                lifecycle.finalize(
+                    "completed",
+                    finished_at=f"2026-07-23T00:00:1{index}Z",
+                )
+            _append_test_jsonl(
+                Path(inflight["outbox_path"]),
+                [
+                    {
+                        "message_type": "runtime_result",
+                        "payload": {
+                            "source_message_id": inflight["message_id"],
+                            "result_status": "completed",
+                            "changed_files": [],
+                            "output": {},
+                        },
+                    }
+                ],
+            )
+
+            collected = scheduler.collect_ready_results()
+            projection = replay_model_invocation_events(
+                output_dir / "events.jsonl"
+            )
+
+            self.assertEqual(collected["collect_status"], "collected")
+            self.assertEqual(projection["invocation_count"], 2)
+            self.assertEqual(projection["terminal_count"], 2)
+            lifecycle_events = [
+                event
+                for event in _read_jsonl_for_test(output_dir / "events.jsonl")
+                if event["event_type"].startswith("model_invocation_")
+            ]
+            self.assertEqual(len(lifecycle_events), 4)
+            scheduler.collect_ready_results()
+            replay = replay_model_invocation_events(
+                output_dir / "events.jsonl"
+            )
+            self.assertEqual(replay["invocation_count"], 2)
+
+    def test_scheduler_imports_author_bootstrap_before_worker_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_root = tmp_path / "work"
+            output_dir = work_root / "runs" / "author-bootstrap-run"
+            author_root = work_root / "drafts" / ".author-bootstrap"
+            lifecycle = InvocationLifecycle(
+                author_root,
+                _model_invocation_context(
+                    coverage_class="not_applicable_adapter",
+                    task_id=None,
+                    attempt_id=None,
+                    runtime_execution_session_id="AUTHOR-SESSION-001",
+                    lifecycle_owner_token="AUTHOR-OWNER-001",
+                    agent_id="taskpack-author",
+                    agent_role="taskpack_author",
+                    role="taskpack_author",
+                    usage_stage="taskpack_author",
+                ),
+                invocation_id="INV-author-before-dispatch",
+                started_at="2026-07-23T00:00:00Z",
+            )
+            lifecycle.publish_start(ExecutionGroupIdentity.not_applicable())
+            terminal = lifecycle.finalize(
+                "completed",
+                terminal_writer="taskpack_author",
+                finished_at="2026-07-23T00:00:01Z",
+            )
+            state_dir = output_dir / "state"
+            state_dir.mkdir(parents=True)
+            started_relative = lifecycle.started_path.relative_to(work_root)
+            terminal_relative = lifecycle.terminal_path.relative_to(work_root)
+            (state_dir / "author_lifecycle_bootstrap.v1.json").write_text(
+                json.dumps(
+                    {
+                        "bootstrap_schema_version": (
+                            "author_lifecycle_bootstrap.v1"
+                        ),
+                        "author_context_path": str(
+                            author_root.relative_to(work_root)
+                        ),
+                        "invocation_id": lifecycle.invocation_id,
+                        "usage_event_id": terminal["usage_event_id"],
+                        "started_path": str(started_relative),
+                        "started_sha256": hashlib.sha256(
+                            lifecycle.started_path.read_bytes()
+                        ).hexdigest(),
+                        "terminal_path": str(terminal_relative),
+                        "terminal_sha256": hashlib.sha256(
+                            lifecycle.terminal_path.read_bytes()
+                        ).hexdigest(),
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=[],
+                tasks=[_backlog_task("TASK-001", write_scope=[])],
+            )
+            _write_agent_pool_with_agent_ids(
+                agent_pool_path,
+                ["agent-repo-map"],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+            )
+
+            scheduler.dispatch_ready()
+
+            events = _read_jsonl_for_test(output_dir / "events.jsonl")
+            start_event = next(
+                event
+                for event in events
+                if event["event_type"] == "model_invocation_started"
+            )
+            usage_event = next(
+                event
+                for event in events
+                if event["event_type"]
+                == "model_invocation_usage_recorded"
+            )
+            dispatch_event = next(
+                event
+                for event in events
+                if event["event_type"] == "message_dispatched"
+            )
+            self.assertLess(start_event["sequence"], dispatch_event["sequence"])
+            self.assertLess(usage_event["sequence"], dispatch_event["sequence"])
+            self.assertEqual(
+                start_event["source_event_id"],
+                lifecycle.invocation_id,
+            )
+
+    def test_scheduler_hydrates_provider_predecessor_from_canonical_lineage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            output_dir.mkdir()
+            predecessor = InvocationLifecycle(
+                output_dir,
+                _model_invocation_context(
+                    coverage_class="supported_model_invocation",
+                    provider_usage_scope="session_cumulative",
+                    provider_session_lock_held=True,
+                    provider_project_binding_valid=True,
+                ),
+                invocation_id="INV-provider-canonical-001",
+                started_at="2026-07-23T00:00:00Z",
+            )
+            predecessor.publish_start(_supported_execution_group_identity())
+            predecessor.finalize(
+                "completed",
+                stdout=json.dumps(
+                    {
+                        "type": "turn_completed",
+                        "provider_usage_scope": "session_cumulative",
+                        "provider_session_id": "provider-session-canonical",
+                        "provider_turn_id": "turn-canonical-1",
+                        "usage": {
+                            "input_tokens": 100,
+                            "cached_input_tokens": 20,
+                            "output_tokens": 30,
+                            "reasoning_tokens": 5,
+                            "total_tokens": 130,
+                        },
+                    }
+                ),
+                finished_at="2026-07-23T00:00:01Z",
+            )
+            import_model_invocation_lifecycle(
+                output_dir / "events.jsonl",
+                predecessor.started_path,
+                source_root=output_dir,
+            )
+            canonical_events = _read_jsonl_for_test(
+                output_dir / "events.jsonl"
+            )
+            lineage = authoritative_provider_snapshot(
+                list(reversed(canonical_events)),
+                "provider-session-canonical",
+            )
+            self.assertEqual(
+                lineage["provider_predecessor_invocation_id"],
+                predecessor.invocation_id,
+            )
+            self.assertEqual(
+                lineage["provider_predecessor_usage_snapshot"]["total_tokens"],
+                130,
+            )
+
+            agent_pool_path = tmp_path / "agent_pool.json"
+            task = _backlog_task(
+                "TASK-RESUME-001",
+                write_scope=[],
+            )
+            task.update(
+                {
+                    "requested_provider_session_id": (
+                        "provider-session-canonical"
+                    ),
+                    "provider_usage_scope": "session_cumulative",
+                }
+            )
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=[],
+                tasks=[task],
+            )
+            _write_agent_pool_with_agent_ids(
+                agent_pool_path,
+                ["agent-repo-map"],
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+            )
+
+            scheduler.dispatch_ready()
+
+            inflight = scheduler.state["inflight_attempts"][0]
+            message = _read_first_jsonl(
+                output_dir
+                / "steps"
+                / inflight["step_id"]
+                / "mailboxes"
+                / inflight["agent_id"]
+                / "inbox.jsonl"
+            )
+            payload = message["payload"]
+            self.assertEqual(
+                payload["provider_predecessor_invocation_id"],
+                predecessor.invocation_id,
+            )
+            self.assertEqual(
+                payload["provider_predecessor_turn_id"],
+                "turn-canonical-1",
+            )
+            self.assertEqual(
+                payload["provider_predecessor_usage_snapshot"]["total_tokens"],
+                130,
+            )
+            self.assertNotEqual(
+                payload["runtime_execution_session_id"],
+                payload["requested_provider_session_id"],
+            )
+
     def test_model_invocation_terminal_is_exclusive_and_revocation_fences_owner(self):
         with tempfile.TemporaryDirectory() as tmp:
             lifecycle = InvocationLifecycle(
@@ -13222,6 +13676,14 @@ def _planner_message(tmp_path):
 
 def _read_first_jsonl(path):
     return json.loads(Path(path).read_text(encoding="utf-8").splitlines()[0])
+
+
+def _read_jsonl_for_test(path):
+    return [
+        json.loads(line)
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def _append_test_jsonl(path, records):

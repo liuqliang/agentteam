@@ -7,6 +7,7 @@ from pathlib import Path
 from .model_invocation import (
     ModelInvocationCall,
     ModelInvocationError,
+    import_registered_controller_lifecycles,
     is_supported_codex_command,
 )
 
@@ -22,6 +23,7 @@ _FAILURE_TEST_PATTERNS = [
 
 def build_runtime_diagnostic_context(run_dir, topic=None, text_limit=_DEFAULT_TEXT_LIMIT):
     run_dir = Path(run_dir).resolve()
+    import_registered_controller_lifecycles(run_dir)
     events = _read_jsonl(run_dir / "events.jsonl")
     integration_queue = _read_json_if_exists(run_dir / "state" / "integration_queue.json")
     state = _read_json_if_exists(run_dir / "state" / "two_phase_scheduler_state.json")
@@ -206,6 +208,7 @@ def run_runtime_diagnostic_chat(
             timeout_seconds=timeout_seconds,
         )
     except ModelInvocationError as exc:
+        canonical_events = import_registered_controller_lifecycles(run_dir)
         return {
             "chat_status": "failed",
             "agent_role": "runtime_diagnostic_agent",
@@ -216,6 +219,9 @@ def run_runtime_diagnostic_chat(
             "controller_claim_path": str(
                 authority_root / "controller_claim.json"
             ),
+            "canonical_event_ids": [
+                event["event_id"] for event in canonical_events
+            ],
             "error": str(exc)[:500],
         }
     if execution.launch_failed:
@@ -235,6 +241,7 @@ def run_runtime_diagnostic_chat(
         execution,
         terminal_writer="runtime_diagnostic_controller",
     )
+    canonical_events = import_registered_controller_lifecycles(run_dir)
     if execution.stdout:
         sys.stdout.write(execution.stdout)
         sys.stdout.flush()
@@ -248,6 +255,9 @@ def run_runtime_diagnostic_chat(
         "run_dir": str(run_dir),
         "runtime_execution_session_id": runtime_session_id,
         "controller_claim_path": str(authority_root / "controller_claim.json"),
+        "canonical_event_ids": [
+            event["event_id"] for event in canonical_events
+        ],
         "model_invocation": {
             **invocation.lifecycle.summary(),
             "usage_event_id": terminal["usage_event_id"],
