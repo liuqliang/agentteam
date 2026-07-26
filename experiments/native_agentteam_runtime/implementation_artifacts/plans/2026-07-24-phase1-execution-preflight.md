@@ -967,8 +967,10 @@ must exactly match the loaded release and its new binding.
     identity and release binding validate;
 15. `frozen/vN/<taskpack>` and `runs/vN/<taskpack>` resolve to the same work
     root; explicit-taskpack, explicit-run, and implicit-latest continuation
-    recover the matching frozen namespace; paths under different work roots
-    fail before runtime import;
+    recover the matching frozen namespace; initial flat/versioned and
+    cross-version mismatches fail before runtime import; identity-marked flat
+    run IDs such as `v2` remain direct runs rather than namespaces; paths under
+    different work roots fail before runtime import;
 16. a release-bound frozen taskpack protects its release from project and
     global garbage collection before run creation.
 

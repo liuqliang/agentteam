@@ -18860,11 +18860,31 @@ class TaskpackTests(unittest.TestCase):
                 work_root / "frozen" / "v2",
             )
             frozen = Path(frozen_result["frozen_taskpack_dir"])
+            flat_frozen = Path(
+                freeze_taskpack(
+                    draft["taskpack_dir"],
+                    work_root / "frozen",
+                )["frozen_taskpack_dir"]
+            )
             run_root = work_root / "runs" / "v2"
             launcher = runpy.run_path(
                 str(Path(__file__).resolve().parents[4] / "agentteam")
             )
 
+            for mismatched_frozen, mismatched_run_root in (
+                (frozen, work_root / "runs"),
+                (frozen, work_root / "runs" / "v3"),
+                (flat_frozen, work_root / "runs" / "v2"),
+            ):
+                with self.assertRaises(launcher["LauncherError"]):
+                    launcher["_initial_run_selection"](
+                        [
+                            "run",
+                            str(mismatched_frozen),
+                            "--run-root",
+                            str(mismatched_run_root),
+                        ]
+                    )
             selection = launcher["_initial_run_selection"](
                 [
                     "run",
@@ -19008,6 +19028,33 @@ class TaskpackTests(unittest.TestCase):
                         str(tmp_path / "other-work" / "runs" / "v2"),
                     ]
                 )
+
+    def test_pre04_08c_flat_vn_run_id_is_not_treated_as_namespace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            release = _pre04_release_fixture(work_root, "release-1")
+            pair = publish_implementation_run(
+                work_root,
+                project_key="pre04",
+                run_id="v2",
+                taskpack_id="v2",
+                release_identity=release,
+            )
+            launcher = runpy.run_path(
+                str(Path(__file__).resolve().parents[4] / "agentteam")
+            )
+
+            runtime_selected = select_latest_implementation_run(
+                work_root,
+                expected_project_key="pre04",
+            )
+            launcher_selected = launcher["_latest_bound_run"](
+                work_root,
+                "pre04",
+            )
+
+            self.assertEqual(runtime_selected["run_dir"], pair["run_dir"])
+            self.assertEqual(launcher_selected["run_dir"], pair["run_dir"])
 
     def test_pre04_09_acceptance_evidence_does_not_replace_latest_implementation(self):
         with tempfile.TemporaryDirectory() as tmp:

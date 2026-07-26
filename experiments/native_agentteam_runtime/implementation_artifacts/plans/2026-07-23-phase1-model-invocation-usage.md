@@ -1011,7 +1011,9 @@ G5 passes only when:
 - bounded version subdirectories below the same `frozen` and `runs`
   namespaces resolve to one work root without moving immutable earlier
   taskpack or run evidence, and explicit-taskpack, explicit-run, and implicit
-  latest continuation all recover the matching frozen namespace;
+  latest continuation all recover the matching frozen namespace; initial
+  launch rejects flat/versioned or cross-version mismatches, while an
+  identity-marked flat run ID such as `v2` remains a direct run;
 - manifest or source-commit mismatch fails before any worker/provider action;
 - release garbage collection protects every valid bound run release and every
   release-bound frozen taskpack release before run creation;

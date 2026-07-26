@@ -882,6 +882,19 @@ def _iter_versioned_artifact_directories(root, *, artifact_kind):
             raise AgentTeamReleaseError(
                 f"unsafe direct {artifact_kind} child blocks scan: {child.name}"
             )
+        marker_path = (
+            child / "state" / "run_identity.v1.json"
+            if artifact_kind == "run"
+            else child / "taskpack.yaml"
+        )
+        if marker_path.exists() or marker_path.is_symlink():
+            if marker_path.is_symlink() or not marker_path.is_file():
+                raise AgentTeamReleaseError(
+                    f"unsafe direct {artifact_kind} marker blocks scan: "
+                    f"{child.name}"
+                )
+            yield child
+            continue
         if not RUN_NAMESPACE_PATTERN.fullmatch(child.name):
             yield child
             continue

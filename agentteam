@@ -131,6 +131,23 @@ def _initial_run_selection(argv):
             "approval-bound frozen taskpack and --run-root do not resolve to the same work root"
         )
     work_root = frozen_work_root or run_work_root or run_root.parent.resolve()
+    if frozen_work_root and run_work_root and frozen_work_root == run_work_root:
+        frozen_namespace = _artifact_version_namespace(
+            frozen,
+            work_root,
+            "frozen",
+            taskpack_id,
+        )
+        run_namespace = _artifact_version_namespace(
+            run_dir,
+            work_root,
+            "runs",
+            taskpack_id,
+        )
+        if frozen_namespace != run_namespace:
+            raise LauncherError(
+                "frozen taskpack and run directory use different version namespaces"
+            )
     profile = _profile_from_project_root(taskpack.get("project_root"))
     project_key = (
         profile.get("project_key")
@@ -162,6 +179,26 @@ def _work_root_for_namespace(path, namespace):
             return current.parent.resolve()
         current = current.parent
     return None
+
+
+def _artifact_version_namespace(path, work_root, namespace, leaf_id):
+    path = Path(path).resolve()
+    namespace_root = Path(work_root).resolve() / namespace
+    try:
+        relative = path.relative_to(namespace_root)
+    except ValueError as exc:
+        raise LauncherError(
+            f"{namespace} artifact is outside the selected work root"
+        ) from exc
+    if relative.parts == (leaf_id,):
+        return None
+    if (
+        len(relative.parts) == 2
+        and RUN_NAMESPACE_PATTERN.fullmatch(relative.parts[0])
+        and relative.parts[1] == leaf_id
+    ):
+        return relative.parts[0]
+    raise LauncherError(f"{namespace} artifact has an unsupported namespace")
 
 
 def _existing_run_selection(argv, command):
@@ -267,6 +304,14 @@ def _iter_run_identity_directories(run_root):
             raise LauncherError(
                 f"unsafe run child blocks implicit selection: {child.name}"
             )
+        identity_path = child / "state" / "run_identity.v1.json"
+        if identity_path.exists() or identity_path.is_symlink():
+            if identity_path.is_symlink() or not identity_path.is_file():
+                raise LauncherError(
+                    f"unsafe direct run identity blocks scan: {child.name}"
+                )
+            yield child
+            continue
         if not RUN_NAMESPACE_PATTERN.fullmatch(child.name):
             yield child
             continue
