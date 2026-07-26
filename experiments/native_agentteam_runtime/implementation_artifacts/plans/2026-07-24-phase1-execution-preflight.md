@@ -301,8 +301,9 @@ worker to read the blueprint and select the object matching its dispatched
 ### Acceptance
 
 - the tracked Phase 1 blueprint validates;
-- its dry materialization contains exactly 11 tasks, P1-01 through P1-06D,
-  and 10 declared dependency edges;
+- after the recovered P1-01 seed is committed, its v2 dry materialization
+  contains exactly 10 remaining tasks, P1-02A through P1-06D, and 9 declared
+  dependency edges;
 - all negative cases fail closed;
 - package validation succeeds;
 - focused tests and the full native-runtime discovery suite pass.

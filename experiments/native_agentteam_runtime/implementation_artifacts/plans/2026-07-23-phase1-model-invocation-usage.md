@@ -744,7 +744,7 @@ PRE-00/PRE-01/PRE-02/PRE-03A-D/PRE-04 runtime prerequisites, operator merge, and
   -> P0-A readiness contract and fail-closed pilot guard
   -> P1-00 contract review and operator approval (before freeze)
   -> clean tracked source commit and G0-G5 verification
-  -> P1-01 schema and parser
+  -> recovered and independently verified P1-01 schema/parser seed at bc38dfb
   -> P1-02A worker adapter terminal capture
   -> P1-02B mailbox, stage, and scheduler propagation
   -> P1-03 author and follow-up capture
@@ -760,11 +760,12 @@ PRE-00/PRE-01/PRE-02/PRE-03A-D/PRE-04 runtime prerequisites, operator merge, and
   -> operator integration review
 ```
 
-Phase 1A contains the pre-freeze P1-00 review and P1-01 through P1-04B. It is
-the capture, identity, authority, and replay gate. Phase 1B contains P1-05
-through P1-06E and is the projection, query, and end-to-end verification gate.
-Phase 1B must consume a verified Phase 1A integration baseline; it must not
-compensate for incomplete capture inside SQL or report rendering.
+Phase 1A contains the pre-freeze P1-00 review, the recovered P1-01 seed, and
+P1-02A through P1-04B. It is the capture, identity, authority, and replay gate.
+Phase 1B contains P1-05 through P1-06E and is the projection, query, and
+end-to-end verification gate. Phase 1B must consume a verified Phase 1A
+integration baseline; it must not compensate for incomplete capture inside SQL
+or report rendering.
 
 Use one current integration baseline during frozen-backlog execution. Every
 later task starts from the verified integration head containing its
@@ -827,6 +828,15 @@ integration verification correctly selected the candidate worktree through
 own module root. Commit `78d67d5` removes that outer-only variable from primary
 and worker-added integration verification environments. The v2 review binds
 the corrected release; it does not rewrite or delete v1 evidence.
+
+The accepted P1-01 patch from that stopped run was recovered from its immutable
+attempt artifact, independently reviewed, and verified with the focused
+19-test contract suite plus the unrestricted 640-test native-runtime suite.
+Commit `bc38dfb753de6424935888439965add16197c351` is therefore a completed seed,
+not a v2 backlog item. The v2 blueprint records that exact commit, starts at
+P1-02A, and gives P1-02A bounded read access to the recovered schemas, parser,
+event vocabulary, and tests. This avoids charging a second model invocation
+for byte-equivalent P1-01 work while preserving the original v1 run evidence.
 
 It conforms to:
 
@@ -1014,9 +1024,11 @@ package:
   apply a taskpack-ID override to this approved milestone;
 - include `implementation_worker` in the execution agent pool with a Codex role
   profile;
-- materialize P1-01, P1-02A, P1-02B, P1-03, P1-04A, P1-04B, P1-05, P1-06A,
-  P1-06B, P1-06C, and P1-06D in one frozen package with the dependency chain
-  declared above;
+- require the source baseline to contain the exact recovered P1-01 seed commit
+  `bc38dfb753de6424935888439965add16197c351`;
+- materialize P1-02A, P1-02B, P1-03, P1-04A, P1-04B, P1-05, P1-06A, P1-06B,
+  P1-06C, and P1-06D in one frozen package with the dependency chain declared
+  above; P1-02A is the only root item;
 - use the repository grounding section of this tracked plan as bounded read
   context instead of dispatching another repo-map model call;
 - preserve each blueprint task's acceptance criteria, stop condition, and
@@ -1026,8 +1038,6 @@ package:
   receipts as pending;
 - keep execution items within three write-scope entries except these
   digest-bound exact-path cases:
-  - P1-01 uses seven entries so schema and parser changes remain explicit
-    instead of granting directory-wide access over approved schemas;
   - P1-03 uses eleven entries because the author, diagnostic, and six tracked
     development-smoke callers must cross one shared lifecycle boundary in the
     same verified change, with two focused test files;
@@ -1108,6 +1118,8 @@ event semantics. This is the only architecture gate inside Phase 1.
 **Risk:** L1
 **Role:** `implementation_worker`
 **Depends on:** P1-00 approval and G0-G5 preflight
+**Execution status:** completed and independently verified seed at
+`bc38dfb753de6424935888439965add16197c351`; excluded from the v2 backlog
 
 ### Objective
 
