@@ -1244,7 +1244,9 @@ def _rename_noreplace(source, target):
     if renameat2(-100, os.fsencode(source), -100, os.fsencode(target), 1) != 0:
         error = ctypes.get_errno()
         if error in {errno.EEXIST, errno.ENOTEMPTY}:
-            raise AgentTeamReleaseError(f"run already exists: {target}")
+            raise AgentTeamReleaseError(
+                f"atomic publication target already exists: {target}"
+            )
         raise OSError(error, os.strerror(error), str(target))
 
 

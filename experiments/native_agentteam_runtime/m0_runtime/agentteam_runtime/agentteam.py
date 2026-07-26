@@ -1894,18 +1894,11 @@ def _handle_taskpack_blueprint_materialize(
     )
     frozen = None
     if freeze:
-        frozen_dir = (Path(frozen_root).resolve() / manifest["taskpack_id"]).resolve()
-        frozen_dir_existed = frozen_dir.exists()
-        try:
-            frozen = freeze_taskpack(
-                manifest["taskpack_dir"],
-                frozen_root,
-                expected_authoring_mode="blueprint_materialized",
-            )
-        except Exception:
-            if not frozen_dir_existed and frozen_dir.exists():
-                shutil.rmtree(frozen_dir)
-            raise
+        frozen = freeze_taskpack(
+            manifest["taskpack_dir"],
+            frozen_root,
+            expected_authoring_mode="blueprint_materialized",
+        )
     status = "dry-run" if dry_run else ("frozen" if frozen else "draft")
     frozen_dir = frozen["frozen_taskpack_dir"] if frozen else None
     summary = {

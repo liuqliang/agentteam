@@ -1111,7 +1111,7 @@ class TaskpackTests(unittest.TestCase):
             self.assertFalse(output_root.exists())
             self.assertFalse(frozen_root.exists())
 
-    def test_taskpack_materialize_handler_removes_partial_frozen_blueprint_on_failure(self):
+    def test_blueprint_materialize_handler_preserves_competing_publish(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             repo = tmp_path / "repo"
@@ -1120,7 +1120,7 @@ class TaskpackTests(unittest.TestCase):
             _init_repo(repo)
             blueprint_path, _blueprint = _blueprint_fixture(repo)
 
-            def fail_after_partial_freeze(
+            def fail_after_competing_publish(
                 _taskpack_dir,
                 target_root,
                 *,
@@ -1130,19 +1130,22 @@ class TaskpackTests(unittest.TestCase):
                     expected_authoring_mode,
                     "blueprint_materialized",
                 )
-                partial = Path(target_root) / "example-blueprint"
-                partial.mkdir(parents=True)
-                (partial / "taskpack.yaml").write_text("partial", encoding="utf-8")
-                raise TaskpackValidationError("injected freeze failure")
+                competing = Path(target_root) / "example-blueprint"
+                competing.mkdir(parents=True)
+                (competing / "competitor.marker").write_text(
+                    "owned by another publisher",
+                    encoding="utf-8",
+                )
+                raise TaskpackValidationError("publication target exists")
 
             with mock.patch.object(
                 agentteam_module,
                 "freeze_taskpack",
-                side_effect=fail_after_partial_freeze,
+                side_effect=fail_after_competing_publish,
             ):
                 with self.assertRaisesRegex(
                     TaskpackValidationError,
-                    "injected freeze failure",
+                    "publication target exists",
                 ):
                     _handle_taskpack_materialize(
                         SimpleNamespace(
@@ -1161,7 +1164,14 @@ class TaskpackTests(unittest.TestCase):
                     )
 
             self.assertTrue((output_root / "example-blueprint").is_dir())
-            self.assertFalse((frozen_root / "example-blueprint").exists())
+            self.assertEqual(
+                (
+                    frozen_root
+                    / "example-blueprint"
+                    / "competitor.marker"
+                ).read_text(encoding="utf-8"),
+                "owned by another publisher",
+            )
 
     def test_blueprint_freeze_revalidates_approval_and_cleans_failed_freeze(self):
         with tempfile.TemporaryDirectory() as tmp:
