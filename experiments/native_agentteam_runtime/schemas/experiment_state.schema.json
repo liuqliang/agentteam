@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/experiment_state.schema.json",
+  "title": "AgentTeam Phase 2 mutable experiment recovery state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_run_id",
+    "protocol_sha256",
+    "run_manifest_sha256",
+    "status",
+    "state_version",
+    "recoverable",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "experiment_state.v1"
+    },
+    "experiment_run_id": {
+      "$ref": "#/$defs/safe_id"
+    },
+    "protocol_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "run_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "status": {
+      "enum": [
+        "prepared",
+        "resetting",
+        "ready",
+        "running",
+        "evaluating",
+        "finalizing",
+        "completed",
+        "failed",
+        "interrupted",
+        "budget_stopped"
+      ]
+    },
+    "state_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "recoverable": {
+      "type": "boolean"
+    },
+    "snapshot_sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "completed",
+              "failed",
+              "interrupted",
+              "budget_stopped"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "recoverable": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "recoverable": {
+            "const": true
+          }
+        },
+        "required": [
+          "recoverable"
+        ]
+      },
+      "then": {
+        "required": [
+          "snapshot_sequence"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

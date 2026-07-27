@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/experiment_run_binding.schema.json",
+  "title": "AgentTeam Phase 2 immutable experiment run binding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_run_id",
+    "protocol_sha256",
+    "run_manifest_sha256",
+    "mode",
+    "repetition_index",
+    "stable_request_key",
+    "runtime_release",
+    "repository",
+    "bound_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "experiment_run_binding.v1"
+    },
+    "experiment_run_id": {
+      "$ref": "#/$defs/safe_id"
+    },
+    "protocol_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "run_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "mode": {
+      "$ref": "#/$defs/mode"
+    },
+    "repetition_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stable_request_key": {
+      "$ref": "#/$defs/safe_id"
+    },
+    "runtime_release": {
+      "$ref": "#/$defs/runtime_release"
+    },
+    "repository": {
+      "$ref": "#/$defs/repository"
+    },
+    "bound_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "mode": {
+      "enum": [
+        "single_codex",
+        "agentteam_direct",
+        "agentteam_full"
+      ]
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "commit",
+        "tree",
+        "git_object_format"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "tree": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "git_object_format": {
+          "enum": [
+            "sha1",
+            "sha256"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "git_object_format": {
+                "const": "sha1"
+              }
+            },
+            "required": [
+              "git_object_format"
+            ]
+          },
+          "then": {
+            "properties": {
+              "commit": {
+                "pattern": "^[0-9a-f]{40}$"
+              },
+              "tree": {
+                "pattern": "^[0-9a-f]{40}$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "git_object_format": {
+                "const": "sha256"
+              }
+            },
+            "required": [
+              "git_object_format"
+            ]
+          },
+          "then": {
+            "properties": {
+              "commit": {
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "tree": {
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "runtime_release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "release_id",
+        "release_root",
+        "runtime_root",
+        "release_manifest_sha256",
+        "source_commit",
+        "git_object_format"
+      ],
+      "properties": {
+        "release_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "release_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runtime_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "release_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_commit": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "git_object_format": {
+          "enum": [
+            "sha1",
+            "sha256"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "git_object_format": {
+                "const": "sha1"
+              }
+            },
+            "required": [
+              "git_object_format"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_commit": {
+                "pattern": "^[0-9a-f]{40}$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "git_object_format": {
+                "const": "sha256"
+              }
+            },
+            "required": [
+              "git_object_format"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_commit": {
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "safe_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

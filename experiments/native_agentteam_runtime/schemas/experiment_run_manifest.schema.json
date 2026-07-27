@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/experiment_run_manifest.schema.json",
+  "title": "AgentTeam Phase 2 immutable experiment run manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_run_id",
+    "protocol_sha256",
+    "mode",
+    "repetition_index",
+    "stable_request_key"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "experiment_run_manifest.v2"
+    },
+    "experiment_run_id": {
+      "$ref": "#/$defs/safe_id"
+    },
+    "protocol_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "mode": {
+      "$ref": "#/$defs/mode"
+    },
+    "repetition_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stable_request_key": {
+      "$ref": "#/$defs/safe_id"
+    }
+  },
+  "$defs": {
+    "mode": {
+      "enum": [
+        "single_codex",
+        "agentteam_direct",
+        "agentteam_full"
+      ]
+    },
+    "safe_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
