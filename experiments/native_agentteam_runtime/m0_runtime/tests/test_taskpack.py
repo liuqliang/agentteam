@@ -6488,6 +6488,92 @@ class TaskpackTests(unittest.TestCase):
             {"total": 2, "blocked": 0, "verified": 2},
         )
 
+    def test_gate_schema_from_git_resolves_only_committed_refs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            _init_repo(repo)
+            child_id = "https://agentteam.local/schemas/child.schema.json"
+            _write_json(
+                repo / "schemas" / "child.schema.json",
+                {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "$id": child_id,
+                    "type": "object",
+                    "required": ["value"],
+                    "properties": {"value": {"type": "integer"}},
+                    "additionalProperties": False,
+                },
+            )
+            _write_json(
+                repo / "schemas" / "root.schema.json",
+                {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "$id": "https://agentteam.local/schemas/root.schema.json",
+                    "type": "object",
+                    "required": ["child"],
+                    "properties": {"child": {"$ref": child_id}},
+                    "additionalProperties": False,
+                },
+            )
+            subprocess.run(["git", "add", "schemas"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add referenced schemas"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            head = _git_head(repo)
+
+            with mock.patch(
+                "requests.get",
+                side_effect=AssertionError("schema validation attempted network"),
+            ):
+                digest = agentteam_module._validate_schema_from_git(
+                    repo,
+                    head,
+                    "schemas/root.schema.json",
+                    {"child": {"value": 1}},
+                )
+
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_gate_schema_from_git_rejects_uncommitted_external_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            _init_repo(repo)
+            _write_json(
+                repo / "schemas" / "root.schema.json",
+                {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "$id": "https://agentteam.local/schemas/root.schema.json",
+                    "$ref": "https://example.invalid/missing.schema.json",
+                },
+            )
+            subprocess.run(["git", "add", "schemas"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add unresolved schema"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            with mock.patch(
+                "requests.get",
+                side_effect=AssertionError("schema validation attempted network"),
+            ):
+                with self.assertRaisesRegex(
+                    agentteam_module.AgentTeamCliError,
+                    "committed gate schema reference is unavailable",
+                ):
+                    agentteam_module._validate_schema_from_git(
+                        repo,
+                        _git_head(repo),
+                        "schemas/root.schema.json",
+                        {},
+                    )
+
     def test_post_backlog_gate_seal_register_and_integrate_enforcement(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

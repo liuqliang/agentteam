@@ -18,6 +18,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urldefrag, urljoin
 
 from .diagnostic_chat import (
     DEFAULT_CODEX_TIMEOUT_SECONDS,
@@ -7811,14 +7812,19 @@ def _validate_gate_record_schema(schema_name, value):
     _validate_json_schema(schema, value, source=str(schema_path))
 
 
-def _validate_json_schema(schema, value, *, source):
+def _validate_json_schema(schema, value, *, source, resolver=None):
     try:
         import jsonschema
 
         validator_class = jsonschema.validators.validator_for(schema)
         validator_class.check_schema(schema)
+        validator_options = {
+            "format_checker": jsonschema.FormatChecker(),
+        }
+        if resolver is not None:
+            validator_options["resolver"] = resolver
         errors = sorted(
-            validator_class(schema, format_checker=jsonschema.FormatChecker()).iter_errors(value),
+            validator_class(schema, **validator_options).iter_errors(value),
             key=lambda error: tuple(str(part) for part in error.absolute_path),
         )
     except Exception as exc:
@@ -8174,8 +8180,110 @@ def _schema_from_git(project_root, head, schema_path):
 
 def _validate_schema_from_git(project_root, head, schema_path, value):
     schema, digest = _schema_from_git(project_root, head, schema_path)
-    _validate_json_schema(schema, value, source=f"{head}:{schema_path}")
+    store = _schema_store_from_git(project_root, head, schema_path)
+    _require_closed_schema_refs(
+        schema,
+        store,
+        source=f"{head}:{schema_path}",
+    )
+    try:
+        import jsonschema
+
+        resolver = jsonschema.RefResolver.from_schema(schema, store=store)
+    except Exception as exc:
+        if exc.__class__.__module__.startswith(("jsonschema", "referencing")):
+            raise AgentTeamCliError(
+                "gate schema resolver is invalid",
+                schema_source=f"{head}:{schema_path}",
+                detail=str(exc),
+            ) from exc
+        raise
+    _validate_json_schema(
+        schema,
+        value,
+        source=f"{head}:{schema_path}",
+        resolver=resolver,
+    )
     return digest
+
+
+def _schema_store_from_git(project_root, head, schema_path):
+    schema_directory = Path(schema_path).parent.as_posix()
+    completed = _git_completed(
+        project_root,
+        [
+            "ls-tree",
+            "-r",
+            "--name-only",
+            head,
+            "--",
+            schema_directory,
+        ],
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AgentTeamCliError(
+            "unable to enumerate committed gate schemas",
+            integration_head=head,
+            schema_directory=schema_directory,
+        )
+    store = {}
+    for path in completed.stdout.splitlines():
+        if not path.endswith(".schema.json"):
+            continue
+        document, _digest = _schema_from_git(project_root, head, path)
+        schema_id = document.get("$id")
+        if not isinstance(schema_id, str) or not schema_id.strip():
+            continue
+        if schema_id in store and store[schema_id] != document:
+            raise AgentTeamCliError(
+                "committed gate schemas contain a duplicate $id",
+                schema_id=schema_id,
+            )
+        store[schema_id] = document
+    return store
+
+
+def _require_closed_schema_refs(schema, store, *, source):
+    pending = [schema]
+    visited = set()
+    while pending:
+        document = pending.pop()
+        base_uri = document.get("$id")
+        if not isinstance(base_uri, str):
+            base_uri = ""
+        marker = base_uri or id(document)
+        if marker in visited:
+            continue
+        visited.add(marker)
+        for reference in _schema_references(document):
+            if reference.startswith("#"):
+                continue
+            resolved = urljoin(base_uri, reference)
+            document_uri, _fragment = urldefrag(resolved)
+            if document_uri == base_uri:
+                continue
+            target = store.get(document_uri)
+            if target is None:
+                raise AgentTeamCliError(
+                    "committed gate schema reference is unavailable",
+                    schema_source=source,
+                    schema_reference=reference,
+                    resolved_schema_reference=document_uri,
+                )
+            pending.append(target)
+
+
+def _schema_references(value):
+    if isinstance(value, dict):
+        reference = value.get("$ref")
+        if isinstance(reference, str):
+            yield reference
+        for nested in value.values():
+            yield from _schema_references(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _schema_references(nested)
 
 
 def _gate_review_diff_sha256(project_root, epoch, head, *, expected_paths=None):

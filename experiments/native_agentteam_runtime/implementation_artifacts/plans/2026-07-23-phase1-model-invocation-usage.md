@@ -974,7 +974,9 @@ G4 passes only when the active runtime:
 - requires a separate immutable, interactive, digest-bound operator approval
   before any gate declared `operator_review_required` can pass;
 - loads gate schema bytes from the freshly resolved integration commit with
-  `git show`, binds their digest, and rejects dirty schema paths;
+  `git show`, binds their digest, resolves every non-local `$ref` only from
+  schema documents in that same commit, rejects unresolved references without
+  network access, and rejects dirty schema paths;
 - distinguishes verified backlog completion from milestone completion and
   emits `run_completed` only after all gates pass;
 - keeps terminal, Feishu, status, report, paths, diff, and review commands on

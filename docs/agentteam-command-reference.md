@@ -498,6 +498,10 @@ that does not descend from the validated code, open controller invocations,
 and failed frozen verification. It preserves the old epoch and publishes a new
 epoch with both post-backlog gates pending.
 
+Gate evidence schemas are commit-bound. Validation loads the root schema and
+all referenced local schema documents from the epoch's validated Git commit;
+an unresolved non-local `$ref` fails closed without a network request.
+
 ### Candidate live gate
 
 The presence of these commands, deterministic tests, or worker prose is not
