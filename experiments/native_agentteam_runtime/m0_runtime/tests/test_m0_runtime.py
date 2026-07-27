@@ -50,6 +50,7 @@ from agentteam_runtime import (
 )
 from agentteam_runtime.agentteam import _run_runtime_command_with_progress
 from agentteam_runtime.cli import _run_supervised_two_phase_scheduler
+from agentteam_runtime.experiment_controller import create_experiment_controller
 from agentteam_runtime.m0_runtime import (
     apply_patch_to_integration_worktree,
     ensure_integration_baseline_worktree,
@@ -12237,11 +12238,21 @@ class M0RuntimeTests(unittest.TestCase):
                 agent_pool_path,
                 [("agent-semantic", "semantic_architecture_agent")],
             )
+            controller = create_experiment_controller(
+                output_dir,
+                protocol_id="worker-invocation-inventory",
+                max_total_tokens=1000,
+                max_wall_time_seconds=3600,
+                soft_warning_ratio=0.8,
+                scored=True,
+            )
             scheduler = TwoPhaseFileScheduler(
                 agent_pool_path,
                 backlog_path,
                 output_dir,
                 clock=FixedClock(),
+                experiment_controller_reference=controller.reference,
+                experiment_controller_required=True,
             )
 
             scheduler.dispatch_ready()
@@ -12290,8 +12301,8 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(payload["provider_resume_mode"], "explicit")
             self.assertTrue(payload["experiment_controller_required"])
             self.assertEqual(
-                payload["experiment_controller_reference"]["schema_version"],
-                "experiment_budget_controller_reference.v1",
+                payload["experiment_controller_reference"],
+                controller.reference,
             )
             self.assertEqual(
                 json.dumps(

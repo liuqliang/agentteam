@@ -36,6 +36,11 @@ from .m0_runtime import (
     write_patch_artifact,
 )
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
+from .experiment_controller import (
+    ExperimentControllerIntegrityError,
+    load_experiment_controller,
+    validate_experiment_controller_reference,
+)
 from .notifications import DEFAULT_NOTIFICATION_EVENT_TYPES
 from .operator_control import read_run_stop_request
 from .planner_context import build_planner_context
@@ -60,6 +65,10 @@ from .token_usage import aggregate_token_usage, token_usage_from_result
 
 
 _STOP_SCHEDULER_STATUSES = {"stopped", "stop_requested"}
+_RUN_LOOP_TERMINAL_STATUSES = _STOP_SCHEDULER_STATUSES | {
+    "budget_stopped",
+    "interrupted",
+}
 WORKER_USAGE_STAGE_BY_ROLE = {
     "task_planner": "planner_or_task_slicer",
     "planner": "planner_or_task_slicer",
@@ -120,6 +129,10 @@ class TwoPhaseFileScheduler:
         notification_sink=None,
         invocation_fence_assessor=None,
         invocation_service_stopper=None,
+        experiment_controller_reference=None,
+        experiment_controller_required=False,
+        resume_interrupted_experiment=False,
+        experiment_controller_monotonic=None,
     ):
         if max_inflight < 1:
             raise ValueError("max_inflight must be at least 1")
@@ -129,6 +142,10 @@ class TwoPhaseFileScheduler:
             raise ValueError("lease_timeout_seconds must be at least 0")
         if decomposition_max_waves < 1:
             raise ValueError("decomposition_max_waves must be at least 1")
+        if not isinstance(experiment_controller_required, bool):
+            raise ValueError("experiment_controller_required must be a boolean")
+        if not isinstance(resume_interrupted_experiment, bool):
+            raise ValueError("resume_interrupted_experiment must be a boolean")
         self.agent_pool_path = Path(agent_pool_path)
         self.backlog_path = Path(backlog_path)
         self.output_dir = Path(output_dir)
@@ -162,6 +179,20 @@ class TwoPhaseFileScheduler:
         self.notification_sink = notification_sink
         self.invocation_fence_assessor = invocation_fence_assessor
         self.invocation_service_stopper = invocation_service_stopper
+        self.experiment_controller_reference = (
+            validate_experiment_controller_reference(
+                experiment_controller_reference
+            )
+            if experiment_controller_reference is not None
+            else None
+        )
+        self.experiment_controller_required = bool(
+            experiment_controller_required
+            or self.experiment_controller_reference is not None
+        )
+        self.resume_interrupted_experiment = resume_interrupted_experiment
+        self.experiment_controller_monotonic = experiment_controller_monotonic
+        self.experiment_controller = None
         self.state_path = Path(
             state_path or self.output_dir / "state" / "two_phase_scheduler_state.json"
         )
@@ -169,14 +200,23 @@ class TwoPhaseFileScheduler:
         self.events_path = self.output_dir / "events.jsonl"
         self.run_id = "RUN-TWO-PHASE-SCHEDULER"
         self.state = self._load_or_create_state()
+        self._bind_experiment_controller()
 
     def dispatch_ready(self):
         if self.stop_if_requested():
             return self._stopped_dispatch_result()
         import_author_lifecycle_bootstrap(self.output_dir)
         import_registered_controller_lifecycles(self.output_dir)
+        controller_gate = self._prepare_experiment_dispatch()
+        if controller_gate is not None:
+            return controller_gate
         self._ensure_decomposition_task()
-        capacity = self.max_inflight - len(self.state["inflight_attempts"])
+        effective_max_inflight = (
+            1 if self.experiment_controller is not None else self.max_inflight
+        )
+        capacity = effective_max_inflight - len(
+            self.state["inflight_attempts"]
+        )
         if capacity <= 0:
             self.state["scheduler_status"] = "waiting"
             self._write_state()
@@ -191,8 +231,18 @@ class TwoPhaseFileScheduler:
         self._mark_inflight_agents_busy(agent_pool)
         self._mark_unavailable_agents(agent_pool)
         dispatched = []
+        denied_observation = None
         for task in self._ready_tasks():
             if len(dispatched) >= capacity:
+                break
+            self._validate_trusted_task_controller_authority(task)
+            denied_observation = self._observe_experiment_boundary(
+                "pre_provider_launch"
+            )
+            if (
+                denied_observation is not None
+                and not denied_observation["allow_provider_launch"]
+            ):
                 break
             try:
                 dispatch = self._dispatch_task(agent_pool, task)
@@ -202,12 +252,35 @@ class TwoPhaseFileScheduler:
                 raise
             dispatched.append(dispatch)
 
-        self.state["scheduler_status"] = "running" if dispatched else self._status_without_dispatch()
+        if (
+            denied_observation is not None
+            and not denied_observation["allow_provider_launch"]
+            and not self.state["inflight_attempts"]
+        ):
+            denied_observation = self._observe_experiment_boundary(
+                "post_integration"
+            )
+        controller_status = self.state.get("experiment_controller_status")
+        self.state["scheduler_status"] = (
+            controller_status
+            if controller_status
+            in {"budget_draining", "budget_stopped", "interrupted"}
+            else "running"
+            if dispatched
+            else self._status_without_dispatch()
+        )
         self._write_state()
         if dispatched:
             rebuild_sqlite_state_index(self.state_db_path, self.events_path)
         return {
-            "dispatch_status": "dispatched" if dispatched else "idle",
+            "dispatch_status": (
+                "dispatched"
+                if dispatched
+                else denied_observation["controller_status"]
+                if denied_observation is not None
+                and not denied_observation["allow_provider_launch"]
+                else "idle"
+            ),
             "dispatched_task_ids": [item["task_id"] for item in dispatched],
             "dispatch_count": len(dispatched),
             "inflight_count": len(self.state["inflight_attempts"]),
@@ -216,6 +289,16 @@ class TwoPhaseFileScheduler:
     def collect_ready_results(self):
         if self.stop_if_requested():
             return self._stopped_collect_result()
+        experiment_preparation = self._prepare_experiment_dispatch()
+        if (
+            experiment_preparation is not None
+            and experiment_preparation["dispatch_status"]
+            == "integration_recovery_required"
+        ):
+            return {
+                **self._empty_collect_result(),
+                "collect_status": "integration_recovery_required",
+            }
         import_registered_controller_lifecycles(self.output_dir)
         collected = []
         remaining = []
@@ -225,45 +308,134 @@ class TwoPhaseFileScheduler:
                 inflight["outbox_path"],
                 inflight["message_id"],
             )
-            if result is None:
-                if not self._lease_expired(inflight):
-                    remaining.append(inflight)
-                    continue
+            if result is not None and self.experiment_controller is not None:
                 reconciliation = reconcile_orphaned_invocation(
                     self.output_dir,
                     inflight,
                     fence_assessor=self.invocation_fence_assessor,
                     service_stopper=self.invocation_service_stopper,
                 )
-                if reconciliation["reconciliation_status"] in {
-                    "live",
-                    "open_ambiguous",
-                    "service_stop_required",
+                inflight["invocation_reconciliation"] = reconciliation
+                reconciliation_status = reconciliation[
+                    "reconciliation_status"
+                ]
+                if (
+                    reconciliation_status == "no_invocation"
+                    and self._lease_expired(inflight)
+                ):
+                    suspicious_result = result
+                    suspicious_changed_files = suspicious_result.get(
+                        "changed_files"
+                    )
+                    suspicious_output = suspicious_result.get("output")
+                    result = self._timeout_runtime_result(inflight)
+                    result["output"].update(
+                        {
+                            "error": (
+                                "lease_expired_without_provider_start"
+                            ),
+                            "invocation_reconciliation": reconciliation,
+                            "suspicious_outbox_result": {
+                                "result_status": suspicious_result.get(
+                                    "result_status"
+                                ),
+                                "changed_files_type": type(
+                                    suspicious_changed_files
+                                ).__name__,
+                                "changed_files": [
+                                    value[:500]
+                                    for value in (
+                                        suspicious_changed_files
+                                        if isinstance(
+                                            suspicious_changed_files,
+                                            list,
+                                        )
+                                        else []
+                                    )[:100]
+                                    if isinstance(value, str)
+                                ],
+                                "output_type": type(
+                                    suspicious_output
+                                ).__name__,
+                                "output_keys": sorted(
+                                    str(key)[:200]
+                                    for key in (
+                                        suspicious_output
+                                        if isinstance(
+                                            suspicious_output,
+                                            dict,
+                                        )
+                                        else {}
+                                    )
+                                )[:100],
+                            },
+                        }
+                    )
+                elif reconciliation_status not in {
+                    "terminal_available",
+                    "recovered",
                 }:
-                    inflight["invocation_reconciliation"] = reconciliation
                     remaining.append(inflight)
                     continue
-                result = _runtime_result_from_reconciliation(
-                    inflight,
-                    reconciliation,
-                )
+            if result is None:
+                lease_expired = self._lease_expired(inflight)
+                reconciliation = None
+                if self.experiment_controller is not None or lease_expired:
+                    reconciliation = reconcile_orphaned_invocation(
+                        self.output_dir,
+                        inflight,
+                        fence_assessor=self.invocation_fence_assessor,
+                        service_stopper=self.invocation_service_stopper,
+                    )
+                    inflight["invocation_reconciliation"] = reconciliation
+                    if reconciliation["reconciliation_status"] in {
+                        "live",
+                        "open_ambiguous",
+                        "service_stop_required",
+                    }:
+                        remaining.append(inflight)
+                        continue
+                    result = _runtime_result_from_reconciliation(
+                        inflight,
+                        reconciliation,
+                    )
+                if result is None and not lease_expired:
+                    remaining.append(inflight)
+                    continue
                 if result is None:
                     result = self._timeout_runtime_result(inflight)
-                    result["output"]["invocation_reconciliation"] = reconciliation
+                    result["output"]["invocation_reconciliation"] = (
+                        reconciliation
+                    )
             collected.append(self._collect_result(inflight, result))
 
         self.state["inflight_attempts"] = remaining
+        controller_observation = self._observe_experiment_boundary(
+            "post_integration"
+        )
         self.state["scheduler_status"] = self._status_without_dispatch()
         self._write_state()
         if collected:
             rebuild_sqlite_state_index(self.state_db_path, self.events_path)
-        return {
+        response = {
             "collect_status": "collected" if collected else "idle",
             "collected_task_ids": [item["task_id"] for item in collected],
             "collected_count": len(collected),
             "inflight_count": len(self.state["inflight_attempts"]),
             "results": collected,
         }
+        if controller_observation is not None:
+            response.update(
+                {
+                    "experiment_controller_status": controller_observation[
+                        "controller_status"
+                    ],
+                    "experiment_budget_state": deepcopy(
+                        self.state["experiment_budget_state"]
+                    ),
+                }
+            )
+        return response
 
     def tick(self):
         stopped = self.stop_if_requested()
@@ -271,7 +443,9 @@ class TwoPhaseFileScheduler:
             return stopped
         collect = self.collect_ready_results()
         dispatch = self.dispatch_ready()
-        if collect["collected_count"] or dispatch["dispatch_count"]:
+        if self.state.get("scheduler_status") in _RUN_LOOP_TERMINAL_STATUSES:
+            tick_status = self.state["scheduler_status"]
+        elif collect["collected_count"] or dispatch["dispatch_count"]:
             tick_status = "running"
         elif self.state["inflight_attempts"]:
             tick_status = "waiting"
@@ -312,10 +486,13 @@ class TwoPhaseFileScheduler:
         for _ in range(max_ticks):
             tick_count += 1
             last_tick = self.tick()
-            if last_tick["tick_status"] in _STOP_SCHEDULER_STATUSES:
+            if last_tick["tick_status"] in _RUN_LOOP_TERMINAL_STATUSES:
                 self._emit_run_event_once(
                     "run_stopped",
-                    self._run_event_payload("stopped", {"tick_count": tick_count}),
+                    self._run_event_payload(
+                        last_tick["tick_status"],
+                        {"tick_count": tick_count},
+                    ),
                 )
                 return {
                     **self.summary(),
@@ -368,6 +545,13 @@ class TwoPhaseFileScheduler:
             "events_path": str(self.events_path),
             "state_path": str(self.state_path),
             "state_db_path": str(self.state_db_path),
+            "experiment_controller_status": self.state.get(
+                "experiment_controller_status"
+            ),
+            "experiment_budget_state": deepcopy(
+                self.state.get("experiment_budget_state")
+            ),
+            "integration_active": self.state.get("integration_active", False),
         }
 
     def complete_verified_backlog(self, tick_count):
@@ -468,6 +652,17 @@ class TwoPhaseFileScheduler:
             lease_id=lease_id,
             output_dir=self.output_dir,
             project_root=self.project_root,
+            experiment_controller_reference=(
+                self.experiment_controller_reference
+            ),
+            experiment_controller_required=(
+                self.experiment_controller_required
+            ),
+            experiment_authority_root=(
+                self.experiment_controller_reference["controller_root"]
+                if self.experiment_controller_reference is not None
+                else None
+            ),
         )
         invocation_context = hydrate_provider_predecessor_context(
             invocation_context,
@@ -737,6 +932,9 @@ class TwoPhaseFileScheduler:
         )
 
     def _collect_result(self, inflight, runtime_result):
+        prior_result = self._completed_attempt_result(inflight)
+        if prior_result is not None:
+            return prior_result
         self._import_worker_lifecycles(inflight)
         task = self._task_by_id(inflight["task_id"])
         diff_audit = (
@@ -839,14 +1037,51 @@ class TwoPhaseFileScheduler:
             "integration_queue_status": "not_queued",
             "integration_queue_item_id": None,
             "integration_queue_path": str(integration_queue_path(self.output_dir)),
+            "pre_integration_controller_observation": None,
+            "post_integration_controller_observation": None,
         }
         result.update(_runtime_evidence_summary(task, runtime_result))
-        integration_events = self._integrate_accepted_result(
-            inflight,
-            result,
-            patch_path,
-            outcome,
-        )
+        integration_transaction_active = False
+        pre_integration_observation = None
+        if (
+            outcome["validation_status"] == "accepted"
+            and patch_path
+            and not _integration_blocked_by_evidence(result, patch_path)
+        ):
+            pre_integration_observation = self._observe_experiment_boundary(
+                "pre_integration"
+            )
+            result["pre_integration_controller_observation"] = (
+                deepcopy(pre_integration_observation)
+            )
+        if (
+            pre_integration_observation is not None
+            and not pre_integration_observation["allow_integration"]
+        ):
+            integration_events = self._preserve_accepted_patch(
+                inflight,
+                result,
+                patch_path,
+                pre_integration_observation,
+            )
+        else:
+            integration_transaction_active = bool(
+                outcome["validation_status"] == "accepted"
+                and patch_path
+                and self.integrate_accepted_patch
+                and self.project_root
+                and not _integration_blocked_by_evidence(result, patch_path)
+            )
+            if integration_transaction_active:
+                self.state["integration_active"] = True
+                self.state["integration_attempt_id"] = inflight["attempt_id"]
+                self._write_state()
+            integration_events = self._integrate_accepted_result(
+                inflight,
+                result,
+                patch_path,
+                outcome,
+            )
         decomposition_events = self._apply_decomposition_result(
             inflight,
             runtime_result,
@@ -1108,6 +1343,7 @@ class TwoPhaseFileScheduler:
                 "step_id": inflight["step_id"],
                 "step_status": "retry_routed" if retry_allowed else "processed",
                 "task_id": inflight["task_id"],
+                "attempt_id": inflight["attempt_id"],
                 "attempt_number": inflight["attempt_number"],
                 "validation_status": outcome["validation_status"],
                 "failure_category": result["failure_category"],
@@ -1115,6 +1351,19 @@ class TwoPhaseFileScheduler:
                 "result": result,
             }
         )
+        self._write_state()
+        if integration_transaction_active:
+            self.state["integration_active"] = False
+            self.state.pop("integration_attempt_id", None)
+            self._write_state()
+        post_integration_observation = self._observe_experiment_boundary(
+            "post_integration"
+        )
+        if post_integration_observation is not None:
+            result["post_integration_controller_observation"] = deepcopy(
+                post_integration_observation
+            )
+            self._write_state()
         return result
 
     def _apply_decomposition_result(self, inflight, runtime_result, result, outcome):
@@ -1282,6 +1531,14 @@ class TwoPhaseFileScheduler:
                     or inflight.get("integration_base_sha")
                 ),
             }
+        if result.get("integration_status") == "preserved":
+            return {
+                "task_status": "blocked",
+                "completion_policy": "accepted_patch_preserved_budget_stop",
+                "failure_category": "integration_deferred_budget_stop",
+                "retryable": False,
+                "verified_integration_head_sha": None,
+            }
         if not self.integrate_accepted_patch:
             return {
                 "task_status": "blocked",
@@ -1338,6 +1595,43 @@ class TwoPhaseFileScheduler:
             "retryable": retryable,
             "verified_integration_head_sha": None,
         }
+
+    def _preserve_accepted_patch(
+        self,
+        inflight,
+        result,
+        patch_path,
+        observation,
+    ):
+        result.update(
+            {
+                "integration_status": "preserved",
+                "integration_block_reason": "experiment_budget_stop",
+                "integration_preservation_reason": observation[
+                    "controller_status"
+                ],
+            }
+        )
+        queue = upsert_integration_queue_item(self.output_dir, result)
+        result.update(queue)
+        return [
+            self._event(
+                "integration_deferred_by_experiment_budget",
+                "agent-scheduler",
+                inflight["agent_id"],
+                f"integration-budget-deferred:{inflight['attempt_id']}",
+                inflight["correlation_id"],
+                {
+                    "task_id": inflight["task_id"],
+                    "attempt_id": inflight["attempt_id"],
+                    "lease_id": inflight["lease_id"],
+                    "patch_path": str(patch_path),
+                    "controller_status": observation["controller_status"],
+                    "budget_state": deepcopy(observation["budget_state"]),
+                    **queue,
+                },
+            )
+        ]
 
     def _integrate_accepted_result(self, inflight, result, patch_path, outcome):
         if outcome["validation_status"] != "accepted":
@@ -1784,11 +2078,195 @@ class TwoPhaseFileScheduler:
         ]
 
     def _status_without_dispatch(self):
+        controller_status = self.state.get("experiment_controller_status")
+        if controller_status in {
+            "budget_draining",
+            "budget_stopped",
+            "interrupted",
+        }:
+            return controller_status
         if self.state["inflight_attempts"]:
             return "waiting"
         if self._ready_tasks():
             return "running"
         return "idle"
+
+    def _prepare_experiment_dispatch(self):
+        if self.experiment_controller is None:
+            return None
+        integration_recovery = self._recover_experiment_integration_state()
+        if integration_recovery == "recovery_required":
+            self.state["scheduler_status"] = "waiting"
+            self._write_state()
+            return self._experiment_dispatch_result(
+                "integration_recovery_required"
+            )
+        reconciliations = self._reconcile_experiment_inflight()
+        self.experiment_controller = load_experiment_controller(
+            self.experiment_controller_reference,
+            monotonic=self.experiment_controller_monotonic,
+        )
+        self._record_experiment_controller_snapshot()
+        blocking = [
+            item
+            for item in reconciliations
+            if item["reconciliation_status"]
+            in {"live", "open_ambiguous", "service_stop_required"}
+        ]
+        if blocking:
+            self.state["scheduler_status"] = "waiting"
+            self._write_state()
+            return self._experiment_dispatch_result(
+                "invocation_reconciliation_pending",
+                reconciliations=blocking,
+            )
+        if (
+            self.experiment_controller.controller_status == "interrupted"
+            and self.resume_interrupted_experiment
+        ):
+            self.experiment_controller.resume_interrupted(
+                reference=self.experiment_controller_reference
+            )
+            self._record_experiment_controller_snapshot()
+        observation = self._observe_experiment_boundary(
+            "pre_provider_launch"
+        )
+        if observation["allow_provider_launch"]:
+            return None
+        if not self.state["inflight_attempts"]:
+            observation = self._observe_experiment_boundary(
+                "post_integration"
+            )
+        self.state["scheduler_status"] = observation["controller_status"]
+        self._write_state()
+        return self._experiment_dispatch_result(
+            observation["controller_status"]
+        )
+
+    def _recover_experiment_integration_state(self):
+        if not self.state.get("integration_active"):
+            return "not_required"
+        attempt_id = self.state.get("integration_attempt_id")
+        completed = any(
+            (
+                step.get("attempt_id") == attempt_id
+                or step.get("result", {}).get("attempt_id") == attempt_id
+            )
+            and isinstance(step.get("result"), dict)
+            for step in self.state.get("steps", [])
+        )
+        if not completed:
+            return "recovery_required"
+        self.state["integration_active"] = False
+        self.state.pop("integration_attempt_id", None)
+        self._write_state()
+        return "completed_transaction_recovered"
+
+    def _completed_attempt_result(self, inflight):
+        attempt_id = inflight.get("attempt_id")
+        for step in reversed(self.state.get("steps", [])):
+            if (
+                (
+                    step.get("attempt_id") == attempt_id
+                    or step.get("step_id") == inflight.get("step_id")
+                    or step.get("result", {}).get("attempt_id")
+                    == attempt_id
+                )
+                and isinstance(step.get("result"), dict)
+            ):
+                return deepcopy(step["result"])
+        return None
+
+    def _empty_collect_result(self):
+        return {
+            "collect_status": "idle",
+            "collected_task_ids": [],
+            "collected_count": 0,
+            "inflight_count": len(self.state["inflight_attempts"]),
+            "results": [],
+        }
+
+    def _experiment_dispatch_result(self, status, *, reconciliations=None):
+        result = {
+            "dispatch_status": status,
+            "dispatched_task_ids": [],
+            "dispatch_count": 0,
+            "inflight_count": len(self.state["inflight_attempts"]),
+            "experiment_controller_status": self.state.get(
+                "experiment_controller_status"
+            ),
+            "experiment_budget_state": deepcopy(
+                self.state.get("experiment_budget_state")
+            ),
+        }
+        if reconciliations is not None:
+            result["invocation_reconciliations"] = deepcopy(reconciliations)
+        return result
+
+    def _validate_trusted_task_controller_authority(self, task):
+        if self.experiment_controller is not None:
+            return
+        if (
+            task.get("experiment_controller_reference") is not None
+            or task.get("experiment_controller_required") is True
+        ):
+            raise ExperimentControllerIntegrityError(
+                "task experiment controller authority is not trusted "
+                "scheduler configuration"
+            )
+
+    def _reconcile_experiment_inflight(self):
+        reconciliations = []
+        for inflight in self.state["inflight_attempts"]:
+            self._import_worker_lifecycles(inflight)
+            reconciliation = reconcile_orphaned_invocation(
+                self.output_dir,
+                inflight,
+                fence_assessor=self.invocation_fence_assessor,
+                service_stopper=self.invocation_service_stopper,
+            )
+            inflight["invocation_reconciliation"] = reconciliation
+            reconciliations.append(reconciliation)
+        return reconciliations
+
+    def _observe_experiment_boundary(self, boundary):
+        if self.experiment_controller is None:
+            return None
+        observation = self.experiment_controller.observe_boundary(
+            boundary,
+            scheduler_inflight=len(self.state["inflight_attempts"]),
+            integration_active=self.state.get("integration_active", False),
+            open_invocation_ids=self._open_experiment_invocation_ids(),
+        )
+        self._record_experiment_controller_snapshot()
+        return {
+            **observation,
+            "budget_state": deepcopy(self.state["experiment_budget_state"]),
+        }
+
+    def _record_experiment_controller_snapshot(self):
+        if self.experiment_controller is None:
+            return
+        snapshot = self.experiment_controller.snapshot()
+        self.state["experiment_controller_status"] = snapshot[
+            "controller_status"
+        ]
+        self.state["experiment_budget_state"] = deepcopy(
+            snapshot["budget_state"]
+        )
+
+    def _open_experiment_invocation_ids(self):
+        invocation_root = self.output_dir / "model_invocations"
+        if not invocation_root.exists():
+            return []
+        open_ids = []
+        for started_path in sorted(invocation_root.glob("*/started.json")):
+            if started_path.with_name("terminal.json").is_file():
+                continue
+            start = _read_json_file_if_exists(started_path)
+            if start is not None and start.get("invocation_id"):
+                open_ids.append(start["invocation_id"])
+        return open_ids
 
     def _ensure_decomposition_task(self):
         if not self.auto_decompose:
@@ -2121,6 +2599,7 @@ class TwoPhaseFileScheduler:
             state.setdefault("lease_timeout_seconds", self.lease_timeout_seconds)
             state.setdefault("milestones", {})
             state.setdefault("integration_baseline", {})
+            state.setdefault("integration_active", False)
             return state
         return {
             "scheduler_status": "initialized",
@@ -2131,7 +2610,47 @@ class TwoPhaseFileScheduler:
             "inflight_attempts": [],
             "milestones": {},
             "integration_baseline": {},
+            "integration_active": False,
         }
+
+    def _bind_experiment_controller(self):
+        persisted_reference = self.state.get(
+            "experiment_controller_reference"
+        )
+        if persisted_reference is not None:
+            persisted_reference = validate_experiment_controller_reference(
+                persisted_reference
+            )
+            if (
+                self.experiment_controller_reference is not None
+                and persisted_reference != self.experiment_controller_reference
+            ):
+                raise ExperimentControllerIntegrityError(
+                    "scheduler experiment controller reference changed on restart"
+                )
+            self.experiment_controller_reference = persisted_reference
+            self.experiment_controller_required = True
+        if self.experiment_controller_reference is None:
+            if (
+                self.experiment_controller_required
+                or self.state.get("experiment_controller_required") is True
+            ):
+                raise ExperimentControllerIntegrityError(
+                    "required scheduler experiment controller is unavailable"
+                )
+            self.state.setdefault("experiment_controller_required", False)
+            return
+        self.experiment_controller = load_experiment_controller(
+            self.experiment_controller_reference,
+            monotonic=self.experiment_controller_monotonic,
+        )
+        self.experiment_controller_required = True
+        self.state["experiment_controller_reference"] = deepcopy(
+            self.experiment_controller_reference
+        )
+        self.state["experiment_controller_required"] = True
+        self._record_experiment_controller_snapshot()
+        self._write_state()
 
     def _write_state(self):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2218,6 +2737,9 @@ def _worker_invocation_context(
     lease_id,
     output_dir,
     project_root,
+    experiment_controller_reference=None,
+    experiment_controller_required=False,
+    experiment_authority_root=None,
 ):
     role = agent.get("role") or task.get("required_role")
     usage_stage = task.get("usage_stage") or _worker_usage_stage(
@@ -2303,14 +2825,12 @@ def _worker_invocation_context(
         "experiment_sandbox_required": (
             task.get("experiment_sandbox_required") is True
         ),
-        "experiment_authority_root": task.get(
-            "experiment_authority_root"
-        ),
-        "experiment_controller_reference": task.get(
-            "experiment_controller_reference"
+        "experiment_authority_root": experiment_authority_root,
+        "experiment_controller_reference": deepcopy(
+            experiment_controller_reference
         ),
         "experiment_controller_required": (
-            task.get("experiment_controller_required") is True
+            experiment_controller_required is True
         ),
         "model_invocation_authority_root": str(Path(output_dir)),
         "provider_project_identity": project_identity,

@@ -90,7 +90,9 @@ from agentteam_runtime.model_invocation import (
     invocation_context_from_message,
 )
 from agentteam_runtime.mailbox_worker import _model_invocation_context_payload
+import agentteam_runtime.two_phase_scheduler as two_phase_scheduler_module
 from agentteam_runtime.two_phase_scheduler import (
+    TwoPhaseFileScheduler,
     reconcile_orphaned_invocation,
 )
 
@@ -1938,6 +1940,998 @@ class ExperimentProviderBudgetBoundaryTests(unittest.TestCase):
                 resumed["budget_state"]["total_tokens"],
                 15,
             )
+
+
+class _SchedulerMonotonic:
+    def __init__(self, value=None):
+        self.value = time.monotonic() if value is None else value
+
+    def __call__(self):
+        self.value = max(self.value, time.monotonic())
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
+
+
+class _SchedulerClock:
+    def now(self):
+        return "2026-07-27T19:00:00Z"
+
+
+class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
+    def _controller(
+        self,
+        output_dir,
+        monotonic,
+        *,
+        max_total_tokens=100,
+        max_wall_time_seconds=60,
+    ):
+        return create_experiment_controller(
+            output_dir,
+            protocol_id="phase2-scheduler-boundary",
+            max_total_tokens=max_total_tokens,
+            max_wall_time_seconds=max_wall_time_seconds,
+            soft_warning_ratio=0.8,
+            scored=True,
+            initial_monotonic=monotonic.value,
+            monotonic=monotonic,
+        )
+
+    def _scheduler(
+        self,
+        root,
+        controller,
+        monotonic,
+        *,
+        write_scope=None,
+        project_root=None,
+        verification_command=None,
+        commit_verified_integration=False,
+        resume_interrupted_experiment=False,
+        invocation_fence_assessor=None,
+        task_overrides=None,
+        max_inflight=1,
+        task_count=1,
+    ):
+        output_dir = controller.root
+        task = {
+            "task_id": "P2-03B-SCHEDULER",
+            "milestone_id": "M0",
+            "objective": "Exercise scheduler experiment boundaries.",
+            "backlog_status": "ready",
+            "risk_target": "L0",
+            "depends_on": [],
+            "read_scope": ["."],
+            "write_scope": list(write_scope or []),
+            "required_role": "implementation_worker",
+            "blockers": [],
+        }
+        task.update(task_overrides or {})
+        backlog_path = root / "backlog.json"
+        tasks = [task]
+        for index in range(2, task_count + 1):
+            additional = copy.deepcopy(task)
+            additional["task_id"] = f"P2-03B-SCHEDULER-{index}"
+            tasks.append(additional)
+        backlog_path.write_text(
+            json.dumps(
+                {"backlog_id": "BL-P2-03B", "items": tasks},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        agent_pool_path = root / "agent_pool.json"
+        agent_pool_path.write_text(
+            json.dumps(
+                {
+                    "pool_id": "phase2-scheduler-pool",
+                    "scheduler_agent_id": "agent-scheduler",
+                    "updated_at": "2026-07-27T19:00:00Z",
+                    "agents": [
+                        {
+                            "agent_id": (
+                                "agent-implementation"
+                                if index == 1
+                                else f"agent-implementation-{index}"
+                            ),
+                            "role": "implementation_worker",
+                            "status": "idle",
+                            "model_profile": "test",
+                            "runtime_adapter": "codex",
+                            "subscriptions": [],
+                            "inbox_path": (
+                                "mailboxes/agent-implementation/inbox.jsonl"
+                                if index == 1
+                                else f"mailboxes/agent-implementation-{index}/inbox.jsonl"
+                            ),
+                            "outbox_path": (
+                                "mailboxes/agent-implementation/outbox.jsonl"
+                                if index == 1
+                                else f"mailboxes/agent-implementation-{index}/outbox.jsonl"
+                            ),
+                            "lease": {
+                                "lease_id": None,
+                                "task_id": None,
+                                "expires_at": None,
+                            },
+                            "owned_artifacts": [],
+                            "last_event_id": None,
+                            "memory_summary_path": None,
+                        }
+                        for index in range(1, task_count + 1)
+                    ],
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return TwoPhaseFileScheduler(
+            agent_pool_path,
+            backlog_path,
+            output_dir,
+            clock=_SchedulerClock(),
+            project_root=project_root,
+            max_inflight=max_inflight,
+            integrate_accepted_patch=project_root is not None,
+            integration_verification_command=verification_command,
+            commit_verified_integration=commit_verified_integration,
+            experiment_controller_reference=controller.reference,
+            experiment_controller_required=True,
+            resume_interrupted_experiment=resume_interrupted_experiment,
+            experiment_controller_monotonic=monotonic,
+            invocation_fence_assessor=invocation_fence_assessor,
+        )
+
+    @classmethod
+    def _append_result(
+        cls,
+        inflight,
+        changed_files,
+        *,
+        output=None,
+        publish_terminal=True,
+    ):
+        if publish_terminal:
+            cls._publish_zero_usage_terminal(inflight)
+        record = {
+            "message_id": f"RESULT-{inflight['message_id']}",
+            "from_agent": inflight["agent_id"],
+            "to_agent": "agent-scheduler",
+            "message_type": "runtime_result",
+            "correlation_id": inflight["correlation_id"],
+            "created_at": "2026-07-27T19:00:01Z",
+            "payload": {
+                "source_message_id": inflight["message_id"],
+                "task_id": inflight["task_id"],
+                "attempt_id": inflight["attempt_id"],
+                "lease_id": inflight["lease_id"],
+                "result_status": "completed",
+                "changed_files": list(changed_files),
+                "output": output or {"test": "phase2-scheduler-boundary"},
+            },
+        }
+        outbox_path = Path(inflight["outbox_path"])
+        outbox_path.parent.mkdir(parents=True, exist_ok=True)
+        with outbox_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True))
+            stream.write("\n")
+
+    @staticmethod
+    def _publish_zero_usage_terminal(inflight):
+        output_dir = Path(inflight["step_dir"]).parents[1]
+        matching_terminals = [
+            terminal_path
+            for terminal_path in output_dir.glob(
+                "model_invocations/*/terminal.json"
+            )
+            if json.loads(
+                terminal_path.read_text(encoding="utf-8")
+            ).get("attempt_id")
+            == inflight["attempt_id"]
+        ]
+        if matching_terminals:
+            return
+        inbox_paths = list(
+            Path(inflight["step_dir"]).glob(
+                "mailboxes/*/inbox.jsonl"
+            )
+        )
+        if len(inbox_paths) != 1:
+            raise AssertionError("expected one scheduler inbox fixture")
+        message = json.loads(
+            inbox_paths[0].read_text(encoding="utf-8").splitlines()[0]
+        )
+        context = _model_context(
+            supported=True,
+            sandbox_reference=None,
+        )
+        context.update(invocation_context_from_message(message))
+        context["coverage_class"] = "supported_model_invocation"
+        context["backend"] = "codex"
+        calls = []
+        invocation = ModelInvocationCall(
+            output_dir,
+            context,
+            supported=True,
+            systemd_runner_factory=(
+                ExperimentProviderBudgetBoundaryTests._runner_factory(
+                    ExperimentProviderBudgetBoundaryTests._usage_stdout(
+                        0,
+                        0,
+                    ),
+                    calls,
+                )
+            ),
+        )
+        execution = ExperimentProviderBudgetBoundaryTests._execute(
+            invocation,
+            output_dir,
+        )
+        invocation.finalize("completed", execution)
+
+    @staticmethod
+    def _init_repo(repo):
+        repo.mkdir()
+        subprocess.run(
+            ["git", "init"],
+            cwd=repo,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "agentteam@example.invalid"],
+            cwd=repo,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "AgentTeam Test"],
+            cwd=repo,
+            check=True,
+        )
+        (repo / "README.md").write_text("# fixture\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "initial"],
+            cwd=repo,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    @staticmethod
+    def _head(repo, ref="HEAD"):
+        completed = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", ref],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return completed.stdout.strip()
+
+    @staticmethod
+    def _invocation_for_inflight(
+        output_dir,
+        controller,
+        inflight,
+        stdout,
+        calls,
+    ):
+        context = _model_context(supported=True, sandbox_reference=None)
+        context.update(
+            {
+                "run_id": "RUN-TWO-PHASE-SCHEDULER",
+                "task_id": inflight["task_id"],
+                "attempt_id": inflight["attempt_id"],
+                "runtime_execution_session_id": inflight[
+                    "runtime_session_id"
+                ],
+                "lifecycle_owner_token": inflight["lease_id"],
+                "agent_id": inflight["agent_id"],
+                "experiment_authority_root": str(controller.root),
+                "experiment_controller_reference": controller.reference,
+                "experiment_controller_required": True,
+            }
+        )
+        return ModelInvocationCall(
+            output_dir,
+            context,
+            supported=True,
+            systemd_runner_factory=(
+                ExperimentProviderBudgetBoundaryTests._runner_factory(
+                    stdout,
+                    calls,
+                )
+            ),
+        )
+
+    def test_scheduler_denies_worker_dispatch_after_budget_exhaustion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(
+                output_dir,
+                monotonic,
+                max_wall_time_seconds=1,
+            )
+            scheduler = self._scheduler(root, controller, monotonic)
+            monotonic.advance(2)
+
+            dispatch = scheduler.dispatch_ready()
+
+            self.assertEqual(dispatch["dispatch_count"], 0)
+            self.assertEqual(dispatch["dispatch_status"], "budget_stopped")
+            self.assertEqual(scheduler.state["inflight_attempts"], [])
+            self.assertFalse((output_dir / "steps").exists())
+            self.assertEqual(controller.controller_status, "budget_stopped")
+            self.assertTrue(controller.budget_state["exhausted"])
+
+    def test_scheduler_injects_only_trusted_controller_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(output_dir, monotonic)
+            scheduler = self._scheduler(
+                root,
+                controller,
+                monotonic,
+                task_overrides={
+                    "experiment_authority_root": str(root / "untrusted"),
+                    "experiment_controller_reference": {
+                        "schema_version": "untrusted-reference"
+                    },
+                    "experiment_controller_required": False,
+                },
+            )
+
+            dispatch = scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            inbox = (
+                Path(inflight["step_dir"])
+                / "mailboxes"
+                / "agent-implementation"
+                / "inbox.jsonl"
+            )
+            message = json.loads(inbox.read_text(encoding="utf-8").splitlines()[0])
+            payload = message["payload"]
+
+            self.assertEqual(dispatch["dispatch_count"], 1)
+            self.assertEqual(
+                payload["experiment_controller_reference"],
+                controller.reference,
+            )
+            self.assertTrue(payload["experiment_controller_required"])
+            self.assertEqual(
+                payload["experiment_authority_root"],
+                str(controller.root),
+            )
+            persisted = json.loads(scheduler.state_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                persisted["experiment_controller_reference"],
+                controller.reference,
+            )
+
+    def test_experiment_scheduler_serializes_worker_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(output_dir, monotonic)
+            scheduler = self._scheduler(
+                root,
+                controller,
+                monotonic,
+                max_inflight=2,
+                task_count=2,
+            )
+
+            dispatch = scheduler.dispatch_ready()
+
+            self.assertEqual(dispatch["dispatch_count"], 1)
+            self.assertEqual(len(scheduler.state["inflight_attempts"]), 1)
+            self.assertEqual(
+                scheduler.state["backlog"]["items"][1][
+                    "backlog_status"
+                ],
+                "ready",
+            )
+
+    def test_outbox_result_waits_for_provider_terminal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(output_dir, monotonic)
+            scheduler = self._scheduler(
+                root,
+                controller,
+                monotonic,
+                invocation_fence_assessor=lambda _start: {
+                    "fence_status": "live_pinned",
+                    "proof": "test_provider_still_live",
+                },
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            calls = []
+            invocation = self._invocation_for_inflight(
+                output_dir,
+                controller,
+                inflight,
+                ExperimentProviderBudgetBoundaryTests._usage_stdout(1, 1),
+                calls,
+            )
+            execution = ExperimentProviderBudgetBoundaryTests._execute(
+                invocation,
+                root,
+            )
+            self._append_result(
+                inflight,
+                [],
+                publish_terminal=False,
+            )
+            waiting = scheduler.collect_ready_results()
+
+            self.assertEqual(waiting["collected_count"], 0)
+            self.assertEqual(waiting["inflight_count"], 1)
+            invocation.finalize("completed", execution)
+
+            collected = scheduler.collect_ready_results()
+
+            self.assertEqual(collected["collected_count"], 1)
+            self.assertEqual(collected["inflight_count"], 0)
+            self.assertEqual(controller.budget_state["total_tokens"], 2)
+
+    def test_outbox_without_provider_start_remains_inflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(output_dir, monotonic)
+            scheduler = self._scheduler(root, controller, monotonic)
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            self._append_result(
+                inflight,
+                [],
+                publish_terminal=False,
+            )
+            outbox_path = Path(inflight["outbox_path"])
+            malformed = json.loads(
+                outbox_path.read_text(encoding="utf-8")
+            )
+            malformed["payload"]["changed_files"] = None
+            malformed["payload"]["output"] = None
+            outbox_path.write_text(
+                json.dumps(malformed, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            waiting = scheduler.collect_ready_results()
+
+            self.assertEqual(waiting["collected_count"], 0)
+            self.assertEqual(waiting["inflight_count"], 1)
+            self.assertEqual(
+                inflight["invocation_reconciliation"][
+                    "reconciliation_status"
+                ],
+                "no_invocation",
+            )
+            inflight["lease_expires_at"] = "2026-07-27T18:59:59Z"
+
+            expired = scheduler.collect_ready_results()
+
+            self.assertEqual(expired["collected_count"], 1)
+            self.assertEqual(expired["inflight_count"], 0)
+            result = expired["results"][0]
+            self.assertEqual(
+                result["runtime_output"]["error"],
+                "lease_expired_without_provider_start",
+            )
+            self.assertEqual(
+                result["runtime_output"]["suspicious_outbox_result"][
+                    "result_status"
+                ],
+                "completed",
+            )
+            self.assertEqual(
+                result["runtime_output"]["suspicious_outbox_result"][
+                    "changed_files_type"
+                ],
+                "NoneType",
+            )
+            self.assertEqual(
+                result["runtime_output"]["suspicious_outbox_result"][
+                    "output_type"
+                ],
+                "NoneType",
+            )
+
+    def test_direct_collect_rejects_unfinished_integration_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(output_dir, monotonic)
+            scheduler = self._scheduler(root, controller, monotonic)
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            self._append_result(inflight, [])
+            scheduler.state["integration_active"] = True
+            scheduler.state["integration_attempt_id"] = inflight[
+                "attempt_id"
+            ]
+            scheduler._write_state()
+
+            blocked = scheduler.collect_ready_results()
+
+            self.assertEqual(
+                blocked["collect_status"],
+                "integration_recovery_required",
+            )
+            self.assertEqual(blocked["collected_count"], 0)
+            self.assertEqual(blocked["inflight_count"], 1)
+            self.assertEqual(scheduler.state["steps"], [])
+
+    def test_scheduler_drains_inflight_and_exposes_terminal_overshoot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(
+                output_dir,
+                monotonic,
+                max_total_tokens=10,
+            )
+            scheduler = self._scheduler(root, controller, monotonic)
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            calls = []
+            invocation = self._invocation_for_inflight(
+                output_dir,
+                controller,
+                inflight,
+                ExperimentProviderBudgetBoundaryTests._usage_stdout(8, 5),
+                calls,
+            )
+            execution = ExperimentProviderBudgetBoundaryTests._execute(
+                invocation,
+                root,
+            )
+            invocation.finalize("completed", execution)
+            self._append_result(inflight, [])
+
+            collected = scheduler.collect_ready_results()
+
+            self.assertEqual(collected["collected_count"], 1)
+            self.assertEqual(collected["inflight_count"], 0)
+            self.assertEqual(
+                collected["experiment_controller_status"],
+                "budget_stopped",
+            )
+            budget = collected["experiment_budget_state"]
+            self.assertEqual(budget["total_tokens"], 13)
+            self.assertEqual(budget["overshoot_tokens"], 3)
+            self.assertEqual(scheduler.summary()["inflight_count"], 0)
+            self.assertEqual(calls, ["constructed", "prepared", "permitted", "cleaned"])
+
+    def test_preintegration_exhaustion_preserves_patch_and_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            output_dir = root / "run"
+            self._init_repo(repo)
+            source_head = self._head(repo)
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(
+                output_dir,
+                monotonic,
+                max_wall_time_seconds=1,
+            )
+            scheduler = self._scheduler(
+                root,
+                controller,
+                monotonic,
+                write_scope=["feature.txt"],
+                project_root=repo,
+                verification_command=[sys.executable, "-c", "pass"],
+                commit_verified_integration=True,
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            (Path(inflight["worktree_path"]) / "feature.txt").write_text(
+                "accepted patch\n",
+                encoding="utf-8",
+            )
+            self._append_result(inflight, ["feature.txt"])
+            monotonic.advance(2)
+
+            collected = scheduler.collect_ready_results()
+            result = collected["results"][0]
+            baseline = Path(inflight["integration_baseline_worktree_path"])
+
+            self.assertEqual(result["integration_status"], "preserved")
+            self.assertEqual(result["integration_queue_status"], "pending")
+            self.assertEqual(
+                result["completion_policy"],
+                "accepted_patch_preserved_budget_stop",
+            )
+            self.assertTrue(Path(result["patch_path"]).is_file())
+            self.assertIn(
+                "accepted patch",
+                Path(result["patch_path"]).read_text(encoding="utf-8"),
+            )
+            self.assertEqual(self._head(baseline), source_head)
+            self.assertFalse((baseline / "feature.txt").exists())
+            self.assertEqual(collected["experiment_controller_status"], "budget_stopped")
+            stopped_tick = scheduler.tick()
+            self.assertEqual(stopped_tick["tick_status"], "budget_stopped")
+            self.assertEqual(self._head(baseline), source_head)
+
+    def test_budget_stop_is_deferred_through_successful_integration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            output_dir = root / "run"
+            self._init_repo(repo)
+            source_head = self._head(repo)
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(
+                output_dir,
+                monotonic,
+                max_wall_time_seconds=1,
+            )
+            scheduler = self._scheduler(
+                root,
+                controller,
+                monotonic,
+                write_scope=["feature.txt"],
+                project_root=repo,
+                verification_command=[
+                    sys.executable,
+                    "-c",
+                    "import pathlib; assert pathlib.Path('feature.txt').is_file()",
+                ],
+                commit_verified_integration=True,
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            (Path(inflight["worktree_path"]) / "feature.txt").write_text(
+                "durable integration\n",
+                encoding="utf-8",
+            )
+            self._append_result(inflight, ["feature.txt"])
+            observations = []
+            initial_monotonic = monotonic.value
+            original_observe = scheduler.experiment_controller.observe_boundary
+            original_verify = two_phase_scheduler_module.run_integration_verification
+
+            def record_observation(boundary, **kwargs):
+                observations.append(
+                    (boundary, kwargs["integration_active"], monotonic.value)
+                )
+                return original_observe(boundary, **kwargs)
+
+            def cross_budget(*args, **kwargs):
+                monotonic.advance(2)
+                return original_verify(*args, **kwargs)
+
+            with patch.object(
+                scheduler.experiment_controller,
+                "observe_boundary",
+                side_effect=record_observation,
+            ), patch.object(
+                two_phase_scheduler_module,
+                "load_experiment_controller",
+                return_value=scheduler.experiment_controller,
+            ), patch.object(
+                two_phase_scheduler_module,
+                "run_integration_verification",
+                side_effect=cross_budget,
+            ):
+                collected = scheduler.collect_ready_results()
+            result = collected["results"][0]
+            baseline = Path(result["integration_baseline_worktree_path"])
+
+            self.assertEqual(result["integration_verification_status"], "passed")
+            self.assertEqual(result["integration_baseline_commit_status"], "committed")
+            self.assertNotEqual(self._head(baseline), source_head)
+            self.assertTrue((baseline / "feature.txt").is_file())
+            integration_observations = [
+                item
+                for item in observations
+                if item[0] != "pre_provider_launch"
+            ]
+            self.assertEqual(
+                [
+                    (boundary, active)
+                    for boundary, active, _now
+                    in integration_observations
+                ],
+                [
+                    ("pre_integration", False),
+                    ("post_integration", False),
+                    ("post_integration", False),
+                ],
+            )
+            self.assertGreaterEqual(
+                integration_observations[0][2],
+                initial_monotonic,
+            )
+            self.assertGreaterEqual(
+                integration_observations[1][2],
+                integration_observations[0][2] + 2,
+            )
+            self.assertEqual(collected["experiment_controller_status"], "budget_stopped")
+            self.assertFalse(scheduler.state["integration_active"])
+
+    def test_budget_stop_is_deferred_through_integration_rollback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            output_dir = root / "run"
+            self._init_repo(repo)
+            source_head = self._head(repo)
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(
+                output_dir,
+                monotonic,
+                max_wall_time_seconds=1,
+            )
+            scheduler = self._scheduler(
+                root,
+                controller,
+                monotonic,
+                write_scope=["feature.txt"],
+                project_root=repo,
+                verification_command=[sys.executable, "-c", "raise SystemExit(7)"],
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            (Path(inflight["worktree_path"]) / "feature.txt").write_text(
+                "must roll back\n",
+                encoding="utf-8",
+            )
+            self._append_result(inflight, ["feature.txt"])
+            original_verify = two_phase_scheduler_module.run_integration_verification
+
+            def cross_budget(*args, **kwargs):
+                monotonic.advance(2)
+                return original_verify(*args, **kwargs)
+
+            with patch.object(
+                two_phase_scheduler_module,
+                "run_integration_verification",
+                side_effect=cross_budget,
+            ):
+                collected = scheduler.collect_ready_results()
+            result = collected["results"][0]
+            baseline = Path(result["integration_baseline_worktree_path"])
+            event_types = [
+                json.loads(line)["event_type"]
+                for line in (output_dir / "events.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+
+            self.assertEqual(result["integration_verification_status"], "failed")
+            self.assertEqual(result["integration_baseline_rollback_status"], "reset")
+            self.assertEqual(self._head(baseline), source_head)
+            self.assertFalse((baseline / "feature.txt").exists())
+            self.assertIn("integration_blocked", event_types)
+            self.assertIn("integration_baseline_commit_evaluated", event_types)
+            self.assertEqual(collected["experiment_controller_status"], "budget_stopped")
+
+    def test_tick_resumes_interrupted_controller_before_integration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            output_dir = root / "run"
+            self._init_repo(repo)
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(output_dir, monotonic)
+            scheduler = self._scheduler(
+                root,
+                controller,
+                monotonic,
+                write_scope=["feature.txt"],
+                project_root=repo,
+                verification_command=[sys.executable, "-c", "pass"],
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            (Path(inflight["worktree_path"]) / "feature.txt").write_text(
+                "resume before integration\n",
+                encoding="utf-8",
+            )
+            calls = []
+            invocation = self._invocation_for_inflight(
+                output_dir,
+                controller,
+                inflight,
+                ExperimentProviderBudgetBoundaryTests._usage_stdout(1, 1),
+                calls,
+            )
+            execution = ExperimentProviderBudgetBoundaryTests._execute(
+                invocation,
+                root,
+            )
+            invocation.finalize("completed", execution)
+            self._append_result(inflight, ["feature.txt"])
+            controller.interrupt()
+
+            resumed = self._scheduler(
+                root,
+                controller,
+                monotonic,
+                write_scope=["feature.txt"],
+                project_root=repo,
+                verification_command=[sys.executable, "-c", "pass"],
+                resume_interrupted_experiment=True,
+            )
+            tick = resumed.tick()
+            result = tick["collect"]["results"][0]
+
+            self.assertEqual(tick["collect"]["collected_count"], 1)
+            self.assertEqual(
+                result["pre_integration_controller_observation"][
+                    "controller_status"
+                ],
+                "active",
+            )
+            self.assertEqual(result["integration_status"], "applied")
+            self.assertEqual(
+                result["integration_verification_status"],
+                "passed",
+            )
+            self.assertNotEqual(
+                result["completion_policy"],
+                "accepted_patch_preserved_budget_stop",
+            )
+
+    def test_completed_integration_recovery_does_not_repeat_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            output_dir = root / "run"
+            self._init_repo(repo)
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(output_dir, monotonic)
+            scheduler = self._scheduler(
+                root,
+                controller,
+                monotonic,
+                write_scope=["feature.txt"],
+                project_root=repo,
+                verification_command=[sys.executable, "-c", "pass"],
+            )
+            scheduler.dispatch_ready()
+            inflight = copy.deepcopy(
+                scheduler.state["inflight_attempts"][0]
+            )
+            (Path(inflight["worktree_path"]) / "feature.txt").write_text(
+                "commit once\n",
+                encoding="utf-8",
+            )
+            self._append_result(inflight, ["feature.txt"])
+            first = scheduler.collect_ready_results()
+            first_head = self._head(
+                first["results"][0][
+                    "integration_baseline_worktree_path"
+                ]
+            )
+            self.assertEqual(len(scheduler.state["steps"]), 1)
+
+            scheduler.state["integration_active"] = True
+            scheduler.state["integration_attempt_id"] = inflight[
+                "attempt_id"
+            ]
+            scheduler.state["inflight_attempts"] = [inflight]
+            scheduler._write_state()
+
+            recovered = self._scheduler(
+                root,
+                controller,
+                monotonic,
+                write_scope=["feature.txt"],
+                project_root=repo,
+                verification_command=[sys.executable, "-c", "pass"],
+            )
+            tick = recovered.tick()
+
+            self.assertEqual(tick["collect"]["collected_count"], 1)
+            self.assertEqual(len(recovered.state["steps"]), 1)
+            self.assertEqual(recovered.state["inflight_attempts"], [])
+            self.assertFalse(recovered.state["integration_active"])
+            self.assertEqual(
+                self._head(
+                    recovered.state["integration_baseline"][
+                        "integration_baseline_worktree_path"
+                    ]
+                ),
+                first_head,
+            )
+
+    def test_interrupted_scheduler_reconciles_before_original_budget_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(output_dir, monotonic)
+            scheduler = self._scheduler(root, controller, monotonic)
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            calls = []
+            invocation = self._invocation_for_inflight(
+                output_dir,
+                controller,
+                inflight,
+                ExperimentProviderBudgetBoundaryTests._usage_stdout(4, 1),
+                calls,
+            )
+            execution = ExperimentProviderBudgetBoundaryTests._execute(
+                invocation,
+                root,
+            )
+            frozen_budget_sha256 = controller.reference["frozen_budget_sha256"]
+            controller.interrupt()
+
+            blocked = self._scheduler(
+                root,
+                controller,
+                monotonic,
+                resume_interrupted_experiment=True,
+                invocation_fence_assessor=lambda _start: {
+                    "fence_status": "live_pinned",
+                    "proof": "deterministic_live_worker",
+                },
+            )
+            blocked_dispatch = blocked.dispatch_ready()
+            self.assertEqual(
+                blocked_dispatch["dispatch_status"],
+                "invocation_reconciliation_pending",
+            )
+            self.assertEqual(controller.controller_status, "interrupted")
+
+            invocation.finalize("completed", execution)
+            resumed = self._scheduler(
+                root,
+                controller,
+                monotonic,
+                resume_interrupted_experiment=True,
+            )
+            resumed_dispatch = resumed.dispatch_ready()
+
+            self.assertEqual(resumed_dispatch["dispatch_status"], "at_capacity")
+            self.assertEqual(controller.controller_status, "active")
+            self.assertEqual(controller.budget_state["total_tokens"], 5)
+            self.assertEqual(
+                controller.reference["frozen_budget_sha256"],
+                frozen_budget_sha256,
+            )
+            recovered_collection = resumed.collect_ready_results()
+            self.assertEqual(recovered_collection["collected_count"], 1)
+            self.assertEqual(recovered_collection["inflight_count"], 0)
+            alternate_root = root / "alternate-controller"
+            alternate = self._controller(alternate_root, monotonic)
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "reference changed on restart",
+            ):
+                TwoPhaseFileScheduler(
+                    root / "agent_pool.json",
+                    root / "backlog.json",
+                    output_dir,
+                    clock=_SchedulerClock(),
+                    experiment_controller_reference=alternate.reference,
+                    experiment_controller_required=True,
+                    experiment_controller_monotonic=monotonic,
+                )
 
 
 class ExperimentContractSchemaTests(unittest.TestCase):
