@@ -1,0 +1,14 @@
+{
+  "decision": "approved",
+  "epoch_number": 8,
+  "epoch_sha256": "20c3020ce081a6bd65c9dc5e6ac5e5ffc306a3c02ffbd74b77c05d96941206ee",
+  "evidence_sha256": "7e9551831f0d2cfcf7a87eef3dd63ac6a0c7fc3a7dc82f8bed0642a7c0185fa3",
+  "final_report_sha": "ec64cd89e25d88a6a47231f4654ae70c5e7ea148",
+  "gate_id": "P1-06E",
+  "git_object_format": "sha1",
+  "implementation_run_id": "phase1-model-invocation-usage",
+  "operator_identity": "liuql (uid=1013)",
+  "review_diff_sha256": "956134c33534909e59c1f8dbf607e30f8fa2404fb6b6adde21e23b508ffa2c80",
+  "reviewed_at": "2026-07-27T08:36:42Z",
+  "schema_version": "post_backlog_gate_approval.v1"
+}

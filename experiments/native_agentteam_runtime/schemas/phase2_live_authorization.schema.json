@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase2_live_authorization.schema.json",
+  "title": "Phase 2 live calibration operator authorization",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "decision",
+    "operator_identity",
+    "authorized_at",
+    "gate_id",
+    "epoch_number",
+    "epoch_sha256",
+    "protocol_sha256",
+    "readiness_promotion_sha256",
+    "model",
+    "reasoning_profile",
+    "max_total_tokens",
+    "max_wall_time_seconds",
+    "max_inflight_model_invocations",
+    "modes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase2_live_authorization.v1"
+    },
+    "decision": {
+      "enum": [
+        "approved",
+        "rejected"
+      ]
+    },
+    "operator_identity": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authorized_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "gate_id": {
+      "const": "P2-09"
+    },
+    "epoch_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "epoch_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "protocol_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "readiness_promotion_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reasoning_profile": {
+      "type": "string",
+      "minLength": 1
+    },
+    "max_total_tokens": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_wall_time_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "max_inflight_model_invocations": {
+      "const": 1
+    },
+    "modes": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "const": "single_codex"
+        },
+        {
+          "const": "agentteam_direct"
+        },
+        {
+          "const": "agentteam_full"
+        }
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

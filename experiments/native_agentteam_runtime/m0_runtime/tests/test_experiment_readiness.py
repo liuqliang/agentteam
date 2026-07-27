@@ -14,7 +14,9 @@ from agentteam_runtime.experiment_readiness import (
     canonical_json_sha256,
     check_pilot_authorization,
     packaged_readiness_record_path,
+    phase1_completion_promotion_path,
     validate_experiment_manifest,
+    validate_phase1_completion_promotion,
 )
 
 
@@ -77,13 +79,44 @@ class ExperimentReadinessTests(unittest.TestCase):
         self.assertEqual(summary["capability_count"], 7)
         self.assertEqual(
             summary["capability_counts"],
-            {"passed": 0, "partial": 4, "missing": 3},
+            {"passed": 1, "partial": 3, "missing": 3},
         )
         self.assertEqual(
             {item["capability_id"] for item in summary["capabilities"]},
             set(P0_CAPABILITY_IDS),
         )
-        self.assertEqual(len(summary["blockers"]), 7)
+        self.assertEqual(len(summary["blockers"]), 6)
+        self.assertEqual(summary["phase1_completion"]["promotion_status"], "passed")
+
+    def test_phase1_completion_promotion_binds_finalization_and_approval(self):
+        promotion = validate_phase1_completion_promotion()
+
+        self.assertEqual(promotion["promotion_status"], "passed")
+        self.assertEqual(
+            promotion["source_integration_commit"],
+            "ec64cd89e25d88a6a47231f4654ae70c5e7ea148",
+        )
+        self.assertEqual(promotion["gate_epoch"], 8)
+
+        receipt = _read_json(phase1_completion_promotion_path())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "promotion.json"
+            receipt["finalization_artifact"]["sha256"] = "0" * 64
+            _write_json(path, receipt)
+            with self.assertRaises(ExperimentReadinessError):
+                validate_phase1_completion_promotion(path)
+
+            receipt = _read_json(phase1_completion_promotion_path())
+            receipt["source_tree"] = "0" * 40
+            _write_json(path, receipt)
+            with self.assertRaises(ExperimentReadinessError):
+                validate_phase1_completion_promotion(path)
+
+            receipt = _read_json(phase1_completion_promotion_path())
+            receipt["remote_default_head"] = "0" * 40
+            _write_json(path, receipt)
+            with self.assertRaises(ExperimentReadinessError):
+                validate_phase1_completion_promotion(path)
 
     def test_readiness_rejects_inventory_and_state_inconsistency(self):
         source = _read_json(packaged_readiness_record_path())
@@ -144,7 +177,7 @@ class ExperimentReadinessTests(unittest.TestCase):
             result = check_pilot_authorization(path)
 
             self.assertFalse(result["pilot_authorized"])
-            self.assertEqual(len(result["blockers"]), 7)
+            self.assertEqual(len(result["blockers"]), 6)
             self.assertEqual(result["provider_calls"], 0)
             self.assertEqual(result["target_mutations"], 0)
 

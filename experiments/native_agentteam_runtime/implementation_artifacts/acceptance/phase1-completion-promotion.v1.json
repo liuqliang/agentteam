@@ -1,0 +1,31 @@
+{
+  "schema_version": "phase1_completion_promotion.v1",
+  "promotion_status": "passed",
+  "promoted_at": "2026-07-27T17:29:06+08:00",
+  "git_object_format": "sha1",
+  "source_integration_commit": "ec64cd89e25d88a6a47231f4654ae70c5e7ea148",
+  "source_tree": "11023f962057462d3f332020b8bf75c483acdfaf",
+  "remote_default_ref": "refs/heads/master",
+  "remote_default_head": "ec64cd89e25d88a6a47231f4654ae70c5e7ea148",
+  "finalization_artifact": {
+    "path": "implementation_artifacts/acceptance/phase1-usage-finalization.v1.json",
+    "sha256": "7e9551831f0d2cfcf7a87eef3dd63ac6a0c7fc3a7dc82f8bed0642a7c0185fa3"
+  },
+  "operator_approval": {
+    "path": "implementation_artifacts/reviews/phase1-usage-finalization-approval.v1.json",
+    "sha256": "b1295daadc92e8ba79ee28e5747dbb98b4bd45ed048b7304a09a4977c91743ac"
+  },
+  "gate_epoch_artifact": {
+    "path": "implementation_artifacts/acceptance/phase1-gate-epoch.v1.json",
+    "sha256": "cef44c20782891c2f22f88432e04c1ea3d56c5d1b1ce2aebb42ca4b2f1320a7f",
+    "canonical_sha256": "20c3020ce081a6bd65c9dc5e6ac5e5ffc306a3c02ffbd74b77c05d96941206ee"
+  },
+  "invariants": {
+    "finalization_passed": true,
+    "approval_passed": true,
+    "same_epoch": true,
+    "same_final_report_sha": true,
+    "final_report_commit_reachable": true,
+    "remote_default_ref_contains_final_report": true
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "created_at": "2026-07-27T08:35:19Z",
+  "epoch_number": 8,
+  "gate_declaration_sha256": "ed470fc93d02f8f490189ea7fa1e29f55e6b4f7cc9a62271c9afb64ac9482966",
+  "git_object_format": "sha1",
+  "implementation_run_id": "phase1-model-invocation-usage",
+  "integration_branch": "agentteam/repair/v4-versioned-projection",
+  "integration_head_sha": "c6bd4868cc83a23d3182d281273d6efb0bfa83b4",
+  "prior_epoch_sha256": "79c1ba4aeb2403add90c44a722b8ef71b8cc3a004a5dc7cca14ac4a2bd2e565a",
+  "schema_version": "post_backlog_gate_epoch.v1",
+  "target_branch": "p0a-experiment-readiness",
+  "target_head_sha": "cb7efda589851696dc5a95dc49730f6abda695a3",
+  "validated_code_sha": "c6bd4868cc83a23d3182d281273d6efb0bfa83b4",
+  "verification_command_sha256": "89e8e1c92e049bc9b9001881da36ca8c6df449ae8a376f1b0c9065cb9d9c3652",
+  "verification_result_sha256": "8225b36568459cf3fab8d673806202ef0703a6d6b748e9da899607188ee97f6d"
+}

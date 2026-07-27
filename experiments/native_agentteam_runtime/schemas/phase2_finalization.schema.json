@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase2_finalization.schema.json",
+  "title": "Phase 2 milestone finalization",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "controller_validation_status",
+    "validated_code_sha",
+    "final_report_sha",
+    "readiness_promotion_sha256",
+    "live_calibration_sha256",
+    "report_sha256",
+    "roadmap_sha256",
+    "full_verification_sha256",
+    "changed_paths",
+    "merge_recommendation"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase2_finalization.v1"
+    },
+    "controller_validation_status": {
+      "const": "passed"
+    },
+    "validated_code_sha": {
+      "$ref": "#/$defs/git_oid"
+    },
+    "final_report_sha": {
+      "$ref": "#/$defs/git_oid"
+    },
+    "readiness_promotion_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "live_calibration_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "report_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "roadmap_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "full_verification_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "changed_paths": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "const": "experiments/native_agentteam_runtime/implementation_artifacts/native_runtime_roadmap.md"
+        },
+        {
+          "const": "experiments/native_agentteam_runtime/implementation_artifacts/reports/phase2-experiment-harness.md"
+        }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "merge_recommendation": {
+      "const": "ready_for_operator_review"
+    }
+  },
+  "$defs": {
+    "git_oid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

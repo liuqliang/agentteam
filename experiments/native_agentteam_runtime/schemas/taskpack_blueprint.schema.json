@@ -32,6 +32,14 @@
     "research_authority": {
       "$ref": "#/$defs/repository_path"
     },
+    "schema_inventory": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/repository_path"
+      }
+    },
     "taskpack": {
       "type": "object",
       "additionalProperties": false,
@@ -112,7 +120,8 @@
               "research_authority",
               "review_schema",
               "stage_vocabulary",
-              "contract"
+              "contract",
+              "schema_inventory"
             ]
           }
         }
@@ -335,6 +344,12 @@
         "operator_authorization_required": {
           "type": "boolean"
         },
+        "operator_authorization_schema": {
+          "$ref": "#/$defs/repository_path"
+        },
+        "operator_authorization_required_decision": {
+          "$ref": "#/$defs/non_empty_string"
+        },
         "operator_review_required": {
           "type": "boolean"
         },
@@ -370,9 +385,37 @@
         },
         "source_plan_section": {
           "$ref": "#/$defs/non_empty_string"
+        },
+        "relation_validator": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "controller_entrypoint": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "final_commit_changed_paths": {
+          "$ref": "#/$defs/non_empty_string_array"
         }
       },
       "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operator_authorization_required": {
+                "const": true
+              }
+            },
+            "required": [
+              "operator_authorization_required",
+              "controller_entrypoint"
+            ]
+          },
+          "then": {
+            "required": [
+              "operator_authorization_schema",
+              "operator_authorization_required_decision"
+            ]
+          }
+        },
         {
           "if": {
             "properties": {

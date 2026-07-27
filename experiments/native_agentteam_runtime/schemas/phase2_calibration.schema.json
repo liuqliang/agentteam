@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase2_calibration.schema.json",
+  "title": "Phase 2 bounded live calibration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "controller_validation_status",
+    "validated_code_sha",
+    "readiness_promotion_sha256",
+    "protocol_sha256",
+    "pilot_guard_status",
+    "operator_authorization_sha256",
+    "mode_results",
+    "repeat_result",
+    "lifecycle_coverage_percent",
+    "token_coverage_percent",
+    "projection_rebuild_status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase2_calibration.v1"
+    },
+    "controller_validation_status": {
+      "const": "passed"
+    },
+    "validated_code_sha": {
+      "$ref": "#/$defs/git_oid"
+    },
+    "readiness_promotion_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "protocol_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "pilot_guard_status": {
+      "const": "passed"
+    },
+    "operator_authorization_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "mode_results": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/mode_result"
+            },
+            {
+              "properties": {
+                "mode": {
+                  "const": "single_codex"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/mode_result"
+            },
+            {
+              "properties": {
+                "mode": {
+                  "const": "agentteam_direct"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/mode_result"
+            },
+            {
+              "properties": {
+                "mode": {
+                  "const": "agentteam_full"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "repeat_result": {
+      "$ref": "#/$defs/mode_result"
+    },
+    "lifecycle_coverage_percent": {
+      "const": 100
+    },
+    "token_coverage_percent": {
+      "const": 100
+    },
+    "projection_rebuild_status": {
+      "const": "passed"
+    }
+  },
+  "$defs": {
+    "git_oid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "mode_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "result_bundle_sha256",
+        "total_tokens",
+        "wall_time_seconds"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "single_codex",
+            "agentteam_direct",
+            "agentteam_full"
+          ]
+        },
+        "result_bundle_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wall_time_seconds": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase2_readiness_promotion.schema.json",
+  "title": "Phase 2 deterministic readiness promotion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "controller_validation_status",
+    "validated_code_sha",
+    "protocol_sha256",
+    "run_manifest_sha256",
+    "deterministic_calibration_sha256",
+    "readiness_before_sha256",
+    "readiness_after_sha256",
+    "capability_evidence",
+    "pilot_guard_status",
+    "pilot_manifest_sha256",
+    "pilot_guard_sha256",
+    "pilot_guard_provider_calls",
+    "pilot_guard_target_mutations",
+    "changed_paths"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase2_readiness_promotion.v1"
+    },
+    "controller_validation_status": {
+      "const": "passed"
+    },
+    "validated_code_sha": {
+      "$ref": "#/$defs/git_oid"
+    },
+    "protocol_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "run_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "deterministic_calibration_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "readiness_before_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "readiness_after_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "capability_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invocation_level_real_usage",
+        "three_mode_experiment_harness",
+        "immutable_experiment_manifest",
+        "clean_reset_and_blind_gold_isolation",
+        "actual_budget_enforcement",
+        "operator_action_ledger",
+        "machine_readable_result_bundle"
+      ],
+      "properties": {
+        "invocation_level_real_usage": {
+          "$ref": "#/$defs/evidence"
+        },
+        "three_mode_experiment_harness": {
+          "$ref": "#/$defs/evidence"
+        },
+        "immutable_experiment_manifest": {
+          "$ref": "#/$defs/evidence"
+        },
+        "clean_reset_and_blind_gold_isolation": {
+          "$ref": "#/$defs/evidence"
+        },
+        "actual_budget_enforcement": {
+          "$ref": "#/$defs/evidence"
+        },
+        "operator_action_ledger": {
+          "$ref": "#/$defs/evidence"
+        },
+        "machine_readable_result_bundle": {
+          "$ref": "#/$defs/evidence"
+        }
+      }
+    },
+    "pilot_guard_status": {
+      "const": "passed"
+    },
+    "pilot_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "pilot_guard_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "pilot_guard_provider_calls": {
+      "const": 0
+    },
+    "pilot_guard_target_mutations": {
+      "const": 0
+    },
+    "changed_paths": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "const": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/data/p0_experiment_readiness.v1.json"
+        }
+      ],
+      "items": false,
+      "minItems": 1,
+      "maxItems": 1
+    }
+  },
+  "$defs": {
+    "git_oid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "artifact_path",
+          "sha256",
+          "test_id",
+          "status"
+        ],
+        "properties": {
+          "artifact_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "test_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "const": "passed"
+          }
+        }
+      }
+    }
+  }
+}

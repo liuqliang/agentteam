@@ -1,0 +1,35 @@
+{
+  "acceptance_series_id": "phase1-model-invocation-usage-acceptance",
+  "changed_paths": [
+    "experiments/native_agentteam_runtime/implementation_artifacts/native_runtime_roadmap.md",
+    "experiments/native_agentteam_runtime/implementation_artifacts/reports/phase1-model-invocation-usage.md"
+  ],
+  "controller_validation_status": "passed",
+  "created_at": "2026-07-27T08:35:47.305856Z",
+  "evidence_digests": {
+    "acceptance_attempts_sha256": "1f586acb3c9b25e9e2911d404e5110d4ee57fdc809caffbd189e76c4f0a25ca2",
+    "deterministic_verification_sha256": "f962380d120fffc97dad8035d2c5e0ac996a780e76c4ce43205cb58c24bb61fc",
+    "gate_epoch_sha256": "20c3020ce081a6bd65c9dc5e6ac5e5ffc306a3c02ffbd74b77c05d96941206ee",
+    "p1_live_receipt_sha256": "ae220bdd9bd2dcede81ecafe21dd096f8c868467a457261ca4ea40baa75d13d1",
+    "projection_invocation_sha256": "980231234343ba4ff84040ea8584a9b7e6df887db5da883e7e63cd04c22a9537",
+    "selected_live_artifact_sha256": "1a28fcb212c2bc0b182702374bf3006a64b653e665978137360b805ae8061b6d"
+  },
+  "final_report_sha": "ec64cd89e25d88a6a47231f4654ae70c5e7ea148",
+  "gate_epoch": 8,
+  "git_object_format": "sha1",
+  "implementation_run_id": "phase1-model-invocation-usage",
+  "merge_recommendation": "ready_for_operator_review",
+  "parent_commit_sha": "c6bd4868cc83a23d3182d281273d6efb0bfa83b4",
+  "report_sha256": "f4bbcf4ceb438595aecebcc4a98cebe5463b47819e4c3cc17bc705c2634636b2",
+  "roadmap_sha256": "a4bf9fc9b843e7a8cb972e7f778b260b0cba9fdee11d0851b8bdb92b31a90505",
+  "schema_version": "phase1_usage_finalization.v1",
+  "selected_acceptance_run_id": "phase1-model-invocation-usage-acceptance-attempt-007",
+  "validated_code_sha": "c6bd4868cc83a23d3182d281273d6efb0bfa83b4",
+  "verification_summary": {
+    "acceptance_attempt_count": 1,
+    "deterministic_completion_status": "passed",
+    "live_validation_status": "passed",
+    "open_invocations": 0,
+    "projection_status": "passed"
+  }
+}

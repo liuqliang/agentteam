@@ -721,6 +721,12 @@ def materialize_taskpack_blueprint(
         approval_context = {}
         approval_diagnostics.append(str(exc))
     context.update(approval_context)
+    if not dry_run:
+        _require_blueprint_authority_matches_head(
+            project_root,
+            blueprint,
+            blueprint_relative_path,
+        )
 
     if dry_run:
         with tempfile.TemporaryDirectory(prefix="agentteam-blueprint-dry-run-") as temp_root:
@@ -869,12 +875,24 @@ def _validate_taskpack_blueprint(
     tasks = blueprint["tasks"]
     task_id_set = set()
     dependency_graph = {}
+    expected_output_producers = {}
     for task in tasks:
         task_id = task["task_id"]
         if task_id in task_id_set:
             errors.append(f"duplicate task_id: {task_id}")
         task_id_set.add(task_id)
         dependency_graph[task_id] = list(task["depends_on"])
+        for artifact_path in task.get("expected_output_artifacts", []):
+            expected_output_producers.setdefault(artifact_path, []).append(task_id)
+    for artifact_path, producers in expected_output_producers.items():
+        if len(producers) > 1:
+            errors.append(
+                "expected_output_artifacts must have one producer: "
+                f"{artifact_path} declared by {', '.join(producers)}"
+            )
+
+    for task in tasks:
+        task_id = task["task_id"]
         if task["required_role"] not in declared_roles:
             errors.append(
                 f"{task_id} required_role is not declared by blueprint agents: "
@@ -902,7 +920,20 @@ def _validate_taskpack_blueprint(
                 )
                 if field_name == "input_artifacts":
                     input_path = project_root / value
-                    if not input_path.is_file():
+                    producers = expected_output_producers.get(value, [])
+                    if producers:
+                        ancestors = _blueprint_gate_task_ancestors(
+                            task_id,
+                            dependency_graph,
+                            task_id_set,
+                        )
+                        if len(producers) != 1 or producers[0] not in ancestors:
+                            errors.append(
+                                f"{task_id} input_artifacts is not produced by "
+                                "exactly one ancestor task: "
+                                f"{value}"
+                            )
+                    elif not input_path.is_file():
                         errors.append(
                             f"{task_id} input_artifacts does not exist: {value}"
                         )
@@ -942,6 +973,31 @@ def _validate_taskpack_blueprint(
                 errors.append(f"{field_name} resolves outside repository: {value}")
             try:
                 _require_git_tracked_path(project_root, value, field_name)
+            except TaskpackValidationError as exc:
+                errors.append(str(exc))
+
+    for schema_path in blueprint.get("schema_inventory", []):
+        _validate_blueprint_repository_path(
+            schema_path,
+            "schema_inventory",
+            errors,
+            allow_repository_root=False,
+        )
+        _validate_blueprint_resolved_repository_path(
+            project_root,
+            schema_path,
+            "schema_inventory",
+            errors,
+        )
+        if not (project_root / schema_path).is_file():
+            errors.append(f"schema_inventory path does not exist: {schema_path}")
+        else:
+            try:
+                _require_git_tracked_path(
+                    project_root,
+                    schema_path,
+                    "schema_inventory",
+                )
             except TaskpackValidationError as exc:
                 errors.append(str(exc))
 
@@ -995,6 +1051,7 @@ def _validate_taskpack_blueprint(
         for field_name in (
             "evidence_artifact",
             "evidence_schema",
+            "operator_authorization_schema",
             "operator_approval_schema",
         ):
             value = gate.get(field_name)
@@ -1011,6 +1068,23 @@ def _validate_taskpack_blueprint(
                     f"{gate_id} {field_name}",
                     errors,
                 )
+        if gate.get("operator_authorization_required") and gate.get(
+            "controller_entrypoint"
+        ):
+            if not _is_non_empty_string(
+                gate.get("operator_authorization_schema")
+            ):
+                errors.append(
+                    f"{gate_id} controller-managed operator authorization "
+                    "requires operator_authorization_schema"
+                )
+            if not _is_non_empty_string(
+                gate.get("operator_authorization_required_decision")
+            ):
+                errors.append(
+                    f"{gate_id} controller-managed operator authorization "
+                    "requires operator_authorization_required_decision"
+                )
         if gate.get("operator_review_required"):
             if not _is_non_empty_string(gate.get("operator_approval_schema")):
                 errors.append(
@@ -1025,8 +1099,14 @@ def _validate_taskpack_blueprint(
                 )
     _validate_dependency_graph(combined_graph, task_id_set | gate_ids, errors)
     for gate in gates:
-        schema_path = gate["evidence_schema"]
-        if not (project_root / schema_path).is_file():
+        for field_name in (
+            "evidence_schema",
+            "operator_authorization_schema",
+            "operator_approval_schema",
+        ):
+            schema_path = gate.get(field_name)
+            if schema_path is None or (project_root / schema_path).is_file():
+                continue
             ancestors = _blueprint_gate_task_ancestors(
                 gate["gate_id"],
                 combined_graph,
@@ -1044,7 +1124,7 @@ def _validate_taskpack_blueprint(
                 for ancestor in ancestors
             ):
                 errors.append(
-                    f"{gate['gate_id']} evidence_schema must exist or be inside "
+                    f"{gate['gate_id']} {field_name} must exist or be inside "
                     f"an ancestor task write_scope: {schema_path}"
                 )
 
@@ -1203,6 +1283,17 @@ def _taskpack_blueprint_context(
         context["research_authority_sha256"] = _sha256_file(
             project_root / blueprint["research_authority"]
         )
+    if blueprint.get("schema_inventory"):
+        context["schema_inventory"] = [
+            {
+                "path": schema_path,
+                "sha256": _sha256_file(project_root / schema_path),
+            }
+            for schema_path in sorted(blueprint["schema_inventory"])
+        ]
+        context["schema_inventory_sha256"] = _sha256_json(
+            context["schema_inventory"]
+        )
     return context
 
 
@@ -1268,6 +1359,7 @@ def _validate_taskpack_blueprint_approval(
             (blueprint.get("contract") or {}).get("stage_vocabulary")
         ),
         "contract": _sha256_json(blueprint.get("contract")),
+        "schema_inventory": context.get("schema_inventory_sha256"),
     }
     digest_record_fields = {
         "source_plan": "plan_sha256",
@@ -1276,6 +1368,7 @@ def _validate_taskpack_blueprint_approval(
         "review_schema": "review_schema_sha256",
         "stage_vocabulary": "stage_vocabulary_sha256",
         "contract": "contract_decisions_sha256",
+        "schema_inventory": "schema_inventory_sha256",
     }
     for binding in approval["digest_bindings"]:
         expected = digest_values.get(binding)
@@ -1609,6 +1702,60 @@ def _require_git_tracked_path(project_root, relative_path, field_name):
         )
 
 
+def _require_blueprint_authority_matches_head(
+    project_root,
+    blueprint,
+    blueprint_relative_path,
+):
+    paths = [
+        ("blueprint_path", blueprint_relative_path),
+        ("source_plan", blueprint["source_plan"]),
+        ("approval.schema_path", blueprint["approval"]["schema_path"]),
+        ("approval.record_path", blueprint["approval"]["record_path"]),
+    ]
+    if blueprint.get("research_authority"):
+        paths.append(("research_authority", blueprint["research_authority"]))
+    for schema_path in blueprint.get("schema_inventory", []):
+        paths.append(("schema_inventory", schema_path))
+    for gate in blueprint.get("post_backlog_gates", []):
+        for field_name in (
+            "evidence_schema",
+            "operator_authorization_schema",
+            "operator_approval_schema",
+        ):
+            relative_path = gate.get(field_name)
+            if relative_path and (project_root / relative_path).is_file():
+                paths.append(
+                    (f"{gate['gate_id']}.{field_name}", relative_path)
+                )
+    seen_paths = set()
+    for field_name, relative_path in paths:
+        if relative_path in seen_paths:
+            continue
+        seen_paths.add(relative_path)
+        _require_git_tracked_path(project_root, relative_path, field_name)
+        committed = subprocess.run(
+            ["git", "cat-file", "-e", f"HEAD:{relative_path}"],
+            cwd=project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        differs = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--", relative_path],
+            cwd=project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if committed.returncode != 0 or differs.returncode != 0:
+            raise TaskpackValidationError(
+                f"{field_name} must match the committed HEAD bytes: {relative_path}"
+            )
+
+
 def _sha256_file(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -1820,6 +1967,7 @@ def validate_taskpack(taskpack_dir):
     has_followup_quality_item = False
     has_broad_framework_quality_item = False
     repo_map_task_ids = _repo_map_task_ids(items)
+    repo_map_handoff_paths = _repo_map_handoff_paths(items)
     for item in items:
         if not isinstance(item, dict):
             errors.append("backlog.items entries must be objects")
@@ -1910,6 +2058,7 @@ def validate_taskpack(taskpack_dir):
             task_id_label,
             goal_kind=goal_kind,
             repo_map_task_ids=repo_map_task_ids,
+            repo_map_handoff_paths=repo_map_handoff_paths,
             semantic_contract_enabled=semantic_contract_enabled,
             errors=errors,
         )
@@ -2361,6 +2510,19 @@ def _repo_map_task_ids(items):
     }
 
 
+def _repo_map_handoff_paths(items):
+    paths = {REPO_MAP_HANDOFF_PATH}
+    if not isinstance(items, list):
+        return paths
+    for item in items:
+        if not isinstance(item, dict) or not _is_repo_map_backlog_item(item):
+            continue
+        for path in item.get("expected_output_artifacts", []):
+            if _is_non_empty_string(path):
+                paths.add(path)
+    return paths
+
+
 def _effective_task_risk_target(item):
     value = item.get("risk_target") if isinstance(item, dict) else None
     if isinstance(value, str) and value.strip() in TASK_RISK_TARGETS:
@@ -2374,6 +2536,7 @@ def _validate_risk_target_repo_map_routing(
     *,
     goal_kind,
     repo_map_task_ids,
+    repo_map_handoff_paths,
     semantic_contract_enabled,
     errors,
 ):
@@ -2383,14 +2546,17 @@ def _validate_risk_target_repo_map_routing(
         return
     risk_target = _effective_task_risk_target(item)
     if risk_target in DIRECT_IMPLEMENTATION_RISK_TARGETS:
-        if _has_repo_map_handoff_input(item) or _depends_on_repo_map_task(item, repo_map_task_ids):
+        if _has_repo_map_handoff_input(
+            item,
+            repo_map_handoff_paths,
+        ) or _depends_on_repo_map_task(item, repo_map_task_ids):
             errors.append(
                 f"{task_id_label} L0/L1 tasks must not require repo_map_handoff; "
                 "route directly to implementation_worker"
             )
         return
     if risk_target in REPO_MAP_REQUIRED_RISK_TARGETS:
-        if not _has_repo_map_handoff_input(item):
+        if not _has_repo_map_handoff_input(item, repo_map_handoff_paths):
             errors.append(
                 f"{task_id_label} L2 tasks must consume repo_map_handoff "
                 "from a repo_map_agent task or a reused integration baseline artifact"
@@ -2411,9 +2577,11 @@ def _is_repo_map_policy_worker_item(item):
     )
 
 
-def _has_repo_map_handoff_input(item):
+def _has_repo_map_handoff_input(item, repo_map_handoff_paths):
     input_artifacts = item.get("input_artifacts")
-    return isinstance(input_artifacts, list) and REPO_MAP_HANDOFF_PATH in input_artifacts
+    return isinstance(input_artifacts, list) and any(
+        path in repo_map_handoff_paths for path in input_artifacts
+    )
 
 
 def _depends_on_repo_map_task(item, repo_map_task_ids):

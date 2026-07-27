@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase1_completion_promotion.schema.json",
+  "title": "Phase 1 completion promotion receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "promotion_status",
+    "promoted_at",
+    "git_object_format",
+    "source_integration_commit",
+    "source_tree",
+    "remote_default_ref",
+    "remote_default_head",
+    "finalization_artifact",
+    "operator_approval",
+    "gate_epoch_artifact",
+    "invariants"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase1_completion_promotion.v1"
+    },
+    "promotion_status": {
+      "const": "passed"
+    },
+    "promoted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "git_object_format": {
+      "enum": [
+        "sha1",
+        "sha256"
+      ]
+    },
+    "source_integration_commit": {
+      "$ref": "#/$defs/git_oid"
+    },
+    "source_tree": {
+      "$ref": "#/$defs/git_oid"
+    },
+    "remote_default_ref": {
+      "const": "refs/heads/master"
+    },
+    "remote_default_head": {
+      "$ref": "#/$defs/git_oid"
+    },
+    "finalization_artifact": {
+      "$ref": "#/$defs/bound_artifact"
+    },
+    "operator_approval": {
+      "$ref": "#/$defs/bound_artifact"
+    },
+    "gate_epoch_artifact": {
+      "$ref": "#/$defs/bound_artifact"
+    },
+    "invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finalization_passed",
+        "approval_passed",
+        "same_epoch",
+        "same_final_report_sha",
+        "final_report_commit_reachable",
+        "remote_default_ref_contains_final_report"
+      ],
+      "properties": {
+        "finalization_passed": {
+          "const": true
+        },
+        "approval_passed": {
+          "const": true
+        },
+        "same_epoch": {
+          "const": true
+        },
+        "same_final_report_sha": {
+          "const": true
+        },
+        "final_report_commit_reachable": {
+          "const": true
+        },
+        "remote_default_ref_contains_final_report": {
+          "const": true
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source_integration_commit": {
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "source_tree": {
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "remote_default_head": {
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha256"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source_integration_commit": {
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "source_tree": {
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "remote_default_head": {
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "git_oid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bound_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "canonical_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

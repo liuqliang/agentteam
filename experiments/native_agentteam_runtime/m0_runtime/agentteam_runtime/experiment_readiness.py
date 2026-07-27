@@ -1,5 +1,6 @@
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -7,6 +8,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 READINESS_SCHEMA_VERSION = "p0_experiment_readiness.v1"
 EXPERIMENT_MANIFEST_SCHEMA_VERSION = "agentteam_experiment_manifest.v1"
+PHASE1_COMPLETION_PROMOTION_SCHEMA_VERSION = "phase1_completion_promotion.v1"
 P0_CAPABILITY_IDS = (
     "invocation_level_real_usage",
     "three_mode_experiment_harness",
@@ -42,6 +44,111 @@ def experiment_manifest_schema_path():
     )
 
 
+def phase1_completion_promotion_path():
+    return (
+        Path(__file__).resolve().parents[2]
+        / "implementation_artifacts"
+        / "acceptance"
+        / "phase1-completion-promotion.v1.json"
+    )
+
+
+def phase1_completion_promotion_schema_path():
+    return (
+        Path(__file__).resolve().parents[2]
+        / "schemas"
+        / "phase1_completion_promotion.schema.json"
+    )
+
+
+def validate_phase1_completion_promotion(receipt_path=None):
+    receipt_path = Path(
+        receipt_path or phase1_completion_promotion_path()
+    ).resolve()
+    receipt = _read_json_object(receipt_path, "Phase 1 completion promotion")
+    _validate_schema(
+        receipt,
+        phase1_completion_promotion_schema_path(),
+        "Phase 1 completion promotion",
+    )
+    repository_root = Path(__file__).resolve().parents[2]
+    finalization_path = _resolve_bound_artifact(
+        repository_root,
+        receipt["finalization_artifact"],
+        "Phase 1 finalization",
+    )
+    approval_path = _resolve_bound_artifact(
+        repository_root,
+        receipt["operator_approval"],
+        "Phase 1 operator approval",
+    )
+    epoch_path = _resolve_bound_artifact(
+        repository_root,
+        receipt["gate_epoch_artifact"],
+        "Phase 1 gate epoch",
+    )
+    finalization = _read_json_object(finalization_path, "Phase 1 finalization")
+    approval = _read_json_object(approval_path, "Phase 1 operator approval")
+    epoch = _read_json_object(epoch_path, "Phase 1 gate epoch")
+    _validate_schema(
+        finalization,
+        repository_root / "schemas" / "phase1_usage_finalization.schema.json",
+        "Phase 1 finalization",
+    )
+    _validate_schema(
+        approval,
+        repository_root / "schemas" / "post_backlog_gate_approval.schema.json",
+        "Phase 1 operator approval",
+    )
+    _validate_schema(
+        epoch,
+        repository_root / "schemas" / "post_backlog_gate_epoch.schema.json",
+        "Phase 1 gate epoch",
+    )
+    if finalization["controller_validation_status"] != "passed":
+        raise ExperimentReadinessError("Phase 1 finalization is not passed")
+    if approval["decision"] != "approved":
+        raise ExperimentReadinessError("Phase 1 operator approval is not approved")
+    if approval["gate_id"] != "P1-06E":
+        raise ExperimentReadinessError("Phase 1 approval does not bind P1-06E")
+    if approval["epoch_number"] != finalization["gate_epoch"]:
+        raise ExperimentReadinessError("Phase 1 approval epoch does not match finalization")
+    if epoch["epoch_number"] != finalization["gate_epoch"]:
+        raise ExperimentReadinessError("Phase 1 gate epoch number is inconsistent")
+    if (
+        receipt["gate_epoch_artifact"]["canonical_sha256"]
+        != finalization["evidence_digests"]["gate_epoch_sha256"]
+        or receipt["gate_epoch_artifact"]["canonical_sha256"]
+        != approval["epoch_sha256"]
+        or canonical_json_sha256(epoch)
+        != receipt["gate_epoch_artifact"]["canonical_sha256"]
+    ):
+        raise ExperimentReadinessError("Phase 1 gate epoch digest is inconsistent")
+    if epoch["validated_code_sha"] != finalization["validated_code_sha"]:
+        raise ExperimentReadinessError("Phase 1 gate epoch validated code is inconsistent")
+    if (
+        approval["final_report_sha"] != finalization["final_report_sha"]
+        or receipt["source_integration_commit"] != finalization["final_report_sha"]
+    ):
+        raise ExperimentReadinessError(
+            "Phase 1 final report commit binding is inconsistent"
+        )
+    if approval["evidence_sha256"] != receipt["finalization_artifact"]["sha256"]:
+        raise ExperimentReadinessError(
+            "Phase 1 approval evidence digest does not bind finalization"
+        )
+    _verify_phase1_git_promotion(receipt)
+    return {
+        "promotion_status": receipt["promotion_status"],
+        "source_integration_commit": receipt["source_integration_commit"],
+        "gate_epoch": finalization["gate_epoch"],
+        "finalization_sha256": receipt["finalization_artifact"]["sha256"],
+        "approval_sha256": receipt["operator_approval"]["sha256"],
+        "gate_epoch_sha256": receipt["gate_epoch_artifact"]["canonical_sha256"],
+        "receipt_sha256": canonical_json_sha256(receipt),
+    }
+
+
 def build_p0_readiness_summary(record_path=None):
     path = Path(record_path or packaged_readiness_record_path()).resolve()
     record = _read_json_object(path, "P0 readiness record")
@@ -73,6 +180,14 @@ def build_p0_readiness_summary(record_path=None):
         raise ExperimentReadinessError(
             "P0 readiness pilot authorization disagrees with capability states"
         )
+    invocation_capability = next(
+        item
+        for item in capabilities
+        if item["capability_id"] == "invocation_level_real_usage"
+    )
+    phase1_completion = None
+    if invocation_capability["status"] == "passed":
+        phase1_completion = validate_phase1_completion_promotion()
     counts = {
         status: sum(item["status"] == status for item in capabilities)
         for status in ("passed", "partial", "missing")
@@ -99,6 +214,7 @@ def build_p0_readiness_summary(record_path=None):
         "capability_counts": counts,
         "capabilities": capabilities,
         "blockers": blockers,
+        "phase1_completion": phase1_completion,
     }
 
 
@@ -197,3 +313,93 @@ def _validate_schema(value, schema_path, label):
         raise ExperimentReadinessError(
             f"{label} schema validation failed at {location}: {first.message}"
         )
+
+
+def _resolve_bound_artifact(repository_root, binding, label):
+    relative_path = Path(binding["path"])
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ExperimentReadinessError(f"{label} path is unsafe")
+    path = (Path(repository_root) / relative_path).resolve()
+    try:
+        path.relative_to(Path(repository_root).resolve())
+    except ValueError as exc:
+        raise ExperimentReadinessError(f"{label} path escapes repository root") from exc
+    if path.is_symlink() or not path.is_file():
+        raise ExperimentReadinessError(f"{label} is missing or unsafe: {path}")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != binding["sha256"]:
+        raise ExperimentReadinessError(f"{label} digest does not match promotion")
+    return path
+
+
+def _verify_phase1_git_promotion(receipt):
+    checkout = _phase1_source_checkout()
+    object_format = _git_text(checkout, "rev-parse", "--show-object-format")
+    if object_format != receipt["git_object_format"]:
+        raise ExperimentReadinessError("Phase 1 promotion Git object format mismatch")
+    commit = receipt["source_integration_commit"]
+    _git_text(checkout, "cat-file", "-e", f"{commit}^{{commit}}")
+    tree = _git_text(checkout, "rev-parse", f"{commit}^{{tree}}")
+    if tree != receipt["source_tree"]:
+        raise ExperimentReadinessError("Phase 1 promotion source tree mismatch")
+    remote_head = receipt["remote_default_head"]
+    _git_text(checkout, "cat-file", "-e", f"{remote_head}^{{commit}}")
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "merge-base",
+            "--is-ancestor",
+            commit,
+            remote_head,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ExperimentReadinessError(
+            "Phase 1 final report commit is not reachable from the recorded "
+            "remote default head"
+        )
+
+
+def _phase1_source_checkout():
+    release_or_checkout_root = Path(__file__).resolve().parents[4]
+    candidates = [release_or_checkout_root]
+    manifest_path = release_or_checkout_root / "manifest.json"
+    if manifest_path.is_file():
+        manifest = _read_json_object(manifest_path, "runtime release manifest")
+        source_root = manifest.get("source_root")
+        if isinstance(source_root, str) and source_root:
+            candidates.append(Path(source_root).expanduser().resolve())
+    for candidate in candidates:
+        completed = subprocess.run(
+            ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if completed.returncode == 0:
+            return Path(completed.stdout.strip()).resolve()
+    raise ExperimentReadinessError(
+        "Phase 1 completion promotion requires its bound Git source checkout"
+    )
+
+
+def _git_text(checkout, *arguments):
+    completed = subprocess.run(
+        ["git", "-C", str(checkout), *arguments],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ExperimentReadinessError(
+            completed.stderr.strip() or "Phase 1 Git promotion check failed"
+        )
+    return completed.stdout.strip()

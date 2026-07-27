@@ -1934,6 +1934,53 @@ class TaskpackTests(unittest.TestCase):
                 ],
             )
 
+    def test_blueprint_accepts_only_unique_ancestor_generated_input_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            generated_path = ".agentteam/generated/generated_analysis.json"
+            blueprint["tasks"][0]["expected_output_artifacts"] = [generated_path]
+            blueprint["tasks"][1]["input_artifacts"].append(generated_path)
+            _write_json(repo / blueprint_path, blueprint)
+
+            result = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                tmp_path / "unused",
+                dry_run=True,
+            )
+            self.assertEqual(result["validation_status"], "accepted")
+
+            blueprint["tasks"][1]["depends_on"] = []
+            _write_json(repo / generated_path, {"stale": True})
+            _write_json(repo / blueprint_path, blueprint)
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "not produced by exactly one ancestor task",
+            ):
+                taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_path,
+                    tmp_path / "missing-edge",
+                    dry_run=True,
+                )
+
+            blueprint["tasks"][1]["depends_on"] = ["T-1"]
+            blueprint["tasks"][2]["expected_output_artifacts"] = [generated_path]
+            _write_json(repo / blueprint_path, blueprint)
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "expected_output_artifacts must have one producer",
+            ):
+                taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_path,
+                    tmp_path / "duplicate-producer",
+                    dry_run=True,
+                )
+
     def test_blueprint_enforces_write_scope_cardinality_policy(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2111,6 +2158,54 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(first["dependency_edges"], second["dependency_edges"])
             self.assertFalse((tmp_path / "unused-a").exists())
             self.assertFalse((tmp_path / "unused-b").exists())
+
+    def test_blueprint_materialization_rejects_authority_drift_from_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            blueprint["tasks"][0]["objective"] = "Uncommitted authority drift."
+            _write_json(repo / blueprint_path, blueprint)
+            _write_blueprint_approval(repo, blueprint)
+
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "blueprint_path must match the committed HEAD bytes",
+            ):
+                taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_path,
+                    tmp_path / "drafts",
+                )
+
+    def test_blueprint_materialization_rejects_committed_gate_schema_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            schema_path = repo / blueprint["post_backlog_gates"][0]["evidence_schema"]
+            _write_json(schema_path, {"type": "object"})
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "track gate schema"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            _write_json(schema_path, {"type": "string"})
+
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "FINAL.evidence_schema must match the committed HEAD bytes",
+            ):
+                taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_path,
+                    tmp_path / "drafts",
+                )
 
     def test_blueprint_addition_preserves_one_task_semantic_materialization(self):
         with tempfile.TemporaryDirectory() as tmp:
