@@ -223,7 +223,7 @@
             },
             {
               "type": "string",
-              "pattern": "^USAGE-[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+              "pattern": "^USAGE-[0-9a-f]{64}$"
             }
           ]
         },

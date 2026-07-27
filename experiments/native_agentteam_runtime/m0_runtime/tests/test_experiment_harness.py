@@ -46,6 +46,7 @@ from agentteam_runtime.experiment_workspace import (
     validate_clean_snapshot_attestation,
     verify_clean_snapshot,
 )
+from agentteam_runtime.token_usage import usage_event_id_for_invocation
 from agentteam_runtime.experiment_sandbox import (
     _capture_bounded_process,
     _candidate_repository_state,
@@ -449,11 +450,51 @@ def _budget_usage(
     usage_status="reported",
     unavailable_reason=None,
 ):
+    invocation_id = f"INV-{suffix}"
+    start_sha256 = hashlib.sha256(
+        _authority_record_bytes({"invocation_id": invocation_id})
+    ).hexdigest()
     return {
         "usage_schema_version": "model_invocation_usage.v1",
-        "usage_event_id": f"USAGE-{suffix}",
-        "invocation_id": f"INV-{suffix}",
+        "usage_event_id": usage_event_id_for_invocation(invocation_id),
+        "invocation_id": invocation_id,
+        "start_sha256": start_sha256,
+        "project": "agentteam",
+        "run_id": "phase2-budget-fixture",
+        "pursue_id": None,
+        "round_index": None,
+        "taskpack_id": "phase2-budget-fixture",
+        "implementation_run_id": None,
+        "gate_epoch": None,
+        "task_id": "P2-03A",
+        "attempt_id": f"ATTEMPT-{suffix}",
+        "runtime_execution_session_id": f"SESSION-{suffix}",
+        "provider_session_id": None,
+        "provider_predecessor_invocation_id": None,
+        "provider_turn_id": None,
+        "provider_predecessor_turn_id": None,
+        "lifecycle_owner_token": f"LEASE-{suffix}",
+        "terminal_writer": "worker",
+        "agent_id": "agent-implementation-worker-1",
+        "role": "implementation_worker",
+        "usage_stage": "implementation_worker",
+        "backend": "codex",
+        "model": None,
+        "coverage_class": "supported_model_invocation",
+        "terminal_status": "completed",
         "usage_status": usage_status,
+        "usage_source": "codex_jsonl",
+        "provider_usage_scope": "invocation",
+        "accounting_method": (
+            "provider_reported"
+            if usage_status == "reported"
+            else (
+                "not_applicable"
+                if usage_status == "not_applicable"
+                else "unavailable"
+            )
+        ),
+        "provider_usage_snapshot": None,
         "unavailable_reason": unavailable_reason,
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_input_tokens,
@@ -467,10 +508,121 @@ def _budget_usage(
             and not isinstance(output_tokens, bool)
             else None
         ),
+        "started_at": "2026-07-27T00:00:00Z",
+        "finished_at": "2026-07-27T00:00:01Z",
+        "wall_time_seconds": 1.0,
+        "source_artifact_path": (
+            f"model_invocations/{invocation_id}/terminal.json"
+        ),
     }
 
 
+_BUDGET_CLOCK_ONLY = object()
+
+
+def _authority_record_bytes(record, *, pretty=False):
+    return (
+        json.dumps(
+            record,
+            ensure_ascii=False,
+            indent=2 if pretty else None,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _publish_budget_authority(
+    state,
+    usage,
+    *,
+    pretty_terminal=False,
+    terminal_digest_override=None,
+):
+    root = Path(state["authority_root"])
+    invocation_dir = root / "model_invocations" / usage["invocation_id"]
+    invocation_dir.mkdir(parents=True, exist_ok=True)
+    start_record = {"invocation_id": usage["invocation_id"]}
+    start_bytes = _authority_record_bytes(start_record)
+    terminal_bytes = _authority_record_bytes(
+        usage,
+        pretty=pretty_terminal,
+    )
+    start_digest = hashlib.sha256(start_bytes).hexdigest()
+    terminal_digest = hashlib.sha256(terminal_bytes).hexdigest()
+    started_path = invocation_dir / f"started-{start_digest}.json"
+    terminal_path = invocation_dir / f"terminal-{terminal_digest}.json"
+    if not started_path.exists():
+        started_path.write_bytes(start_bytes)
+    if not terminal_path.exists():
+        terminal_path.write_bytes(terminal_bytes)
+    events = [
+            {
+                "event_id": f"START-{usage['invocation_id']}",
+                "event_type": "model_invocation_started",
+                "source_event_id": usage["invocation_id"],
+                "payload": {
+                    **start_record,
+                    "_source_artifact_path": (
+                        started_path.relative_to(root).as_posix()
+                    ),
+                    "_source_record_sha256": start_digest,
+                },
+            },
+            {
+                "event_id": usage["usage_event_id"],
+                "event_type": "model_invocation_usage_recorded",
+                "source_event_id": usage["usage_event_id"],
+                "payload": {
+                    **copy.deepcopy(usage),
+                    "_source_artifact_path": (
+                        terminal_path.relative_to(root).as_posix()
+                    ),
+                    "_source_record_sha256": (
+                        terminal_digest_override
+                        or terminal_digest
+                    ),
+                },
+            },
+    ]
+    events_path = root / state["authority_events_path"]
+    existing_events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    with events_path.open("a", encoding="utf-8") as stream:
+        for event in events:
+            if event in existing_events:
+                continue
+            stream.write(json.dumps(event, sort_keys=True) + "\n")
+
+
+def _advance_budget(
+    state,
+    terminal_usage=_BUDGET_CLOCK_ONLY,
+    **kwargs,
+):
+    if terminal_usage is _BUDGET_CLOCK_ONLY:
+        return advance_experiment_budget(state, **kwargs)
+    if terminal_usage is None:
+        return advance_experiment_budget(state, None, **kwargs)
+    _publish_budget_authority(state, terminal_usage)
+    return advance_experiment_budget(
+        state,
+        terminal_usage["usage_event_id"],
+        **kwargs,
+    )
+
+
 class ExperimentBudgetTests(unittest.TestCase):
+    def _authority_paths(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        events_path = root / "events.jsonl"
+        events_path.touch()
+        return root, events_path
+
     def _state(
         self,
         *,
@@ -479,11 +631,14 @@ class ExperimentBudgetTests(unittest.TestCase):
         soft_warning_ratio=0.8,
         initial_monotonic=10,
     ):
+        authority_root, authority_events_path = self._authority_paths()
         return create_experiment_budget_state(
             "protocol-global-fixture",
             max_total_tokens,
             max_wall_time_seconds,
             soft_warning_ratio,
+            authority_root=authority_root,
+            authority_events_path=authority_events_path,
             initial_monotonic=initial_monotonic,
         )
 
@@ -507,7 +662,7 @@ class ExperimentBudgetTests(unittest.TestCase):
             reasoning_tokens=20,
         )
 
-        state, events = advance_experiment_budget(
+        state, events = _advance_budget(
             state,
             usage,
             now_monotonic=10,
@@ -547,14 +702,14 @@ class ExperimentBudgetTests(unittest.TestCase):
 
     def test_token_warning_and_exhaustion_include_exact_boundaries(self):
         state = self._state()
-        state, events = advance_experiment_budget(
+        state, events = _advance_budget(
             state,
             _budget_usage("below-warning", input_tokens=79, output_tokens=0),
             now_monotonic=10,
         )
         self.assertEqual(events, [])
 
-        state, events = advance_experiment_budget(
+        state, events = _advance_budget(
             state,
             _budget_usage("at-warning", input_tokens=1, output_tokens=0),
             now_monotonic=10,
@@ -562,7 +717,7 @@ class ExperimentBudgetTests(unittest.TestCase):
         self.assertEqual([event["event_kind"] for event in events], ["warning"])
         self.assertEqual(events[0]["threshold_dimensions"], ["tokens"])
 
-        state, events = advance_experiment_budget(
+        state, events = _advance_budget(
             state,
             _budget_usage("at-limit", input_tokens=20, output_tokens=0),
             now_monotonic=10,
@@ -574,7 +729,7 @@ class ExperimentBudgetTests(unittest.TestCase):
         self.assertTrue(state["exhausted"])
         self.assertEqual(state["overshoot_tokens"], 0)
 
-        state, events = advance_experiment_budget(
+        state, events = _advance_budget(
             state,
             _budget_usage("above-limit", input_tokens=1, output_tokens=0),
             now_monotonic=10,
@@ -585,11 +740,14 @@ class ExperimentBudgetTests(unittest.TestCase):
     def test_fake_monotonic_clock_drives_exact_wall_boundaries(self):
         ticks = iter([10, 17.999, 18, 30])
         controller = ExperimentBudgetController(monotonic=lambda: next(ticks))
+        authority_root, authority_events_path = self._authority_paths()
         state = controller.create_state(
             "clock-fixture",
             100,
             20,
             0.4,
+            authority_root=authority_root,
+            authority_events_path=authority_events_path,
         )
 
         state, events = controller.advance(state)
@@ -608,7 +766,7 @@ class ExperimentBudgetTests(unittest.TestCase):
             ExperimentBudgetIntegrityError,
             "regressed",
         ):
-            advance_experiment_budget(state, now_monotonic=29)
+            _advance_budget(state, now_monotonic=29)
 
     def test_simultaneous_threshold_events_emit_exactly_once(self):
         state = self._state(
@@ -618,7 +776,7 @@ class ExperimentBudgetTests(unittest.TestCase):
             initial_monotonic=0,
         )
         usage = _budget_usage("simultaneous", input_tokens=100, output_tokens=0)
-        state, events = advance_experiment_budget(
+        state, events = _advance_budget(
             state,
             usage,
             now_monotonic=10,
@@ -635,7 +793,7 @@ class ExperimentBudgetTests(unittest.TestCase):
         )
         frozen_projection = json.dumps(state, sort_keys=True)
 
-        replayed, replay_events = advance_experiment_budget(
+        replayed, replay_events = _advance_budget(
             state,
             copy.deepcopy(usage),
             now_monotonic=10,
@@ -649,12 +807,12 @@ class ExperimentBudgetTests(unittest.TestCase):
 
     def test_one_lane_terminal_completion_exposes_overshoot(self):
         state = self._state()
-        state, _ = advance_experiment_budget(
+        state, _ = _advance_budget(
             state,
             _budget_usage("before-limit", input_tokens=70, output_tokens=20),
             now_monotonic=10,
         )
-        state, events = advance_experiment_budget(
+        state, events = _advance_budget(
             state,
             _budget_usage(
                 "inflight-completion",
@@ -714,7 +872,7 @@ class ExperimentBudgetTests(unittest.TestCase):
 
         for name, usage in cases.items():
             with self.subTest(name=name):
-                state, _ = advance_experiment_budget(
+                state, _ = _advance_budget(
                     self._state(),
                     usage,
                     now_monotonic=10,
@@ -728,7 +886,7 @@ class ExperimentBudgetTests(unittest.TestCase):
             max_wall_time_seconds=1,
             initial_monotonic=10,
         )
-        state, events = advance_experiment_budget(
+        state, events = _advance_budget(
             state,
             cases["unavailable"],
             now_monotonic=11,
@@ -749,12 +907,12 @@ class ExperimentBudgetTests(unittest.TestCase):
     def test_replay_is_idempotent_and_conflicting_identity_fails_closed(self):
         state = self._state()
         usage = _budget_usage("replay", input_tokens=70, output_tokens=10)
-        state, _ = advance_experiment_budget(
+        state, _ = _advance_budget(
             state,
             usage,
             now_monotonic=10,
         )
-        replayed, events = advance_experiment_budget(
+        replayed, events = _advance_budget(
             state,
             copy.deepcopy(usage),
             now_monotonic=10,
@@ -762,9 +920,18 @@ class ExperimentBudgetTests(unittest.TestCase):
         self.assertEqual(replayed, state)
         self.assertEqual(events, [])
 
+        rebuilt_state = create_experiment_budget_state(
+            state["budget_id"],
+            state["max_total_tokens"],
+            state["max_wall_time_seconds"],
+            state["soft_warning_ratio"],
+            authority_root=state["authority_root"],
+            authority_events_path=state["authority_events_path"],
+            initial_monotonic=state["initial_monotonic"],
+        )
         rebuilt, rebuilt_events = advance_experiment_budget(
-            self._state(),
-            copy.deepcopy(usage),
+            rebuilt_state,
+            usage["usage_event_id"],
             now_monotonic=10,
         )
         self.assertEqual(rebuilt, state)
@@ -776,36 +943,287 @@ class ExperimentBudgetTests(unittest.TestCase):
         conflict = copy.deepcopy(usage)
         conflict["input_tokens"] = 71
         conflict["total_tokens"] = 81
+        conflict_state = self._state()
+        conflict_state, _ = _advance_budget(
+            conflict_state,
+            usage,
+            now_monotonic=10,
+        )
         with self.assertRaisesRegex(
             ExperimentBudgetIntegrityError,
-            "conflicting terminal usage identity",
+            "authority replay failed",
         ):
-            advance_experiment_budget(
-                state,
+            _advance_budget(
+                conflict_state,
                 conflict,
                 now_monotonic=10,
             )
 
         duplicate_invocation = copy.deepcopy(usage)
-        duplicate_invocation["usage_event_id"] = "USAGE-replay-second"
+        duplicate_invocation["usage_event_id"] = usage_event_id_for_invocation(
+            "INV-replay-second"
+        )
+        duplicate_state = self._state()
+        duplicate_state, _ = _advance_budget(
+            duplicate_state,
+            usage,
+            now_monotonic=10,
+        )
         with self.assertRaisesRegex(
             ExperimentBudgetIntegrityError,
-            "multiple terminal usage records",
+            "authority replay failed",
         ):
-            advance_experiment_budget(
-                state,
+            _advance_budget(
+                duplicate_state,
                 duplicate_invocation,
                 now_monotonic=10,
             )
 
+    def test_serialized_projection_cannot_reset_consumption_before_replay(self):
+        usage = _budget_usage(
+            "projection-reset",
+            input_tokens=10,
+            output_tokens=2,
+        )
+        state, _ = _advance_budget(
+            self._state(),
+            usage,
+            now_monotonic=10,
+        )
+        tampered = copy.deepcopy(state)
+        tampered["input_tokens"] = 0
+        tampered["output_tokens"] = 0
+        tampered["total_tokens"] = 0
+
+        with self.assertRaisesRegex(
+            ExperimentBudgetIntegrityError,
+            "projection integrity",
+        ):
+            validate_experiment_budget_state(tampered)
+        with self.assertRaisesRegex(
+            ExperimentBudgetIntegrityError,
+            "projection integrity",
+        ):
+            _advance_budget(
+                tampered,
+                copy.deepcopy(usage),
+                now_monotonic=10,
+            )
+
+    def test_only_canonical_phase1_terminal_usage_can_add_consumption(self):
+        canonical = _budget_usage(
+            "canonical-authority",
+            input_tokens=10,
+            output_tokens=2,
+        )
+        rejected, _ = advance_experiment_budget(
+            self._state(),
+            canonical,
+            now_monotonic=10,
+        )
+        self.assertEqual(rejected["total_tokens"], 0)
+        self.assertFalse(rejected["calibration_eligible"])
+        self.assertEqual(
+            rejected["incomplete_usage_reasons"][0]["reason"],
+            "missing_terminal_usage_authority",
+        )
+
+        state, _ = _advance_budget(
+            self._state(),
+            canonical,
+            now_monotonic=10,
+        )
+        self.assertEqual(state["total_tokens"], 12)
+        digest_mismatch_state = self._state()
+        _publish_budget_authority(
+            digest_mismatch_state,
+            canonical,
+            terminal_digest_override="b" * 64,
+        )
+        with self.assertRaisesRegex(
+            ExperimentBudgetIntegrityError,
+            "source-record digest mismatch",
+        ):
+            advance_experiment_budget(
+                digest_mismatch_state,
+                canonical["usage_event_id"],
+                now_monotonic=10,
+            )
+
+        _publish_budget_authority(
+            state,
+            canonical,
+            pretty_terminal=True,
+        )
+        with self.assertRaisesRegex(
+            ExperimentBudgetIntegrityError,
+            "authority replay failed",
+        ):
+            advance_experiment_budget(
+                state,
+                canonical["usage_event_id"],
+                now_monotonic=10,
+            )
+
+        for name, mutate in (
+            (
+                "noncanonical-event-id",
+                lambda usage: usage.update(
+                    {"usage_event_id": "USAGE-has space"}
+                ),
+            ),
+            (
+                "incomplete-terminal-shape",
+                lambda usage: usage.pop("source_artifact_path"),
+            ),
+        ):
+            with self.subTest(name=name):
+                usage = _budget_usage(
+                    name,
+                    input_tokens=10,
+                    output_tokens=2,
+                )
+                mutate(usage)
+                rejected, events = _advance_budget(
+                    self._state(
+                        max_wall_time_seconds=1,
+                        initial_monotonic=10,
+                    ),
+                    usage,
+                    now_monotonic=11,
+                )
+                self.assertEqual(rejected["total_tokens"], 0)
+                self.assertFalse(rejected["calibration_eligible"])
+                self.assertIsNone(
+                    rejected["incomplete_usage_reasons"][0][
+                        "usage_event_id"
+                    ]
+                    if name == "noncanonical-event-id"
+                    else None
+                )
+                for event in events:
+                    self._event_validator().validate(event)
+
+    def test_budget_state_v2_rejects_unsealed_v1_state(self):
+        state = self._state()
+        legacy = copy.deepcopy(state)
+        legacy["budget_schema_version"] = "experiment_budget_state.v1"
+        legacy.pop("projection_sha256")
+
+        with self.assertRaisesRegex(
+            ExperimentBudgetIntegrityError,
+            "fields do not match|unsupported",
+        ):
+            validate_experiment_budget_state(legacy)
+
+    def test_authority_root_symlink_and_event_log_replacement_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            real_root = parent / "real-authority"
+            real_root.mkdir()
+            events_path = real_root / "events.jsonl"
+            events_path.touch()
+            linked_root = parent / "linked-authority"
+            linked_root.symlink_to(real_root, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                ExperimentBudgetIntegrityError,
+                "symbolic link",
+            ):
+                create_experiment_budget_state(
+                    "symlink-authority",
+                    100,
+                    100,
+                    0.8,
+                    authority_root=linked_root,
+                    authority_events_path=linked_root / "events.jsonl",
+                    initial_monotonic=0,
+                )
+
+            fifo_root = parent / "fifo-authority"
+            fifo_root.mkdir()
+            fifo_events = fifo_root / "events.jsonl"
+            os.mkfifo(fifo_events)
+            with self.assertRaisesRegex(
+                ExperimentBudgetIntegrityError,
+                "regular authority file",
+            ):
+                create_experiment_budget_state(
+                    "fifo-authority",
+                    100,
+                    100,
+                    0.8,
+                    authority_root=fifo_root,
+                    authority_events_path=fifo_events,
+                    initial_monotonic=0,
+                )
+
+        state = self._state()
+        usage = _budget_usage(
+            "event-log-replacement",
+            input_tokens=1,
+            output_tokens=1,
+        )
+        events_path = (
+            Path(state["authority_root"]) / state["authority_events_path"]
+        )
+        replacement = events_path.with_name("replacement-events.jsonl")
+        replacement.touch()
+        os.replace(replacement, events_path)
+        _publish_budget_authority(state, usage)
+        with self.assertRaisesRegex(
+            ExperimentBudgetIntegrityError,
+            "identity changed",
+        ):
+            advance_experiment_budget(
+                state,
+                usage["usage_event_id"],
+                now_monotonic=10,
+            )
+
+    def test_authority_event_log_history_cannot_be_truncated_in_place(self):
+        state = self._state()
+        first = _budget_usage(
+            "append-only-first",
+            input_tokens=10,
+            output_tokens=1,
+        )
+        state, _ = _advance_budget(
+            state,
+            first,
+            now_monotonic=10,
+        )
+        events_path = (
+            Path(state["authority_root"]) / state["authority_events_path"]
+        )
+        original_inode = events_path.stat().st_ino
+        events_path.write_text("", encoding="utf-8")
+        self.assertEqual(events_path.stat().st_ino, original_inode)
+        second = _budget_usage(
+            "append-only-second",
+            input_tokens=20,
+            output_tokens=2,
+        )
+        _publish_budget_authority(state, second)
+
+        with self.assertRaisesRegex(
+            ExperimentBudgetIntegrityError,
+            "append-only prefix changed",
+        ):
+            advance_experiment_budget(
+                state,
+                second["usage_event_id"],
+                now_monotonic=11,
+            )
+
     def test_frozen_budget_drift_is_rejected_and_exhaustion_is_sticky(self):
         state = self._state()
-        state, _ = advance_experiment_budget(
+        state, _ = _advance_budget(
             state,
             _budget_usage("exhaust", input_tokens=100, output_tokens=0),
             now_monotonic=10,
         )
-        state, events = advance_experiment_budget(
+        state, events = _advance_budget(
             state,
             _budget_usage("post-exhaust", input_tokens=1, output_tokens=0),
             now_monotonic=11,
@@ -830,6 +1248,7 @@ class ExperimentBudgetTests(unittest.TestCase):
                     validate_experiment_budget_state(drifted)
 
     def test_invalid_numeric_inputs_never_become_consumption(self):
+        authority_root, authority_events_path = self._authority_paths()
         for name, kwargs in {
             "boolean-token-limit": {"max_total_tokens": True},
             "zero-token-limit": {"max_total_tokens": 0},
@@ -846,6 +1265,8 @@ class ExperimentBudgetTests(unittest.TestCase):
                     "max_wall_time_seconds": 100,
                     "soft_warning_ratio": 0.8,
                     "initial_monotonic": 0,
+                    "authority_root": authority_root,
+                    "authority_events_path": authority_events_path,
                 }
                 arguments.update(kwargs)
                 with self.assertRaises(ExperimentBudgetError):
@@ -875,7 +1296,7 @@ class ExperimentBudgetTests(unittest.TestCase):
 
         for usage in invalid_usages:
             with self.subTest(usage_event_id=usage["usage_event_id"]):
-                state, _ = advance_experiment_budget(
+                state, _ = _advance_budget(
                     self._state(),
                     usage,
                     now_monotonic=10,
@@ -884,7 +1305,7 @@ class ExperimentBudgetTests(unittest.TestCase):
                 self.assertFalse(state["calibration_eligible"])
 
         with self.assertRaises(ExperimentBudgetError):
-            advance_experiment_budget(
+            _advance_budget(
                 self._state(),
                 now_monotonic=float("nan"),
             )
