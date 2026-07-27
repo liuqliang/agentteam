@@ -1996,6 +1996,7 @@ python3 -m agentteam_runtime.phase1_usage_acceptance \
   --profile-project-root <source-checkout-with-agentteam-profile> \
   --candidate-project-root <clean-integration-worktree> \
   --implementation-run-id phase1-model-invocation-usage \
+  --implementation-run-dir <work-root>/runs/<optional-vN>/phase1-model-invocation-usage \
   --gate-epoch <current-epoch> \
   --acceptance-series-id <phase1-run-id>-acceptance \
   --attempt-id <attempt-id> \
@@ -2006,7 +2007,9 @@ python3 -m agentteam_runtime.phase1_usage_acceptance \
 
 The controller loads `.agentteam/profile.json` only from
 `--profile-project-root` and requires `--work-root` to equal that profile's
-resolved work root. It treats `--candidate-project-root` solely as the clean
+resolved work root. `--implementation-run-dir` must resolve to the immutable
+direct or `vN`-namespaced run below that work root, and its run identity must
+agree with `--implementation-run-id`. It treats `--candidate-project-root` solely as the clean
 integration worktree under test. Both roots must resolve to the same Git common
 directory, and the candidate branch/head must match the implementation run's
 integration baseline. The candidate is expected not to contain `.agentteam`.
@@ -2145,6 +2148,7 @@ python3 -m agentteam_runtime.phase1_usage_report complete \
   --profile-project-root <source-checkout-with-agentteam-profile> \
   --candidate-project-root <clean-integration-worktree> \
   --implementation-run-id phase1-model-invocation-usage \
+  --implementation-run-dir <work-root>/runs/<optional-vN>/phase1-model-invocation-usage \
   --gate-epoch <current-epoch> \
   --work-root <configured-project-work-root> \
   --acceptance-series-id <phase1-run-id>-acceptance \
@@ -2683,6 +2687,15 @@ This taskpack uses risk-proportional evidence:
   current target head, reruns frozen verification, and publishes a new current
   epoch with both gates pending. It never rewrites the prior epoch branch,
   receipts, approvals, artifacts, or cost records.
+- If a post-backlog controller exposes a candidate-code defect, create a
+  distinct operator-reviewed repair branch from the current
+  `validated_code_sha`. `agentteam gate repair-baseline` must require an
+  explicit versioned implementation run directory, prove the repair head is a
+  descendant while the target and prior epoch branch remain unchanged, rerun
+  the frozen verification command in the candidate environment, and publish a
+  new immutable epoch with both gates pending. Do not use a symlink alias,
+  mutate the prior integration branch, or merge the unapproved candidate into
+  the target to manufacture this transition.
 - Push and release activation are separate operator actions after source merge.
 
 ## Stop Conditions

@@ -65,6 +65,7 @@ def run_acceptance(
     profile_project_root,
     candidate_project_root,
     implementation_run_id,
+    implementation_run_dir=None,
     gate_epoch,
     acceptance_series_id,
     attempt_id,
@@ -116,7 +117,12 @@ def run_acceptance(
     work_root = configured_work_root
     _require_same_git_repository(profile_project_root, candidate_project_root)
     _verify_candidate_runtime_modules(candidate_project_root)
-    implementation_run_dir = work_root / "runs" / implementation_run_id
+    implementation_run_dir = _resolve_implementation_run_dir(
+        work_root,
+        implementation_run_id,
+        implementation_run_dir,
+        expected_project_key=profile.get("project_key"),
+    )
     context = _gate_runtime._require_post_backlog_gate_context(
         profile,
         implementation_run_dir,
@@ -1540,6 +1546,76 @@ def _safe_slug(value, label, *, maximum=128):
     return value
 
 
+def _resolve_implementation_run_dir(
+    work_root,
+    implementation_run_id,
+    supplied_run_dir=None,
+    *,
+    expected_project_key=None,
+):
+    """Resolve one explicit direct or vN-namespaced implementation run."""
+    work_root = Path(work_root).resolve()
+    runs_root = work_root / "runs"
+    requested = (
+        runs_root / implementation_run_id
+        if supplied_run_dir is None
+        else Path(supplied_run_dir).expanduser()
+    )
+    if requested.is_symlink():
+        raise Phase1UsageAcceptanceError(
+            "implementation_run_dir must not be a symlink"
+        )
+    run_dir = requested.resolve()
+    try:
+        relative = run_dir.relative_to(runs_root)
+    except ValueError as exc:
+        raise Phase1UsageAcceptanceError(
+            "implementation_run_dir must be below the configured runs root"
+        ) from exc
+    if len(relative.parts) == 1:
+        pass
+    elif (
+        len(relative.parts) == 2
+        and _release_runtime.RUN_NAMESPACE_PATTERN.fullmatch(relative.parts[0])
+    ):
+        namespace = runs_root / relative.parts[0]
+        if namespace.is_symlink():
+            raise Phase1UsageAcceptanceError(
+                "implementation run namespace must not be a symlink"
+            )
+    else:
+        raise Phase1UsageAcceptanceError(
+            "implementation_run_dir must be direct or below one vN namespace"
+        )
+    if run_dir.name != implementation_run_id:
+        raise Phase1UsageAcceptanceError(
+            "implementation_run_dir basename differs from implementation_run_id"
+        )
+    if not run_dir.is_dir():
+        raise Phase1UsageAcceptanceError("implementation_run_dir does not exist")
+    identity_path = run_dir / "state" / "run_identity.v1.json"
+    if identity_path.is_symlink() or not identity_path.is_file():
+        raise Phase1UsageAcceptanceError(
+            "implementation_run_dir lacks an immutable run identity"
+        )
+    identity = _read_json_object(identity_path, "implementation run identity")
+    expected = {
+        "run_id": implementation_run_id,
+        "taskpack_id": implementation_run_id,
+        "run_kind": "implementation",
+    }
+    if expected_project_key is not None:
+        expected["project_key"] = expected_project_key
+    mismatches = [
+        key for key, value in expected.items() if identity.get(key) != value
+    ]
+    if mismatches:
+        raise Phase1UsageAcceptanceError(
+            "implementation run identity mismatch: " + ", ".join(mismatches)
+        )
+    return run_dir
+
+
 def _boot_id():
     try:
         return Path("/proc/sys/kernel/random/boot_id").read_text(
@@ -1589,6 +1665,7 @@ def main(argv=None):
     parser.add_argument("--profile-project-root", required=True)
     parser.add_argument("--candidate-project-root", required=True)
     parser.add_argument("--implementation-run-id", required=True)
+    parser.add_argument("--implementation-run-dir")
     parser.add_argument("--gate-epoch", required=True, type=int)
     parser.add_argument("--acceptance-series-id", required=True)
     parser.add_argument("--attempt-id", required=True)
@@ -1606,6 +1683,7 @@ def main(argv=None):
             profile_project_root=args.profile_project_root,
             candidate_project_root=args.candidate_project_root,
             implementation_run_id=args.implementation_run_id,
+            implementation_run_dir=args.implementation_run_dir,
             gate_epoch=args.gate_epoch,
             acceptance_series_id=args.acceptance_series_id,
             attempt_id=args.attempt_id,

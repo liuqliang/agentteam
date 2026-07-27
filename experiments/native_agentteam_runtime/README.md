@@ -502,6 +502,7 @@ python3 -m agentteam_runtime.phase1_usage_acceptance \
   --profile-project-root <source-checkout-with-agentteam-profile> \
   --candidate-project-root <clean-integration-worktree> \
   --implementation-run-id phase1-model-invocation-usage \
+  --implementation-run-dir <work-root>/runs/<optional-vN>/phase1-model-invocation-usage \
   --gate-epoch <current-epoch> \
   --acceptance-series-id <phase1-run-id>-acceptance \
   --attempt-id <fresh-attempt-id> \
@@ -513,6 +514,9 @@ python3 -m agentteam_runtime.phase1_usage_acceptance \
 Supply the profile checkout and candidate integration worktree as distinct
 roots in the same Git common directory. The candidate must be clean, may omit
 `.agentteam`, and is the source of all Phase 1 modules through `PYTHONPATH`.
+The implementation run directory must be an immutable direct or
+`vN`-namespaced run below the configured work root and must match the supplied
+implementation run ID.
 Only the controller's atomically published, schema-valid
 `<work-root>/runs/<acceptance-series-id>-<attempt-id>/acceptance/model-invocation-live-smoke.v1.json`
 can pass `P1-LIVE`; failure records and worker prose cannot.
@@ -525,6 +529,7 @@ python3 -m agentteam_runtime.phase1_usage_report complete \
   --profile-project-root <source-checkout-with-agentteam-profile> \
   --candidate-project-root <clean-integration-worktree> \
   --implementation-run-id phase1-model-invocation-usage \
+  --implementation-run-dir <work-root>/runs/<optional-vN>/phase1-model-invocation-usage \
   --gate-epoch <current-epoch> \
   --work-root <configured-project-work-root> \
   --acceptance-series-id <phase1-run-id>-acceptance \

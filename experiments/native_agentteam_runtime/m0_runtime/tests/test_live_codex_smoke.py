@@ -793,6 +793,26 @@ class Phase1UsageAcceptanceTests(unittest.TestCase):
                 )
             self.assertFalse(work_root.exists())
 
+    def test_controller_accepts_explicit_versioned_implementation_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _acceptance_controller_fixture(
+                Path(tmp),
+                namespace="v4",
+            )
+            with _patched_acceptance_controller(fixture):
+                result = run_acceptance(
+                    **fixture["arguments"],
+                    helper_runner=_write_acceptance_provisional,
+                )
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(
+                fixture["context"]["run_dir"],
+                fixture["work_root"]
+                / "runs"
+                / "v4"
+                / fixture["implementation_run_id"],
+            )
+
     def test_controller_rejects_helper_hash_and_total_mismatches(self):
         for mismatch in ("hash", "totals"):
             with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as tmp:
@@ -1073,11 +1093,32 @@ def _write_usage_fake_codex(path):
     path.chmod(0o755)
 
 
-def _acceptance_controller_fixture(root):
+def _acceptance_controller_fixture(root, *, namespace=None):
     work_root = root / "work"
     implementation_run_id = "phase1-model-invocation-usage"
-    implementation_run_dir = work_root / "runs" / implementation_run_id
+    implementation_run_dir = work_root / "runs"
+    if namespace is not None:
+        implementation_run_dir /= namespace
+    implementation_run_dir /= implementation_run_id
     implementation_run_dir.mkdir(parents=True)
+    identity_path = implementation_run_dir / "state" / "run_identity.v1.json"
+    identity_path.parent.mkdir()
+    identity_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "run_identity.v1",
+                "project_key": "acceptance-project",
+                "run_id": implementation_run_id,
+                "taskpack_id": implementation_run_id,
+                "run_kind": "implementation",
+                "creation_sequence": 1,
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     run_id = "phase1-acceptance-attempt-1"
     expected_commit = _git_head(REPO_ROOT)
     profile = {
@@ -1135,6 +1176,7 @@ def _acceptance_controller_fixture(root):
         "profile_project_root": REPO_ROOT,
         "candidate_project_root": REPO_ROOT,
         "implementation_run_id": implementation_run_id,
+        "implementation_run_dir": implementation_run_dir,
         "gate_epoch": 1,
         "acceptance_series_id": "phase1-acceptance",
         "attempt_id": "attempt-1",

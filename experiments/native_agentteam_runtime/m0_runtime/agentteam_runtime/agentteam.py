@@ -27,6 +27,7 @@ from .diagnostic_chat import (
 )
 from .artifact_repo import snapshot_run_artifacts_safe
 from .m0_runtime import (
+    _integration_verification_env,
     answer_manual_gate,
     list_permission_requests,
     replay_event_records,
@@ -1435,6 +1436,18 @@ def _add_gate_parser(subcommands):
     refresh.add_argument("--authorize-revalidation", action="store_true", required=True)
     refresh.add_argument("--json", action="store_true")
     refresh.set_defaults(handler=_handle_gate)
+
+    repair = gate_commands.add_parser(
+        "repair-baseline",
+        help="Validate an operator-reviewed descendant and publish a fresh repair epoch.",
+    )
+    _add_gate_run_selection_arguments(repair)
+    repair.add_argument("--expected-gate-epoch", required=True, type=int)
+    repair.add_argument("--repair-branch", required=True)
+    repair.add_argument("--expected-repair-head", required=True)
+    repair.add_argument("--authorize-revalidation", action="store_true", required=True)
+    repair.add_argument("--json", action="store_true")
+    repair.set_defaults(handler=_handle_gate)
 
     register = gate_commands.add_parser(
         "register",
@@ -3490,6 +3503,15 @@ def _handle_gate(args):
             expected_gate_epoch=args.expected_gate_epoch,
             expected_target_head=args.expected_target_head,
         )
+    elif args.gate_command == "repair-baseline":
+        summary = _gate_repair_baseline(
+            project_root,
+            profile,
+            run_dir,
+            expected_gate_epoch=args.expected_gate_epoch,
+            repair_branch=args.repair_branch,
+            expected_repair_head=args.expected_repair_head,
+        )
     elif args.gate_command == "register":
         summary = _gate_register(
             project_root,
@@ -3536,9 +3558,35 @@ def _write_gate_text(summary):
 
 
 def _post_backlog_gate_context(profile, run_dir):
-    run_dir = Path(run_dir).resolve()
+    requested_run_dir = Path(run_dir).expanduser()
+    if requested_run_dir.is_symlink():
+        raise AgentTeamCliError(
+            "implementation run directory must not be a symlink",
+            run_dir=str(requested_run_dir),
+        )
+    run_dir = requested_run_dir.resolve()
     work_root = Path(profile.get("work_root") or run_dir.parent.parent).resolve()
-    frozen_dir = (work_root / "frozen" / run_dir.name).resolve()
+    runs_root = work_root / "runs"
+    try:
+        run_relative = run_dir.relative_to(runs_root)
+    except ValueError:
+        return None
+    if len(run_relative.parts) == 1:
+        frozen_relative = run_relative
+    elif (
+        len(run_relative.parts) == 2
+        and re.fullmatch(r"v[1-9][0-9]*", run_relative.parts[0])
+    ):
+        namespace = runs_root / run_relative.parts[0]
+        if namespace.is_symlink():
+            raise AgentTeamCliError(
+                "implementation run namespace must not be a symlink",
+                namespace=str(namespace),
+            )
+        frozen_relative = run_relative
+    else:
+        return None
+    frozen_dir = (work_root / "frozen" / frozen_relative).resolve()
     if not (frozen_dir / "taskpack.yaml").is_file():
         return None
     taskpack = json.loads((frozen_dir / "taskpack.yaml").read_text(encoding="utf-8"))
@@ -3651,6 +3699,7 @@ def _gate_seal_baseline(project_root, profile, run_dir, *, expected_integration_
         verification = subprocess.run(
             command,
             cwd=worktree,
+            env=_integration_verification_env(worktree),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -3880,6 +3929,7 @@ def _gate_refresh_baseline(
             verification = subprocess.run(
                 command,
                 cwd=candidate_worktree,
+                env=_integration_verification_env(candidate_worktree),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -4033,6 +4083,226 @@ def _gate_refresh_baseline(
                     candidate_branch,
                     candidate_worktree,
                 )
+
+
+def _gate_repair_baseline(
+    project_root,
+    profile,
+    run_dir,
+    *,
+    expected_gate_epoch,
+    repair_branch,
+    expected_repair_head,
+):
+    """Publish a verified descendant without rewriting the prior gate epoch."""
+    context = _require_post_backlog_gate_context(profile, run_dir)
+    if Path(project_root).resolve() != context["project_root"]:
+        raise AgentTeamCliError(
+            "selected project root does not match frozen gate authority",
+            project_root=str(Path(project_root).resolve()),
+            frozen_project_root=str(context["project_root"]),
+        )
+    gate_ids = sorted(context["declarations_by_id"])
+    with _gate_mutation_locks(context, gate_ids):
+        current = _require_current_gate_epoch(context, expected_gate_epoch)
+        record = current["record"]
+        run_status = _build_run_status_summary(profile, context["run_dir"])
+        if run_status.get("status") not in {
+            "idle",
+            "completed",
+            "awaiting_post_backlog_gates",
+        }:
+            raise AgentTeamCliError(
+                "implementation run must be idle before gate baseline repair",
+                run_status=run_status.get("status") or "unknown",
+            )
+        open_invocations = _open_gate_controller_invocations(context)
+        if open_invocations:
+            raise AgentTeamCliError(
+                "open gate controller invocation blocks baseline repair",
+                open_controller_invocations=open_invocations,
+            )
+
+        current_head = _resolved_epoch_integration_head(project_root, record)
+        current_worktree = _git_worktree_for_branch(
+            project_root,
+            record["integration_branch"],
+            current_head,
+        )
+        _require_clean_worktree(
+            current_worktree,
+            "current gate integration worktree must be clean before baseline repair",
+        )
+        target_head = _git_stdout(
+            project_root,
+            ["rev-parse", "--verify", f"{record['target_branch']}^{{commit}}"],
+        )
+        if target_head != record["target_head_sha"]:
+            raise AgentTeamCliError(
+                "target branch changed; refresh the target before applying a repair",
+                epoch_target_head=record["target_head_sha"],
+                current_target_head=target_head,
+            )
+        if repair_branch in {record["integration_branch"], record["target_branch"]}:
+            raise AgentTeamCliError(
+                "repair branch must be distinct from the immutable epoch and target branches"
+            )
+        repair_head = _git_stdout(
+            project_root,
+            ["rev-parse", "--verify", f"{repair_branch}^{{commit}}"],
+        )
+        _require_expected_git_oid(
+            project_root,
+            expected_repair_head,
+            repair_head,
+            field_name="expected repair head",
+        )
+        relation = _git_completed(
+            project_root,
+            [
+                "merge-base",
+                "--is-ancestor",
+                record["validated_code_sha"],
+                repair_head,
+            ],
+            check=False,
+        )
+        if relation.returncode != 0:
+            raise AgentTeamCliError(
+                "repair branch does not descend from the current validated code",
+                validated_code_sha=record["validated_code_sha"],
+                repair_head_sha=repair_head,
+            )
+        if repair_head == record["validated_code_sha"]:
+            raise AgentTeamCliError("repair branch does not contain a repair commit")
+        repair_worktree = _git_worktree_for_branch(
+            project_root,
+            repair_branch,
+            repair_head,
+        )
+        _require_clean_worktree(
+            repair_worktree,
+            "repair worktree must be clean before revalidation",
+        )
+
+        command = _frozen_gate_verification_command(context)
+        verification = subprocess.run(
+            command,
+            cwd=repair_worktree,
+            env=_integration_verification_env(repair_worktree),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=3600,
+        )
+        result_authority = {
+            "command": command,
+            "returncode": verification.returncode,
+            "stdout_sha256": _sha256_bytes(verification.stdout.encode("utf-8")),
+            "stderr_sha256": _sha256_bytes(verification.stderr.encode("utf-8")),
+        }
+        if verification.returncode != 0:
+            raise AgentTeamCliError(
+                "frozen full verification failed; repair epoch was not published",
+                verification_result=result_authority,
+            )
+        verified_head = _git_stdout(repair_worktree, ["rev-parse", "HEAD"])
+        if verified_head != repair_head:
+            raise AgentTeamCliError(
+                "repair branch changed during frozen verification",
+                before_head=repair_head,
+                after_head=verified_head,
+            )
+        _require_clean_worktree(
+            repair_worktree,
+            "frozen verification changed the repair worktree",
+        )
+        reread = _require_current_gate_epoch(context, expected_gate_epoch)
+        if reread["digest"] != current["digest"]:
+            raise AgentTeamCliError(
+                "gate epoch changed during baseline repair",
+                expected_epoch_sha256=current["digest"],
+                current_epoch_sha256=reread["digest"],
+            )
+        if _resolved_epoch_integration_head(project_root, record) != current_head:
+            raise AgentTeamCliError(
+                "current integration branch changed during baseline repair"
+            )
+        if _git_stdout(
+            project_root,
+            ["rev-parse", "--verify", f"{repair_branch}^{{commit}}"],
+        ) != repair_head:
+            raise AgentTeamCliError("repair branch changed during revalidation")
+        if _git_stdout(
+            project_root,
+            ["rev-parse", "--verify", f"{record['target_branch']}^{{commit}}"],
+        ) != target_head:
+            raise AgentTeamCliError("target branch changed during baseline repair")
+        open_invocations = _open_gate_controller_invocations(context)
+        if open_invocations:
+            raise AgentTeamCliError(
+                "controller invocation opened during baseline repair",
+                open_controller_invocations=open_invocations,
+            )
+
+        next_epoch = record["epoch_number"] + 1
+        repaired_record = {
+            "schema_version": "post_backlog_gate_epoch.v1",
+            "implementation_run_id": context["run_dir"].name,
+            "epoch_number": next_epoch,
+            "prior_epoch_sha256": current["digest"],
+            "gate_declaration_sha256": record["gate_declaration_sha256"],
+            "git_object_format": record["git_object_format"],
+            "target_branch": record["target_branch"],
+            "target_head_sha": target_head,
+            "integration_branch": repair_branch,
+            "integration_head_sha": repair_head,
+            "validated_code_sha": repair_head,
+            "verification_command_sha256": _sha256_json(command),
+            "verification_result_sha256": _sha256_json(result_authority),
+            "created_at": _format_utc_timestamp(datetime.now(UTC)),
+        }
+        _validate_gate_record_schema(
+            "post_backlog_gate_epoch.schema.json",
+            repaired_record,
+        )
+        epoch_dir = _publish_gate_epoch(context, repaired_record)
+        state_warning = None
+        try:
+            _atomic_write_json(
+                context["gate_root"] / "gate_state.v1.json",
+                {
+                    "schema_version": "post_backlog_gate_state.v1",
+                    "implementation_run_id": context["run_dir"].name,
+                    "state": "gates_pending",
+                    "gate_declaration_sha256": repaired_record[
+                        "gate_declaration_sha256"
+                    ],
+                    "current_epoch": next_epoch,
+                    "current_epoch_sha256": _sha256_json(repaired_record),
+                    "updated_at": _format_utc_timestamp(datetime.now(UTC)),
+                },
+            )
+        except Exception as exc:
+            state_warning = str(exc) or exc.__class__.__name__
+        summary = {
+            "gate_action": "repair-baseline",
+            "gate_status": "pending",
+            "taskpack_id": context["run_dir"].name,
+            "gate_epoch": next_epoch,
+            "parent_gate_epoch": record["epoch_number"],
+            "epoch_sha256": _sha256_json(repaired_record),
+            "target_head_sha": target_head,
+            "validated_code_sha": repair_head,
+            "integration_branch": repair_branch,
+            "integration_worktree": str(repair_worktree),
+            "verification_result": result_authority,
+            "path": str(epoch_dir / "epoch.v1.json"),
+        }
+        if state_warning:
+            summary["state_projection_warning"] = state_warning
+        return summary
 
 
 def _frozen_gate_verification_command(context):

@@ -700,6 +700,25 @@ class ProjectionDbOperatorPathTests(unittest.TestCase):
                 sorted(FIXED_CHANGED_PATHS),
             )
 
+    def test_phase1_complete_controller_accepts_versioned_implementation_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._phase1_completion_fixture(
+                Path(tmp),
+                namespace="v4",
+            )
+            with self._patched_phase1_completion(fixture):
+                result = complete_phase1_usage_report(
+                    **fixture["arguments"],
+                )
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(
+                fixture["context"]["run_dir"],
+                fixture["work_root"]
+                / "runs"
+                / "v4"
+                / "phase1-model-invocation-usage",
+            )
+
     def test_native_runtime_verification_profile_stays_compatible_with_focused_addition(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
@@ -725,12 +744,27 @@ class ProjectionDbOperatorPathTests(unittest.TestCase):
             NATIVE_RUNTIME_CORRECTNESS_COMMAND,
         )
 
-    def _phase1_completion_fixture(self, root):
+    def _phase1_completion_fixture(self, root, *, namespace=None):
         repo, validated = _initialize_report_repository(root)
         work_root = root / "work"
         implementation_run_id = "phase1-model-invocation-usage"
-        implementation_run_dir = work_root / "runs" / implementation_run_id
+        implementation_run_dir = work_root / "runs"
+        if namespace is not None:
+            implementation_run_dir /= namespace
+        implementation_run_dir /= implementation_run_id
         implementation_run_dir.mkdir(parents=True)
+        _write_json(
+            implementation_run_dir / "state" / "run_identity.v1.json",
+            {
+                "schema_version": "run_identity.v1",
+                "project_key": "phase1-test",
+                "run_id": implementation_run_id,
+                "taskpack_id": implementation_run_id,
+                "run_kind": "implementation",
+                "creation_sequence": 1,
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+        )
         selected_run_id = "phase1-acceptance-attempt-2"
         selected_run_dir = work_root / "runs" / selected_run_id
         selected_run_dir.mkdir(parents=True)
@@ -814,6 +848,7 @@ class ProjectionDbOperatorPathTests(unittest.TestCase):
                 "profile_project_root": repo,
                 "candidate_project_root": repo,
                 "implementation_run_id": implementation_run_id,
+                "implementation_run_dir": implementation_run_dir,
                 "gate_epoch": 1,
                 "work_root": work_root,
                 "acceptance_series_id": "phase1-acceptance",

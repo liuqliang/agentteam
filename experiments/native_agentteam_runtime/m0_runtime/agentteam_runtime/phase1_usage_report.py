@@ -57,6 +57,7 @@ def build_report_evidence(
     *,
     work_root,
     implementation_run_id,
+    implementation_run_dir=None,
     gate_epoch,
     acceptance_series_id,
     selected_acceptance_run_id,
@@ -84,7 +85,11 @@ def build_report_evidence(
     if not _SHA256.fullmatch(str(gate_epoch_sha256)):
         raise Phase1UsageReportError("gate_epoch_sha256 is not a SHA-256 digest")
 
-    implementation_run_dir = work_root / "runs" / implementation_run_id
+    implementation_run_dir = _acceptance_runtime._resolve_implementation_run_dir(
+        work_root,
+        implementation_run_id,
+        implementation_run_dir,
+    )
     deterministic_evidence = _deterministic_completion_evidence(
         implementation_run_dir
     )
@@ -616,6 +621,7 @@ def complete_phase1_usage_report(
     profile_project_root,
     candidate_project_root,
     implementation_run_id,
+    implementation_run_dir=None,
     gate_epoch,
     work_root,
     acceptance_series_id,
@@ -650,7 +656,12 @@ def complete_phase1_usage_report(
     _acceptance_runtime._verify_candidate_runtime_modules(
         candidate_project_root
     )
-    implementation_run_dir = configured_work_root / "runs" / implementation_run_id
+    implementation_run_dir = _acceptance_runtime._resolve_implementation_run_dir(
+        configured_work_root,
+        implementation_run_id,
+        implementation_run_dir,
+        expected_project_key=profile.get("project_key"),
+    )
     context = _gate_runtime._require_post_backlog_gate_context(
         profile,
         implementation_run_dir,
@@ -752,6 +763,7 @@ def complete_phase1_usage_report(
             evidence = build_report_evidence(
                 work_root=configured_work_root,
                 implementation_run_id=implementation_run_id,
+                implementation_run_dir=implementation_run_dir,
                 gate_epoch=gate_epoch,
                 acceptance_series_id=acceptance_series_id,
                 selected_acceptance_run_id=run_id,
@@ -1859,6 +1871,7 @@ def main(argv=None):
     complete.add_argument("--profile-project-root", required=True)
     complete.add_argument("--candidate-project-root", required=True)
     complete.add_argument("--implementation-run-id", required=True)
+    complete.add_argument("--implementation-run-dir")
     complete.add_argument("--gate-epoch", required=True, type=int)
     complete.add_argument("--work-root", required=True)
     complete.add_argument("--acceptance-series-id", required=True)
@@ -1870,6 +1883,7 @@ def main(argv=None):
             profile_project_root=args.profile_project_root,
             candidate_project_root=args.candidate_project_root,
             implementation_run_id=args.implementation_run_id,
+            implementation_run_dir=args.implementation_run_dir,
             gate_epoch=args.gate_epoch,
             work_root=args.work_root,
             acceptance_series_id=args.acceptance_series_id,

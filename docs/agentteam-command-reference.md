@@ -472,6 +472,28 @@ Legacy task-result summaries predate this lifecycle contract: they remain
 diagnostic, are never interpreted as zero usage, and cannot pass a Phase 1
 benchmark gate.
 
+### Post-backlog repair
+
+If a live or finalization gate exposes a candidate-code defect after baseline
+sealing, create a distinct reviewed repair branch that descends from the
+current `validated_code_sha`. Keep the prior integration and target branches
+unchanged, then publish a new epoch only after rerunning the frozen suite:
+
+```bash
+agentteam gate repair-baseline \
+  --project-root <source-checkout-with-agentteam-profile> \
+  --run-dir <work-root>/runs/<optional-vN>/<implementation-run-id> \
+  --expected-gate-epoch <current-epoch> \
+  --repair-branch <reviewed-repair-branch> \
+  --expected-repair-head <repair-commit-sha> \
+  --authorize-revalidation
+```
+
+The command rejects symlinked or dirty worktrees, target divergence, a repair
+that does not descend from the validated code, open controller invocations,
+and failed frozen verification. It preserves the old epoch and publishes a new
+epoch with both post-backlog gates pending.
+
 ### Candidate live gate
 
 The presence of these commands, deterministic tests, or worker prose is not
@@ -484,6 +506,7 @@ python3 -m agentteam_runtime.phase1_usage_acceptance \
   --profile-project-root <source-checkout-with-agentteam-profile> \
   --candidate-project-root <clean-integration-worktree> \
   --implementation-run-id phase1-model-invocation-usage \
+  --implementation-run-dir <work-root>/runs/<optional-vN>/phase1-model-invocation-usage \
   --gate-epoch <current-epoch> \
   --acceptance-series-id <phase1-run-id>-acceptance \
   --attempt-id <fresh-attempt-id> \
@@ -496,7 +519,9 @@ python3 -m agentteam_runtime.phase1_usage_acceptance \
 `.agentteam/profile.json`; `--candidate-project-root` is the clean integration
 worktree under test. They must share one Git common directory, but the candidate
 does not need its own `.agentteam`. `--work-root` must exactly equal the
-profile's configured work root, and `PYTHONPATH` must resolve the controller
+profile's configured work root. `--implementation-run-dir` must identify the
+immutable direct or `vN`-namespaced run below that work root and must agree with
+`--implementation-run-id`. `PYTHONPATH` must resolve the controller
 and Phase 1 modules from the candidate. Runtime output stays outside the
 candidate source tree. `--timeout-seconds` is optional and must be from 1
 through 900 seconds.
@@ -521,6 +546,7 @@ python3 -m agentteam_runtime.phase1_usage_report complete \
   --profile-project-root <source-checkout-with-agentteam-profile> \
   --candidate-project-root <clean-integration-worktree> \
   --implementation-run-id phase1-model-invocation-usage \
+  --implementation-run-dir <work-root>/runs/<optional-vN>/phase1-model-invocation-usage \
   --gate-epoch <current-epoch> \
   --work-root <configured-project-work-root> \
   --acceptance-series-id <phase1-run-id>-acceptance \

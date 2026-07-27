@@ -11,7 +11,7 @@ import threading
 import unittest
 import io
 import runpy
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -7759,6 +7759,223 @@ class TaskpackTests(unittest.TestCase):
                 repair_action,
             )
             self.assertIn("gate refresh-baseline", repair_action)
+
+    def test_post_backlog_context_maps_versioned_run_to_versioned_frozen_taskpack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work_root = root / "work"
+            project_root = root / "repo"
+            run_dir = work_root / "runs" / "v4" / "phase1-run"
+            run_dir.mkdir(parents=True)
+            project_root.mkdir()
+            versioned = {
+                "taskpack_id": "phase1-run",
+                "project_root": str(project_root),
+                "post_backlog_gates": [{"gate_id": "P1-LIVE"}],
+                "marker": "versioned",
+            }
+            flat = {**versioned, "marker": "flat"}
+            _write_json(
+                work_root / "frozen" / "v4" / "phase1-run" / "taskpack.yaml",
+                versioned,
+            )
+            _write_json(
+                work_root / "frozen" / "phase1-run" / "taskpack.yaml",
+                flat,
+            )
+
+            context = agentteam_module._post_backlog_gate_context(
+                {"work_root": str(work_root)},
+                run_dir,
+            )
+
+            self.assertEqual(context["taskpack"]["marker"], "versioned")
+            self.assertEqual(
+                context["frozen_dir"],
+                (work_root / "frozen" / "v4" / "phase1-run").resolve(),
+            )
+
+    def test_post_backlog_repair_publishes_new_epoch_with_candidate_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            run_dir = root / "work" / "runs" / "v4" / "phase1-run"
+            current_worktree = root / "current"
+            repair_worktree = root / "repair"
+            for path in (repo, run_dir, current_worktree, repair_worktree):
+                path.mkdir(parents=True)
+            runtime_package = (
+                repair_worktree
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "m0_runtime"
+                / "agentteam_runtime"
+            )
+            runtime_package.mkdir(parents=True)
+            (runtime_package / "__init__.py").write_text("", encoding="utf-8")
+            current_head = "a" * 40
+            target_head = "b" * 40
+            repair_head = "c" * 40
+            context = {
+                "project_root": repo.resolve(),
+                "work_root": root / "work",
+                "run_dir": run_dir,
+                "declarations_by_id": {"P1-LIVE": {}, "P1-06E": {}},
+                "gate_root": run_dir / "state" / "post_backlog_gates",
+                "epochs_root": (
+                    run_dir / "state" / "post_backlog_gates" / "epochs"
+                ),
+                "locks_root": (
+                    run_dir / "state" / "post_backlog_gates" / "locks"
+                ),
+            }
+            record = {
+                "schema_version": "post_backlog_gate_epoch.v1",
+                "implementation_run_id": "phase1-run",
+                "epoch_number": 1,
+                "prior_epoch_sha256": None,
+                "gate_declaration_sha256": "d" * 64,
+                "git_object_format": "sha1",
+                "target_branch": "target",
+                "target_head_sha": target_head,
+                "integration_branch": "integration-epoch-1",
+                "integration_head_sha": current_head,
+                "validated_code_sha": current_head,
+                "verification_command_sha256": "e" * 64,
+                "verification_result_sha256": "f" * 64,
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+            current = {"record": record, "digest": "1" * 64}
+            calls = []
+
+            def git_stdout(repo_path, command):
+                if command == ["rev-parse", "--show-object-format"]:
+                    return "sha1"
+                if command == [
+                    "rev-parse",
+                    "--verify",
+                    "integration-epoch-1^{commit}",
+                ]:
+                    return current_head
+                if command == ["rev-parse", "--verify", "target^{commit}"]:
+                    return target_head
+                if command == [
+                    "rev-parse",
+                    "--verify",
+                    "repair-branch^{commit}",
+                ]:
+                    return repair_head
+                if command == ["status", "--porcelain=v1", "--untracked-files=all"]:
+                    return ""
+                if command == ["rev-parse", "HEAD"]:
+                    self.assertEqual(Path(repo_path), repair_worktree)
+                    return repair_head
+                raise AssertionError((repo_path, command))
+
+            def publish_epoch(_context, value):
+                calls.append(value)
+                path = context["epochs_root"] / str(value["epoch_number"])
+                path.mkdir(parents=True)
+                return path
+
+            verification = SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+            verified_idle = {
+                "status": "awaiting_post_backlog_gates",
+            }
+            with (
+                mock.patch.object(
+                    agentteam_module,
+                    "_require_post_backlog_gate_context",
+                    return_value=context,
+                ),
+                mock.patch.object(
+                    agentteam_module,
+                    "_gate_mutation_locks",
+                    return_value=nullcontext(),
+                ),
+                mock.patch.object(
+                    agentteam_module,
+                    "_require_current_gate_epoch",
+                    return_value=current,
+                ),
+                mock.patch.object(
+                    agentteam_module,
+                    "_build_run_status_summary",
+                    return_value=verified_idle,
+                ),
+                mock.patch.object(
+                    agentteam_module,
+                    "_open_gate_controller_invocations",
+                    return_value=[],
+                ),
+                mock.patch.object(
+                    agentteam_module,
+                    "_git_stdout",
+                    side_effect=git_stdout,
+                ),
+                mock.patch.object(
+                    agentteam_module,
+                    "_git_completed",
+                    return_value=SimpleNamespace(returncode=0),
+                ),
+                mock.patch.object(
+                    agentteam_module,
+                    "_git_worktree_for_branch",
+                    side_effect=lambda _repo, branch, _head: (
+                        repair_worktree
+                        if branch == "repair-branch"
+                        else current_worktree
+                    ),
+                ),
+                mock.patch.object(
+                    agentteam_module,
+                    "_frozen_gate_verification_command",
+                    return_value=["python3", "-c", "pass"],
+                ),
+                mock.patch.object(
+                    agentteam_module,
+                    "_validate_gate_record_schema",
+                ),
+                mock.patch.object(
+                    agentteam_module,
+                    "_publish_gate_epoch",
+                    side_effect=publish_epoch,
+                ),
+                mock.patch.object(
+                    agentteam_module.subprocess,
+                    "run",
+                    return_value=verification,
+                ) as run_mock,
+            ):
+                os.environ["AGENTTEAM_LAUNCHER_SELECTION"] = "outer-release"
+                try:
+                    summary = agentteam_module._gate_repair_baseline(
+                        repo,
+                        {},
+                        run_dir,
+                        expected_gate_epoch=1,
+                        repair_branch="repair-branch",
+                        expected_repair_head=repair_head,
+                    )
+                finally:
+                    os.environ.pop("AGENTTEAM_LAUNCHER_SELECTION", None)
+
+            self.assertEqual(summary["gate_epoch"], 2)
+            self.assertEqual(summary["validated_code_sha"], repair_head)
+            self.assertEqual(calls[0]["prior_epoch_sha256"], current["digest"])
+            self.assertEqual(calls[0]["integration_branch"], "repair-branch")
+            verification_env = run_mock.call_args.kwargs["env"]
+            self.assertNotIn("AGENTTEAM_LAUNCHER_SELECTION", verification_env)
+            self.assertTrue(
+                verification_env["PYTHONPATH"].startswith(
+                    str(
+                        repair_worktree
+                        / "experiments"
+                        / "native_agentteam_runtime"
+                        / "m0_runtime"
+                    )
+                )
+            )
 
     def test_post_backlog_gate_git_oid_format_and_operator_tty_fail_closed(self):
         self.assertTrue(agentteam_module._valid_git_oid("a" * 40, "sha1"))
