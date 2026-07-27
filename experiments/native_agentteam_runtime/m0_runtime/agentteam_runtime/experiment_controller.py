@@ -30,6 +30,15 @@ from .experiment_budget import (
     create_experiment_budget_state,
     validate_experiment_budget_state,
 )
+from .experiment_ledger import (
+    create_experiment_operator_action_ledger,
+    load_experiment_operator_action_ledger,
+)
+from .experiment_contract import (
+    canonical_json_sha256,
+    validate_experiment_protocol,
+    validate_experiment_run_manifest,
+)
 from .model_invocation import (
     ModelInvocationIntegrityError,
     import_model_invocation_lifecycle,
@@ -37,7 +46,8 @@ from .model_invocation import (
 )
 
 
-CONTROLLER_SCHEMA_VERSION = "experiment_budget_controller.v1"
+CONTROLLER_SCHEMA_VERSION = "experiment_budget_controller.v2"
+LEGACY_CONTROLLER_SCHEMA_VERSION = "experiment_budget_controller.v1"
 CONTROLLER_STATE_SCHEMA_VERSION = "experiment_budget_controller_state.v2"
 CONTROLLER_STATE_CHECKPOINT_SCHEMA_VERSION = (
     "experiment_budget_controller_checkpoint.v1"
@@ -67,6 +77,15 @@ _BOUNDARIES = {
     "post_invocation_terminal",
     "pre_integration",
     "post_integration",
+}
+_OPERATOR_ACTION_CLASSES = {
+    "expected_operator_action",
+    "corrective_intervention",
+    "decision_escalation",
+}
+_OPERATOR_RUNTIME_REQUEST_TYPES = {
+    "manual_gate": "manual_gate_required",
+    "permission_request": "permission_request_required",
 }
 
 
@@ -139,6 +158,8 @@ class ExperimentController:
         soft_warning_ratio,
         budget_id=None,
         scored=True,
+        protocol_sha256=None,
+        operator_limits=None,
         initial_monotonic=None,
         monotonic=None,
     ):
@@ -150,6 +171,10 @@ class ExperimentController:
         )
         if not isinstance(scored, bool):
             raise ExperimentControllerError("scored must be a boolean")
+        protocol_sha256, operator_limits = _operator_policy_binding(
+            protocol_sha256,
+            operator_limits,
+        )
         _touch_regular_file(root / _AUTHORITY_EVENTS)
         state_lock_path = root / _CONTROLLER_STATE_LOCK
         state_journal_path = root / _CONTROLLER_STATE_JOURNAL
@@ -162,6 +187,39 @@ class ExperimentController:
         metadata_path = root / _CONTROLLER_METADATA
         existing_metadata = (
             _load_metadata(root) if metadata_path.exists() else None
+        )
+        operator_ledger_binding = (
+            _operator_ledger_binding(
+                root,
+                protocol_id=protocol_id,
+                protocol_sha256=protocol_sha256,
+                operator_limits=operator_limits,
+                create=True,
+            )
+            if existing_metadata is None and protocol_sha256 is not None
+            else {
+                "operator_ledger_root_device": (
+                    existing_metadata[
+                        "operator_ledger_root_device"
+                    ]
+                    if existing_metadata is not None
+                    else None
+                ),
+                "operator_ledger_root_inode": (
+                    existing_metadata[
+                        "operator_ledger_root_inode"
+                    ]
+                    if existing_metadata is not None
+                    else None
+                ),
+                "operator_ledger_policy_sha256": (
+                    existing_metadata[
+                        "operator_ledger_policy_sha256"
+                    ]
+                    if existing_metadata is not None
+                    else None
+                ),
+            }
         )
         expected_state_lock_identity = _metadata_file_identity(
             existing_metadata,
@@ -181,6 +239,8 @@ class ExperimentController:
                     metadata["protocol_id"] != protocol_id
                     or metadata["budget_id"] != budget_id
                     or metadata["scored"] is not scored
+                    or metadata["protocol_sha256"] != protocol_sha256
+                    or metadata["operator_limits"] != operator_limits
                 ):
                     raise ExperimentControllerIntegrityError(
                         "existing controller binding differs from requested "
@@ -233,6 +293,14 @@ class ExperimentController:
                     "protocol_id": protocol_id,
                     "budget_id": budget_id,
                     "scored": scored,
+                    "protocol_sha256": protocol_sha256,
+                    "operator_limits": operator_limits,
+                    "operator_limits_sha256": (
+                        _canonical_json_sha256(operator_limits)
+                        if operator_limits is not None
+                        else None
+                    ),
+                    **operator_ledger_binding,
                     "controller_root": str(root),
                     "authority_events_path": _AUTHORITY_EVENTS,
                     "budget_events_path": _BUDGET_EVENTS,
@@ -296,6 +364,119 @@ class ExperimentController:
     def snapshot(self):
         with self._state_lock():
             return copy.deepcopy(self._load_document())
+
+    def record_operator_action(
+        self,
+        *,
+        protocol,
+        run_manifest,
+        run_dir,
+        request_source,
+        request,
+        response=None,
+        requested_at,
+        answered_at=None,
+        related_task_id=None,
+        related_attempt_id=None,
+    ):
+        """Record one input under the protocol-global frozen action policy."""
+        protocol, run_manifest = self._validated_operator_run_binding(
+            protocol,
+            run_manifest,
+        )
+        _validate_operator_target_authority(
+            self.reference,
+            run_manifest,
+            run_dir,
+            request_source=request_source,
+            request=request,
+        )
+        ledger = self._operator_action_ledger()
+        ledger.bind_run(run_manifest)
+        return ledger.record(
+            experiment_run_id=run_manifest["experiment_run_id"],
+            mode=run_manifest["mode"],
+            request_source=request_source,
+            request=request,
+            response=response,
+            requested_at=requested_at,
+            answered_at=answered_at,
+            related_task_id=related_task_id,
+            related_attempt_id=related_attempt_id,
+        )
+
+    def operator_action_projection(
+        self,
+        *,
+        protocol,
+        run_manifest,
+    ):
+        protocol, run_manifest = self._validated_operator_run_binding(
+            protocol,
+            run_manifest,
+        )
+        ledger = self._operator_action_ledger()
+        ledger.bind_run(run_manifest)
+        return ledger.replay(
+            experiment_run_id=run_manifest["experiment_run_id"]
+        )
+
+    def _validated_operator_run_binding(self, protocol, run_manifest):
+        protocol = copy.deepcopy(protocol)
+        run_manifest = copy.deepcopy(run_manifest)
+        validate_experiment_protocol(protocol)
+        validate_experiment_run_manifest(run_manifest, protocol)
+        if protocol["experiment_id"] != self._metadata["protocol_id"]:
+            raise ExperimentControllerIntegrityError(
+                "operator ledger protocol conflicts with controller authority"
+            )
+        protocol_sha256 = canonical_json_sha256(protocol)
+        if (
+            self._metadata["protocol_sha256"] is None
+            or self._metadata["operator_limits"] is None
+        ):
+            raise ExperimentControllerIntegrityError(
+                "controller lacks frozen operator policy authority"
+            )
+        if (
+            protocol_sha256 != self._metadata["protocol_sha256"]
+            or protocol["operator_limits"]
+            != self._metadata["operator_limits"]
+        ):
+            raise ExperimentControllerIntegrityError(
+                "operator protocol differs from frozen controller authority"
+            )
+        return protocol, run_manifest
+
+    def _operator_action_ledger(self):
+        if self._metadata["operator_ledger_policy_sha256"] is None:
+            raise ExperimentControllerIntegrityError(
+                "controller lacks frozen operator ledger authority"
+            )
+        ledger_root = self.root / "operator-actions"
+        if ledger_root.is_symlink() or not ledger_root.is_dir():
+            raise ExperimentControllerIntegrityError(
+                "frozen operator ledger authority is unavailable"
+            )
+        ledger = load_experiment_operator_action_ledger(
+            ledger_root
+        )
+        binding = _operator_ledger_binding(
+            self.root,
+            protocol_id=self._metadata["protocol_id"],
+            protocol_sha256=self._metadata["protocol_sha256"],
+            operator_limits=self._metadata["operator_limits"],
+            create=False,
+        )
+        expected = {
+            key: self._metadata[key]
+            for key in binding
+        }
+        if binding != expected:
+            raise ExperimentControllerIntegrityError(
+                "operator ledger authority changed"
+            )
+        return ledger
 
     def prelaunch_admission(
         self,
@@ -612,6 +793,8 @@ class ExperimentController:
                     "controller frozen budget identity changed"
                 )
             self._sync_budget_events(state)
+        if self._metadata["operator_ledger_policy_sha256"] is not None:
+            self._operator_action_ledger()
 
     def _load_document(self):
         checkpoint = _latest_state_checkpoint(
@@ -1204,6 +1387,12 @@ def _load_metadata(root):
         "protocol_id",
         "budget_id",
         "scored",
+        "protocol_sha256",
+        "operator_limits",
+        "operator_limits_sha256",
+        "operator_ledger_root_device",
+        "operator_ledger_root_inode",
+        "operator_ledger_policy_sha256",
         "controller_root",
         "authority_events_path",
         "budget_events_path",
@@ -1221,21 +1410,248 @@ def _load_metadata(root):
         "budget_events_device",
         "budget_events_inode",
     }
-    if set(metadata) != required:
+    legacy_required = required - {
+        "protocol_sha256",
+        "operator_limits",
+        "operator_limits_sha256",
+        "operator_ledger_root_device",
+        "operator_ledger_root_inode",
+        "operator_ledger_policy_sha256",
+    }
+    if (
+        set(metadata) == legacy_required
+        and metadata.get("schema_version")
+        == LEGACY_CONTROLLER_SCHEMA_VERSION
+    ):
+        metadata = {
+            **metadata,
+            "protocol_sha256": None,
+            "operator_limits": None,
+            "operator_limits_sha256": None,
+            "operator_ledger_root_device": None,
+            "operator_ledger_root_inode": None,
+            "operator_ledger_policy_sha256": None,
+        }
+    elif (
+        set(metadata) == required
+        and metadata.get("schema_version")
+        == LEGACY_CONTROLLER_SCHEMA_VERSION
+    ):
+        raise ExperimentControllerIntegrityError(
+            "legacy controller metadata cannot contain v2 operator fields"
+        )
+    elif set(metadata) != required:
         raise ExperimentControllerIntegrityError(
             "experiment controller metadata fields are invalid"
         )
     if (
-        metadata["schema_version"] != CONTROLLER_SCHEMA_VERSION
+        metadata["schema_version"]
+        not in {
+            CONTROLLER_SCHEMA_VERSION,
+            LEGACY_CONTROLLER_SCHEMA_VERSION,
+        }
         or not isinstance(metadata["scored"], bool)
         or not _SHA256.fullmatch(str(metadata["frozen_budget_sha256"]))
     ):
         raise ExperimentControllerIntegrityError(
             "experiment controller metadata identity is invalid"
-        )
+    )
     _safe_id(metadata["protocol_id"], "protocol_id")
     _safe_id(metadata["budget_id"], "budget_id")
+    protocol_sha256, operator_limits = _operator_policy_binding(
+        metadata["protocol_sha256"],
+        metadata["operator_limits"],
+    )
+    expected_limits_sha256 = (
+        _canonical_json_sha256(operator_limits)
+        if operator_limits is not None
+        else None
+    )
+    if (
+        protocol_sha256 != metadata["protocol_sha256"]
+        or metadata["operator_limits_sha256"] != expected_limits_sha256
+    ):
+        raise ExperimentControllerIntegrityError(
+            "controller operator policy binding is invalid"
+        )
+    ledger_binding_values = (
+        metadata["operator_ledger_root_device"],
+        metadata["operator_ledger_root_inode"],
+        metadata["operator_ledger_policy_sha256"],
+    )
+    if operator_limits is None:
+        if ledger_binding_values != (None, None, None):
+            raise ExperimentControllerIntegrityError(
+                "budget-only controller cannot bind an operator ledger"
+            )
+    elif (
+        not all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in ledger_binding_values[:2]
+        )
+        or not _SHA256.fullmatch(str(ledger_binding_values[2]))
+    ):
+        raise ExperimentControllerIntegrityError(
+            "controller operator ledger binding is invalid"
+        )
     return metadata
+
+
+def _operator_policy_binding(protocol_sha256, operator_limits):
+    if protocol_sha256 is None and operator_limits is None:
+        return None, None
+    if (
+        not isinstance(protocol_sha256, str)
+        or not _SHA256.fullmatch(protocol_sha256)
+    ):
+        raise ExperimentControllerError(
+            "protocol_sha256 must bind operator limits"
+        )
+    if (
+        not isinstance(operator_limits, dict)
+        or set(operator_limits) != _OPERATOR_ACTION_CLASSES
+    ):
+        raise ExperimentControllerError(
+            "operator_limits must define the closed action vocabulary"
+        )
+    normalized = {}
+    for action_class in sorted(_OPERATOR_ACTION_CLASSES):
+        limit = operator_limits[action_class]
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit < 0
+        ):
+            raise ExperimentControllerError(
+                f"{action_class} limit must be a non-negative integer"
+            )
+        normalized[action_class] = limit
+    return protocol_sha256, normalized
+
+
+def _validate_operator_target_authority(
+    controller_reference,
+    run_manifest,
+    run_dir,
+    *,
+    request_source,
+    request,
+):
+    run_dir = Path(run_dir).resolve()
+    state_path = run_dir / "state" / "two_phase_scheduler_state.json"
+    try:
+        state = _read_json_file(
+            state_path,
+            "experiment target scheduler state",
+        )
+    except (OSError, ExperimentControllerIntegrityError) as exc:
+        raise PermissionError(
+            "experiment target run binding is absent or inconsistent"
+        ) from exc
+    expected = {
+        "experiment_controller_reference": controller_reference,
+        "experiment_run_id": run_manifest["experiment_run_id"],
+        "experiment_run_manifest_sha256": canonical_json_sha256(
+            run_manifest
+        ),
+        "experiment_target_path_sha256": hashlib.sha256(
+            str(run_dir).encode("utf-8")
+        ).hexdigest(),
+    }
+    if not isinstance(state, dict) or any(
+        state.get(key) != value for key, value in expected.items()
+    ):
+        raise PermissionError(
+            "experiment target run binding is absent or inconsistent"
+        )
+
+    expected_event_type = _OPERATOR_RUNTIME_REQUEST_TYPES.get(
+        request_source
+    )
+    if expected_event_type is None:
+        return
+    if (
+        not isinstance(request, dict)
+        or request.get("event_type") != expected_event_type
+        or not isinstance(request.get("event_id"), str)
+    ):
+        raise PermissionError(
+            "operator request lacks target-run source authority"
+        )
+    events_path = run_dir / "events.jsonl"
+    try:
+        raw_events = _read_regular_file_bytes(
+            events_path,
+            "experiment target runtime events",
+        ).decode("utf-8")
+    except (
+        OSError,
+        UnicodeDecodeError,
+        ExperimentControllerIntegrityError,
+    ) as exc:
+        raise PermissionError(
+            "operator request lacks target-run source authority"
+        ) from exc
+    matches = []
+    try:
+        for line in raw_events.splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if (
+                isinstance(event, dict)
+                and event.get("event_id") == request["event_id"]
+            ):
+                matches.append(event)
+    except json.JSONDecodeError as exc:
+        raise PermissionError(
+            "operator request target-run authority is invalid"
+        ) from exc
+    if len(matches) != 1 or matches[0] != request:
+        raise PermissionError(
+            "operator request lacks target-run source authority"
+        )
+
+
+def _operator_ledger_binding(
+    controller_root,
+    *,
+    protocol_id,
+    protocol_sha256,
+    operator_limits,
+    create,
+):
+    ledger_root = controller_root / "operator-actions"
+    if create:
+        ledger = create_experiment_operator_action_ledger(
+            ledger_root,
+            protocol_id=protocol_id,
+            protocol_sha256=protocol_sha256,
+            operator_limits=operator_limits,
+        )
+    else:
+        if ledger_root.is_symlink() or not ledger_root.is_dir():
+            raise ExperimentControllerIntegrityError(
+                "frozen operator ledger authority is unavailable"
+            )
+        ledger = load_experiment_operator_action_ledger(ledger_root)
+        policy = ledger.policy
+        if (
+            policy["protocol_id"] != protocol_id
+            or policy["protocol_sha256"] != protocol_sha256
+            or policy["operator_limits"] != operator_limits
+        ):
+            raise ExperimentControllerIntegrityError(
+                "operator ledger policy conflicts with controller"
+            )
+    stat_result = ledger.root.stat()
+    return {
+        "operator_ledger_root_device": stat_result.st_dev,
+        "operator_ledger_root_inode": stat_result.st_ino,
+        "operator_ledger_policy_sha256": _file_sha256(
+            ledger.root / "operator-action-policy.json"
+        ),
+    }
 
 
 def _state_document(status, budget_state, *, checkpoint_sequence):

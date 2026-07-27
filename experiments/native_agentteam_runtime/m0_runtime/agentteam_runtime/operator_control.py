@@ -1,13 +1,606 @@
+import hashlib
 import json
 import os
 import signal
 import time
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
+
+from .experiment_contract import canonical_json_sha256
 
 
 _RUNNING_WORKER_STATUSES = {"running", "started", "idle", "busy"}
 _RUNNING_SCHEDULER_STATUSES = {"running", "waiting", "max_ticks_reached"}
+_EXPERIMENT_OPERATOR_EVENT_SOURCES = {
+    "operator_answer_received": (
+        "manual_gate",
+        "manual_gate_required",
+        True,
+    ),
+    "permission_request_resolved": (
+        "permission_request",
+        "permission_request_required",
+        True,
+    ),
+    "run_stop_requested": ("run_stop", "run_stop_requested", False),
+    "run_resume_requested": (
+        "run_resume",
+        "run_resume_requested",
+        False,
+    ),
+    "corrective_guidance_received": (
+        "corrective_guidance",
+        "corrective_guidance_received",
+        False,
+    ),
+}
+_NON_OPERATOR_ACTION_EVENTS = {
+    "status_inspected",
+    "explain_status_inspected",
+    "controller_tick",
+    "scheduler_tick",
+    "budget_warning",
+    "budget_exhausted",
+    "worker_dispatched",
+    "worker_completed",
+}
+_EXPERIMENT_AUTHORIZATION_TOKEN = object()
+
+
+class _ExperimentMutationAuthorization:
+    __slots__ = (
+        "_token",
+        "action_id",
+        "controller_reference",
+        "identity_value",
+        "experiment_run_id",
+        "request_source",
+        "target_path_sha256",
+    )
+
+    def __init__(
+        self,
+        token,
+        *,
+        action_id,
+        controller_reference,
+        identity_value,
+        experiment_run_id,
+        request_source,
+        target_path_sha256,
+    ):
+        if token is not _EXPERIMENT_AUTHORIZATION_TOKEN:
+            raise PermissionError(
+                "experiment mutation authorization is controller-owned"
+            )
+        self._token = token
+        self.action_id = action_id
+        self.controller_reference = deepcopy(controller_reference)
+        self.identity_value = identity_value
+        self.experiment_run_id = experiment_run_id
+        self.request_source = request_source
+        self.target_path_sha256 = target_path_sha256
+
+
+def validate_experiment_mutation_authorization(
+    authorization,
+    *,
+    controller_reference,
+    request_source,
+    identity_value,
+    experiment_run_id,
+    target_path_sha256,
+):
+    if (
+        not isinstance(authorization, _ExperimentMutationAuthorization)
+        or authorization._token is not _EXPERIMENT_AUTHORIZATION_TOKEN
+        or authorization.controller_reference != controller_reference
+        or authorization.request_source != request_source
+        or authorization.identity_value != identity_value
+        or authorization.experiment_run_id != experiment_run_id
+        or authorization.target_path_sha256 != target_path_sha256
+        or not authorization.action_id
+    ):
+        raise PermissionError(
+            "experiment operator input requires a bound ledger authorization"
+        )
+    from .experiment_controller import load_experiment_controller
+
+    controller = load_experiment_controller(controller_reference)
+    entries = controller._operator_action_ledger().replay()["entries"]
+    if not any(
+        entry.get("action_id") == authorization.action_id
+        and entry.get("request_source") == request_source
+        and entry.get("experiment_run_id") == experiment_run_id
+        for entry in entries
+    ):
+        raise PermissionError(
+            "experiment mutation authorization lacks ledger authority"
+        )
+    return authorization
+
+
+def _experiment_mutation_authorization(
+    controller,
+    action,
+    *,
+    request_source,
+    identity_value,
+    run_manifest,
+    target_path_sha256,
+):
+    entry = action.get("entry") if isinstance(action, dict) else None
+    if (
+        not isinstance(entry, dict)
+        or entry.get("request_source") != request_source
+    ):
+        raise PermissionError(
+            "experiment ledger action cannot authorize this mutation"
+        )
+    return _ExperimentMutationAuthorization(
+        _EXPERIMENT_AUTHORIZATION_TOKEN,
+        action_id=entry["action_id"],
+        controller_reference=controller.reference,
+        experiment_run_id=run_manifest["experiment_run_id"],
+        identity_value=identity_value,
+        request_source=request_source,
+        target_path_sha256=target_path_sha256,
+    )
+
+
+def _validate_experiment_target_run(
+    controller,
+    *,
+    run_manifest,
+    run_dir,
+):
+    run_dir = Path(run_dir).resolve()
+    state_path = _scheduler_state_path(run_dir)
+    state = _read_json_if_exists(state_path)
+    expected = {
+        "experiment_controller_reference": controller.reference,
+        "experiment_run_id": run_manifest["experiment_run_id"],
+        "experiment_run_manifest_sha256": canonical_json_sha256(
+            run_manifest
+        ),
+        "experiment_target_path_sha256": _path_digest(run_dir),
+    }
+    if not isinstance(state, dict) or any(
+        state.get(key) != value for key, value in expected.items()
+    ):
+        raise PermissionError(
+            "experiment target run binding is absent or inconsistent"
+        )
+    return expected
+
+
+def record_experiment_operator_event(
+    controller,
+    *,
+    protocol,
+    run_manifest,
+    run_dir,
+    event_type,
+    request_event,
+    response_event=None,
+    requested_at=None,
+    answered_at=None,
+    related_task_id=None,
+    related_attempt_id=None,
+):
+    """Normalize one supported operator event without retaining raw content."""
+    if event_type in _NON_OPERATOR_ACTION_EVENTS:
+        return {
+            "record_status": "ignored_non_operator_action",
+            "event_type": event_type,
+        }
+    try:
+        (
+            request_source,
+            expected_request_type,
+            response_required,
+        ) = _EXPERIMENT_OPERATOR_EVENT_SOURCES[event_type]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            f"unsupported experiment operator event: {event_type!r}"
+        ) from exc
+
+    request_event = _operator_event_object(request_event, "request_event")
+    response_event = (
+        _operator_event_object(response_event, "response_event")
+        if response_event is not None
+        else None
+    )
+    if request_event.get("event_type") != expected_request_type:
+        raise ValueError(
+            "operator request event does not match its action source"
+        )
+    if response_required and response_event is None:
+        raise ValueError(
+            "operator action requires an authoritative response event"
+        )
+    if not response_required and response_event is not None:
+        raise ValueError(
+            "request-only operator action cannot include a response event"
+        )
+    if (
+        response_event is not None
+        and response_event.get("event_type") != event_type
+    ):
+        raise ValueError(
+            "operator response event does not match its action source"
+        )
+    requested_at = (
+        requested_at
+        or request_event.get("time")
+        or request_event.get("requested_at")
+    )
+    answered_at = (
+        answered_at
+        or (
+            response_event.get("time")
+            or response_event.get("answered_at")
+            if response_event is not None
+            else None
+        )
+    )
+    payload = request_event.get("payload")
+    if isinstance(payload, dict):
+        related_task_id = related_task_id or payload.get("task_id")
+        related_attempt_id = (
+            related_attempt_id or payload.get("attempt_id")
+        )
+    return controller.record_operator_action(
+        protocol=protocol,
+        run_manifest=run_manifest,
+        run_dir=run_dir,
+        request_source=request_source,
+        request=request_event,
+        response=response_event,
+        requested_at=requested_at,
+        answered_at=answered_at,
+        related_task_id=related_task_id,
+        related_attempt_id=related_attempt_id,
+    )
+
+
+def answer_experiment_manual_gate(
+    controller,
+    *,
+    protocol,
+    run_manifest,
+    output_dir,
+    question_id,
+    answer,
+    operator="operator",
+    clock=None,
+):
+    """Enforce experiment accounting before applying a manual-gate answer."""
+    _validate_experiment_target_run(
+        controller,
+        run_manifest=run_manifest,
+        run_dir=output_dir,
+    )
+    request_event = _find_authoritative_operator_request(
+        Path(output_dir) / "events.jsonl",
+        event_type="manual_gate_required",
+        identity_field="question_id",
+        identity_value=question_id,
+    )
+    answered_at = _operator_now(clock)
+    response_payload = {
+        "question_id": question_id,
+        "answer": answer,
+        "operator": operator,
+    }
+    response_event = {
+        "event_id": _operator_input_event_id(
+            "manual-gate-answer",
+            request_event,
+            response_payload,
+        ),
+        "event_type": "operator_answer_received",
+        "time": answered_at,
+        "payload": response_payload,
+    }
+    action = record_experiment_operator_event(
+        controller,
+        protocol=protocol,
+        run_manifest=run_manifest,
+        run_dir=output_dir,
+        event_type="operator_answer_received",
+        request_event=request_event,
+        response_event=response_event,
+    )
+    from .m0_runtime import answer_manual_gate
+
+    result = answer_manual_gate(
+        output_dir,
+        question_id,
+        answer,
+        operator=operator,
+        clock=clock,
+    )
+    return {**result, "operator_action": action}
+
+
+def resolve_experiment_permission_request(
+    controller,
+    *,
+    protocol,
+    run_manifest,
+    output_dir,
+    request_id,
+    decision,
+    operator="operator",
+    reason=None,
+    clock=None,
+):
+    """Enforce experiment accounting before applying a permission answer."""
+    _validate_experiment_target_run(
+        controller,
+        run_manifest=run_manifest,
+        run_dir=output_dir,
+    )
+    request_event = _find_authoritative_operator_request(
+        Path(output_dir) / "events.jsonl",
+        event_type="permission_request_required",
+        identity_field="request_id",
+        identity_value=request_id,
+    )
+    answered_at = _operator_now(clock)
+    response_payload = {
+        "request_id": request_id,
+        "decision": decision,
+        "operator": operator,
+        "reason": reason,
+    }
+    response_event = {
+        "event_id": _operator_input_event_id(
+            "permission-answer",
+            request_event,
+            response_payload,
+        ),
+        "event_type": "permission_request_resolved",
+        "time": answered_at,
+        "payload": response_payload,
+    }
+    action = record_experiment_operator_event(
+        controller,
+        protocol=protocol,
+        run_manifest=run_manifest,
+        run_dir=output_dir,
+        event_type="permission_request_resolved",
+        request_event=request_event,
+        response_event=response_event,
+    )
+    from .m0_runtime import resolve_permission_request
+
+    result = resolve_permission_request(
+        output_dir,
+        request_id,
+        decision,
+        operator=operator,
+        reason=reason,
+        clock=clock,
+    )
+    return {**result, "operator_action": action}
+
+
+def stop_experiment_run(
+    controller,
+    *,
+    protocol,
+    run_manifest,
+    run_dir,
+    action_request_id,
+    operator="operator",
+    requested_at=None,
+    grace_seconds=5,
+    force=False,
+):
+    """Account for an operator interruption before stopping runtime work."""
+    target_binding = _validate_experiment_target_run(
+        controller,
+        run_manifest=run_manifest,
+        run_dir=run_dir,
+    )
+    requested_at = requested_at or _utc_now()
+    action = record_experiment_operator_event(
+        controller,
+        protocol=protocol,
+        run_manifest=run_manifest,
+        run_dir=run_dir,
+        event_type="run_stop_requested",
+        request_event={
+            "event_id": str(action_request_id),
+            "event_type": "run_stop_requested",
+            "time": requested_at,
+            "payload": {
+                "operator": operator,
+                "run_dir_digest": _path_digest(run_dir),
+            },
+        },
+    )
+    if controller.controller_status == "active":
+        controller.interrupt()
+    elif controller.controller_status != "interrupted":
+        raise ValueError(
+            "experiment stop requires active or interrupted controller"
+        )
+    authorization = _experiment_mutation_authorization(
+        controller,
+        action,
+        request_source="run_stop",
+        identity_value=_path_digest(run_dir),
+        run_manifest=run_manifest,
+        target_path_sha256=target_binding[
+            "experiment_target_path_sha256"
+        ],
+    )
+    result = stop_run(
+        run_dir,
+        grace_seconds=grace_seconds,
+        force=force,
+        operator=operator,
+        experiment_operator_authorization=authorization,
+    )
+    return {**result, "operator_action": action}
+
+
+def resume_experiment_run(
+    controller,
+    *,
+    protocol,
+    run_manifest,
+    run_dir,
+    action_request_id,
+    operator="operator",
+    requested_at=None,
+    **resume_binding,
+):
+    """Account for an operator resume before reacquiring experiment authority."""
+    _validate_experiment_target_run(
+        controller,
+        run_manifest=run_manifest,
+        run_dir=run_dir,
+    )
+    requested_at = requested_at or _utc_now()
+    action = record_experiment_operator_event(
+        controller,
+        protocol=protocol,
+        run_manifest=run_manifest,
+        run_dir=run_dir,
+        event_type="run_resume_requested",
+        request_event={
+            "event_id": str(action_request_id),
+            "event_type": "run_resume_requested",
+            "time": requested_at,
+            "payload": {"operator": operator},
+        },
+    )
+    if (
+        action["record_status"] == "already_recorded"
+        and controller.controller_status == "active"
+    ):
+        result = controller.snapshot()
+        result["resume_status"] = "already_resumed"
+    else:
+        result = controller.resume_interrupted(**resume_binding)
+    return {**result, "operator_action": action}
+
+
+def record_experiment_corrective_guidance(
+    controller,
+    *,
+    protocol,
+    run_manifest,
+    run_dir,
+    action_request_id,
+    guidance,
+    operator="operator",
+    requested_at=None,
+    related_task_id=None,
+    related_attempt_id=None,
+):
+    """Account for corrective guidance while retaining only its digest."""
+    _validate_experiment_target_run(
+        controller,
+        run_manifest=run_manifest,
+        run_dir=run_dir,
+    )
+    requested_at = requested_at or _utc_now()
+    return record_experiment_operator_event(
+        controller,
+        protocol=protocol,
+        run_manifest=run_manifest,
+        run_dir=run_dir,
+        event_type="corrective_guidance_received",
+        request_event={
+            "event_id": str(action_request_id),
+            "event_type": "corrective_guidance_received",
+            "time": requested_at,
+            "payload": {
+                "operator": operator,
+                "guidance": guidance,
+                "task_id": related_task_id,
+                "attempt_id": related_attempt_id,
+            },
+        },
+        related_task_id=related_task_id,
+        related_attempt_id=related_attempt_id,
+    )
+
+
+def _operator_event_object(value, label):
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    return value
+
+
+def _find_authoritative_operator_request(
+    events_path,
+    *,
+    event_type,
+    identity_field,
+    identity_value,
+):
+    if not events_path.is_file() or events_path.is_symlink():
+        raise FileNotFoundError(
+            f"missing authoritative runtime events: {events_path}"
+        )
+    found = None
+    with events_path.open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if (
+                isinstance(event, dict)
+                and event.get("event_type") == event_type
+                and isinstance(event.get("payload"), dict)
+                and event["payload"].get(identity_field) == identity_value
+            ):
+                found = event
+    if found is None:
+        raise ValueError(
+            f"authoritative operator request not found: {identity_value}"
+        )
+    return found
+
+
+def _operator_now(clock):
+    return clock.now() if clock is not None else _utc_now()
+
+
+def _path_digest(path):
+    return hashlib.sha256(
+        str(Path(path).resolve()).encode("utf-8")
+    ).hexdigest()
+
+
+def _operator_input_event_id(kind, request_event, payload):
+    request_identity = (
+        request_event.get("event_id")
+        or request_event.get("payload", {}).get("question_id")
+        or request_event.get("payload", {}).get("request_id")
+        or "unknown"
+    )
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "kind": kind,
+                "payload": payload,
+                "request_identity": request_identity,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"OPERATOR-INPUT-{digest}"
 
 
 def build_run_liveness_summary(run_dir, profile=None):
@@ -52,12 +645,35 @@ def read_event_records_since(events_path, cursor=0, max_records=None):
         return stream.tell(), records
 
 
-def stop_run(run_dir, grace_seconds=5, force=False, stale_only=False, operator="operator"):
+def stop_run(
+    run_dir,
+    grace_seconds=5,
+    force=False,
+    stale_only=False,
+    operator="operator",
+    experiment_operator_authorization=None,
+):
     run_dir = Path(run_dir).resolve()
     now = _utc_now()
     state_path = _scheduler_state_path(run_dir)
     registry_path = _worker_registry_path(run_dir)
     state = _read_json_if_exists(state_path)
+    if (
+        isinstance(state, dict)
+        and state.get("experiment_controller_reference") is not None
+    ):
+        validate_experiment_mutation_authorization(
+            experiment_operator_authorization,
+            controller_reference=state[
+                "experiment_controller_reference"
+            ],
+            request_source="run_stop",
+            identity_value=_path_digest(run_dir),
+            experiment_run_id=state.get("experiment_run_id"),
+            target_path_sha256=state.get(
+                "experiment_target_path_sha256"
+            ),
+        )
     registry = _read_json_if_exists(registry_path)
     workers = registry.get("workers") if isinstance(registry, dict) else []
     if not isinstance(workers, list):
@@ -155,10 +771,27 @@ def cleanup_stale_runs(profile, operator="operator"):
             "runs": [],
             "run_root": str(run_root),
         }
-    runs = [
-        stop_run(run_dir, stale_only=True, operator=operator)
-        for run_dir in sorted(path for path in run_root.iterdir() if path.is_dir())
-    ]
+    runs = []
+    for run_dir in sorted(path for path in run_root.iterdir() if path.is_dir()):
+        state = _read_json_if_exists(_scheduler_state_path(run_dir))
+        if (
+            isinstance(state, dict)
+            and state.get("experiment_controller_reference") is not None
+        ):
+            runs.append(
+                {
+                    "stop_status": "experiment_gateway_required",
+                    "run_dir": str(run_dir.resolve()),
+                }
+            )
+            continue
+        runs.append(
+            stop_run(
+                run_dir,
+                stale_only=True,
+                operator=operator,
+            )
+        )
     cleaned = [run for run in runs if run["stop_status"] == "stopped"]
     return {
         "stop_status": "stale_cleaned" if cleaned else "not_stale",

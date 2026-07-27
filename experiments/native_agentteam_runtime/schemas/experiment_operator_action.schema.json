@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/experiment_operator_action.schema.json",
+  "title": "AgentTeam normalized experiment operator action",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ledger_schema_version",
+    "action_id",
+    "experiment_run_id",
+    "mode",
+    "action_class",
+    "requested_at",
+    "answered_at",
+    "request_source",
+    "request_digest",
+    "response_digest",
+    "reason",
+    "related_task_id",
+    "related_attempt_id",
+    "counts_as_intervention"
+  ],
+  "properties": {
+    "ledger_schema_version": {
+      "const": "experiment_operator_action.v1"
+    },
+    "action_id": {
+      "type": "string",
+      "pattern": "^ACTION-[0-9a-f]{64}$"
+    },
+    "experiment_run_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "mode": {
+      "enum": [
+        "single_codex",
+        "agentteam_direct",
+        "agentteam_full"
+      ]
+    },
+    "action_class": {
+      "enum": [
+        "expected_operator_action",
+        "corrective_intervention",
+        "decision_escalation"
+      ]
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "answered_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "request_source": {
+      "enum": [
+        "manual_gate",
+        "permission_request",
+        "run_stop",
+        "run_resume",
+        "corrective_guidance"
+      ]
+    },
+    "request_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "response_digest": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "related_task_id": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/safeId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "related_attempt_id": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/safeId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "counts_as_intervention": {
+      "type": "boolean"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action_class": {
+            "const": "corrective_intervention"
+          }
+        },
+        "required": [
+          "action_class"
+        ]
+      },
+      "then": {
+        "properties": {
+          "counts_as_intervention": {
+            "const": true
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "counts_as_intervention": {
+            "const": false
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    }
+  }
+}

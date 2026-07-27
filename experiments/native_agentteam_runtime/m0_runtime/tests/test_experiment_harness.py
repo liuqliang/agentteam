@@ -27,6 +27,14 @@ from agentteam_runtime.experiment_controller import (
     ExperimentProviderAdmissionDenied,
     create_experiment_controller,
 )
+from agentteam_runtime.experiment_ledger import (
+    ExperimentLedgerError,
+    ExperimentLedgerIntegrityError,
+    ExperimentOperatorActionLimitExceeded,
+    create_experiment_operator_action_ledger,
+    load_experiment_operator_action_ledger,
+    validate_experiment_operator_action,
+)
 from agentteam_runtime.experiment_contract import (
     LEGACY_MANIFEST_SCHEMA_VERSION,
     ExperimentContractError,
@@ -90,6 +98,16 @@ from agentteam_runtime.model_invocation import (
     invocation_context_from_message,
 )
 from agentteam_runtime.mailbox_worker import _model_invocation_context_payload
+import agentteam_runtime.experiment_ledger as experiment_ledger_module
+from agentteam_runtime.operator_control import (
+    answer_experiment_manual_gate,
+    cleanup_stale_runs,
+    record_experiment_operator_event,
+    resume_experiment_run,
+    resolve_experiment_permission_request,
+    stop_run,
+    stop_experiment_run,
+)
 import agentteam_runtime.two_phase_scheduler as two_phase_scheduler_module
 from agentteam_runtime.two_phase_scheduler import (
     TwoPhaseFileScheduler,
@@ -2932,6 +2950,1674 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
                     experiment_controller_required=True,
                     experiment_controller_monotonic=monotonic,
                 )
+
+
+class ExperimentOperatorActionLedgerTests(unittest.TestCase):
+    LIMITS = {
+        "expected_operator_action": 2,
+        "corrective_intervention": 1,
+        "decision_escalation": 1,
+    }
+
+    @staticmethod
+    def _controller(root):
+        protocol = _protocol()
+        return create_experiment_controller(
+            root,
+            protocol_id=protocol["experiment_id"],
+            protocol_sha256=canonical_json_sha256(protocol),
+            operator_limits=protocol["operator_limits"],
+            max_total_tokens=100,
+            max_wall_time_seconds=3600,
+            soft_warning_ratio=0.8,
+            scored=True,
+        )
+
+    @staticmethod
+    def _event(event_type, time_value, payload):
+        digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "event_type": event_type,
+                    "payload": payload,
+                    "time": time_value,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            "event_id": f"EVENT-{digest}",
+            "event_type": event_type,
+            "time": time_value,
+            "payload": payload,
+        }
+
+    @staticmethod
+    def _manifest(mode="single_codex", key="operator-ledger-001"):
+        return build_experiment_run_manifest(
+            _protocol(),
+            mode=mode,
+            repetition_index=0,
+            stable_request_key=key,
+        )
+
+    @staticmethod
+    def _bind_target_run(controller, manifest, run_dir):
+        run_dir = Path(run_dir).resolve()
+        state_path = run_dir / "state" / "two_phase_scheduler_state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = (
+            json.loads(state_path.read_text(encoding="utf-8"))
+            if state_path.exists()
+            else {}
+        )
+        state.update(
+            {
+                "experiment_controller_reference": controller.reference,
+                "experiment_run_id": manifest["experiment_run_id"],
+                "experiment_run_manifest_sha256": (
+                    canonical_json_sha256(manifest)
+                ),
+                "experiment_target_path_sha256": hashlib.sha256(
+                    str(run_dir).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+        state_path.write_text(
+            json.dumps(state, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    def _prepare_operator_target(self, controller, manifest, request):
+        run_dir = (
+            controller.root.parent
+            / f"{controller.root.name}-operator-targets"
+            / manifest["experiment_run_id"]
+        )
+        run_dir.mkdir(parents=True, exist_ok=True)
+        self._bind_target_run(controller, manifest, run_dir)
+        events_path = run_dir / "events.jsonl"
+        existing = (
+            [
+                json.loads(line)
+                for line in events_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+                if line
+            ]
+            if events_path.exists()
+            else []
+        )
+        if not any(
+            event.get("event_id") == request.get("event_id")
+            and event == request
+            for event in existing
+        ):
+            with events_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(request, sort_keys=True) + "\n")
+        return run_dir
+
+    def _record(
+        self,
+        controller,
+        *,
+        event_type="permission_request_resolved",
+        manifest=None,
+        request=None,
+        response=None,
+    ):
+        request = request or self._event(
+            "permission_request_required",
+            "2026-07-27T00:00:00Z",
+            {
+                "request_id": "PERM-001",
+                "task_id": "TASK-001",
+                "attempt_id": "ATTEMPT-001",
+                "secret": "must-not-be-retained",
+            },
+        )
+        if (
+            response is None
+            and event_type
+            not in {
+                "run_stop_requested",
+                "run_resume_requested",
+                "corrective_guidance_received",
+            }
+        ):
+            response = self._event(
+                event_type,
+                "2026-07-27T00:00:01Z",
+                {
+                    "request_id": "PERM-001",
+                    "decision": "approved",
+                    "secret": "also-must-not-be-retained",
+                },
+            )
+        manifest = manifest or self._manifest()
+        run_dir = self._prepare_operator_target(
+            controller,
+            manifest,
+            request,
+        )
+        return record_experiment_operator_event(
+            controller,
+            protocol=_protocol(),
+            run_manifest=manifest,
+            run_dir=run_dir,
+            event_type=event_type,
+            request_event=request,
+            response_event=response,
+        )
+
+    def test_supported_inputs_map_to_closed_vocabulary_without_raw_content(self):
+        cases = (
+            (
+                "operator_answer_received",
+                "manual_gate_required",
+                "decision_escalation",
+                False,
+            ),
+            (
+                "permission_request_resolved",
+                "permission_request_required",
+                "expected_operator_action",
+                False,
+            ),
+            (
+                "run_stop_requested",
+                "run_stop_requested",
+                "corrective_intervention",
+                True,
+            ),
+            (
+                "run_resume_requested",
+                "run_resume_requested",
+                "corrective_intervention",
+                True,
+            ),
+            (
+                "corrective_guidance_received",
+                "corrective_guidance_received",
+                "corrective_intervention",
+                True,
+            ),
+        )
+        for index, (
+            event_type,
+            request_type,
+            action_class,
+            intervention,
+        ) in enumerate(cases):
+            with self.subTest(event_type=event_type):
+                with tempfile.TemporaryDirectory() as tmp:
+                    controller = self._controller(Path(tmp) / "controller")
+                    correlation_fields = {
+                        "manual_gate_required": "question_id",
+                        "permission_request_required": "request_id",
+                    }
+                    correlation_field = correlation_fields.get(
+                        request_type
+                    )
+                    correlation_value = f"CORRELATION-{index}"
+                    request_payload = {
+                        "task_id": f"TASK-{index}",
+                        "attempt_id": f"ATTEMPT-{index}",
+                        "message": "secret request body",
+                    }
+                    response_payload = {
+                        "message": "secret response body"
+                    }
+                    if correlation_field is not None:
+                        request_payload[correlation_field] = (
+                            correlation_value
+                        )
+                        response_payload[correlation_field] = (
+                            correlation_value
+                        )
+                    request = self._event(
+                        request_type,
+                        "2026-07-27T00:00:00Z",
+                        request_payload,
+                    )
+                    response = self._event(
+                        event_type,
+                        "2026-07-27T00:00:01Z",
+                        response_payload,
+                    ) if event_type not in {
+                        "run_stop_requested",
+                        "run_resume_requested",
+                        "corrective_guidance_received",
+                    } else None
+                    recorded = self._record(
+                        controller,
+                        event_type=event_type,
+                        request=request,
+                        response=response,
+                    )
+                    entry = recorded["entry"]
+
+                    self.assertEqual(entry["action_class"], action_class)
+                    self.assertIs(
+                        entry["counts_as_intervention"],
+                        intervention,
+                    )
+                    serialized = json.dumps(entry, sort_keys=True)
+                    self.assertNotIn("secret request body", serialized)
+                    self.assertNotIn("secret response body", serialized)
+                    self.assertEqual(len(entry["request_digest"]), 64)
+                    if response is None:
+                        self.assertIsNone(entry["response_digest"])
+                    else:
+                        self.assertEqual(len(entry["response_digest"]), 64)
+                    self.assertIs(
+                        validate_experiment_operator_action(entry),
+                        entry,
+                    )
+
+    def test_replay_is_idempotent_and_conflicting_response_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp) / "controller")
+            first = self._record(controller)
+            replayed = self._record(controller)
+
+            self.assertEqual(first["record_status"], "recorded")
+            self.assertEqual(replayed["record_status"], "already_recorded")
+            self.assertEqual(replayed["projection"]["action_count"], 1)
+
+            changed_response = self._event(
+                "permission_request_resolved",
+                "2026-07-27T00:00:01Z",
+                {"request_id": "PERM-001", "decision": "denied"},
+            )
+            with self.assertRaisesRegex(
+                ExperimentLedgerIntegrityError,
+                "replay conflicts",
+            ):
+                self._record(controller, response=changed_response)
+
+    def test_frozen_equal_limits_apply_to_every_mode_and_exhaust_per_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "controller"
+            controller = self._controller(root)
+            first = self._record(
+                controller,
+                manifest=self._manifest(
+                    "single_codex",
+                    "operator-ledger-single",
+                ),
+            )
+            direct = self._record(
+                controller,
+                manifest=self._manifest(
+                    "agentteam_direct",
+                    "operator-ledger-direct",
+                ),
+            )
+
+            self.assertEqual(
+                first["projection"]["operator_action_counts"][
+                    "expected_operator_action"
+                ],
+                1,
+            )
+            self.assertEqual(
+                direct["projection"]["operator_action_counts"][
+                    "expected_operator_action"
+                ],
+                1,
+            )
+            changed_limits = {
+                **self.LIMITS,
+                "expected_operator_action": 3,
+            }
+            changed_protocol = {
+                **_protocol(),
+                "operator_limits": changed_limits,
+            }
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "differs from frozen.*authority",
+            ):
+                controller.record_operator_action(
+                    protocol=changed_protocol,
+                    run_manifest=build_experiment_run_manifest(
+                        changed_protocol,
+                        mode="agentteam_full",
+                        repetition_index=0,
+                        stable_request_key="operator-ledger-full",
+                    ),
+                    run_dir=Path(tmp) / "unbound-target",
+                    request_source="permission_request",
+                    request={
+                        "event_type": "permission_request_required",
+                        "request_id": "PERM-002",
+                    },
+                    response={
+                        "event_type": "permission_request_resolved",
+                        "decision": "approved",
+                    },
+                    requested_at="2026-07-27T00:00:00Z",
+                    answered_at="2026-07-27T00:00:01Z",
+                )
+
+            one_limit = {
+                **self.LIMITS,
+                "expected_operator_action": 1,
+            }
+            limited_protocol = {
+                **_protocol(),
+                "operator_limits": one_limit,
+            }
+            isolated = create_experiment_controller(
+                Path(tmp) / "isolated",
+                protocol_id=limited_protocol["experiment_id"],
+                protocol_sha256=canonical_json_sha256(
+                    limited_protocol
+                ),
+                operator_limits=one_limit,
+                max_total_tokens=100,
+                max_wall_time_seconds=3600,
+                soft_warning_ratio=0.8,
+                scored=True,
+            )
+            limited_manifest = build_experiment_run_manifest(
+                limited_protocol,
+                mode="agentteam_full",
+                repetition_index=0,
+                stable_request_key="operator-ledger-limited",
+            )
+            first_request = self._event(
+                "permission_request_required",
+                "2026-07-27T00:00:00Z",
+                {"request_id": "PERM-001"},
+            )
+            limited_run_dir = self._prepare_operator_target(
+                isolated,
+                limited_manifest,
+                first_request,
+            )
+            isolated.record_operator_action(
+                protocol=limited_protocol,
+                run_manifest=limited_manifest,
+                run_dir=limited_run_dir,
+                request_source="permission_request",
+                request=first_request,
+                response=self._event(
+                    "permission_request_resolved",
+                    "2026-07-27T00:00:01Z",
+                    {
+                        "request_id": "PERM-001",
+                        "decision": "approved",
+                    },
+                ),
+                requested_at="2026-07-27T00:00:00Z",
+                answered_at="2026-07-27T00:00:01Z",
+            )
+            second_request = self._event(
+                "permission_request_required",
+                "2026-07-27T00:00:02Z",
+                {"request_id": "PERM-002"},
+            )
+            self._prepare_operator_target(
+                isolated,
+                limited_manifest,
+                second_request,
+            )
+            with self.assertRaises(
+                ExperimentOperatorActionLimitExceeded
+            ):
+                isolated.record_operator_action(
+                    protocol=limited_protocol,
+                    run_manifest=limited_manifest,
+                    run_dir=limited_run_dir,
+                    request_source="permission_request",
+                    request=second_request,
+                    response=self._event(
+                        "permission_request_resolved",
+                        "2026-07-27T00:00:03Z",
+                        {
+                            "request_id": "PERM-002",
+                            "decision": "approved",
+                        },
+                    ),
+                    requested_at="2026-07-27T00:00:02Z",
+                    answered_at="2026-07-27T00:00:03Z",
+                )
+
+    def test_run_identity_cannot_change_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp) / "controller")
+            self._record(
+                controller,
+                manifest=self._manifest(
+                    "single_codex",
+                    "operator-ledger-mode-bound",
+                ),
+            )
+            request = self._event(
+                "permission_request_required",
+                "2026-07-27T00:00:02Z",
+                {"request_id": "PERM-002"},
+            )
+            response = self._event(
+                "permission_request_resolved",
+                "2026-07-27T00:00:03Z",
+                {"request_id": "PERM-002", "decision": "approved"},
+            )
+            with self.assertRaisesRegex(
+                ExperimentContractError,
+                "experiment_run_id",
+            ):
+                self._record(
+                    controller,
+                    manifest={
+                        **self._manifest(
+                            "agentteam_direct",
+                            "operator-ledger-mode-bound-direct",
+                        ),
+                        "experiment_run_id": self._manifest(
+                            "single_codex",
+                            "operator-ledger-mode-bound",
+                        )["experiment_run_id"],
+                    },
+                    request=request,
+                    response=response,
+                )
+
+    def test_source_masquerading_is_rejected_by_controller_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp) / "controller")
+            manifest = self._manifest()
+            request = {
+                "event_type": "corrective_guidance_received",
+                "guidance": "pretend this is a permission answer",
+            }
+            run_dir = self._prepare_operator_target(
+                controller,
+                manifest,
+                request,
+            )
+            with self.assertRaisesRegex(
+                PermissionError,
+                "source authority",
+            ):
+                controller.record_operator_action(
+                    protocol=_protocol(),
+                    run_manifest=manifest,
+                    run_dir=run_dir,
+                    request_source="permission_request",
+                    request=request,
+                    response={
+                        "event_type": "permission_request_resolved",
+                        "decision": "approved",
+                    },
+                    requested_at="2026-07-27T00:00:00Z",
+                    answered_at="2026-07-27T00:00:01Z",
+                )
+
+    def test_status_and_deterministic_system_events_do_not_create_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp) / "controller")
+            for event_type in (
+                "status_inspected",
+                "controller_tick",
+                "worker_completed",
+            ):
+                ignored = record_experiment_operator_event(
+                    controller,
+                    protocol=_protocol(),
+                    run_manifest=self._manifest(
+                        "agentteam_full",
+                        "operator-ledger-status",
+                    ),
+                    run_dir=Path(tmp) / "unused-status-target",
+                    event_type=event_type,
+                    request_event={"time": "2026-07-27T00:00:00Z"},
+                )
+                self.assertEqual(
+                    ignored["record_status"],
+                    "ignored_non_operator_action",
+                )
+
+            projection = controller.operator_action_projection(
+                protocol=_protocol(),
+                run_manifest=self._manifest(
+                    "agentteam_full",
+                    "operator-ledger-status",
+                ),
+            )
+            self.assertEqual(projection["action_count"], 0)
+            self.assertEqual(projection["intervention_count"], 0)
+
+    def test_corrective_guidance_counts_once_and_bounded_reason_is_fixed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp) / "controller")
+            request = self._event(
+                "corrective_guidance_received",
+                "2026-07-27T00:00:00Z",
+                {
+                    "task_id": "TASK-001",
+                    "guidance": "do not retain this free-form instruction",
+                },
+            )
+            manifest = self._manifest(
+                "agentteam_full",
+                "operator-ledger-guidance",
+            )
+            run_dir = self._prepare_operator_target(
+                controller,
+                manifest,
+                request,
+            )
+            result = record_experiment_operator_event(
+                controller,
+                protocol=_protocol(),
+                run_manifest=manifest,
+                run_dir=run_dir,
+                event_type="corrective_guidance_received",
+                request_event=request,
+            )
+
+            entry = result["entry"]
+            self.assertTrue(entry["counts_as_intervention"])
+            self.assertEqual(result["projection"]["intervention_count"], 1)
+            self.assertNotIn(
+                "do not retain",
+                json.dumps(entry, sort_keys=True),
+            )
+            self.assertLessEqual(len(entry["reason"]), 240)
+
+    def test_ledger_rejects_authority_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = create_experiment_operator_action_ledger(
+                Path(tmp) / "ledger",
+                protocol_id="phase2-operator-ledger",
+                protocol_sha256=canonical_json_sha256(_protocol()),
+                operator_limits=self.LIMITS,
+            )
+            ledger_path = ledger.root / "operator-actions.jsonl"
+            replacement = ledger.root / "replacement.jsonl"
+            replacement.write_text("", encoding="utf-8")
+            os.replace(replacement, ledger_path)
+            with self.assertRaisesRegex(
+                ExperimentLedgerIntegrityError,
+                "authority changed",
+            ):
+                load_experiment_operator_action_ledger(ledger.root)
+
+    def test_checkpoint_detects_same_inode_ledger_truncation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = create_experiment_operator_action_ledger(
+                Path(tmp) / "ledger",
+                protocol_id="phase2-operator-ledger",
+                protocol_sha256=canonical_json_sha256(_protocol()),
+                operator_limits=self.LIMITS,
+            )
+            manifest = self._manifest(
+                "agentteam_full",
+                "operator-ledger-truncation",
+            )
+            ledger.bind_run(manifest)
+            ledger.record(
+                experiment_run_id=manifest["experiment_run_id"],
+                mode="agentteam_full",
+                request_source="permission_request",
+                request=self._event(
+                    "permission_request_required",
+                    "2026-07-27T00:00:00Z",
+                    {"request_id": "PERM-001"},
+                ),
+                response=self._event(
+                    "permission_request_resolved",
+                    "2026-07-27T00:00:01Z",
+                    {
+                        "request_id": "PERM-001",
+                        "decision": "approved",
+                    },
+                ),
+                requested_at="2026-07-27T00:00:00Z",
+                answered_at="2026-07-27T00:00:01Z",
+            )
+            ledger_path = ledger.root / "operator-actions.jsonl"
+            ledger_path.write_text("", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ExperimentLedgerIntegrityError,
+                "checkpoint.*ledger",
+            ):
+                load_experiment_operator_action_ledger(ledger.root)
+
+    def test_experiment_gateways_account_before_applying_runtime_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            output_dir.mkdir()
+            events_path = output_dir / "events.jsonl"
+            requests = [
+                self._event(
+                    "manual_gate_required",
+                    "2026-07-27T00:00:00Z",
+                    {
+                        "question_id": "QUESTION-001",
+                        "task_id": "TASK-001",
+                    },
+                ),
+                self._event(
+                    "permission_request_required",
+                    "2026-07-27T00:00:01Z",
+                    {
+                        "request_id": "PERM-001",
+                        "task_id": "TASK-001",
+                    },
+                ),
+            ]
+            events_path.write_text(
+                "".join(
+                    json.dumps(event, sort_keys=True) + "\n"
+                    for event in requests
+                ),
+                encoding="utf-8",
+            )
+            controller = self._controller(root / "controller")
+            manifest = self._manifest(
+                "agentteam_full",
+                "operator-ledger-gateways",
+            )
+            self._bind_target_run(controller, manifest, output_dir)
+            clock = Mock()
+            clock.now.return_value = "2026-07-27T00:00:02Z"
+
+            with patch(
+                "agentteam_runtime.m0_runtime.answer_manual_gate",
+                return_value={
+                    "answer_status": "accepted",
+                    "question_id": "QUESTION-001",
+                },
+            ) as answer:
+                manual = answer_experiment_manual_gate(
+                    controller,
+                    protocol=_protocol(),
+                    run_manifest=manifest,
+                    output_dir=output_dir,
+                    question_id="QUESTION-001",
+                    answer="sensitive architecture decision",
+                    clock=clock,
+                )
+            with patch(
+                "agentteam_runtime.m0_runtime.resolve_permission_request",
+                return_value={
+                    "permission_status": "approved",
+                    "request_id": "PERM-001",
+                },
+            ) as permission:
+                resolved = resolve_experiment_permission_request(
+                    controller,
+                    protocol=_protocol(),
+                    run_manifest=manifest,
+                    output_dir=output_dir,
+                    request_id="PERM-001",
+                    decision="approved",
+                    reason="sensitive permission reason",
+                    clock=clock,
+                )
+
+            answer.assert_called_once()
+            permission.assert_called_once()
+            self.assertEqual(
+                manual["operator_action"]["entry"]["action_class"],
+                "decision_escalation",
+            )
+            self.assertEqual(
+                resolved["operator_action"]["entry"]["action_class"],
+                "expected_operator_action",
+            )
+            projection = controller.operator_action_projection(
+                protocol=_protocol(),
+                run_manifest=manifest,
+            )
+            self.assertEqual(projection["action_count"], 2)
+            serialized = json.dumps(projection, sort_keys=True)
+            self.assertNotIn("sensitive architecture", serialized)
+            self.assertNotIn("sensitive permission", serialized)
+
+    def test_experiment_stop_accounts_before_interrupt_and_runtime_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp) / "controller")
+            manifest = self._manifest(
+                "agentteam_full",
+                "operator-ledger-stop",
+            )
+            run_dir = Path(tmp) / "run"
+            self._bind_target_run(controller, manifest, run_dir)
+            with patch(
+                "agentteam_runtime.operator_control.stop_run",
+                return_value={"stop_status": "stopped"},
+            ) as stop:
+                result = stop_experiment_run(
+                    controller,
+                    protocol=_protocol(),
+                    run_manifest=manifest,
+                    run_dir=run_dir,
+                    action_request_id="STOP-001",
+                    requested_at="2026-07-27T00:00:00Z",
+                )
+
+            stop.assert_called_once()
+            self.assertEqual(controller.controller_status, "interrupted")
+            self.assertEqual(
+                result["operator_action"]["entry"]["action_class"],
+                "corrective_intervention",
+            )
+
+    def test_experiment_stop_capability_validates_against_real_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root / "controller")
+            manifest = self._manifest(
+                "agentteam_full",
+                "operator-ledger-stop-capability",
+            )
+            run_dir = root / "run"
+            state_dir = run_dir / "state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "two_phase_scheduler_state.json").write_text(
+                json.dumps(
+                    {
+                        "scheduler_status": "running",
+                        "experiment_controller_reference": (
+                            controller.reference
+                        ),
+                        "experiment_run_id": manifest[
+                            "experiment_run_id"
+                        ],
+                        "experiment_run_manifest_sha256": (
+                            canonical_json_sha256(manifest)
+                        ),
+                        "experiment_target_path_sha256": hashlib.sha256(
+                            str(run_dir.resolve()).encode("utf-8")
+                        ).hexdigest(),
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = stop_experiment_run(
+                controller,
+                protocol=_protocol(),
+                run_manifest=manifest,
+                run_dir=run_dir,
+                action_request_id="STOP-CAPABILITY-001",
+                requested_at="2026-07-27T00:00:00Z",
+            )
+
+            self.assertEqual(result["stop_status"], "stopped")
+            self.assertEqual(
+                json.loads(
+                    (
+                        state_dir / "two_phase_scheduler_state.json"
+                    ).read_text(encoding="utf-8")
+                )["scheduler_status"],
+                "stopped",
+            )
+
+    def test_gateway_retry_reuses_authoritative_input_after_runtime_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            output_dir.mkdir()
+            request = self._event(
+                "manual_gate_required",
+                "2026-07-27T00:00:00Z",
+                {
+                    "question_id": "QUESTION-RETRY",
+                    "task_id": "TASK-001",
+                },
+            )
+            request["sequence"] = 7
+            request["run_id"] = "runtime-run-retry"
+            (output_dir / "events.jsonl").write_text(
+                json.dumps(request, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            controller = self._controller(root / "controller")
+            manifest = self._manifest(
+                "agentteam_full",
+                "operator-ledger-retry",
+            )
+            self._bind_target_run(controller, manifest, output_dir)
+            clock = Mock()
+            clock.now.side_effect = [
+                "2026-07-27T00:00:01Z",
+                "2026-07-27T00:00:02Z",
+            ]
+
+            with patch(
+                "agentteam_runtime.m0_runtime.answer_manual_gate",
+                side_effect=[
+                    RuntimeError("runtime failed after accounting"),
+                    {
+                        "answer_status": "accepted",
+                        "question_id": "QUESTION-RETRY",
+                    },
+                ],
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "after accounting",
+                ):
+                    answer_experiment_manual_gate(
+                        controller,
+                        protocol=_protocol(),
+                        run_manifest=manifest,
+                        output_dir=output_dir,
+                        question_id="QUESTION-RETRY",
+                        answer="stable answer",
+                        clock=clock,
+                    )
+                retried = answer_experiment_manual_gate(
+                    controller,
+                    protocol=_protocol(),
+                    run_manifest=manifest,
+                    output_dir=output_dir,
+                    question_id="QUESTION-RETRY",
+                    answer="stable answer",
+                    clock=clock,
+                )
+
+            self.assertEqual(
+                retried["operator_action"]["record_status"],
+                "already_recorded",
+            )
+            projection = controller.operator_action_projection(
+                protocol=_protocol(),
+                run_manifest=manifest,
+            )
+            self.assertEqual(projection["action_count"], 1)
+            source_text = (
+                controller.root
+                / "operator-actions"
+                / "operator-input-events.jsonl"
+            ).read_text(encoding="utf-8")
+            source_events = [
+                json.loads(line)
+                for line in source_text.splitlines()
+                if line
+            ]
+            request_source = next(
+                event
+                for event in source_events
+                if event["event_type"] == "manual_gate_required"
+            )
+            response_source = next(
+                event
+                for event in source_events
+                if event["event_type"] == "operator_answer_received"
+            )
+            self.assertEqual(
+                projection["entries"][0]["request_digest"],
+                hashlib.sha256(
+                    canonical_json_bytes(request_source)
+                ).hexdigest(),
+            )
+            self.assertEqual(
+                projection["entries"][0]["response_digest"],
+                hashlib.sha256(
+                    canonical_json_bytes(response_source)
+                ).hexdigest(),
+            )
+            self.assertNotIn("stable answer", source_text)
+            self.assertIn("payload_sha256", source_text)
+
+    def test_missing_retained_request_authority_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp) / "controller")
+            recorded = self._record(controller)
+            source_path = (
+                controller.root
+                / "operator-actions"
+                / "operator-input-events.jsonl"
+            )
+            source_events = [
+                json.loads(line)
+                for line in source_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+                if line
+            ]
+            response_only = [
+                event
+                for event in source_events
+                if event["event_type"] == "permission_request_resolved"
+            ]
+            source_path.write_text(
+                "".join(
+                    json.dumps(event, sort_keys=True) + "\n"
+                    for event in response_only
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ExperimentLedgerIntegrityError,
+                "lacks retained source event authority",
+            ):
+                controller.operator_action_projection(
+                    protocol=_protocol(),
+                    run_manifest=self._manifest(),
+                )
+            self.assertEqual(recorded["projection"]["action_count"], 1)
+
+    def test_gateway_rejects_manifest_for_another_target_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root / "controller")
+            manifest_a = self._manifest(
+                "single_codex",
+                "operator-ledger-target-a",
+            )
+            manifest_b = self._manifest(
+                "agentteam_full",
+                "operator-ledger-target-b",
+            )
+            run_b = root / "run-b"
+            run_b.mkdir()
+            self._bind_target_run(controller, manifest_b, run_b)
+            (run_b / "events.jsonl").write_text(
+                json.dumps(
+                    self._event(
+                        "manual_gate_required",
+                        "2026-07-27T00:00:00Z",
+                        {
+                            "question_id": "QUESTION-WRONG-RUN",
+                            "task_id": "TASK-001",
+                        },
+                    ),
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "target run binding",
+            ):
+                answer_experiment_manual_gate(
+                    controller,
+                    protocol=_protocol(),
+                    run_manifest=manifest_a,
+                    output_dir=run_b,
+                    question_id="QUESTION-WRONG-RUN",
+                    answer="must not mutate run b",
+                )
+            self.assertEqual(
+                controller.operator_action_projection(
+                    protocol=_protocol(),
+                    run_manifest=manifest_b,
+                )["action_count"],
+                0,
+            )
+
+    def test_normalizer_cannot_bypass_target_run_source_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root / "controller")
+            manifest_a = self._manifest(
+                "single_codex",
+                "operator-ledger-authority-a",
+            )
+            manifest_b = self._manifest(
+                "single_codex",
+                "operator-ledger-authority-b",
+            )
+            request = self._event(
+                "manual_gate_required",
+                "2026-07-27T00:00:00Z",
+                {"question_id": "QUESTION-AUTHORITY"},
+            )
+            response = self._event(
+                "operator_answer_received",
+                "2026-07-27T00:00:01Z",
+                {
+                    "question_id": "QUESTION-AUTHORITY",
+                    "answer": "approved",
+                },
+            )
+            unbound = root / "unbound"
+            unbound.mkdir()
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "target run binding",
+            ):
+                record_experiment_operator_event(
+                    controller,
+                    protocol=_protocol(),
+                    run_manifest=manifest_b,
+                    run_dir=unbound,
+                    event_type="operator_answer_received",
+                    request_event=request,
+                    response_event=response,
+                )
+
+            run_a = root / "run-a"
+            run_a.mkdir()
+            self._bind_target_run(controller, manifest_a, run_a)
+            (run_a / "events.jsonl").write_text(
+                json.dumps(request, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                PermissionError,
+                "target run binding",
+            ):
+                record_experiment_operator_event(
+                    controller,
+                    protocol=_protocol(),
+                    run_manifest=manifest_b,
+                    run_dir=run_a,
+                    event_type="operator_answer_received",
+                    request_event=request,
+                    response_event=response,
+                )
+
+            run_b = root / "run-b-authority"
+            run_b.mkdir()
+            self._bind_target_run(controller, manifest_b, run_b)
+            (run_b / "events.jsonl").write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(
+                PermissionError,
+                "source authority",
+            ):
+                record_experiment_operator_event(
+                    controller,
+                    protocol=_protocol(),
+                    run_manifest=manifest_b,
+                    run_dir=run_b,
+                    event_type="operator_answer_received",
+                    request_event=request,
+                    response_event=response,
+                )
+
+            self.assertEqual(
+                controller.operator_action_projection(
+                    protocol=_protocol(),
+                    run_manifest=manifest_b,
+                )["action_count"],
+                0,
+            )
+
+    def test_resume_replay_is_idempotent_after_first_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root / "controller")
+            manifest = self._manifest(
+                "agentteam_full",
+                "operator-ledger-resume-retry",
+            )
+            run_dir = root / "run"
+            self._bind_target_run(controller, manifest, run_dir)
+            controller.interrupt()
+
+            first = resume_experiment_run(
+                controller,
+                protocol=_protocol(),
+                run_manifest=manifest,
+                run_dir=run_dir,
+                action_request_id="RESUME-001",
+                requested_at="2026-07-27T00:00:00Z",
+            )
+            replayed = resume_experiment_run(
+                controller,
+                protocol=_protocol(),
+                run_manifest=manifest,
+                run_dir=run_dir,
+                action_request_id="RESUME-001",
+                requested_at="2026-07-27T00:00:01Z",
+            )
+
+            self.assertEqual(first["controller_status"], "active")
+            self.assertEqual(
+                replayed["resume_status"],
+                "already_resumed",
+            )
+            self.assertEqual(
+                controller.operator_action_projection(
+                    protocol=_protocol(),
+                    run_manifest=manifest,
+                )["action_count"],
+                1,
+            )
+
+    def test_checkpoint_failure_recovers_from_valid_ledger_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = create_experiment_operator_action_ledger(
+                Path(tmp) / "ledger",
+                protocol_id="phase2-operator-ledger",
+                protocol_sha256=canonical_json_sha256(_protocol()),
+                operator_limits=self.LIMITS,
+            )
+            manifest = self._manifest(
+                "agentteam_full",
+                "operator-ledger-checkpoint-crash",
+            )
+            ledger.bind_run(manifest)
+            request = self._event(
+                "permission_request_required",
+                "2026-07-27T00:00:00Z",
+                {"request_id": "PERM-CRASH"},
+            )
+            response = self._event(
+                "permission_request_resolved",
+                "2026-07-27T00:00:01Z",
+                {
+                    "request_id": "PERM-CRASH",
+                    "decision": "approved",
+                },
+            )
+            with patch.object(
+                experiment_ledger_module,
+                "_append_checkpoint",
+                side_effect=OSError("checkpoint write failed"),
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "checkpoint write failed",
+                ):
+                    ledger.record(
+                        experiment_run_id=manifest["experiment_run_id"],
+                        mode="agentteam_full",
+                        request_source="permission_request",
+                        request=request,
+                        response=response,
+                        requested_at="2026-07-27T00:00:00Z",
+                        answered_at="2026-07-27T00:00:01Z",
+                    )
+
+            recovered = load_experiment_operator_action_ledger(ledger.root)
+            projection = recovered.replay(
+                experiment_run_id=manifest["experiment_run_id"]
+            )
+            self.assertEqual(projection["action_count"], 1)
+
+    def test_torn_checkpoint_tail_is_discarded_and_rebuilt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = create_experiment_operator_action_ledger(
+                Path(tmp) / "ledger",
+                protocol_id="phase2-operator-ledger",
+                protocol_sha256=canonical_json_sha256(_protocol()),
+                operator_limits=self.LIMITS,
+            )
+            manifest = self._manifest(
+                "agentteam_full",
+                "operator-ledger-torn-checkpoint",
+            )
+            ledger.bind_run(manifest)
+            ledger.record(
+                experiment_run_id=manifest["experiment_run_id"],
+                mode="agentteam_full",
+                request_source="permission_request",
+                request=self._event(
+                    "permission_request_required",
+                    "2026-07-27T00:00:00Z",
+                    {"request_id": "PERM-TORN"},
+                ),
+                response=self._event(
+                    "permission_request_resolved",
+                    "2026-07-27T00:00:01Z",
+                    {
+                        "request_id": "PERM-TORN",
+                        "decision": "approved",
+                    },
+                ),
+                requested_at="2026-07-27T00:00:00Z",
+                answered_at="2026-07-27T00:00:01Z",
+            )
+            checkpoint_path = (
+                ledger.root / "operator-action-checkpoints.jsonl"
+            )
+            with checkpoint_path.open("ab") as stream:
+                stream.write(b'{"torn":')
+
+            recovered = load_experiment_operator_action_ledger(ledger.root)
+            self.assertEqual(
+                recovered.replay(
+                    experiment_run_id=manifest["experiment_run_id"]
+                )["action_count"],
+                1,
+            )
+            self.assertTrue(
+                checkpoint_path.read_bytes().endswith(b"\n")
+            )
+
+    def test_first_torn_append_recovers_to_empty_authority_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = create_experiment_operator_action_ledger(
+                Path(tmp) / "ledger",
+                protocol_id="phase2-operator-ledger",
+                protocol_sha256=canonical_json_sha256(_protocol()),
+                operator_limits=self.LIMITS,
+            )
+            manifest = self._manifest(
+                "agentteam_full",
+                "operator-ledger-first-torn",
+            )
+            bindings_path = (
+                ledger.root / "operator-run-bindings.jsonl"
+            )
+            bindings_path.write_bytes(b'{"partial":')
+            ledger.bind_run(manifest)
+
+            source_path = ledger.root / "operator-input-events.jsonl"
+            source_path.write_bytes(b'{"partial":')
+            ledger_path = ledger.root / "operator-actions.jsonl"
+            ledger_path.write_bytes(b'{"partial":')
+            recorded = ledger.record(
+                experiment_run_id=manifest["experiment_run_id"],
+                mode="agentteam_full",
+                request_source="permission_request",
+                request=self._event(
+                    "permission_request_required",
+                    "2026-07-27T00:00:00Z",
+                    {"request_id": "PERM-FIRST-TORN"},
+                ),
+                response=self._event(
+                    "permission_request_resolved",
+                    "2026-07-27T00:00:01Z",
+                    {
+                        "request_id": "PERM-FIRST-TORN",
+                        "decision": "approved",
+                    },
+                ),
+                requested_at="2026-07-27T00:00:00Z",
+                answered_at="2026-07-27T00:00:01Z",
+            )
+            self.assertEqual(recorded["record_status"], "recorded")
+
+            checkpoint_path = (
+                ledger.root / "operator-action-checkpoints.jsonl"
+            )
+            checkpoint_path.write_bytes(b'{"partial":')
+            recovered = load_experiment_operator_action_ledger(ledger.root)
+            self.assertEqual(
+                recovered.replay(
+                    experiment_run_id=manifest["experiment_run_id"]
+                )["action_count"],
+                1,
+            )
+
+    def test_stop_retry_reuses_action_and_already_interrupted_controller(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp) / "controller")
+            manifest = self._manifest(
+                "agentteam_full",
+                "operator-ledger-stop-retry",
+            )
+            run_dir = Path(tmp) / "run"
+            self._bind_target_run(controller, manifest, run_dir)
+            with patch(
+                "agentteam_runtime.operator_control.stop_run",
+                side_effect=[
+                    RuntimeError("stop failed after interrupt"),
+                    {"stop_status": "stopped"},
+                ],
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "after interrupt",
+                ):
+                    stop_experiment_run(
+                        controller,
+                        protocol=_protocol(),
+                        run_manifest=manifest,
+                        run_dir=run_dir,
+                        action_request_id="STOP-RETRY-001",
+                        requested_at="2026-07-27T00:00:00Z",
+                    )
+                retried = stop_experiment_run(
+                    controller,
+                    protocol=_protocol(),
+                    run_manifest=manifest,
+                    run_dir=run_dir,
+                    action_request_id="STOP-RETRY-001",
+                    requested_at="2026-07-27T00:00:01Z",
+                )
+
+            self.assertEqual(
+                retried["operator_action"]["record_status"],
+                "already_recorded",
+            )
+            self.assertEqual(controller.controller_status, "interrupted")
+            self.assertEqual(
+                controller.operator_action_projection(
+                    protocol=_protocol(),
+                    run_manifest=manifest,
+                )["action_count"],
+                1,
+            )
+
+    def test_terminal_rerun_can_bind_a_new_stable_request_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp) / "controller")
+            first = self._record(
+                controller,
+                manifest=self._manifest(
+                    "single_codex",
+                    "operator-ledger-original-key",
+                ),
+            )
+            second = self._record(
+                controller,
+                manifest=self._manifest(
+                    "single_codex",
+                    "operator-ledger-alternate-key",
+                ),
+            )
+
+            self.assertNotEqual(
+                first["entry"]["experiment_run_id"],
+                second["entry"]["experiment_run_id"],
+            )
+            self.assertEqual(first["projection"]["action_count"], 1)
+            self.assertEqual(second["projection"]["action_count"], 1)
+
+    def test_request_response_identity_mismatch_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp) / "controller")
+            with self.assertRaisesRegex(
+                ExperimentLedgerError,
+                "identities do not match",
+            ):
+                self._record(
+                    controller,
+                    request=self._event(
+                        "permission_request_required",
+                        "2026-07-27T00:00:00Z",
+                        {"request_id": "PERM-REAL"},
+                    ),
+                    response=self._event(
+                        "permission_request_resolved",
+                        "2026-07-27T00:00:01Z",
+                        {
+                            "request_id": "PERM-OTHER",
+                            "decision": "approved",
+                        },
+                    ),
+                )
+
+    def test_legacy_budget_controller_loads_without_operator_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "controller"
+            create_experiment_controller(
+                root,
+                protocol_id="legacy-budget-only",
+                max_total_tokens=100,
+                max_wall_time_seconds=3600,
+                soft_warning_ratio=0.8,
+                scored=True,
+            )
+            metadata_path = root / "experiment-budget-controller.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["schema_version"] = "experiment_budget_controller.v1"
+            metadata.pop("protocol_sha256")
+            metadata.pop("operator_limits")
+            metadata.pop("operator_limits_sha256")
+            metadata.pop("operator_ledger_root_device")
+            metadata.pop("operator_ledger_root_inode")
+            metadata.pop("operator_ledger_policy_sha256")
+            metadata_path.write_text(
+                json.dumps(metadata, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            legacy = create_experiment_controller(
+                root,
+                protocol_id="legacy-budget-only",
+                max_total_tokens=100,
+                max_wall_time_seconds=3600,
+                soft_warning_ratio=0.8,
+                scored=True,
+            )
+            self.assertEqual(legacy.controller_status, "active")
+            legacy_protocol = {
+                **_protocol(),
+                "experiment_id": "legacy-budget-only",
+            }
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "lacks frozen operator policy",
+            ):
+                legacy.operator_action_projection(
+                    protocol=legacy_protocol,
+                    run_manifest=build_experiment_run_manifest(
+                        legacy_protocol,
+                        mode="single_codex",
+                        repetition_index=0,
+                        stable_request_key="legacy-budget-only",
+                    ),
+                )
+
+    def test_mixed_v1_metadata_with_v2_fields_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "controller"
+            self._controller(root)
+            metadata_path = root / "experiment-budget-controller.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["schema_version"] = "experiment_budget_controller.v1"
+            metadata_path.write_text(
+                json.dumps(metadata, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "cannot contain v2 operator fields",
+            ):
+                self._controller(root)
+
+    def test_ordinary_stop_entrypoint_rejects_experiment_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            state_dir = run_dir / "state"
+            state_dir.mkdir(parents=True)
+            state = {
+                "experiment_controller_reference": {
+                    "schema_version": (
+                        "experiment_budget_controller_reference.v1"
+                    )
+                },
+                "backlog": {"items": [{"task_id": "TASK-001"}]},
+            }
+            (state_dir / "two_phase_scheduler_state.json").write_text(
+                json.dumps(state, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            events = [
+                self._event(
+                    "manual_gate_required",
+                    "2026-07-27T00:00:00Z",
+                    {
+                        "question_id": "QUESTION-GUARD",
+                        "task_id": "TASK-001",
+                    },
+                ),
+                self._event(
+                    "permission_request_required",
+                    "2026-07-27T00:00:01Z",
+                    {
+                        "request_id": "PERM-GUARD",
+                        "task_id": "TASK-001",
+                    },
+                ),
+            ]
+            (run_dir / "events.jsonl").write_text(
+                "".join(
+                    json.dumps(event, sort_keys=True) + "\n"
+                    for event in events
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "bound ledger authorization",
+            ):
+                stop_run(run_dir)
+
+    def test_generic_stale_cleanup_skips_experiment_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp) / "work"
+            run_dir = work_root / "runs" / "experiment-run"
+            state_dir = run_dir / "state"
+            state_dir.mkdir(parents=True)
+            state_path = state_dir / "two_phase_scheduler_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "scheduler_status": "running",
+                        "experiment_controller_reference": {
+                            "schema_version": (
+                                "experiment_budget_controller_reference.v1"
+                            )
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            summary = cleanup_stale_runs(
+                {"work_root": str(work_root)}
+            )
+
+            self.assertEqual(
+                summary["runs"][0]["stop_status"],
+                "experiment_gateway_required",
+            )
+            self.assertEqual(
+                json.loads(state_path.read_text(encoding="utf-8"))[
+                    "scheduler_status"
+                ],
+                "running",
+            )
+
+    def test_forged_boolean_cannot_authorize_experiment_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            state_dir = run_dir / "state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "two_phase_scheduler_state.json").write_text(
+                json.dumps(
+                    {
+                        "experiment_controller_reference": {
+                            "schema_version": (
+                                "experiment_budget_controller_reference.v1"
+                            )
+                        },
+                        "backlog": {
+                            "items": [{"task_id": "TASK-001"}]
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                PermissionError,
+                "bound ledger authorization",
+            ):
+                stop_run(
+                    run_dir,
+                    experiment_operator_authorization=True,
+                )
+
+    def test_controller_rejects_deleted_operator_ledger_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "controller"
+            controller = self._controller(root)
+            manifest = self._manifest(
+                "agentteam_full",
+                "operator-ledger-delete",
+            )
+            self._record(controller, manifest=manifest)
+            shutil.rmtree(root / "operator-actions")
+
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "ledger authority is unavailable",
+            ):
+                controller.operator_action_projection(
+                    protocol=_protocol(),
+                    run_manifest=manifest,
+                )
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "ledger authority is unavailable",
+            ):
+                self._controller(root)
+
+    def test_policy_short_write_is_completed_and_failed_publish_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "short-write"
+            original_write = os.write
+
+            def partial_write(fd, payload):
+                return original_write(fd, payload[: min(11, len(payload))])
+
+            with patch.object(
+                experiment_ledger_module.os,
+                "write",
+                side_effect=partial_write,
+            ):
+                ledger = create_experiment_operator_action_ledger(
+                    root,
+                    protocol_id="phase2-operator-ledger",
+                    protocol_sha256=canonical_json_sha256(_protocol()),
+                    operator_limits=self.LIMITS,
+                )
+            self.assertEqual(
+                ledger.policy["protocol_sha256"],
+                canonical_json_sha256(_protocol()),
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "failed-write"
+            with patch.object(
+                experiment_ledger_module.os,
+                "write",
+                return_value=0,
+            ):
+                with self.assertRaisesRegex(
+                    ExperimentLedgerIntegrityError,
+                    "write was incomplete",
+                ):
+                    create_experiment_operator_action_ledger(
+                        root,
+                        protocol_id="phase2-operator-ledger",
+                        protocol_sha256=canonical_json_sha256(
+                            _protocol()
+                        ),
+                        operator_limits=self.LIMITS,
+                    )
+            self.assertFalse(
+                (root / "operator-action-policy.json").exists()
+            )
+            recovered = create_experiment_operator_action_ledger(
+                root,
+                protocol_id="phase2-operator-ledger",
+                protocol_sha256=canonical_json_sha256(_protocol()),
+                operator_limits=self.LIMITS,
+            )
+            self.assertEqual(
+                recovered.policy["protocol_id"],
+                "phase2-operator-ledger",
+            )
 
 
 class ExperimentContractSchemaTests(unittest.TestCase):
