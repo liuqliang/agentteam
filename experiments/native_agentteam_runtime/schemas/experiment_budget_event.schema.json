@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/experiment_budget_event.schema.json",
+  "title": "AgentTeam global experiment budget threshold event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "event_kind",
+    "budget_id",
+    "frozen_budget_sha256",
+    "max_total_tokens",
+    "max_wall_time_seconds",
+    "soft_warning_ratio",
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+    "overshoot_tokens",
+    "elapsed_wall_time_seconds",
+    "threshold_dimensions",
+    "usage_complete",
+    "incomplete_usage_reasons"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "experiment_budget_event.v1"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^BUDGET-(?:warning|exhaustion)-[0-9a-f]{64}$"
+    },
+    "event_kind": {
+      "enum": [
+        "warning",
+        "exhaustion"
+      ]
+    },
+    "budget_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "frozen_budget_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "max_total_tokens": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_wall_time_seconds": {
+      "$ref": "#/$defs/positiveFiniteNumber"
+    },
+    "soft_warning_ratio": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "exclusiveMaximum": 1
+    },
+    "input_tokens": {
+      "$ref": "#/$defs/token"
+    },
+    "cached_input_tokens": {
+      "$ref": "#/$defs/nullableToken"
+    },
+    "output_tokens": {
+      "$ref": "#/$defs/token"
+    },
+    "reasoning_tokens": {
+      "$ref": "#/$defs/nullableToken"
+    },
+    "total_tokens": {
+      "$ref": "#/$defs/token"
+    },
+    "overshoot_tokens": {
+      "$ref": "#/$defs/token"
+    },
+    "elapsed_wall_time_seconds": {
+      "$ref": "#/$defs/nonnegativeFiniteNumber"
+    },
+    "threshold_dimensions": {
+      "type": "array",
+      "oneOf": [
+        {
+          "prefixItems": [
+            {
+              "const": "tokens"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        },
+        {
+          "prefixItems": [
+            {
+              "const": "wall_time"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        },
+        {
+          "prefixItems": [
+            {
+              "const": "tokens"
+            },
+            {
+              "const": "wall_time"
+            }
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        }
+      ]
+    },
+    "usage_complete": {
+      "type": "boolean"
+    },
+    "incomplete_usage_reasons": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/incompleteUsageReason"
+      },
+      "uniqueItems": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_kind": {
+            "const": "warning"
+          }
+        },
+        "required": [
+          "event_kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "event_id": {
+            "pattern": "^BUDGET-warning-[0-9a-f]{64}$"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "event_id": {
+            "pattern": "^BUDGET-exhaustion-[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "usage_complete": {
+            "const": true
+          }
+        },
+        "required": [
+          "usage_complete"
+        ]
+      },
+      "then": {
+        "properties": {
+          "incomplete_usage_reasons": {
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "incomplete_usage_reasons": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "token": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nullableToken": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "positiveFiniteNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1.7976931348623157e+308
+    },
+    "nonnegativeFiniteNumber": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1.7976931348623157e+308
+    },
+    "incompleteUsageReason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "usage_event_id",
+        "usage_status",
+        "reason"
+      ],
+      "properties": {
+        "usage_event_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^USAGE-[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+            }
+          ]
+        },
+        "usage_status": {
+          "enum": [
+            "partial",
+            "unavailable",
+            "not_applicable",
+            "missing",
+            "invalid"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

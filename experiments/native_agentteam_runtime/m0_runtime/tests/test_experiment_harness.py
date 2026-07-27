@@ -11,6 +11,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from jsonschema import Draft202012Validator
+
+from agentteam_runtime.experiment_budget import (
+    ExperimentBudgetController,
+    ExperimentBudgetError,
+    ExperimentBudgetIntegrityError,
+    advance_experiment_budget,
+    create_experiment_budget_state,
+    validate_experiment_budget_state,
+)
 from agentteam_runtime.experiment_contract import (
     LEGACY_MANIFEST_SCHEMA_VERSION,
     ExperimentContractError,
@@ -427,6 +437,457 @@ def _test_evaluator_execution(
         }
     )
     return result
+
+
+def _budget_usage(
+    suffix,
+    *,
+    input_tokens,
+    output_tokens,
+    cached_input_tokens=0,
+    reasoning_tokens=0,
+    usage_status="reported",
+    unavailable_reason=None,
+):
+    return {
+        "usage_schema_version": "model_invocation_usage.v1",
+        "usage_event_id": f"USAGE-{suffix}",
+        "invocation_id": f"INV-{suffix}",
+        "usage_status": usage_status,
+        "unavailable_reason": unavailable_reason,
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "total_tokens": (
+            input_tokens + output_tokens
+            if isinstance(input_tokens, int)
+            and not isinstance(input_tokens, bool)
+            and isinstance(output_tokens, int)
+            and not isinstance(output_tokens, bool)
+            else None
+        ),
+    }
+
+
+class ExperimentBudgetTests(unittest.TestCase):
+    def _state(
+        self,
+        *,
+        max_total_tokens=100,
+        max_wall_time_seconds=100,
+        soft_warning_ratio=0.8,
+        initial_monotonic=10,
+    ):
+        return create_experiment_budget_state(
+            "protocol-global-fixture",
+            max_total_tokens,
+            max_wall_time_seconds,
+            soft_warning_ratio,
+            initial_monotonic=initial_monotonic,
+        )
+
+    def _event_validator(self):
+        schema_path = (
+            Path(__file__).resolve().parents[2]
+            / "schemas"
+            / "experiment_budget_event.schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        Draft202012Validator.check_schema(schema)
+        return Draft202012Validator(schema)
+
+    def test_components_stay_separate_and_events_match_declared_schema(self):
+        state = self._state(max_total_tokens=200, soft_warning_ratio=0.5)
+        usage = _budget_usage(
+            "components",
+            input_tokens=100,
+            cached_input_tokens=80,
+            output_tokens=30,
+            reasoning_tokens=20,
+        )
+
+        state, events = advance_experiment_budget(
+            state,
+            usage,
+            now_monotonic=10,
+        )
+
+        self.assertEqual(
+            {
+                field: state[field]
+                for field in (
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "output_tokens",
+                    "reasoning_tokens",
+                    "total_tokens",
+                    "overshoot_tokens",
+                )
+            },
+            {
+                "input_tokens": 100,
+                "cached_input_tokens": 80,
+                "output_tokens": 30,
+                "reasoning_tokens": 20,
+                "total_tokens": 130,
+                "overshoot_tokens": 0,
+            },
+        )
+        self.assertEqual([event["event_kind"] for event in events], ["warning"])
+        validator = self._event_validator()
+        validator.validate(events[0])
+
+        invalid = copy.deepcopy(events[0])
+        invalid["max_total_tokens"] = True
+        self.assertTrue(list(validator.iter_errors(invalid)))
+        invalid = copy.deepcopy(events[0])
+        invalid["elapsed_wall_time_seconds"] = float("inf")
+        self.assertTrue(list(validator.iter_errors(invalid)))
+
+    def test_token_warning_and_exhaustion_include_exact_boundaries(self):
+        state = self._state()
+        state, events = advance_experiment_budget(
+            state,
+            _budget_usage("below-warning", input_tokens=79, output_tokens=0),
+            now_monotonic=10,
+        )
+        self.assertEqual(events, [])
+
+        state, events = advance_experiment_budget(
+            state,
+            _budget_usage("at-warning", input_tokens=1, output_tokens=0),
+            now_monotonic=10,
+        )
+        self.assertEqual([event["event_kind"] for event in events], ["warning"])
+        self.assertEqual(events[0]["threshold_dimensions"], ["tokens"])
+
+        state, events = advance_experiment_budget(
+            state,
+            _budget_usage("at-limit", input_tokens=20, output_tokens=0),
+            now_monotonic=10,
+        )
+        self.assertEqual(
+            [event["event_kind"] for event in events],
+            ["exhaustion"],
+        )
+        self.assertTrue(state["exhausted"])
+        self.assertEqual(state["overshoot_tokens"], 0)
+
+        state, events = advance_experiment_budget(
+            state,
+            _budget_usage("above-limit", input_tokens=1, output_tokens=0),
+            now_monotonic=10,
+        )
+        self.assertEqual(events, [])
+        self.assertEqual(state["overshoot_tokens"], 1)
+
+    def test_fake_monotonic_clock_drives_exact_wall_boundaries(self):
+        ticks = iter([10, 17.999, 18, 30])
+        controller = ExperimentBudgetController(monotonic=lambda: next(ticks))
+        state = controller.create_state(
+            "clock-fixture",
+            100,
+            20,
+            0.4,
+        )
+
+        state, events = controller.advance(state)
+        self.assertEqual(events, [])
+        state, events = controller.advance(state)
+        self.assertEqual([event["event_kind"] for event in events], ["warning"])
+        self.assertEqual(state["elapsed_wall_time_seconds"], 8.0)
+        state, events = controller.advance(state)
+        self.assertEqual(
+            [event["event_kind"] for event in events],
+            ["exhaustion"],
+        )
+        self.assertEqual(events[0]["threshold_dimensions"], ["wall_time"])
+
+        with self.assertRaisesRegex(
+            ExperimentBudgetIntegrityError,
+            "regressed",
+        ):
+            advance_experiment_budget(state, now_monotonic=29)
+
+    def test_simultaneous_threshold_events_emit_exactly_once(self):
+        state = self._state(
+            max_total_tokens=100,
+            max_wall_time_seconds=10,
+            soft_warning_ratio=0.5,
+            initial_monotonic=0,
+        )
+        usage = _budget_usage("simultaneous", input_tokens=100, output_tokens=0)
+        state, events = advance_experiment_budget(
+            state,
+            usage,
+            now_monotonic=10,
+        )
+        self.assertEqual(
+            [event["event_kind"] for event in events],
+            ["warning", "exhaustion"],
+        )
+        self.assertTrue(
+            all(
+                event["threshold_dimensions"] == ["tokens", "wall_time"]
+                for event in events
+            )
+        )
+        frozen_projection = json.dumps(state, sort_keys=True)
+
+        replayed, replay_events = advance_experiment_budget(
+            state,
+            copy.deepcopy(usage),
+            now_monotonic=10,
+        )
+        self.assertEqual(replay_events, [])
+        self.assertEqual(json.dumps(replayed, sort_keys=True), frozen_projection)
+        self.assertEqual(
+            [event["event_kind"] for event in replayed["events"]],
+            ["warning", "exhaustion"],
+        )
+
+    def test_one_lane_terminal_completion_exposes_overshoot(self):
+        state = self._state()
+        state, _ = advance_experiment_budget(
+            state,
+            _budget_usage("before-limit", input_tokens=70, output_tokens=20),
+            now_monotonic=10,
+        )
+        state, events = advance_experiment_budget(
+            state,
+            _budget_usage(
+                "inflight-completion",
+                input_tokens=20,
+                cached_input_tokens=5,
+                output_tokens=5,
+                reasoning_tokens=2,
+            ),
+            now_monotonic=11,
+        )
+
+        self.assertEqual(state["total_tokens"], 115)
+        self.assertEqual(state["input_tokens"], 90)
+        self.assertEqual(state["output_tokens"], 25)
+        self.assertEqual(state["cached_input_tokens"], 5)
+        self.assertEqual(state["reasoning_tokens"], 2)
+        self.assertEqual(state["overshoot_tokens"], 15)
+        self.assertEqual(events[-1]["event_kind"], "exhaustion")
+        self.assertEqual(events[-1]["overshoot_tokens"], 15)
+
+    def test_unavailable_partial_not_applicable_and_missing_fail_closed(self):
+        cases = {
+            "partial": _budget_usage(
+                "partial",
+                input_tokens=None,
+                output_tokens=None,
+                cached_input_tokens=None,
+                reasoning_tokens=None,
+                usage_status="partial",
+                unavailable_reason="incomplete_provider_usage",
+            ),
+            "unavailable": _budget_usage(
+                "unavailable",
+                input_tokens=None,
+                output_tokens=None,
+                cached_input_tokens=None,
+                reasoning_tokens=None,
+                usage_status="unavailable",
+                unavailable_reason="missing_provider_terminal_usage",
+            ),
+            "not-applicable": _budget_usage(
+                "not-applicable",
+                input_tokens=None,
+                output_tokens=None,
+                cached_input_tokens=None,
+                reasoning_tokens=None,
+                usage_status="not_applicable",
+            ),
+            "missing-total": _budget_usage(
+                "missing-total",
+                input_tokens=1,
+                output_tokens=1,
+            ),
+            "missing-terminal": None,
+        }
+        cases["missing-total"]["total_tokens"] = None
+
+        for name, usage in cases.items():
+            with self.subTest(name=name):
+                state, _ = advance_experiment_budget(
+                    self._state(),
+                    usage,
+                    now_monotonic=10,
+                )
+                self.assertEqual(state["total_tokens"], 0)
+                self.assertFalse(state["usage_complete"])
+                self.assertFalse(state["calibration_eligible"])
+                self.assertTrue(state["incomplete_usage_reasons"])
+
+        state = self._state(
+            max_wall_time_seconds=1,
+            initial_monotonic=10,
+        )
+        state, events = advance_experiment_budget(
+            state,
+            cases["unavailable"],
+            now_monotonic=11,
+        )
+        self.assertEqual(
+            [event["event_kind"] for event in events],
+            ["warning", "exhaustion"],
+        )
+        validator = self._event_validator()
+        for event in events:
+            validator.validate(event)
+            self.assertFalse(event["usage_complete"])
+            self.assertEqual(
+                event["incomplete_usage_reasons"][0]["usage_status"],
+                "unavailable",
+            )
+
+    def test_replay_is_idempotent_and_conflicting_identity_fails_closed(self):
+        state = self._state()
+        usage = _budget_usage("replay", input_tokens=70, output_tokens=10)
+        state, _ = advance_experiment_budget(
+            state,
+            usage,
+            now_monotonic=10,
+        )
+        replayed, events = advance_experiment_budget(
+            state,
+            copy.deepcopy(usage),
+            now_monotonic=10,
+        )
+        self.assertEqual(replayed, state)
+        self.assertEqual(events, [])
+
+        rebuilt, rebuilt_events = advance_experiment_budget(
+            self._state(),
+            copy.deepcopy(usage),
+            now_monotonic=10,
+        )
+        self.assertEqual(rebuilt, state)
+        self.assertEqual(
+            [event["event_id"] for event in rebuilt_events],
+            [event["event_id"] for event in state["events"]],
+        )
+
+        conflict = copy.deepcopy(usage)
+        conflict["input_tokens"] = 71
+        conflict["total_tokens"] = 81
+        with self.assertRaisesRegex(
+            ExperimentBudgetIntegrityError,
+            "conflicting terminal usage identity",
+        ):
+            advance_experiment_budget(
+                state,
+                conflict,
+                now_monotonic=10,
+            )
+
+        duplicate_invocation = copy.deepcopy(usage)
+        duplicate_invocation["usage_event_id"] = "USAGE-replay-second"
+        with self.assertRaisesRegex(
+            ExperimentBudgetIntegrityError,
+            "multiple terminal usage records",
+        ):
+            advance_experiment_budget(
+                state,
+                duplicate_invocation,
+                now_monotonic=10,
+            )
+
+    def test_frozen_budget_drift_is_rejected_and_exhaustion_is_sticky(self):
+        state = self._state()
+        state, _ = advance_experiment_budget(
+            state,
+            _budget_usage("exhaust", input_tokens=100, output_tokens=0),
+            now_monotonic=10,
+        )
+        state, events = advance_experiment_budget(
+            state,
+            _budget_usage("post-exhaust", input_tokens=1, output_tokens=0),
+            now_monotonic=11,
+        )
+        self.assertTrue(state["exhausted"])
+        self.assertEqual(events, [])
+
+        for field, value in (
+            ("budget_id", "different-budget"),
+            ("max_total_tokens", 1000),
+            ("max_wall_time_seconds", 1000),
+            ("soft_warning_ratio", 0.5),
+            ("initial_monotonic", 0),
+        ):
+            with self.subTest(field=field):
+                drifted = copy.deepcopy(state)
+                drifted[field] = value
+                with self.assertRaisesRegex(
+                    ExperimentBudgetIntegrityError,
+                    "frozen experiment budget",
+                ):
+                    validate_experiment_budget_state(drifted)
+
+    def test_invalid_numeric_inputs_never_become_consumption(self):
+        for name, kwargs in {
+            "boolean-token-limit": {"max_total_tokens": True},
+            "zero-token-limit": {"max_total_tokens": 0},
+            "nonfinite-wall-limit": {
+                "max_wall_time_seconds": float("inf")
+            },
+            "zero-ratio": {"soft_warning_ratio": 0},
+            "unit-ratio": {"soft_warning_ratio": 1},
+        }.items():
+            with self.subTest(name=name):
+                arguments = {
+                    "budget_id": "invalid-fixture",
+                    "max_total_tokens": 100,
+                    "max_wall_time_seconds": 100,
+                    "soft_warning_ratio": 0.8,
+                    "initial_monotonic": 0,
+                }
+                arguments.update(kwargs)
+                with self.assertRaises(ExperimentBudgetError):
+                    create_experiment_budget_state(**arguments)
+
+        invalid_usages = []
+        for field, value in (
+            ("input_tokens", -1),
+            ("input_tokens", True),
+            ("cached_input_tokens", -1),
+            ("reasoning_tokens", True),
+        ):
+            usage = _budget_usage(
+                f"invalid-{field}-{value}",
+                input_tokens=1,
+                output_tokens=1,
+            )
+            usage[field] = value
+            invalid_usages.append(usage)
+        inconsistent = _budget_usage(
+            "inconsistent-total",
+            input_tokens=1,
+            output_tokens=1,
+        )
+        inconsistent["total_tokens"] = 3
+        invalid_usages.append(inconsistent)
+
+        for usage in invalid_usages:
+            with self.subTest(usage_event_id=usage["usage_event_id"]):
+                state, _ = advance_experiment_budget(
+                    self._state(),
+                    usage,
+                    now_monotonic=10,
+                )
+                self.assertEqual(state["total_tokens"], 0)
+                self.assertFalse(state["calibration_eligible"])
+
+        with self.assertRaises(ExperimentBudgetError):
+            advance_experiment_budget(
+                self._state(),
+                now_monotonic=float("nan"),
+            )
 
 
 class ExperimentContractSchemaTests(unittest.TestCase):
