@@ -1037,6 +1037,7 @@ class SystemdGatedExecution:
                 "systemd-run",
                 "--user",
                 "--quiet",
+                "--no-block",
                 f"--unit={self.unit}",
                 "--property=Type=oneshot",
                 "--property=RemainAfterExit=yes",

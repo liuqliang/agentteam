@@ -12722,7 +12722,8 @@ class M0RuntimeTests(unittest.TestCase):
             )
             self.assertTrue(
                 any(
-                    "--property=RemainAfterExit=yes" in command
+                    "--no-block" in command
+                    and "--property=RemainAfterExit=yes" in command
                     and "--property=KillMode=control-group" in command
                     for command in commands
                 )
