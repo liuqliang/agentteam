@@ -2431,6 +2431,10 @@ coverage.
 - `validated_code_sha` equals the candidate commit and the expected verified
   integration head;
 - terminal status is completed and usage status is reported;
+- deterministic completion accepts the native scheduler's
+  `processed` + `accepted` step contract only when integration is applied and
+  its required verification passed; `not_requested` additions are valid only
+  when the additions list is empty;
 - one start and one terminal record share an invocation ID and reconcile
   exactly with provider totals;
 - lifecycle and token coverage are both `1/1`;

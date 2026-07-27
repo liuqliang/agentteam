@@ -14,6 +14,7 @@ from agentteam_runtime.phase1_usage_report import (
     REPORT_RELATIVE_PATH,
     ROADMAP_RELATIVE_PATH,
     Phase1UsageReportError,
+    _deterministic_completion_evidence,
     complete_phase1_usage_report,
     render_report_artifacts,
     render_milestone_report,
@@ -353,6 +354,85 @@ def _commit_report_artifacts(repo, artifacts, *, extra_path=None):
 
 
 class ProjectionDbOperatorPathTests(unittest.TestCase):
+    def test_deterministic_evidence_accepts_native_scheduler_result_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            _write_json(
+                run_dir / "state" / "two_phase_scheduler_state.json",
+                {
+                    "scheduler_status": "awaiting_post_backlog_gates",
+                    "steps": [
+                        {
+                            "task_id": "P1-06D",
+                            "step_status": "processed",
+                            "validation_status": "accepted",
+                            "result": {
+                                "attempt_id": "P1-06D-ATTEMPT-001",
+                                "integration_status": "applied",
+                                "integration_verification_status": "passed",
+                                "integration_verification_additions_status": (
+                                    "not_requested"
+                                ),
+                                "integration_verification_additions": [],
+                            },
+                        }
+                    ],
+                },
+            )
+
+            evidence = _deterministic_completion_evidence(run_dir)
+
+            self.assertEqual(evidence["status"], "passed")
+            self.assertEqual(
+                evidence["task_results"][0]["result_status"],
+                "completed",
+            )
+            self.assertEqual(
+                evidence["task_results"][0]["attempt_id"],
+                "P1-06D-ATTEMPT-001",
+            )
+
+    def test_deterministic_evidence_rejects_unaccepted_or_unverified_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            state_path = (
+                run_dir / "state" / "two_phase_scheduler_state.json"
+            )
+            state = {
+                "scheduler_status": "awaiting_post_backlog_gates",
+                "steps": [
+                    {
+                        "task_id": "P1-06D",
+                        "step_status": "processed",
+                        "validation_status": "rejected",
+                        "result": {
+                            "attempt_id": "P1-06D-ATTEMPT-001",
+                            "integration_status": "applied",
+                            "integration_verification_status": "passed",
+                            "integration_verification_additions_status": (
+                                "not_requested"
+                            ),
+                            "integration_verification_additions": [],
+                        },
+                    }
+                ],
+            }
+            _write_json(state_path, state)
+            self.assertEqual(
+                _deterministic_completion_evidence(run_dir)["status"],
+                "failed",
+            )
+
+            state["steps"][0]["validation_status"] = "accepted"
+            state["steps"][0]["result"][
+                "integration_verification_status"
+            ] = "failed"
+            _write_json(state_path, state)
+            self.assertEqual(
+                _deterministic_completion_evidence(run_dir)["status"],
+                "failed",
+            )
+
     def test_completion_report_keeps_authoritative_recap_behavior_without_projection_db(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_root = Path(tmp) / "agentteam-work"

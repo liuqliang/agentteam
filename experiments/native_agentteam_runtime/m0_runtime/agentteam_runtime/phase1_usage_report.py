@@ -941,10 +941,17 @@ def _deterministic_completion_evidence(run_dir):
     for step in steps:
         result = step.get("result") if isinstance(step, dict) else None
         result = result if isinstance(result, dict) else {}
+        native_step_completed = (
+            step.get("step_status") == "processed"
+            and step.get("validation_status") == "accepted"
+        )
+        result_status = result.get("result_status")
+        if result_status is None and native_step_completed:
+            result_status = "completed"
         summary = {
             "task_id": step.get("task_id"),
-            "attempt_id": step.get("attempt_id"),
-            "result_status": result.get("result_status"),
+            "attempt_id": step.get("attempt_id") or result.get("attempt_id"),
+            "result_status": result_status,
             "integration_status": result.get("integration_status"),
             "integration_verification_status": result.get(
                 "integration_verification_status"
@@ -956,14 +963,24 @@ def _deterministic_completion_evidence(run_dir):
         task_results.append(summary)
         if summary["result_status"] != "completed":
             passed = False
-        if summary["integration_status"] not in {None, "passed"}:
+        if summary["integration_status"] not in {None, "passed", "applied"}:
             passed = False
         if summary["integration_verification_status"] not in {None, "passed"}:
             passed = False
         if summary["integration_verification_additions_status"] not in {
             None,
             "passed",
+            "not_requested",
         }:
+            passed = False
+        if (
+            summary["integration_verification_additions_status"]
+            == "not_requested"
+            and result.get("integration_verification_additions") not in (
+                None,
+                [],
+            )
+        ):
             passed = False
     task_results.sort(
         key=lambda item: (
