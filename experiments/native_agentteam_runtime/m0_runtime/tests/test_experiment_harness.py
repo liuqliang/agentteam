@@ -1,9 +1,11 @@
 import copy
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from agentteam_runtime.experiment_contract import (
     LEGACY_MANIFEST_SCHEMA_VERSION,
@@ -21,6 +23,14 @@ from agentteam_runtime.experiment_contract import (
     validate_experiment_run_manifest,
     validate_experiment_state,
     validate_resume_binding,
+)
+from agentteam_runtime.experiment_workspace import (
+    ExperimentWorkspaceError,
+    allocate_clean_snapshot,
+    cleanup_clean_snapshot,
+    load_clean_snapshot_attestation,
+    validate_clean_snapshot_attestation,
+    verify_clean_snapshot,
 )
 
 
@@ -136,6 +146,77 @@ def _allocate(root, key="request-001"):
         runtime_release=_release(),
         bound_at="2026-07-27T00:00:00Z",
     )
+
+
+def _git(repository, *arguments, check=True):
+    completed = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if check and completed.returncode != 0:
+        raise AssertionError(completed.stderr)
+    return completed
+
+
+def _fixture_repository(
+    root,
+    *,
+    escaping_symlink=False,
+    object_format="sha1",
+):
+    source = Path(root) / "source"
+    source.mkdir()
+    subprocess.run(
+        [
+            "git",
+            "init",
+            "--quiet",
+            f"--object-format={object_format}",
+            str(source),
+        ],
+        check=True,
+    )
+    _git(source, "config", "user.name", "Experiment Fixture")
+    _git(source, "config", "user.email", "fixture@example.invalid")
+    (source / "history.txt").write_text("first\n", encoding="utf-8")
+    _git(source, "add", "history.txt")
+    _git(source, "commit", "--quiet", "-m", "first")
+    parent_commit = _git(source, "rev-parse", "HEAD").stdout.strip()
+
+    (source / "history.txt").write_text("second\n", encoding="utf-8")
+    (source / "tracked.txt").write_text("clean fixture\n", encoding="utf-8")
+    if escaping_symlink:
+        os.symlink("../outside-secret", source / "escape")
+    _git(source, "add", "-A")
+    _git(source, "commit", "--quiet", "-m", "protocol source")
+    commit = _git(source, "rev-parse", "HEAD").stdout.strip()
+    tree = _git(source, "rev-parse", "HEAD^{tree}").stdout.strip()
+    object_format = _git(
+        source,
+        "rev-parse",
+        "--show-object-format",
+    ).stdout.strip()
+
+    _git(source, "branch", "source-only-branch", parent_commit)
+    _git(source, "tag", "source-only-tag", parent_commit)
+    _git(source, "remote", "add", "source-only-remote", str(source))
+    prior_state = source / ".agentteam"
+    prior_state.mkdir()
+    (prior_state / "prior-run.json").write_text("{}\n", encoding="utf-8")
+    (source / "untracked.patch").write_text("prior patch\n", encoding="utf-8")
+    return {
+        "repository": {
+            "source": str(source),
+            "commit": commit,
+            "tree": tree,
+            "git_object_format": object_format,
+        },
+        "parent_commit": parent_commit,
+        "source": source,
+    }
 
 
 class ExperimentContractSchemaTests(unittest.TestCase):
@@ -509,6 +590,284 @@ class ExperimentLeaseAndResumeTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ExperimentContractError, "cannot resume"):
                 validate_resume_binding(allocation["run_dir"])
+
+
+class ExperimentWorkspaceTests(unittest.TestCase):
+    def test_allocates_independent_exact_commit_snapshot_and_attestation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp)
+            run_dir = Path(tmp) / "experiment-run-fixture"
+            run_dir.mkdir()
+
+            allocation = allocate_clean_snapshot(
+                run_dir,
+                fixture["repository"],
+                attested_at="2026-07-27T00:00:03Z",
+            )
+
+            snapshot = Path(allocation["snapshot_path"])
+            attestation = load_clean_snapshot_attestation(
+                allocation["attestation_path"]
+            )
+            self.assertEqual(
+                validate_clean_snapshot_attestation(attestation),
+                attestation,
+            )
+            self.assertEqual(
+                _git(snapshot, "rev-parse", "HEAD").stdout.strip(),
+                fixture["repository"]["commit"],
+            )
+            self.assertEqual(
+                _git(snapshot, "rev-parse", "HEAD^{tree}").stdout.strip(),
+                fixture["repository"]["tree"],
+            )
+            self.assertNotEqual(
+                Path(attestation["snapshot_common_dir"]),
+                Path(attestation["source_common_dir"]),
+            )
+            self.assertTrue(Path(attestation["snapshot_common_dir"]).is_dir())
+            self.assertTrue(attestation["detached_head"])
+            self.assertTrue(attestation["worktree_clean"])
+            self.assertEqual(attestation["remotes"], [])
+            self.assertEqual(attestation["alternates"], [])
+            self.assertEqual(attestation["extra_refs"], [])
+            self.assertFalse((snapshot / ".agentteam").exists())
+            self.assertFalse((snapshot / "untracked.patch").exists())
+            self.assertEqual(
+                _git(snapshot, "symbolic-ref", "-q", "HEAD", check=False).returncode,
+                1,
+            )
+            self.assertEqual(_git(snapshot, "remote").stdout, "")
+            self.assertEqual(
+                _git(
+                    snapshot,
+                    "for-each-ref",
+                    "--format=%(refname)",
+                ).stdout,
+                "",
+            )
+            self.assertNotEqual(
+                _git(
+                    snapshot,
+                    "cat-file",
+                    "-e",
+                    fixture["parent_commit"],
+                    check=False,
+                ).returncode,
+                0,
+            )
+
+    def test_sha256_object_format_snapshot_preserves_exact_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp, object_format="sha256")
+            run_dir = Path(tmp) / "experiment-run-sha256"
+            run_dir.mkdir()
+
+            allocation = allocate_clean_snapshot(
+                run_dir,
+                fixture["repository"],
+            )
+
+            snapshot = Path(allocation["snapshot_path"])
+            self.assertEqual(
+                allocation["attestation"]["git_object_format"],
+                "sha256",
+            )
+            self.assertEqual(
+                len(allocation["attestation"]["head_commit"]),
+                64,
+            )
+            self.assertEqual(
+                _git(
+                    snapshot,
+                    "rev-parse",
+                    "--show-object-format",
+                ).stdout.strip(),
+                "sha256",
+            )
+            self.assertNotEqual(
+                _git(
+                    snapshot,
+                    "cat-file",
+                    "-e",
+                    fixture["parent_commit"],
+                    check=False,
+                ).returncode,
+                0,
+            )
+
+    def test_exact_tree_and_bounded_inventory_fail_before_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp)
+            cases = {
+                "tree-mismatch": {
+                    "repository": {
+                        **fixture["repository"],
+                        "tree": "0" * 40,
+                    },
+                    "inventory_limit": 100,
+                },
+                "inventory-overflow": {
+                    "repository": fixture["repository"],
+                    "inventory_limit": 1,
+                },
+            }
+            for name, case in cases.items():
+                with self.subTest(name=name):
+                    run_dir = Path(tmp) / f"experiment-run-{name}"
+                    run_dir.mkdir()
+                    with self.assertRaises(ExperimentWorkspaceError):
+                        allocate_clean_snapshot(
+                            run_dir,
+                            case["repository"],
+                            inventory_limit=case["inventory_limit"],
+                        )
+                    self.assertFalse((run_dir / "repository").exists())
+                    self.assertFalse((run_dir / "clean-snapshot.json").exists())
+                    self.assertEqual(
+                        list(run_dir.glob(".repository-staging-*")),
+                        [],
+                    )
+
+            preexisting_run = Path(tmp) / "experiment-run-preexisting"
+            preexisting_snapshot = preexisting_run / "repository"
+            preexisting_snapshot.mkdir(parents=True)
+            marker = preexisting_snapshot / "operator-evidence.txt"
+            marker.write_text("preserve\n", encoding="utf-8")
+            with self.assertRaisesRegex(ExperimentWorkspaceError, "already exists"):
+                allocate_clean_snapshot(
+                    preexisting_run,
+                    fixture["repository"],
+                )
+            self.assertEqual(marker.read_text(encoding="utf-8"), "preserve\n")
+
+    def test_verification_denies_remote_alternate_and_extra_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp)
+            run_dir = Path(tmp) / "experiment-run-contamination"
+            run_dir.mkdir()
+            allocation = allocate_clean_snapshot(
+                run_dir,
+                fixture["repository"],
+            )
+            snapshot = Path(allocation["snapshot_path"])
+
+            _git(snapshot, "remote", "add", "forbidden", fixture["repository"]["source"])
+            with self.assertRaisesRegex(ExperimentWorkspaceError, "remote"):
+                verify_clean_snapshot(snapshot, fixture["repository"])
+            _git(snapshot, "remote", "remove", "forbidden")
+
+            _git(
+                snapshot,
+                "update-ref",
+                "refs/heads/forbidden",
+                fixture["repository"]["commit"],
+            )
+            with self.assertRaisesRegex(ExperimentWorkspaceError, "extra Git refs"):
+                verify_clean_snapshot(snapshot, fixture["repository"])
+            _git(snapshot, "update-ref", "-d", "refs/heads/forbidden")
+
+            common_dir = Path(
+                _git(
+                    snapshot,
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir",
+                ).stdout.strip()
+            )
+            alternates = common_dir / "objects" / "info" / "alternates"
+            alternates.write_text(
+                str(fixture["source"] / ".git" / "objects") + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ExperimentWorkspaceError, "alternates"):
+                verify_clean_snapshot(snapshot, fixture["repository"])
+
+    def test_symlink_escape_is_rejected_without_leaving_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp, escaping_symlink=True)
+            run_dir = Path(tmp) / "experiment-run-symlink"
+            run_dir.mkdir()
+
+            with self.assertRaisesRegex(ExperimentWorkspaceError, "symlinks"):
+                allocate_clean_snapshot(run_dir, fixture["repository"])
+
+            self.assertFalse((run_dir / "repository").exists())
+            self.assertFalse((run_dir / "clean-snapshot.json").exists())
+            self.assertEqual(list(run_dir.glob(".repository-staging-*")), [])
+
+    def test_cleanup_preserves_sealed_result_and_records_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp)
+            run_dir = Path(tmp) / "experiment-run-cleanup"
+            run_dir.mkdir()
+            allocation = allocate_clean_snapshot(
+                run_dir,
+                fixture["repository"],
+            )
+            result_dir = run_dir / "results" / "sealed-result"
+            result_dir.mkdir(parents=True)
+            result_path = result_dir / "result.json"
+            result_path.write_text('{"status":"completed"}\n', encoding="utf-8")
+            unsafe_result = (
+                Path(allocation["snapshot_path"]) / "provider-result.json"
+            )
+            unsafe_result.write_text('{"unsafe":true}\n', encoding="utf-8")
+            with self.assertRaisesRegex(
+                ExperimentWorkspaceError,
+                "outside the disposable snapshot",
+            ):
+                cleanup_clean_snapshot(
+                    run_dir,
+                    sealed_result_path=unsafe_result,
+                )
+            self.assertTrue(Path(allocation["snapshot_path"]).is_dir())
+            unsafe_result.unlink()
+
+            cleanup = cleanup_clean_snapshot(
+                run_dir,
+                sealed_result_path=result_dir,
+            )
+
+            self.assertEqual(cleanup["cleanup_status"], "removed")
+            self.assertTrue(cleanup["result_preserved"])
+            self.assertFalse(Path(allocation["snapshot_path"]).exists())
+            self.assertEqual(
+                result_path.read_text(encoding="utf-8"),
+                '{"status":"completed"}\n',
+            )
+            self.assertEqual(
+                cleanup["sealed_result_sha256"],
+                cleanup["sealed_result_sha256_after_cleanup"],
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp)
+            run_dir = Path(tmp) / "experiment-run-cleanup-failure"
+            run_dir.mkdir()
+            allocation = allocate_clean_snapshot(
+                run_dir,
+                fixture["repository"],
+            )
+            result_path = run_dir / "sealed-result.json"
+            result_path.write_text('{"status":"failed"}\n', encoding="utf-8")
+
+            with patch(
+                "agentteam_runtime.experiment_workspace.shutil.rmtree",
+                side_effect=OSError("simulated cleanup failure"),
+            ):
+                cleanup = cleanup_clean_snapshot(
+                    run_dir,
+                    sealed_result_path=result_path,
+                )
+
+            self.assertEqual(cleanup["cleanup_status"], "failed")
+            self.assertIn("simulated cleanup failure", cleanup["error"])
+            self.assertTrue(Path(allocation["snapshot_path"]).is_dir())
+            self.assertEqual(
+                result_path.read_text(encoding="utf-8"),
+                '{"status":"failed"}\n',
+            )
 
 
 if __name__ == "__main__":

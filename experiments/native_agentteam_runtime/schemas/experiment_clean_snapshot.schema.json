@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/experiment_clean_snapshot.schema.json",
+  "title": "AgentTeam Phase 2 clean repository snapshot attestation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_run_id",
+    "attested_at",
+    "repository",
+    "snapshot_path",
+    "snapshot_common_dir",
+    "source_common_dir",
+    "path_preexisted",
+    "head_commit",
+    "head_tree",
+    "git_object_format",
+    "detached_head",
+    "worktree_clean",
+    "common_dirs_distinct",
+    "remotes",
+    "alternates",
+    "extra_refs",
+    "file_inventory",
+    "symlink_escape_count",
+    "tracked_files_only",
+    "prior_run_state_detected"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "experiment_clean_snapshot.v1"
+    },
+    "experiment_run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "attested_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "repository": {
+      "$ref": "#/$defs/repository"
+    },
+    "snapshot_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "snapshot_common_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_common_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "path_preexisted": {
+      "const": false
+    },
+    "head_commit": {
+      "$ref": "#/$defs/object_id"
+    },
+    "head_tree": {
+      "$ref": "#/$defs/object_id"
+    },
+    "git_object_format": {
+      "enum": [
+        "sha1",
+        "sha256"
+      ]
+    },
+    "detached_head": {
+      "const": true
+    },
+    "worktree_clean": {
+      "const": true
+    },
+    "common_dirs_distinct": {
+      "const": true
+    },
+    "remotes": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "alternates": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "extra_refs": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "file_inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_count",
+        "sha256",
+        "inventory_limit",
+        "matches_source"
+      ],
+      "properties": {
+        "entry_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "inventory_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "matches_source": {
+          "const": true
+        }
+      }
+    },
+    "symlink_escape_count": {
+      "const": 0
+    },
+    "tracked_files_only": {
+      "const": true
+    },
+    "prior_run_state_detected": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "object_id": {
+      "type": "string",
+      "oneOf": [
+        {
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        {
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      ]
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "commit",
+        "tree",
+        "git_object_format"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "$ref": "#/$defs/object_id"
+        },
+        "tree": {
+          "$ref": "#/$defs/object_id"
+        },
+        "git_object_format": {
+          "enum": [
+            "sha1",
+            "sha256"
+          ]
+        }
+      }
+    }
+  }
+}
