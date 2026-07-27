@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,13 @@ from .repo_map import (
     build_repo_context,
     build_repository_map,
     REPO_CONTEXT_SCHEMA_VERSION,
+)
+from .runtime_artifacts import (
+    materialize_runtime_input_artifacts,
+    persist_runtime_artifacts,
+    runtime_input_artifact_producers,
+    runtime_output_artifact_paths,
+    validate_runtime_input_artifacts,
 )
 from .token_usage import token_usage_from_jsonl
 
@@ -73,21 +81,36 @@ class FakeRuntimeAdapter:
                     },
                 },
             }
-        changed_files = _fake_changed_files(message["payload"]["write_scope"])
-        if worktree_path and changed_files:
-            target = Path(worktree_path) / changed_files[0]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                json.dumps(
-                    {
-                        "task_id": message["payload"]["task_id"],
-                        "attempt_id": message["payload"]["attempt_id"],
-                        "generated_by": "FakeRuntimeAdapter",
-                    },
-                    sort_keys=True,
-                ),
-                encoding="utf-8",
+        expected_output_artifacts = list(
+            message["payload"].get("expected_output_artifacts") or []
+        )
+        changed_files = list(
+            dict.fromkeys(
+                [
+                    *expected_output_artifacts,
+                    *(
+                        []
+                        if expected_output_artifacts
+                        else _fake_changed_files(message["payload"]["write_scope"])
+                    ),
+                ]
             )
+        )
+        if worktree_path:
+            for changed_file in changed_files:
+                target = Path(worktree_path) / changed_file
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(
+                    json.dumps(
+                        {
+                            "task_id": message["payload"]["task_id"],
+                            "attempt_id": message["payload"]["attempt_id"],
+                            "generated_by": "FakeRuntimeAdapter",
+                        },
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
         evidence_summary = _fake_evidence_summary(message["payload"], changed_files)
         return {
             "result_status": "completed",
@@ -836,6 +859,9 @@ def run_simulation(
     integration_verification_command=None,
     commit_verified_integration=False,
     attempt_id_prefix=None,
+    runtime_artifact_store_dir=None,
+    runtime_input_artifact_producer_map=None,
+    runtime_output_artifact_path_list=None,
 ):
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
@@ -847,6 +873,21 @@ def run_simulation(
     backlog = _read_json(backlog_path)
 
     task = _select_ready_task(backlog)
+    runtime_artifact_store_dir = Path(runtime_artifact_store_dir or output_dir)
+    runtime_input_artifact_producer_map = (
+        runtime_input_artifact_producer_map
+        if runtime_input_artifact_producer_map is not None
+        else runtime_input_artifact_producers(backlog, task)
+    )
+    runtime_output_artifact_path_list = (
+        runtime_output_artifact_path_list
+        if runtime_output_artifact_path_list is not None
+        else runtime_output_artifact_paths(backlog, task)
+    )
+    validate_runtime_input_artifacts(
+        runtime_artifact_store_dir,
+        runtime_input_artifact_producer_map,
+    )
     agent = _find_idle_agent(agent_pool, task["required_role"])
     runtime_adapter_selection = _resolve_runtime_adapter_selection(
         runtime_adapter,
@@ -900,6 +941,19 @@ def run_simulation(
                 attempt_id,
                 worktree_id,
             )
+        materialized_input_artifacts = (
+            materialize_runtime_input_artifacts(
+                runtime_artifact_store_dir,
+                worktree_path,
+                runtime_input_artifact_producer_map,
+            )
+            if worktree_path
+            else []
+        )
+        runtime_artifact_baseline = snapshot_runtime_artifacts(
+            worktree_path,
+            task.get("expected_output_artifacts", []),
+        )
 
         message = {
             "message_id": message_id,
@@ -940,6 +994,7 @@ def run_simulation(
                 "write_scope": task["write_scope"],
                 "input_artifacts": task.get("input_artifacts", []),
                 "expected_output_artifacts": task.get("expected_output_artifacts", []),
+                "materialized_input_artifacts": materialized_input_artifacts,
                 **_role_prompt_fields(agent_pool, agent, task),
                 **_role_context_fields(
                     agent_pool,
@@ -1043,7 +1098,13 @@ def run_simulation(
             },
         )
         diff_audit = (
-            audit_worktree_diff(worktree_path, runtime_result["changed_files"])
+            audit_worktree_diff(
+                worktree_path,
+                runtime_result["changed_files"],
+                runtime_artifact_paths=task.get("expected_output_artifacts", []),
+                runtime_artifact_baseline=runtime_artifact_baseline,
+                required_changed_files=task.get("expected_output_artifacts", []),
+            )
             if worktree_path
             else None
         )
@@ -1056,6 +1117,12 @@ def run_simulation(
             if worktree_path and diff_audit and diff_audit["actual_changed_files"]
             else None
         )
+        outcome = classify_attempt_outcome(
+            runtime_result,
+            task,
+            diff_audit=diff_audit,
+        )
+        runtime_artifacts = []
         append_event(
             "runtime_output_received",
             agent["agent_id"],
@@ -1070,6 +1137,7 @@ def run_simulation(
                 "output": runtime_result.get("output", {}),
                 "diff_audit": diff_audit,
                 "patch_path": str(patch_path) if patch_path else None,
+                "runtime_artifacts": runtime_artifacts,
             },
         )
         append_event(
@@ -1088,7 +1156,6 @@ def run_simulation(
             },
         )
 
-        outcome = classify_attempt_outcome(runtime_result, task, diff_audit=diff_audit)
         append_event(
             "validation_accepted"
             if outcome["validation_status"] == "accepted"
@@ -1106,6 +1173,7 @@ def run_simulation(
                 "lease_id": lease_id,
                 "diff_audit": diff_audit,
                 "patch_path": str(patch_path) if patch_path else None,
+                "runtime_artifacts": runtime_artifacts,
                 "semantic_validation": outcome.get("semantic_validation"),
             },
         )
@@ -1126,6 +1194,7 @@ def run_simulation(
             "semantic_validation": outcome.get("semantic_validation"),
             "diff_audit": diff_audit,
             "patch_path": str(patch_path) if patch_path else None,
+            "runtime_artifacts": runtime_artifacts,
             "integration_status": "not_requested",
             "integration_branch": None,
             "integration_worktree_path": None,
@@ -1229,6 +1298,82 @@ def run_simulation(
                 final_attempt.update(
                     upsert_integration_queue_item(output_dir, final_attempt)
                 )
+            runtime_output_artifact_digests = {
+                path: digest
+                for path, digest in (
+                    diff_audit["runtime_artifact_digests"].items()
+                    if diff_audit
+                    else []
+                )
+                if path in runtime_output_artifact_path_list
+            }
+            artifact_publishable = (
+                not patch_path
+                or final_attempt["integration_verification_status"] == "passed"
+            )
+            if runtime_output_artifact_digests and not artifact_publishable:
+                final_attempt.update(
+                    {
+                        "validation_status": "rejected",
+                        "failure_category": "artifact_integration_not_verified",
+                        "retryable": False,
+                    }
+                )
+                append_event(
+                    "artifact_publication_rejected",
+                    agent_pool["scheduler_agent_id"],
+                    agent["agent_id"],
+                    f"artifact-publication-rejected:{attempt_id}",
+                    correlation_id,
+                    {
+                        "task_id": task["task_id"],
+                        "attempt_id": attempt_id,
+                        "lease_id": lease_id,
+                        "failure_category": "artifact_integration_not_verified",
+                        "integration_status": final_attempt["integration_status"],
+                        "integration_verification_status": final_attempt[
+                            "integration_verification_status"
+                        ],
+                    },
+                )
+                append_event(
+                    "backlog_updated",
+                    agent_pool["scheduler_agent_id"],
+                    None,
+                    f"backlog-blocked:{task['task_id']}",
+                    correlation_id,
+                    {
+                        "task_id": task["task_id"],
+                        "attempt_id": attempt_id,
+                        "task_status": "blocked",
+                        "lease_id": lease_id,
+                        "blockers": ["artifact_integration_not_verified"],
+                    },
+                )
+                break
+            if diff_audit and diff_audit["runtime_artifact_digests"]:
+                runtime_artifacts = persist_runtime_artifacts(
+                    runtime_artifact_store_dir,
+                    worktree_path,
+                    diff_audit["runtime_artifact_digests"],
+                    task_id=task["task_id"],
+                    attempt_id=attempt_id,
+                )
+                final_attempt["runtime_artifacts"] = runtime_artifacts
+                if runtime_artifacts:
+                    append_event(
+                        "runtime_artifacts_published",
+                        agent_pool["scheduler_agent_id"],
+                        agent["agent_id"],
+                        f"runtime-artifacts-published:{attempt_id}",
+                        correlation_id,
+                        {
+                            "task_id": task["task_id"],
+                            "attempt_id": attempt_id,
+                            "lease_id": lease_id,
+                            "runtime_artifacts": runtime_artifacts,
+                        },
+                    )
             if cleanup_accepted_worktrees and project_root and worktree_path:
                 _remove_git_worktree(project_root, worktree_path)
                 final_attempt["worktree_removed"] = True
@@ -1373,6 +1518,14 @@ class FileScheduler:
                 "state_path": str(self.state_path),
             }
 
+        runtime_artifact_producer_map = runtime_input_artifact_producers(
+            self.state["backlog"],
+            task,
+        )
+        runtime_artifact_output_paths = runtime_output_artifact_paths(
+            self.state["backlog"],
+            task,
+        )
         step_number = len(self.state["steps"]) + 1
         step_id = f"STEP-{step_number:04d}-{task['task_id']}"
         step_dir = self.output_dir / "steps" / step_id
@@ -1404,6 +1557,9 @@ class FileScheduler:
             integration_verification_command=self.integration_verification_command,
             commit_verified_integration=self.commit_verified_integration,
             attempt_id_prefix=task["task_id"],
+            runtime_artifact_store_dir=self.output_dir,
+            runtime_input_artifact_producer_map=runtime_artifact_producer_map,
+            runtime_output_artifact_path_list=runtime_artifact_output_paths,
         )
         self._update_task_from_result(task["task_id"], result)
         step_summary = {
@@ -2986,8 +3142,10 @@ def _scoped_id(kind, number, id_prefix=None, width=3):
 
 def _changed_files_in_scope(changed_files, task):
     write_scope = [scope for scope in task.get("write_scope", []) if scope]
+    expected_artifacts = set(task.get("expected_output_artifacts", []))
     return all(
-        any(_path_matches_write_scope(path, scope) for scope in write_scope)
+        path in expected_artifacts
+        or any(_path_matches_write_scope(path, scope) for scope in write_scope)
         for path in changed_files
     )
 
@@ -3006,6 +3164,16 @@ def _validate_runtime_result(runtime_result, task):
 
 def classify_attempt_outcome(runtime_result, task, diff_audit=None):
     validation_status = _validate_runtime_result(runtime_result, task)
+    if (
+        validation_status == "accepted"
+        and task.get("expected_output_artifacts")
+        and diff_audit is None
+    ):
+        return {
+            "validation_status": "rejected",
+            "failure_category": "artifact_verification_unavailable",
+            "retryable": False,
+        }
     if validation_status == "accepted" and diff_audit and diff_audit["diff_status"] != "matched":
         return {
             "validation_status": "rejected",
@@ -3159,18 +3327,85 @@ def _coerce_text_list(value):
     return [str(value)]
 
 
-def audit_worktree_diff(worktree_path, declared_changed_files):
+def audit_worktree_diff(
+    worktree_path,
+    declared_changed_files,
+    runtime_artifact_paths=None,
+    runtime_artifact_baseline=None,
+    required_changed_files=None,
+):
     declared = sorted(set(declared_changed_files))
     actual = sorted(set(_git_changed_files(worktree_path)))
-    missing = sorted(path for path in declared if path not in actual)
+    runtime_artifact_paths = set(runtime_artifact_paths or [])
+    runtime_artifact_baseline = runtime_artifact_baseline or {}
+    missing_required = sorted(set(required_changed_files or []) - set(declared))
+    observed_runtime_artifact_digests = {
+        path: _worktree_file_sha256(worktree_path, path)
+        for path in declared
+        if path in runtime_artifact_paths
+        and _worktree_regular_file(worktree_path, path)
+    }
+    runtime_artifact_digests = {
+        path: digest
+        for path, digest in observed_runtime_artifact_digests.items()
+        if path in runtime_artifact_baseline
+        and digest != runtime_artifact_baseline[path]
+    }
+    verified_runtime_artifacts = sorted(runtime_artifact_digests)
+    materialized_artifacts = sorted(
+        set(verified_runtime_artifacts) - set(actual)
+    )
+    effective_actual = set(actual) | set(materialized_artifacts)
+    missing = sorted(path for path in declared if path not in effective_actual)
     undeclared = sorted(path for path in actual if path not in declared)
     return {
-        "diff_status": "matched" if not missing and not undeclared else "mismatch",
+        "diff_status": (
+            "matched"
+            if not missing and not undeclared and not missing_required
+            else "mismatch"
+        ),
         "declared_changed_files": declared,
         "actual_changed_files": actual,
+        "materialized_runtime_artifacts": materialized_artifacts,
+        "runtime_artifact_digests": runtime_artifact_digests,
+        "verified_runtime_artifacts": verified_runtime_artifacts,
         "missing_declared_files": missing,
+        "missing_required_changed_files": missing_required,
         "undeclared_changed_files": undeclared,
     }
+
+
+def _worktree_regular_file(worktree_path, relative_path):
+    root = Path(worktree_path).resolve()
+    candidate = root / relative_path
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (FileNotFoundError, OSError):
+        return False
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return False
+    return candidate.is_file() and not candidate.is_symlink()
+
+
+def snapshot_runtime_artifacts(worktree_path, artifact_paths):
+    if not worktree_path:
+        return {}
+    return {
+        path: _worktree_file_sha256(worktree_path, path)
+        if _worktree_regular_file(worktree_path, path)
+        else None
+        for path in sorted(set(artifact_paths or []))
+    }
+
+
+def _worktree_file_sha256(worktree_path, relative_path):
+    digest = hashlib.sha256()
+    with (Path(worktree_path) / relative_path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def write_patch_artifact(worktree_path, artifact_dir, actual_changed_files):

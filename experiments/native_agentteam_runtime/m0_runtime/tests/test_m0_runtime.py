@@ -19,6 +19,7 @@ from unittest import mock
 from agentteam_runtime import (
     CodexRuntimeAdapter,
     FakeRuntimeAdapter,
+    FileScheduler,
     FileSchedulerDaemon,
     FileMailboxExternalRuntimeAdapter,
     FileMailboxRuntimeAdapter,
@@ -66,6 +67,10 @@ from agentteam_runtime.model_invocation import (
     authoritative_provider_snapshot,
     import_model_invocation_lifecycle,
     replay_model_invocation_events,
+)
+from agentteam_runtime.runtime_artifacts import (
+    persist_runtime_artifacts,
+    validate_runtime_input_artifacts,
 )
 from agentteam_runtime.two_phase_scheduler import _operator_task_report, _runtime_evidence_summary
 
@@ -7801,6 +7806,563 @@ class M0RuntimeTests(unittest.TestCase):
                 ["integration_noop_verified"],
             )
 
+    def test_ignored_runtime_artifact_is_persisted_and_materialized_for_dependency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            (repo / ".git" / "info" / "exclude").write_text(
+                ".agentteam/\n",
+                encoding="utf-8",
+            )
+            artifact_path = ".agentteam/generated/repo_map_handoff.json"
+            producer = _backlog_task(
+                "TASK-REPO-MAP",
+                write_scope=[".agentteam/generated/"],
+            )
+            producer["expected_output_artifacts"] = [artifact_path]
+            consumer = _backlog_task(
+                "TASK-IMPLEMENT",
+                write_scope=["generated/"],
+                depends_on=["TASK-REPO-MAP"],
+            )
+            consumer["input_artifacts"] = [artifact_path]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[producer, consumer],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                max_inflight=1,
+                integrate_accepted_patch=True,
+            )
+
+            scheduler.dispatch_ready()
+            producer_inflight = scheduler.state["inflight_attempts"][0]
+            producer_artifact = (
+                Path(producer_inflight["worktree_path"]) / artifact_path
+            )
+            producer_artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact_text = '{"schema_version":"repo_map_handoff.v1"}\n'
+            producer_artifact.write_text(artifact_text, encoding="utf-8")
+            _append_runtime_result(
+                producer_inflight["outbox_path"],
+                producer_inflight["message_id"],
+                producer_inflight["task_id"],
+                producer_inflight["attempt_id"],
+                producer_inflight["lease_id"],
+                "completed",
+                [artifact_path],
+            )
+
+            producer_result = scheduler.collect_ready_results()["results"][0]
+            dispatch = scheduler.dispatch_ready()
+            consumer_inflight = scheduler.state["inflight_attempts"][0]
+            consumer_artifact = (
+                Path(consumer_inflight["worktree_path"]) / artifact_path
+            )
+            manifest = json.loads(
+                (output_dir / "runtime_artifacts" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            message = _read_first_jsonl(
+                output_dir
+                / "steps"
+                / "STEP-0002-TASK-IMPLEMENT"
+                / "mailboxes"
+                / "agent-repo-map"
+                / "inbox.jsonl"
+            )
+
+            self.assertEqual(producer_result["validation_status"], "accepted")
+            self.assertEqual(producer_result["task_status"], "done")
+            self.assertEqual(producer_result["patch_path"], None)
+            self.assertEqual(dispatch["dispatched_task_ids"], ["TASK-IMPLEMENT"])
+            self.assertEqual(
+                consumer_artifact.read_text(encoding="utf-8"),
+                artifact_text,
+            )
+            self.assertEqual(
+                manifest["artifacts"][artifact_path]["task_id"],
+                "TASK-REPO-MAP",
+            )
+            self.assertEqual(
+                message["payload"]["materialized_input_artifacts"][0][
+                    "materialization_status"
+                ],
+                "materialized",
+            )
+
+    def test_runtime_artifact_is_published_only_after_retry_integration_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            counter = tmp_path / "verification-count.txt"
+            _init_git_repo(repo)
+            (repo / ".git" / "info" / "exclude").write_text(
+                ".agentteam/\n",
+                encoding="utf-8",
+            )
+            artifact_path = ".agentteam/generated/repo_map_handoff.json"
+            task = _backlog_task(
+                "TASK-REPO-MAP",
+                write_scope=["generated/"],
+            )
+            task["expected_output_artifacts"] = [artifact_path]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[task],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            verification_code = (
+                "from pathlib import Path; import sys; "
+                f"p=Path({str(counter)!r}); "
+                "n=int(p.read_text()) if p.exists() else 0; "
+                "p.write_text(str(n+1)); sys.exit(1 if n == 0 else 0)"
+            )
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                max_inflight=1,
+                max_attempts=2,
+                integrate_accepted_patch=True,
+                integration_verification_command=[
+                    sys.executable,
+                    "-c",
+                    verification_code,
+                ],
+                commit_verified_integration=True,
+            )
+
+            first_dispatch = scheduler.dispatch_ready()
+            first = scheduler.state["inflight_attempts"][0]
+            self._write_runtime_artifact_attempt(
+                first,
+                artifact_path,
+                "same handoff",
+            )
+            first_result = scheduler.collect_ready_results()["results"][0]
+
+            self.assertEqual(first_dispatch["dispatch_count"], 1)
+            self.assertEqual(first_result["task_status"], "ready")
+            self.assertFalse(
+                (output_dir / "runtime_artifacts" / "manifest.json").exists()
+            )
+
+            scheduler.dispatch_ready()
+            second = scheduler.state["inflight_attempts"][0]
+            self._write_runtime_artifact_attempt(
+                second,
+                artifact_path,
+                "same handoff",
+            )
+            second_result = scheduler.collect_ready_results()["results"][0]
+            manifest = json.loads(
+                (output_dir / "runtime_artifacts" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            self.assertEqual(second_result["task_status"], "done")
+            self.assertEqual(
+                manifest["artifacts"][artifact_path]["attempt_id"],
+                second["attempt_id"],
+            )
+
+    def _write_runtime_artifact_attempt(self, inflight, artifact_path, content):
+        worktree = Path(inflight["worktree_path"])
+        artifact = worktree / artifact_path
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(content, encoding="utf-8")
+        changed = worktree / "generated" / "change.txt"
+        changed.parent.mkdir(parents=True, exist_ok=True)
+        changed.write_text("integration candidate\n", encoding="utf-8")
+        _append_runtime_result(
+            inflight["outbox_path"],
+            inflight["message_id"],
+            inflight["task_id"],
+            inflight["attempt_id"],
+            inflight["lease_id"],
+            "completed",
+            [artifact_path, "generated/change.txt"],
+        )
+
+    def test_runtime_artifact_materialization_rejects_store_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            (repo / ".git" / "info" / "exclude").write_text(
+                ".agentteam/\n",
+                encoding="utf-8",
+            )
+            artifact_path = ".agentteam/generated/repo_map_handoff.json"
+            producer = _backlog_task(
+                "TASK-REPO-MAP",
+                write_scope=[".agentteam/generated/"],
+            )
+            producer["expected_output_artifacts"] = [artifact_path]
+            consumer = _backlog_task(
+                "TASK-IMPLEMENT",
+                write_scope=["generated/"],
+                depends_on=["TASK-REPO-MAP"],
+            )
+            consumer["input_artifacts"] = [artifact_path]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[producer, consumer],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                max_inflight=1,
+                integrate_accepted_patch=True,
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            artifact = Path(inflight["worktree_path"]) / artifact_path
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text('{"valid":true}\n', encoding="utf-8")
+            _append_runtime_result(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "completed",
+                [artifact_path],
+            )
+            scheduler.collect_ready_results()
+            manifest = json.loads(
+                (output_dir / "runtime_artifacts" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            stored = (
+                output_dir
+                / "runtime_artifacts"
+                / "objects"
+                / manifest["artifacts"][artifact_path]["sha256"]
+            )
+            stored.write_text('{"tampered":true}\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "input artifact digest mismatch",
+            ):
+                scheduler.dispatch_ready()
+
+    def test_runtime_artifact_validation_rejects_wrong_dependency_producer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            worktree = tmp_path / "worktree"
+            output_dir = tmp_path / "run"
+            artifact_path = ".agentteam/generated/repo_map_handoff.json"
+            artifact = worktree / artifact_path
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text('{"producer":"one"}\n', encoding="utf-8")
+            persist_runtime_artifacts(
+                output_dir,
+                worktree,
+                {
+                    artifact_path: hashlib.sha256(
+                        artifact.read_bytes()
+                    ).hexdigest()
+                },
+                task_id="TASK-PRODUCER",
+                attempt_id="ATTEMPT-001",
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "input artifact producer mismatch",
+            ):
+                validate_runtime_input_artifacts(
+                    output_dir,
+                    {artifact_path: "TASK-OTHER"},
+                )
+
+    def test_runtime_artifact_persistence_binds_audited_digest_and_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            worktree = tmp_path / "worktree"
+            output_dir = tmp_path / "run"
+            artifact_path = ".agentteam/generated/repo_map_handoff.json"
+            artifact = worktree / artifact_path
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text('{"version":1}\n', encoding="utf-8")
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            persist_runtime_artifacts(
+                output_dir,
+                worktree,
+                {artifact_path: digest},
+                task_id="TASK-PRODUCER",
+                attempt_id="ATTEMPT-001",
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "runtime artifact record is immutable",
+            ):
+                persist_runtime_artifacts(
+                    output_dir,
+                    worktree,
+                    {artifact_path: digest},
+                    task_id="TASK-PRODUCER",
+                    attempt_id="ATTEMPT-002",
+                )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "runtime artifact changed after audit",
+            ):
+                persist_runtime_artifacts(
+                    output_dir,
+                    worktree,
+                    {artifact_path: "0" * 64},
+                    task_id="TASK-OTHER",
+                    attempt_id="ATTEMPT-001",
+                )
+
+    def test_static_repository_input_artifact_does_not_require_runtime_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            blueprint = repo / "blueprint.json"
+            blueprint.write_text('{"task":"static input"}\n', encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "blueprint.json"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "add blueprint"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            task = _backlog_task(
+                "TASK-IMPLEMENT",
+                write_scope=["generated/"],
+            )
+            task["input_artifacts"] = ["blueprint.json"]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[task],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+            )
+
+            dispatch = scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            message = _read_first_jsonl(
+                Path(inflight["outbox_path"]).with_name("inbox.jsonl")
+            )
+
+            self.assertEqual(dispatch["dispatched_task_ids"], ["TASK-IMPLEMENT"])
+            self.assertTrue(
+                (Path(inflight["worktree_path"]) / "blueprint.json").is_file()
+            )
+            self.assertEqual(message["payload"]["input_artifacts"], ["blueprint.json"])
+            self.assertEqual(message["payload"]["materialized_input_artifacts"], [])
+
+    def test_file_scheduler_materializes_runtime_artifact_between_steps(self):
+        class InspectingFakeRuntime(FakeRuntimeAdapter):
+            def __init__(self, artifact_path):
+                self.artifact_path = artifact_path
+                self.consumer_observed_artifact = False
+
+            def run(self, message, worktree_path=None):
+                if message["payload"]["task_id"] == "TASK-REPO-MAP":
+                    target = Path(worktree_path) / self.artifact_path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text('{"repo_map":"ready"}\n', encoding="utf-8")
+                    return {
+                        "result_status": "completed",
+                        "changed_files": [self.artifact_path],
+                        "output": {"adapter": "artifact-only"},
+                    }
+                if message["payload"]["task_id"] == "TASK-IMPLEMENT":
+                    self.consumer_observed_artifact = (
+                        Path(worktree_path) / self.artifact_path
+                    ).is_file()
+                return super().run(message, worktree_path=worktree_path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            (repo / ".git" / "info" / "exclude").write_text(
+                ".agentteam/\n",
+                encoding="utf-8",
+            )
+            artifact_path = ".agentteam/generated/repo_map_handoff.json"
+            producer = _backlog_task(
+                "TASK-REPO-MAP",
+                write_scope=["generated/"],
+            )
+            producer["expected_output_artifacts"] = [artifact_path]
+            consumer = _backlog_task(
+                "TASK-IMPLEMENT",
+                write_scope=["generated/"],
+                depends_on=["TASK-REPO-MAP"],
+            )
+            consumer["input_artifacts"] = [artifact_path]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[producer, consumer],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            runtime = InspectingFakeRuntime(artifact_path)
+            scheduler = FileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=runtime,
+            )
+
+            result = scheduler.run_until_idle(max_steps=3)
+
+            self.assertEqual(result["scheduler_status"], "idle")
+            self.assertTrue(runtime.consumer_observed_artifact)
+            self.assertTrue(
+                (output_dir / "runtime_artifacts" / "manifest.json").is_file()
+            )
+
+    def test_file_scheduler_does_not_publish_artifact_when_integration_fails(self):
+        class ObservingFakeRuntime(FakeRuntimeAdapter):
+            def __init__(self, artifact_path):
+                self.artifact_path = artifact_path
+                self.consumer_dispatched = False
+
+            def run(self, message, worktree_path=None):
+                if message["payload"]["task_id"] == "TASK-REPO-MAP":
+                    artifact = Path(worktree_path) / self.artifact_path
+                    artifact.parent.mkdir(parents=True, exist_ok=True)
+                    artifact.write_text('{"repo_map":"ready"}\n', encoding="utf-8")
+                    changed = Path(worktree_path) / "generated" / "change.json"
+                    changed.parent.mkdir(parents=True, exist_ok=True)
+                    changed.write_text('{"code":"changed"}\n', encoding="utf-8")
+                    return {
+                        "result_status": "completed",
+                        "changed_files": [
+                            self.artifact_path,
+                            "generated/change.json",
+                        ],
+                        "output": {"adapter": "artifact-plus-patch"},
+                    }
+                if message["payload"]["task_id"] == "TASK-IMPLEMENT":
+                    self.consumer_dispatched = True
+                return super().run(message, worktree_path=worktree_path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            (repo / ".git" / "info" / "exclude").write_text(
+                ".agentteam/\n",
+                encoding="utf-8",
+            )
+            artifact_path = ".agentteam/generated/repo_map_handoff.json"
+            producer = _backlog_task(
+                "TASK-REPO-MAP",
+                write_scope=["generated/"],
+            )
+            producer["expected_output_artifacts"] = [artifact_path]
+            consumer = _backlog_task(
+                "TASK-IMPLEMENT",
+                write_scope=["generated/"],
+                depends_on=["TASK-REPO-MAP"],
+            )
+            consumer["input_artifacts"] = [artifact_path]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[producer, consumer],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            runtime = ObservingFakeRuntime(artifact_path)
+            scheduler = FileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                runtime_adapter=runtime,
+                integrate_accepted_patch=True,
+                integration_verification_command=[
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.exit(7)",
+                ],
+            )
+
+            result = scheduler.run_until_idle(max_steps=3)
+            producer_result = result["steps"][0]["result"]
+            producer_state = next(
+                item
+                for item in scheduler.state["backlog"]["items"]
+                if item["task_id"] == "TASK-REPO-MAP"
+            )
+
+            self.assertEqual(result["scheduler_status"], "idle")
+            self.assertEqual(producer_result["validation_status"], "rejected")
+            self.assertEqual(
+                producer_result["failure_category"],
+                "artifact_integration_not_verified",
+            )
+            self.assertEqual(
+                producer_result["integration_verification_status"],
+                "failed",
+            )
+            self.assertEqual(producer_state["backlog_status"], "blocked")
+            self.assertFalse(runtime.consumer_dispatched)
+            self.assertFalse(
+                (output_dir / "runtime_artifacts" / "manifest.json").exists()
+            )
+
     def test_verified_dependency_dispatch_patch_requires_integration(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -9842,6 +10404,47 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertEqual(outcome["failure_category"], "timeout")
         self.assertTrue(outcome["retryable"])
 
+    def test_expected_runtime_artifact_is_an_exact_additional_write_scope(self):
+        artifact_path = ".agentteam/generated/repo_map_handoff.json"
+        task = {
+            "write_scope": ["generated/"],
+            "expected_output_artifacts": [artifact_path],
+        }
+        result = {
+            "result_status": "completed",
+            "changed_files": [artifact_path],
+            "output": {},
+        }
+
+        outcome = classify_attempt_outcome(
+            result,
+            task,
+            diff_audit={"diff_status": "matched"},
+        )
+
+        self.assertEqual(outcome["validation_status"], "accepted")
+        self.assertEqual(outcome["failure_category"], None)
+
+    def test_expected_runtime_artifact_requires_worktree_verification(self):
+        artifact_path = ".agentteam/generated/repo_map_handoff.json"
+        task = {
+            "write_scope": [".agentteam/generated/"],
+            "expected_output_artifacts": [artifact_path],
+        }
+        result = {
+            "result_status": "completed",
+            "changed_files": [artifact_path],
+            "output": {},
+        }
+
+        outcome = classify_attempt_outcome(result, task, diff_audit=None)
+
+        self.assertEqual(outcome["validation_status"], "rejected")
+        self.assertEqual(
+            outcome["failure_category"],
+            "artifact_verification_unavailable",
+        )
+
     def test_worktree_diff_audit_detects_declared_file_missing_from_git_diff(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
@@ -9870,6 +10473,92 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(audit["actual_changed_files"], ["generated/actual.json"])
             self.assertEqual(audit["missing_declared_files"], [])
             self.assertEqual(audit["undeclared_changed_files"], [])
+
+    def test_worktree_diff_audit_accepts_declared_runtime_artifact_ignored_by_git(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            _init_git_repo(repo)
+            (repo / ".git" / "info" / "exclude").write_text(
+                ".agentteam/\n",
+                encoding="utf-8",
+            )
+            artifact_path = ".agentteam/generated/repo_map_handoff.json"
+            target = repo / artifact_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                '{"schema_version":"repo_map_handoff.v1"}\n',
+                encoding="utf-8",
+            )
+
+            audit = audit_worktree_diff(
+                repo,
+                [artifact_path],
+                runtime_artifact_paths=[artifact_path],
+                runtime_artifact_baseline={artifact_path: None},
+            )
+
+            self.assertEqual(audit["diff_status"], "matched")
+            self.assertEqual(audit["actual_changed_files"], [])
+            self.assertEqual(
+                audit["materialized_runtime_artifacts"],
+                [artifact_path],
+            )
+            self.assertEqual(audit["missing_declared_files"], [])
+
+    def test_worktree_diff_audit_rejects_unchanged_tracked_runtime_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            _init_git_repo(repo)
+            artifact_path = "tracked_handoff.json"
+            target = repo / artifact_path
+            target.write_text('{"existing":true}\n', encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", artifact_path],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "add tracked handoff"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            audit = audit_worktree_diff(
+                repo,
+                [artifact_path],
+                runtime_artifact_paths=[artifact_path],
+                runtime_artifact_baseline={
+                    artifact_path: hashlib.sha256(target.read_bytes()).hexdigest()
+                },
+            )
+
+            self.assertEqual(audit["diff_status"], "mismatch")
+            self.assertEqual(audit["materialized_runtime_artifacts"], [])
+            self.assertEqual(audit["missing_declared_files"], [artifact_path])
+
+    def test_worktree_diff_audit_rejects_missing_required_runtime_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            _init_git_repo(repo)
+            artifact_path = ".agentteam/generated/repo_map_handoff.json"
+
+            audit = audit_worktree_diff(
+                repo,
+                [],
+                runtime_artifact_paths=[artifact_path],
+                runtime_artifact_baseline={artifact_path: None},
+                required_changed_files=[artifact_path],
+            )
+
+            self.assertEqual(audit["diff_status"], "mismatch")
+            self.assertEqual(
+                audit["missing_required_changed_files"],
+                [artifact_path],
+            )
 
     def test_shell_runtime_adapter_executes_command_in_worktree_and_parses_result(self):
         with tempfile.TemporaryDirectory() as tmp:

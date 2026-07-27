@@ -30,12 +30,19 @@ from .m0_runtime import (
     run_integration_verification_additions,
     run_integration_verification,
     skip_integration_baseline_commit,
+    snapshot_runtime_artifacts,
     write_patch_artifact,
 )
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
 from .notifications import DEFAULT_NOTIFICATION_EVENT_TYPES
 from .operator_control import read_run_stop_request
 from .planner_context import build_planner_context
+from .runtime_artifacts import (
+    materialize_runtime_input_artifacts,
+    persist_runtime_artifacts,
+    runtime_input_artifact_producers,
+    validate_runtime_input_artifacts,
+)
 from .model_invocation import (
     InvocationLifecycle,
     ModelInvocationIntegrityError,
@@ -464,6 +471,13 @@ class TwoPhaseFileScheduler:
             invocation_context,
             self.events_path,
         )
+        runtime_input_artifact_producers = self._runtime_input_artifact_producers(
+            task
+        )
+        validate_runtime_input_artifacts(
+            self.output_dir,
+            runtime_input_artifact_producers,
+        )
         agent["status"] = "busy"
         agent["lease"] = {
             "lease_id": lease_id,
@@ -484,6 +498,14 @@ class TwoPhaseFileScheduler:
                     else None
                 ),
             )
+        materialized_input_artifacts = self._materialize_input_artifacts(
+            runtime_input_artifact_producers,
+            worktree_path,
+        )
+        runtime_artifact_baseline = snapshot_runtime_artifacts(
+            worktree_path,
+            task.get("expected_output_artifacts", []),
+        )
 
         message = {
             "message_id": message_id,
@@ -511,6 +533,7 @@ class TwoPhaseFileScheduler:
                 "write_scope": task["write_scope"],
                 "input_artifacts": task.get("input_artifacts", []),
                 "expected_output_artifacts": task.get("expected_output_artifacts", []),
+                "materialized_input_artifacts": materialized_input_artifacts,
                 **invocation_context,
                 **_evidence_policy_fields(task),
                 **_operator_guidance_fields(task),
@@ -628,6 +651,7 @@ class TwoPhaseFileScheduler:
                         "task_id": task["task_id"],
                         "attempt_id": attempt_id,
                         "lease_id": lease_id,
+                        "materialized_input_artifacts": materialized_input_artifacts,
                         **_message_context_event_fields(message["payload"]),
                     },
                 ),
@@ -667,17 +691,62 @@ class TwoPhaseFileScheduler:
             "worktree_id": worktree_id,
             "worktree_path": str(worktree_path) if worktree_path else None,
             "branch": branch,
+            "runtime_artifact_baseline": runtime_artifact_baseline,
             **_integration_baseline_inflight_fields(integration_baseline),
             "correlation_id": correlation_id,
         }
         self.state["inflight_attempts"].append(inflight)
         return {"task_id": task["task_id"], "step_id": step_id}
 
+    def _runtime_input_artifact_producers(self, task):
+        return runtime_input_artifact_producers(
+            self.state["backlog"],
+            task,
+        )
+
+    def _materialize_input_artifacts(
+        self,
+        artifact_producers,
+        worktree_path,
+    ):
+        if not worktree_path:
+            return []
+        return materialize_runtime_input_artifacts(
+            self.output_dir,
+            worktree_path,
+            artifact_producers,
+        )
+
+    def _persist_runtime_artifacts(
+        self,
+        task,
+        inflight,
+        artifact_digests,
+    ):
+        if not artifact_digests:
+            return []
+        return persist_runtime_artifacts(
+            self.output_dir,
+            inflight["worktree_path"],
+            artifact_digests,
+            task_id=task["task_id"],
+            attempt_id=inflight["attempt_id"],
+        )
+
     def _collect_result(self, inflight, runtime_result):
         self._import_worker_lifecycles(inflight)
         task = self._task_by_id(inflight["task_id"])
         diff_audit = (
-            audit_worktree_diff(inflight["worktree_path"], runtime_result["changed_files"])
+            audit_worktree_diff(
+                inflight["worktree_path"],
+                runtime_result["changed_files"],
+                runtime_artifact_paths=task.get("expected_output_artifacts", []),
+                runtime_artifact_baseline=inflight.get(
+                    "runtime_artifact_baseline",
+                    {},
+                ),
+                required_changed_files=task.get("expected_output_artifacts", []),
+            )
             if inflight["worktree_path"]
             else None
         )
@@ -693,6 +762,7 @@ class TwoPhaseFileScheduler:
             else None
         )
         outcome = classify_attempt_outcome(runtime_result, task, diff_audit=diff_audit)
+        runtime_artifacts = []
         permission_request = (
             _permission_request_payload(inflight, runtime_result)
             if runtime_result["result_status"] == "blocked"
@@ -738,6 +808,7 @@ class TwoPhaseFileScheduler:
             "semantic_validation": outcome.get("semantic_validation"),
             "diff_audit": diff_audit,
             "patch_path": str(patch_path) if patch_path else None,
+            "runtime_artifacts": runtime_artifacts,
             "integration_status": "not_requested",
             "integration_branch": None,
             "integration_worktree_path": None,
@@ -793,6 +864,13 @@ class TwoPhaseFileScheduler:
         result["retry_allowed"] = retry_allowed
         if transition["task_status"] == "retryable":
             result["task_status"] = "ready" if retry_allowed else "blocked"
+        if result["task_status"] == "done" and diff_audit:
+            runtime_artifacts = self._persist_runtime_artifacts(
+                task,
+                inflight,
+                diff_audit["runtime_artifact_digests"],
+            )
+            result["runtime_artifacts"] = runtime_artifacts
         runtime_events = [
                 self._event(
                     "runtime_session_observed",
@@ -824,6 +902,7 @@ class TwoPhaseFileScheduler:
                         "output": runtime_result.get("output", {}),
                         "diff_audit": diff_audit,
                         "patch_path": str(patch_path) if patch_path else None,
+                        "runtime_artifacts": runtime_artifacts,
                     },
                 ),
                 self._event(
@@ -858,6 +937,7 @@ class TwoPhaseFileScheduler:
                         "lease_id": inflight["lease_id"],
                         "diff_audit": diff_audit,
                         "patch_path": str(patch_path) if patch_path else None,
+                        "runtime_artifacts": runtime_artifacts,
                         "semantic_validation": outcome.get("semantic_validation"),
                         **_decomposition_validation_payload(result),
                     },
