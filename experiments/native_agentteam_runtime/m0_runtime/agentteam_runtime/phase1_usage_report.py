@@ -160,6 +160,7 @@ def build_report_evidence(
         deterministic_evidence,
         projection_replay,
         lineage,
+        implementation_run_id=implementation_run_id,
     )
     changed_files = sorted(
         {
@@ -1131,7 +1132,13 @@ def _projection_replay_contract(projection_check):
     )
 
 
-def _verification_summary(deterministic, projection_replay, lineage):
+def _verification_summary(
+    deterministic,
+    projection_replay,
+    lineage,
+    *,
+    implementation_run_id,
+):
     integration_outcomes = (
         lineage.get("integration_outcomes", [])
         if isinstance(lineage, dict)
@@ -1140,7 +1147,10 @@ def _verification_summary(deterministic, projection_replay, lineage):
     passed_count = sum(
         1
         for item in integration_outcomes
-        if item.get("integration_verification_status") == "passed"
+        if (
+            item.get("run_id") == implementation_run_id
+            and item.get("integration_verification_status") == "passed"
+        )
     )
     return {
         "deterministic_completion_status": deterministic["status"],

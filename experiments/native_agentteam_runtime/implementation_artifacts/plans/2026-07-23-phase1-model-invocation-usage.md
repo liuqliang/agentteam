@@ -2435,6 +2435,10 @@ coverage.
   `processed` + `accepted` step contract only when integration is applied and
   its required verification passed; `not_requested` additions are valid only
   when the additions list is empty;
+- project projection scans direct and `vN` run namespaces and selects the
+  highest immutable implementation `creation_sequence` for a duplicated run
+  ID; report verification counts and changed files are scoped to that selected
+  implementation run rather than unrelated project history;
 - one start and one terminal record share an invocation ID and reconcile
   exactly with provider totals;
 - lifecycle and token coverage are both `1/1`;

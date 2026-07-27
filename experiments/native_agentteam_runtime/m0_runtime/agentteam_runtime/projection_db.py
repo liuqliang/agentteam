@@ -1,6 +1,7 @@
 import json
 import hashlib
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -10,6 +11,7 @@ PROJECTION_SCHEMA_VERSION = "agentteam_projection.v5"
 PROJECTION_WARNING_UNAVAILABLE = "projection_db_unavailable"
 PROJECTION_REBUILD_NEXT_ACTION = "run agentteam db rebuild"
 PROJECTION_REBUILD_HINT = "agentteam db rebuild"
+_RUN_NAMESPACE_PATTERN = re.compile(r"^v[1-9][0-9]*$")
 _INVOCATION_EVENT_TYPES = {
     "model_invocation_started",
     "model_invocation_usage_recorded",
@@ -896,7 +898,7 @@ def _scan_runs(runs_root):
     if not runs_root.exists():
         return []
     runs = []
-    for run_dir in sorted(path for path in runs_root.iterdir() if path.is_dir()):
+    for run_dir in _projection_run_directories(runs_root):
         events_path = run_dir / "events.jsonl"
         state_path = run_dir / "state" / "two_phase_scheduler_state.json"
         events = _read_jsonl(events_path)
@@ -927,6 +929,58 @@ def _scan_runs(runs_root):
             }
         )
     return runs
+
+
+def _projection_run_directories(runs_root):
+    candidates = []
+    for child in sorted(
+        (path for path in Path(runs_root).iterdir() if path.is_dir()),
+        key=lambda path: path.name,
+    ):
+        identity_path = child / "state" / "run_identity.v1.json"
+        if (
+            _RUN_NAMESPACE_PATTERN.fullmatch(child.name)
+            and not identity_path.is_file()
+        ):
+            candidates.extend(
+                sorted(
+                    (path for path in child.iterdir() if path.is_dir()),
+                    key=lambda path: path.name,
+                )
+            )
+        else:
+            candidates.append(child)
+
+    selected_implementations = {}
+    passthrough = []
+    for run_dir in candidates:
+        identity = _read_json_if_exists(
+            run_dir / "state" / "run_identity.v1.json"
+        )
+        sequence = identity.get("creation_sequence")
+        if (
+            identity.get("schema_version") == "run_identity.v1"
+            and identity.get("run_kind") == "implementation"
+            and identity.get("run_id") == run_dir.name
+            and isinstance(sequence, int)
+            and not isinstance(sequence, bool)
+            and sequence >= 1
+        ):
+            current = selected_implementations.get(run_dir.name)
+            if (
+                current is None
+                or sequence > current["creation_sequence"]
+            ):
+                selected_implementations[run_dir.name] = {
+                    "creation_sequence": sequence,
+                    "run_dir": run_dir,
+                }
+            continue
+        passthrough.append(run_dir)
+    selected = passthrough + [
+        item["run_dir"] for item in selected_implementations.values()
+    ]
+    return sorted(selected, key=lambda path: str(path.resolve()))
 
 
 def _scan_invocations(

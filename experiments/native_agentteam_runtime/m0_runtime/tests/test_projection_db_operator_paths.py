@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import agentteam_runtime.projection_db as projection_db
 from agentteam_runtime.operator_report import build_run_completion_report, render_run_completion_report
 from agentteam_runtime.phase1_usage_report import (
     FIXED_ARTIFACT_RELATIVE as PHASE1_FINALIZATION_ARTIFACT,
@@ -15,6 +16,7 @@ from agentteam_runtime.phase1_usage_report import (
     ROADMAP_RELATIVE_PATH,
     Phase1UsageReportError,
     _deterministic_completion_evidence,
+    _verification_summary,
     complete_phase1_usage_report,
     render_report_artifacts,
     render_milestone_report,
@@ -354,6 +356,65 @@ def _commit_report_artifacts(repo, artifacts, *, extra_path=None):
 
 
 class ProjectionDbOperatorPathTests(unittest.TestCase):
+    def test_projection_selects_latest_versioned_implementation_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_root = Path(tmp) / "runs"
+            flat = runs_root / "phase1-run"
+            versioned = runs_root / "v4" / "phase1-run"
+            for run_dir, sequence, task_id in (
+                (flat, 1, "OLD-TASK"),
+                (versioned, 3, "CURRENT-TASK"),
+            ):
+                _write_json(
+                    run_dir / "state" / "run_identity.v1.json",
+                    {
+                        "schema_version": "run_identity.v1",
+                        "run_id": "phase1-run",
+                        "run_kind": "implementation",
+                        "creation_sequence": sequence,
+                    },
+                )
+                _write_json(
+                    run_dir / "state" / "two_phase_scheduler_state.json",
+                    {
+                        "scheduler_status": "idle",
+                        "steps": [{"task_id": task_id}],
+                    },
+                )
+
+            runs = projection_db._scan_runs(runs_root)
+
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(Path(runs[0]["run_dir"]), versioned.resolve())
+            self.assertEqual(
+                runs[0]["state"]["steps"][0]["task_id"],
+                "CURRENT-TASK",
+            )
+
+    def test_verification_summary_filters_unrelated_project_runs(self):
+        summary = _verification_summary(
+            {
+                "status": "passed",
+                "task_results": [{"task_id": "TASK-1"}],
+            },
+            {"check_status": "passed"},
+            {
+                "integration_outcomes": [
+                    {
+                        "run_id": "phase1-run",
+                        "integration_verification_status": "passed",
+                    },
+                    {
+                        "run_id": "unrelated-run",
+                        "integration_verification_status": "passed",
+                    },
+                ]
+            },
+            implementation_run_id="phase1-run",
+        )
+
+        self.assertEqual(summary["integration_verification_passed_count"], 1)
+
     def test_deterministic_evidence_accepts_native_scheduler_result_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
