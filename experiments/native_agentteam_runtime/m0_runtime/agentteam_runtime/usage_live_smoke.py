@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -205,6 +206,15 @@ def run_usage_live_smoke(
 
 def _provider_command(command, *, project_root, result_path, model):
     command = list(command or ["codex", "exec"])
+    executable = Path(str(command[0]))
+    if executable.parent == Path(".") and executable.name.lower() in {
+        "codex",
+        "codex.exe",
+    }:
+        resolved = shutil.which(str(command[0]))
+        if not resolved:
+            raise UsageLiveSmokeError("Codex executable is unavailable")
+        command[0] = str(Path(resolved).resolve())
     command.extend(["-C", str(project_root), "-s", "read-only"])
     if model:
         command.extend(["-m", model])

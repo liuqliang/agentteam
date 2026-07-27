@@ -29,6 +29,7 @@ from agentteam_runtime.usage_live_smoke import (
     FIXED_ACCEPTANCE_ARTIFACT,
     SUPPORTED_ACCEPTANCE_INVOCATION_INVENTORY,
     UsageLiveSmokeError,
+    _provider_command,
     run_usage_live_smoke,
 )
 
@@ -38,6 +39,36 @@ REPO_ROOT = ROOT.parents[1]
 
 
 class LiveCodexSmokeTests(unittest.TestCase):
+    def test_usage_live_smoke_resolves_codex_for_systemd_environment(self):
+        with mock.patch(
+            "agentteam_runtime.usage_live_smoke.shutil.which",
+            return_value="/opt/codex/bin/codex",
+        ):
+            command = _provider_command(
+                None,
+                project_root=Path("/candidate"),
+                result_path=Path("/output/result.json"),
+                model=None,
+            )
+        self.assertEqual(command[0], "/opt/codex/bin/codex")
+        self.assertEqual(command[1], "exec")
+
+    def test_usage_live_smoke_rejects_missing_codex_before_launch(self):
+        with mock.patch(
+            "agentteam_runtime.usage_live_smoke.shutil.which",
+            return_value=None,
+        ):
+            with self.assertRaisesRegex(
+                UsageLiveSmokeError,
+                "Codex executable is unavailable",
+            ):
+                _provider_command(
+                    None,
+                    project_root=Path("/candidate"),
+                    result_path=Path("/output/result.json"),
+                    model=None,
+                )
+
     def test_live_codex_smoke_skips_without_env_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp) / "smoke"
