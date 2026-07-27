@@ -1331,6 +1331,7 @@ def _write_author_template_bundle(
             "taskpack_schema_version": "taskpack.v1",
             "taskpack_id": taskpack_id,
             "status": "draft",
+            "authoring_mode": "direct_draft",
             "semantic_contract_version": TASKPACK_SEMANTIC_CONTRACT_VERSION,
             "project_root": str(project_root),
             "goal": goal,
@@ -2075,6 +2076,8 @@ def _canonicalize_codex_taskpack_files(taskpack_dir):
     if isinstance(taskpack, dict):
         taskpack = _unwrap_nested_taskpack_object(taskpack)
     if isinstance(taskpack, dict):
+        # Provenance belongs to this trusted authoring route, not to model output.
+        taskpack["authoring_mode"] = "direct_draft"
         if not taskpack.get("semantic_contract_version"):
             taskpack["semantic_contract_version"] = TASKPACK_SEMANTIC_CONTRACT_VERSION
         if not taskpack.get("original_goal") and taskpack.get("goal"):

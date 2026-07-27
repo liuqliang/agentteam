@@ -16497,6 +16497,39 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(loaded["taskpack"]["goal_kind"], "optimization")
             self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
 
+    def test_canonicalize_codex_taskpack_binds_direct_authoring_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen = tmp_path / "frozen"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement a bounded code change.",
+                draft_root=drafts,
+                taskpack_id="canonicalize-authoring-mode",
+                write_scope=["src/"],
+            )
+            taskpack_path = Path(result["taskpack_dir"]) / "taskpack.yaml"
+            taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+            taskpack.pop("authoring_mode")
+            taskpack_path.write_text(json.dumps(taskpack), encoding="utf-8")
+
+            _canonicalize_codex_taskpack_files(result["taskpack_dir"])
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            self.assertEqual(loaded["taskpack"]["authoring_mode"], "direct_draft")
+            frozen_result = freeze_taskpack(
+                result["taskpack_dir"],
+                frozen,
+                expected_authoring_mode="direct_draft",
+            )
+            self.assertEqual(
+                frozen_result["manifest"]["taskpack_id"],
+                "canonicalize-authoring-mode",
+            )
+
     def test_canonicalize_codex_taskpack_without_project_root_does_not_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
