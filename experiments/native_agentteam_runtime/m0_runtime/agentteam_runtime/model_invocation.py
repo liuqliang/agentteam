@@ -23,6 +23,7 @@ import json
 import os
 import secrets
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -996,6 +997,10 @@ class SystemdGatedExecution:
             )
         self.lifecycle = lifecycle
         self.command = list(command)
+        if self.command and not Path(self.command[0]).is_absolute():
+            resolved_executable = shutil.which(self.command[0])
+            if resolved_executable:
+                self.command[0] = resolved_executable
         self.cwd = str(cwd)
         self.input_text = str(input_text)
         self.timeout_seconds = timeout_seconds

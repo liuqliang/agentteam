@@ -12646,6 +12646,31 @@ class M0RuntimeTests(unittest.TestCase):
                 revoked.finalize("failed")
             self.assertFalse(revoked.terminal_path.exists())
 
+    def test_model_invocation_systemd_resolves_provider_before_service_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lifecycle = InvocationLifecycle(
+                tmp,
+                _model_invocation_context(
+                    coverage_class="supported_model_invocation",
+                ),
+            )
+            with mock.patch(
+                "agentteam_runtime.model_invocation.shutil.which",
+                return_value="/home/test/.local/bin/codex",
+            ):
+                execution = SystemdGatedExecution(
+                    lifecycle,
+                    ["codex", "exec", "--json"],
+                    cwd=tmp,
+                    input_text="bounded prompt",
+                    timeout_seconds=30,
+                )
+
+            self.assertEqual(
+                execution.command,
+                ["/home/test/.local/bin/codex", "exec", "--json"],
+            )
+
     def test_model_invocation_systemd_persists_exact_process_group_identity(self):
         commands = []
 

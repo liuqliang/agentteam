@@ -585,6 +585,35 @@ class InvocationProjectionTests(unittest.TestCase):
                 1,
             )
 
+    def test_source_metadata_does_not_create_a_conflicting_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp) / "work"
+            start = _start("INV-source-metadata")
+            event_start = {
+                **start,
+                "_source_artifact_path": (
+                    "model_invocations/INV-source-metadata/started.json"
+                ),
+                "_source_record_sha256": "a" * 64,
+            }
+            _write_jsonl(
+                work_root / "runs" / "implementation-run" / "events.jsonl",
+                [_event("model_invocation_started", event_start, 1)],
+            )
+            _write_json(
+                work_root
+                / "runs"
+                / "implementation-run"
+                / "model_invocations"
+                / start["invocation_id"]
+                / "started.json",
+                start,
+            )
+
+            result = rebuild_project_projection_db(work_root)
+
+            self.assertEqual(result["invocations"], 1)
+
     def test_conflicting_duplicate_start_is_an_integrity_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_root = Path(tmp) / "work"

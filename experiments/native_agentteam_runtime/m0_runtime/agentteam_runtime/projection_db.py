@@ -1190,6 +1190,7 @@ def _scan_run_identities(work_root):
 
 
 def _register_invocation_start(starts, record, source_path):
+    record = _canonical_invocation_record(record)
     invocation_id = record.get("invocation_id")
     if not invocation_id:
         raise ProjectionIntegrityError(
@@ -1215,6 +1216,7 @@ def _register_invocation_terminal(
     record,
     source_path,
 ):
+    record = _canonical_invocation_record(record)
     invocation_id = record.get("invocation_id")
     usage_event_id = record.get("usage_event_id")
     if not invocation_id or not usage_event_id:
@@ -1239,6 +1241,14 @@ def _register_invocation_terminal(
     }
     terminals_by_event.setdefault(usage_event_id, entry)
     terminals_by_invocation.setdefault(invocation_id, entry)
+
+
+def _canonical_invocation_record(record):
+    return {
+        key: value
+        for key, value in record.items()
+        if not str(key).startswith("_source_")
+    }
 
 
 def _validate_start_terminal_correlation(start, terminal):
