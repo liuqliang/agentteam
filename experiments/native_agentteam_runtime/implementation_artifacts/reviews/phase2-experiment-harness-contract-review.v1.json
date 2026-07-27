@@ -4,8 +4,8 @@
   "reviewer": "liuql",
   "reviewed_at": "2026-07-27T18:27:48+08:00",
   "git_object_format": "sha1",
-  "preflight_release_id": "p2-preflight-b7b9eeb",
-  "preflight_release_source_commit": "b7b9eebcb125683e28e2254964f579e236aebfdf",
+  "preflight_release_id": "p2-preflight-26ed244",
+  "preflight_release_source_commit": "26ed2442bb850268748bb53c168ebcc2dea0cc62",
   "plan_sha256": "27ce8dbc2920d1f539c25010358c355c454fb04f8dbb4995cba2494f9a8f40c2",
   "blueprint_sha256": "89a251a05557ada6436dbe602850464c393ac6c65131f77bce5636fb16d6c677",
   "research_authority_sha256": "8dca1748a211b9eaf9df5d392d7d39d755cbe3946a358c11cff2f51c5323d91d",
@@ -34,5 +34,5 @@
     "Split implementation and promotion into separately frozen taskpacks so new gate code executes only under the candidate release."
   ],
   "remaining_escalations": [],
-  "notes": "Two independent final reviews found no blocker or major issue. The full native runtime suite passed 721 tests. The preflight release includes the approved materializer and tracked repo-map handoff compatibility needed to validate this taskpack at run startup."
+  "notes": "Two independent final reviews found no blocker or major issue. The full native runtime suite passed 721 tests. The preflight release includes the approved materializer, tracked repo-map handoff compatibility, absolute provider executable resolution for systemd, and canonical projection handling for source metadata."
 }
