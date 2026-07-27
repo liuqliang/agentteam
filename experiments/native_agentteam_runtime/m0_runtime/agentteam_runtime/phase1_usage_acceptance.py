@@ -51,7 +51,10 @@ _FIELD_ALIASES = {
         "cached_prompt_tokens",
     ),
     "output_tokens": ("output_tokens", "completion_tokens", "completion"),
-    "reasoning_tokens": ("reasoning_tokens",),
+    "reasoning_tokens": (
+        "reasoning_tokens",
+        "reasoning_output_tokens",
+    ),
     "total_tokens": ("total_tokens", "total"),
 }
 
@@ -455,10 +458,16 @@ def decode_bounded_provider_spool(path, *, maximum_bytes=MAX_PROVIDER_SPOOL_BYTE
         field: _first_nonnegative_integer(
             usage,
             _FIELD_ALIASES[field],
-            required=field in {"input_tokens", "output_tokens", "total_tokens"},
+            required=field in {"input_tokens", "output_tokens"},
         )
         for field in _TOKEN_FIELDS
     }
+    if totals["total_tokens"] is None:
+        # Keep this implementation independent from token_usage.py. Codex exec
+        # JSONL omits total_tokens and reports cached/reasoning as subsets.
+        totals["total_tokens"] = (
+            totals["input_tokens"] + totals["output_tokens"]
+        )
     return {
         "terminal_event": terminal,
         "terminal_event_sha256": _sha256_json(terminal),

@@ -450,8 +450,12 @@ seconds, request counts, money, or prompt estimates:
   says otherwise. Do not add it to `total_tokens`.
 - `reasoning_tokens` is displayed separately. Do not add it to
   `output_tokens` or `total_tokens` when the provider already includes it.
-- `total_tokens` is the provider total; do not recompute it from the other
-  fields when their provider semantics are unknown.
+- `total_tokens` is the normalized provider total. Preserve a reported value.
+  For Codex `turn.completed` JSONL, which intentionally omits this field,
+  derive it only as `input_tokens + output_tokens`; cached input is already
+  included in input, and reasoning output is already included in output.
+  Do not derive totals for provider formats whose component semantics are
+  unknown.
 
 An invocation lifecycle is `open` until one immutable terminal record exists,
 then `terminal`. Terminal runtime outcomes are `completed`, `failed`,

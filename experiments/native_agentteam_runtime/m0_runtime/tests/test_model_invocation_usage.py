@@ -417,9 +417,28 @@ class TerminalUsageParserTests(unittest.TestCase):
             )
         )
 
-    def test_partial_terminal_usage_is_not_guessed(self):
+    def test_codex_exec_components_supply_exact_total(self):
         usage = parse_terminal_usage_from_jsonl(
-            self._event({"input_tokens": 7, "output_tokens": 3})
+            self._event(
+                {
+                    "input_tokens": 15635,
+                    "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0,
+                    "output_tokens": 5,
+                    "reasoning_output_tokens": 0,
+                }
+            )
+        )
+
+        self.assertEqual(usage["usage_status"], "reported")
+        self.assertEqual(usage["total_tokens"], 15640)
+        self.assertEqual(usage["reasoning_tokens"], 0)
+        self.assertEqual(usage["cached_input_tokens"], 0)
+        self.assertEqual(usage["accounting_method"], "provider_reported")
+
+    def test_partial_terminal_usage_is_not_guessed_without_both_components(self):
+        usage = parse_terminal_usage_from_jsonl(
+            self._event({"input_tokens": 7})
         )
 
         self.assertEqual(usage["usage_status"], "partial")

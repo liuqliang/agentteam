@@ -542,6 +542,12 @@ is outside this contract.
   explicitly documents otherwise. Do not add it to `total_tokens`.
 - `reasoning_tokens` is displayed separately. Do not add it to total when the
   provider already includes it in output or total usage.
+- Codex `exec --json` terminal `turn.completed` events omit `total_tokens` by
+  contract. When both non-negative `input_tokens` and `output_tokens` are
+  present, normalize the exact total as their sum. Treat
+  `cached_input_tokens` as an input subset and `reasoning_output_tokens` as an
+  output subset; do not add either again. This rule is Codex-specific and does
+  not authorize guessing totals for unknown provider formats.
 - Prefer the final cumulative terminal usage payload for one invocation.
 - Do not sum repeated cumulative JSONL snapshots.
 - Verify whether a provider payload is scoped to the current invocation or the

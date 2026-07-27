@@ -479,7 +479,9 @@ In brief:
 
 - Token values are provider-reported tokens, not bytes, time, money, or prompt
   estimates. `cached_input_tokens` is not subtracted from `input_tokens` or
-  added to `total_tokens`; `reasoning_tokens` stays separate.
+  added to `total_tokens`; `reasoning_tokens` stays separate. Codex
+  `turn.completed` omits `total_tokens`, so the Codex adapter normalizes it as
+  `input_tokens + output_tokens` without adding either subset again.
 - Unique supported durable starts are the denominator for both lifecycle and
   token coverage. `reported`, `partial`, `unavailable`, `not_applicable`, and
   `open` remain distinct; any open supported invocation blocks completion.

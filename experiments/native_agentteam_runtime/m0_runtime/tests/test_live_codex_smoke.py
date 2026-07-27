@@ -706,6 +706,30 @@ class Phase1UsageAcceptanceTests(unittest.TestCase):
             ):
                 decode_bounded_provider_spool(spool, maximum_bytes=32)
 
+    def test_independent_decoder_accepts_real_codex_exec_usage_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spool = Path(tmp) / "provider.jsonl"
+            spool.write_text(
+                '{"type":"turn.completed","usage":{'
+                '"input_tokens":15635,"cached_input_tokens":0,'
+                '"cache_write_input_tokens":0,"output_tokens":5,'
+                '"reasoning_output_tokens":0}}\n',
+                encoding="utf-8",
+            )
+
+            decoded = decode_bounded_provider_spool(spool)
+
+            self.assertEqual(
+                decoded["provider_totals"],
+                {
+                    "input_tokens": 15635,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 5,
+                    "reasoning_tokens": 0,
+                    "total_tokens": 15640,
+                },
+            )
+
     def test_controller_pass_is_atomic_projected_and_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = _acceptance_controller_fixture(Path(tmp))

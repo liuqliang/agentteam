@@ -51,7 +51,10 @@ _FIELD_ALIASES = {
         "cache_read_input_tokens",
         "cached_prompt_tokens",
     ],
-    "reasoning_tokens": ["reasoning_tokens"],
+    "reasoning_tokens": [
+        "reasoning_tokens",
+        "reasoning_output_tokens",
+    ],
 }
 
 
@@ -259,10 +262,16 @@ def _provider_lineage_context(event, candidate, supplied):
 
 
 def _provider_snapshot(candidate):
-    return {
+    snapshot = {
         field: _first_int(candidate, _FIELD_ALIASES[field])
         for field in TOKEN_USAGE_FIELDS
     }
+    # Codex exec JSONL intentionally omits total_tokens from turn.completed.
+    # Its input/output counters are the complete billing components; cached
+    # input and reasoning output are subsets and must not be added again.
+    if snapshot["total_tokens"] is None:
+        snapshot["total_tokens"] = _computed_total(snapshot)
+    return snapshot
 
 
 def _invocation_usage(snapshot):
