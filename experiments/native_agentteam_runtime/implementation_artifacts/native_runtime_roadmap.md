@@ -1522,3 +1522,12 @@ The next ordered route is:
 component of P0 closure, not work that starts after P0 is complete. Do not
 begin the real long-running comparison until short calibration reaches the
 usage-coverage and reconciliation gates in the linked route note.
+
+<!-- phase1-model-invocation-usage:start -->
+### Phase 1 model invocation usage
+
+- Status: `finalization_pending`
+- Validated code: `c6bd4868cc83a23d3182d281273d6efb0bfa83b4`
+- Evidence digest: `5350114b77a1013d3691e22eb894e0551a8be8def190135f564a149d46f10ec3`
+- Merge recommendation: conditional; wait for the external P1-06E finalization artifact and immutable operator approval.
+<!-- phase1-model-invocation-usage:end -->
