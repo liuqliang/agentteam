@@ -881,6 +881,102 @@ class M0RuntimeTests(unittest.TestCase):
         self.assertEqual(report["blocked_count"], 1)
         self.assertEqual(report["task_reports"][0]["status"], "implementation rejected")
 
+    def test_operator_report_counts_backlog_integration_block_as_blocked(self):
+        from agentteam_runtime.two_phase_scheduler import _operator_report_from_state
+
+        report = _operator_report_from_state(
+            {
+                "backlog": {
+                    "items": [
+                        {
+                            "task_id": "TASK-EVIDENCE",
+                            "backlog_status": "blocked",
+                            "blockers": ["integration_evidence_incomplete"],
+                        }
+                    ]
+                },
+                "steps": [
+                    {
+                        "task_id": "TASK-EVIDENCE",
+                        "result": {
+                            "task_id": "TASK-EVIDENCE",
+                            "validation_status": "accepted",
+                            "runtime_output": {
+                                "summary": "Implementation completed."
+                            },
+                            "changed_files": ["agentteam_runtime/example.py"],
+                            "integration_verification_status": "not_requested",
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(report["task_count"], 1)
+        self.assertEqual(report["blocked_count"], 1)
+        self.assertEqual(report["blocked_task_ids"], ["TASK-EVIDENCE"])
+
+    def test_run_report_recomputes_backlog_block_from_scheduler_state(self):
+        from agentteam_runtime.operator_report import build_run_completion_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "RUN-EVIDENCE"
+            state_dir = run_dir / "state"
+            state_dir.mkdir(parents=True)
+            event = {
+                "event_type": "run_completed",
+                "payload": {
+                    "run_status": "completed",
+                    "operator_report": {
+                        "report_schema_version": "operator_run_report.v1",
+                        "task_count": 1,
+                        "blocked_count": 0,
+                        "task_reports": [
+                            {
+                                "task_id": "TASK-EVIDENCE",
+                                "status": "implementation completed",
+                                "integration": "not requested",
+                            }
+                        ],
+                    },
+                },
+            }
+            (run_dir / "events.jsonl").write_text(
+                json.dumps(event, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            (state_dir / "two_phase_scheduler_state.json").write_text(
+                json.dumps(
+                    {
+                        "scheduler_status": "idle",
+                        "backlog": {
+                            "items": [
+                                {
+                                    "task_id": "TASK-EVIDENCE",
+                                    "backlog_status": "blocked",
+                                }
+                            ]
+                        },
+                        "steps": [],
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            report = build_run_completion_report(
+                run_dir,
+                project="agentteam",
+                write_files=False,
+            )
+
+        self.assertEqual(report["blocked_count"], 1)
+        self.assertEqual(
+            report["run_outcome"],
+            "completed_with_review_required",
+        )
+
     def test_run_completion_report_recomputes_stale_rejected_blocked_count(self):
         from agentteam_runtime.operator_report import build_run_completion_report
 
@@ -12128,6 +12224,12 @@ class M0RuntimeTests(unittest.TestCase):
                     "provider_predecessor_invocation_id": "INV-predecessor-1",
                     "provider_predecessor_turn_id": "turn-1",
                     "provider_predecessor_usage_snapshot": snapshot,
+                    "experiment_controller_reference": {
+                        "schema_version": (
+                            "experiment_budget_controller_reference.v1"
+                        )
+                    },
+                    "experiment_controller_required": True,
                 }
             )
             backlog_path = _write_backlog(tmp_path, write_scope=[], tasks=[task])
@@ -12186,6 +12288,11 @@ class M0RuntimeTests(unittest.TestCase):
             )
             self.assertEqual(payload["lifecycle_owner_token"], payload["lease_id"])
             self.assertEqual(payload["provider_resume_mode"], "explicit")
+            self.assertTrue(payload["experiment_controller_required"])
+            self.assertEqual(
+                payload["experiment_controller_reference"]["schema_version"],
+                "experiment_budget_controller_reference.v1",
+            )
             self.assertEqual(
                 json.dumps(
                     payload["provider_predecessor_usage_snapshot"],
@@ -12194,6 +12301,105 @@ class M0RuntimeTests(unittest.TestCase):
                 ),
                 json.dumps(snapshot, sort_keys=True, separators=(",", ":")),
             )
+            step_dir = (
+                output_dir / "steps" / "STEP-0001-TASK-SEMANTIC-001"
+            )
+            authority_files = list(
+                (
+                    step_dir
+                    / "state"
+                    / "mailbox_dispatch_authority"
+                ).glob("*.json")
+            )
+            self.assertEqual(len(authority_files), 1)
+            from agentteam_runtime.two_phase_scheduler import (
+                _write_dispatch_authority,
+            )
+
+            _write_dispatch_authority(step_dir, message)
+            crash_step_dir = tmp_path / "crash-step"
+            crash_message = {
+                "message_id": "MSG-CRASH-RECOVERY",
+                "payload": {"objective": "prove atomic publication"},
+            }
+            with mock.patch(
+                "agentteam_runtime.two_phase_scheduler.os.link",
+                side_effect=OSError("simulated publication crash"),
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "simulated publication crash",
+                ):
+                    _write_dispatch_authority(
+                        crash_step_dir,
+                        crash_message,
+                    )
+            crash_authority_dir = (
+                crash_step_dir
+                / "state"
+                / "mailbox_dispatch_authority"
+            )
+            self.assertEqual(list(crash_authority_dir.iterdir()), [])
+            _write_dispatch_authority(crash_step_dir, crash_message)
+            self.assertEqual(
+                len(list(crash_authority_dir.glob("*.json"))),
+                1,
+            )
+            fifo_step_dir = tmp_path / "fifo-step"
+            fifo_message = {
+                "message_id": "MSG-FIFO-AUTHORITY",
+                "payload": {"objective": "reject non-regular authority"},
+            }
+            fifo_authority_dir = (
+                fifo_step_dir
+                / "state"
+                / "mailbox_dispatch_authority"
+            )
+            fifo_authority_dir.mkdir(parents=True)
+            fifo_authority_path = fifo_authority_dir / (
+                hashlib.sha256(
+                    fifo_message["message_id"].encode("utf-8")
+                ).hexdigest()
+                + ".json"
+            )
+            os.mkfifo(fifo_authority_path)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "conflicts with retry",
+            ):
+                _write_dispatch_authority(
+                    fifo_step_dir,
+                    fifo_message,
+                )
+
+            message["payload"].pop("experiment_controller_reference")
+            message["payload"].pop("experiment_controller_required")
+            message["payload"].pop("experiment_authority_root")
+            inbox_path = (
+                step_dir
+                / "mailboxes"
+                / "agent-semantic"
+                / "inbox.jsonl"
+            )
+            inbox_path.write_text(
+                json.dumps(message, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            from agentteam_runtime.mailbox_worker import (
+                MailboxDispatchIntegrityError,
+            )
+
+            with self.assertRaisesRegex(
+                MailboxDispatchIntegrityError,
+                "differs from scheduler authority",
+            ):
+                FileMailboxWorker(
+                    agent_pool_path,
+                    step_dir,
+                    "agent-semantic",
+                    runtime_adapter=FakeRuntimeAdapter(),
+                    clock=FixedClock(),
+                ).poll_once()
 
     def test_provider_session_coordinator_is_single_writer_and_rejects_cross_project(self):
         from agentteam_runtime.mailbox_worker import (

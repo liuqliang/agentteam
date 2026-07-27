@@ -21,6 +21,12 @@ from agentteam_runtime.experiment_budget import (
     create_experiment_budget_state,
     validate_experiment_budget_state,
 )
+from agentteam_runtime.experiment_controller import (
+    ExperimentControllerError,
+    ExperimentControllerIntegrityError,
+    ExperimentProviderAdmissionDenied,
+    create_experiment_controller,
+)
 from agentteam_runtime.experiment_contract import (
     LEGACY_MANIFEST_SCHEMA_VERSION,
     ExperimentContractError,
@@ -79,10 +85,14 @@ from agentteam_runtime.model_invocation import (
     InvocationLifecycle,
     ModelInvocationCall,
     ModelInvocationIntegrityError,
+    ModelInvocationUnavailable,
     ProviderExecution,
     invocation_context_from_message,
 )
 from agentteam_runtime.mailbox_worker import _model_invocation_context_payload
+from agentteam_runtime.two_phase_scheduler import (
+    reconcile_orphaned_invocation,
+)
 
 
 def _protocol():
@@ -1308,6 +1318,625 @@ class ExperimentBudgetTests(unittest.TestCase):
             _advance_budget(
                 self._state(),
                 now_monotonic=float("nan"),
+            )
+
+
+class ExperimentProviderBudgetBoundaryTests(unittest.TestCase):
+    @staticmethod
+    def _runner_factory(stdout, calls):
+        class FakeGatedRunner:
+            def __init__(
+                self,
+                lifecycle,
+                command,
+                *,
+                cwd,
+                input_text,
+                timeout_seconds,
+                environment=None,
+            ):
+                del lifecycle, cwd, input_text, timeout_seconds, environment
+                self.command = list(command)
+                calls.append("constructed")
+
+            def prepare(self):
+                calls.append("prepared")
+                return ExecutionGroupIdentity.not_applicable()
+
+            def permit_and_wait(self, **_kwargs):
+                calls.append("permitted")
+                return ProviderExecution(self.command, 0, stdout, "")
+
+            def abort_before_permit(self):
+                calls.append("aborted")
+
+            def cleanup_after_terminal(self):
+                calls.append("cleaned")
+
+        return FakeGatedRunner
+
+    @staticmethod
+    def _usage_stdout(input_tokens, output_tokens):
+        return json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "cached_input_tokens": 0,
+                    "output_tokens": output_tokens,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": input_tokens + output_tokens,
+                },
+            },
+            sort_keys=True,
+        )
+
+    def _controller(self, root, *, max_total_tokens=100):
+        return create_experiment_controller(
+            root,
+            protocol_id="phase2-provider-boundary",
+            max_total_tokens=max_total_tokens,
+            max_wall_time_seconds=3600,
+            soft_warning_ratio=0.8,
+            scored=True,
+        )
+
+    def _call(
+        self,
+        root,
+        controller,
+        run_name,
+        stdout,
+        calls,
+        *,
+        supported=True,
+    ):
+        lifecycle_root = root / "runs" / run_name
+        lifecycle_root.mkdir(parents=True)
+        context = _model_context(
+            supported=supported,
+            sandbox_reference=None,
+        )
+        context.update(
+            {
+                "run_id": f"RUN-{run_name}",
+                "task_id": "P2-03B",
+                "attempt_id": f"ATTEMPT-{run_name}",
+                "runtime_execution_session_id": f"SESSION-{run_name}",
+                "lifecycle_owner_token": f"OWNER-{run_name}",
+                "experiment_authority_root": str(root),
+                "experiment_controller_reference": controller.reference,
+            }
+        )
+        return ModelInvocationCall(
+            lifecycle_root,
+            context,
+            supported=supported,
+            systemd_runner_factory=self._runner_factory(stdout, calls),
+        )
+
+    @staticmethod
+    def _execute(call, root):
+        return call.execute(
+            [str(Path(sys.executable).resolve()), "-c", "pass"],
+            cwd=root,
+            input_text="prompt",
+            timeout_seconds=10,
+        )
+
+    def test_protocol_global_cross_run_lease_serializes_admission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root)
+            first_calls = []
+            first = self._call(
+                root,
+                controller,
+                "FIRST",
+                self._usage_stdout(7, 3),
+                first_calls,
+            )
+            first_execution = self._execute(first, root)
+
+            second_calls = []
+            second = self._call(
+                root,
+                controller,
+                "SECOND",
+                self._usage_stdout(5, 1),
+                second_calls,
+            )
+            with self.assertRaisesRegex(
+                ModelInvocationUnavailable,
+                "protocol-global provider lane",
+            ):
+                self._execute(second, root)
+            self.assertEqual(second_calls, [])
+            self.assertFalse(second.lifecycle.started_path.exists())
+
+            first.finalize("completed", first_execution)
+            second_execution = self._execute(second, root)
+            second.finalize("completed", second_execution)
+            self.assertEqual(controller.budget_state["total_tokens"], 16)
+
+    def test_provider_lane_inode_replacement_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root)
+            first_root = root / "runs" / "FIRST"
+            second_root = root / "runs" / "SECOND"
+            first_root.mkdir(parents=True)
+            second_root.mkdir(parents=True)
+            first = controller.prelaunch_admission(
+                {
+                    "invocation_id": "INV-FIRST",
+                    "lifecycle_root": str(first_root),
+                    "run_id": "RUN-FIRST",
+                }
+            )
+            lane_path = root / "experiment-provider-lane.lock"
+            lane_path.unlink()
+            lane_path.touch()
+
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "provider lane authority identity changed",
+            ):
+                controller.prelaunch_admission(
+                    {
+                        "invocation_id": "INV-SECOND",
+                        "lifecycle_root": str(second_root),
+                        "run_id": "RUN-SECOND",
+                    }
+                )
+            self.assertTrue(first.held)
+            first._release()
+
+    def test_controller_lock_and_event_inode_replacement_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root)
+            state_lock = root / "experiment-budget-controller-state.lock"
+            replacement = root / "replacement-state-lock"
+            replacement.touch()
+            os.replace(replacement, state_lock)
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "controller lock authority identity changed",
+            ):
+                controller.snapshot()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root)
+            state_journal = (
+                root / "experiment-budget-controller-state.jsonl"
+            )
+            replacement = root / "replacement-state-journal"
+            replacement.touch()
+            os.replace(replacement, state_journal)
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "state_journal authority identity changed",
+            ):
+                type(controller)(root)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root)
+            budget_events = root / "experiment-budget-events.jsonl"
+            replacement = root / "replacement-budget-events"
+            replacement.touch()
+            os.replace(replacement, budget_events)
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "budget_events authority identity changed",
+            ):
+                type(controller)(root)
+
+    def test_controller_rejects_fifo_authority_without_blocking(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("mkfifo is unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            root.mkdir(exist_ok=True)
+            os.mkfifo(root / "experiment-provider-lane.lock")
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "authority path is not a regular file",
+            ):
+                self._controller(root)
+
+    def test_denied_prelaunch_creates_no_runner_start_or_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root, max_total_tokens=10)
+            admitted_calls = []
+            admitted = self._call(
+                root,
+                controller,
+                "EXHAUST",
+                self._usage_stdout(8, 2),
+                admitted_calls,
+            )
+            execution = self._execute(admitted, root)
+            admitted.finalize("completed", execution)
+
+            denied_calls = []
+            denied = self._call(
+                root,
+                controller,
+                "DENIED",
+                self._usage_stdout(1, 0),
+                denied_calls,
+                supported=False,
+            )
+            with patch(
+                "agentteam_runtime.model_invocation.subprocess.Popen"
+            ) as popen:
+                with self.assertRaisesRegex(
+                    ModelInvocationUnavailable,
+                    "budget exhausted",
+                ):
+                    self._execute(denied, root)
+            self.assertEqual(denied_calls, [])
+            popen.assert_not_called()
+            self.assertFalse(denied.lifecycle.started_path.exists())
+
+    def test_required_controller_cannot_be_omitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lifecycle_root = root / "runs" / "MISSING"
+            lifecycle_root.mkdir(parents=True)
+            calls = []
+            context = _model_context(
+                supported=True,
+                sandbox_reference=None,
+            )
+            context.update(
+                {
+                    "run_id": "RUN-MISSING",
+                    "task_id": "P2-03B",
+                    "attempt_id": "ATTEMPT-MISSING",
+                    "runtime_execution_session_id": "SESSION-MISSING",
+                    "lifecycle_owner_token": "OWNER-MISSING",
+                    "experiment_authority_root": str(root),
+                    "experiment_controller_required": True,
+                }
+            )
+            invocation = ModelInvocationCall(
+                lifecycle_root,
+                context,
+                supported=True,
+                systemd_runner_factory=self._runner_factory("", calls),
+            )
+
+            with self.assertRaisesRegex(
+                ModelInvocationIntegrityError,
+                "required experiment budget controller is unavailable",
+            ):
+                self._execute(invocation, root)
+            self.assertEqual(calls, [])
+            self.assertFalse(invocation.lifecycle.started_path.exists())
+
+    def test_controller_reference_rejects_alternate_protocol_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            first_root = base / "first"
+            second_root = base / "second"
+            first_root.mkdir()
+            second_root.mkdir()
+            first_controller = self._controller(first_root)
+            self._controller(second_root)
+            lifecycle_root = second_root / "runs" / "MISMATCH"
+            lifecycle_root.mkdir(parents=True)
+            calls = []
+            context = _model_context(
+                supported=True,
+                sandbox_reference=None,
+            )
+            context.update(
+                {
+                    "run_id": "RUN-MISMATCH",
+                    "task_id": "P2-03B",
+                    "attempt_id": "ATTEMPT-MISMATCH",
+                    "runtime_execution_session_id": "SESSION-MISMATCH",
+                    "lifecycle_owner_token": "OWNER-MISMATCH",
+                    "experiment_authority_root": str(second_root),
+                    "experiment_controller_reference": (
+                        first_controller.reference
+                    ),
+                    "experiment_controller_required": True,
+                }
+            )
+            invocation = ModelInvocationCall(
+                lifecycle_root,
+                context,
+                supported=True,
+                systemd_runner_factory=self._runner_factory("", calls),
+            )
+
+            with self.assertRaisesRegex(
+                ModelInvocationIntegrityError,
+                "reference authority changed",
+            ):
+                self._execute(invocation, second_root)
+            self.assertEqual(calls, [])
+
+    def test_accounting_occurs_only_after_authoritative_terminal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root)
+            calls = []
+            invocation = self._call(
+                root,
+                controller,
+                "TERMINAL",
+                self._usage_stdout(9, 2),
+                calls,
+            )
+            execution = self._execute(invocation, root)
+
+            self.assertFalse(invocation.lifecycle.terminal_path.exists())
+            self.assertEqual(controller.budget_state["total_tokens"], 0)
+            terminal = invocation.finalize("completed", execution)
+
+            self.assertTrue(invocation.lifecycle.terminal_path.is_file())
+            state = controller.budget_state
+            self.assertEqual(state["total_tokens"], 11)
+            self.assertEqual(
+                state["invocation_usage_events"],
+                {terminal["invocation_id"]: terminal["usage_event_id"]},
+            )
+            event_types = [
+                json.loads(line)["event_type"]
+                for line in (root / "events.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertEqual(
+                event_types,
+                [
+                    "model_invocation_started",
+                    "model_invocation_usage_recorded",
+                ],
+            )
+
+    def test_terminal_before_projection_is_recovered_before_lane_reuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root)
+            first_calls = []
+            first = self._call(
+                root,
+                controller,
+                "RECOVERY-FIRST",
+                self._usage_stdout(4, 2),
+                first_calls,
+            )
+            first_execution = self._execute(first, root)
+            first.lifecycle.finalize(
+                "completed",
+                stdout=first_execution.stdout,
+                stderr=first_execution.stderr,
+            )
+            first.provider_admission._release()
+
+            second_calls = []
+            second = self._call(
+                root,
+                controller,
+                "RECOVERY-SECOND",
+                self._usage_stdout(3, 1),
+                second_calls,
+            )
+            second_execution = self._execute(second, root)
+            self.assertEqual(controller.budget_state["total_tokens"], 6)
+            second.finalize("completed", second_execution)
+            self.assertEqual(controller.budget_state["total_tokens"], 10)
+
+    def test_started_orphan_is_terminalized_before_lane_reconciliation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root)
+            calls = []
+            invocation = self._call(
+                root,
+                controller,
+                "ORPHAN",
+                self._usage_stdout(4, 2),
+                calls,
+            )
+            self._execute(invocation, root)
+            invocation.provider_admission._release()
+
+            reconciliation = reconcile_orphaned_invocation(
+                invocation.lifecycle.authority_root,
+                {
+                    "attempt_id": "ATTEMPT-ORPHAN",
+                    "lease_id": "OWNER-ORPHAN",
+                    "agent_id": "agent-fixture",
+                },
+                fence_assessor=lambda _start: {
+                    "fence_status": "death_proven",
+                    "proof": "test_process_death",
+                },
+            )
+            self.assertEqual(
+                reconciliation["reconciliation_status"],
+                "recovered",
+            )
+            self.assertTrue(invocation.lifecycle.terminal_path.is_file())
+
+            next_root = root / "runs" / "AFTER-ORPHAN"
+            next_root.mkdir(parents=True)
+            with self.assertRaisesRegex(
+                ExperimentProviderAdmissionDenied,
+                "controller state is budget_draining",
+            ):
+                controller.prelaunch_admission(
+                    {
+                        "invocation_id": "INV-AFTER-ORPHAN",
+                        "lifecycle_root": str(next_root),
+                        "run_id": "RUN-AFTER-ORPHAN",
+                    }
+                )
+            self.assertEqual(
+                controller.controller_status,
+                "budget_draining",
+            )
+            self.assertFalse(controller.budget_state["usage_complete"])
+
+    def test_exact_exhaustion_is_sticky_and_extension_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root, max_total_tokens=10)
+            calls = []
+            invocation = self._call(
+                root,
+                controller,
+                "EXACT",
+                self._usage_stdout(6, 4),
+                calls,
+            )
+            execution = self._execute(invocation, root)
+            invocation.finalize("completed", execution)
+
+            state = controller.budget_state
+            self.assertEqual(state["total_tokens"], 10)
+            self.assertEqual(state["overshoot_tokens"], 0)
+            self.assertTrue(state["exhausted"])
+            self.assertEqual(
+                [event["event_kind"] for event in state["events"]],
+                ["warning", "exhaustion"],
+            )
+            self.assertEqual(
+                controller.controller_status,
+                "budget_draining",
+            )
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "cannot be reset or extended",
+            ):
+                self._controller(root, max_total_tokens=11)
+            observed = controller.observe_boundary(
+                "post_integration",
+                scheduler_inflight=0,
+                integration_active=False,
+            )
+            self.assertEqual(
+                observed["controller_status"],
+                "budget_stopped",
+            )
+            with self.assertRaisesRegex(
+                ExperimentControllerError,
+                "only interrupted",
+            ):
+                controller.resume_interrupted()
+
+    def test_valid_state_snapshot_rollback_restores_latest_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root, max_total_tokens=10)
+            state_path = root / "experiment-budget-controller-state.json"
+            pre_usage_snapshot = state_path.read_bytes()
+            calls = []
+            invocation = self._call(
+                root,
+                controller,
+                "ROLLBACK",
+                self._usage_stdout(8, 2),
+                calls,
+            )
+            execution = self._execute(invocation, root)
+            invocation.finalize("completed", execution)
+            self.assertTrue(controller.budget_state["exhausted"])
+
+            state_path.write_bytes(pre_usage_snapshot)
+            recovered = type(controller)(root)
+            self.assertEqual(recovered.budget_state["total_tokens"], 10)
+            self.assertTrue(recovered.budget_state["exhausted"])
+            self.assertEqual(
+                recovered.controller_status,
+                "budget_draining",
+            )
+
+            denied = self._call(
+                root,
+                recovered,
+                "ROLLBACK-DENIED",
+                self._usage_stdout(1, 0),
+                [],
+            )
+            with self.assertRaisesRegex(
+                ModelInvocationUnavailable,
+                "budget exhausted",
+            ):
+                self._execute(denied, root)
+
+    def test_state_journal_truncation_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root)
+            controller.interrupt()
+            journal_path = (
+                root / "experiment-budget-controller-state.jsonl"
+            )
+            first_checkpoint = journal_path.read_bytes().splitlines()[0]
+            journal_path.write_bytes(first_checkpoint + b"\n")
+
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "state is ahead of its append-first journal",
+            ):
+                type(controller)(root)
+
+    def test_torn_state_journal_tail_recovers_last_complete_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root)
+            controller.interrupt()
+            journal_path = (
+                root / "experiment-budget-controller-state.jsonl"
+            )
+            committed = journal_path.read_bytes()
+            journal_path.write_bytes(committed + b'{"schema_version":')
+
+            recovered = type(controller)(root)
+
+            self.assertEqual(recovered.controller_status, "interrupted")
+            self.assertEqual(journal_path.read_bytes(), committed)
+
+    def test_interruption_resume_preserves_original_remaining_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root)
+            calls = []
+            invocation = self._call(
+                root,
+                controller,
+                "INTERRUPTED",
+                self._usage_stdout(12, 3),
+                calls,
+            )
+            execution = self._execute(invocation, root)
+            invocation.finalize("completed", execution)
+            controller.interrupt()
+
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "extension or reduction",
+            ):
+                controller.resume_interrupted(max_total_tokens=101)
+            resumed = controller.resume_interrupted(
+                reference=controller.reference,
+                max_total_tokens=100,
+                max_wall_time_seconds=3600,
+            )
+            self.assertEqual(resumed["controller_status"], "active")
+            self.assertEqual(
+                resumed["budget_state"]["total_tokens"],
+                15,
             )
 
 
@@ -2843,6 +3472,12 @@ class ExperimentSandboxTests(unittest.TestCase):
                         "experiment_sandbox_reference": reference,
                         "experiment_sandbox_required": True,
                         "experiment_authority_root": tmp,
+                        "experiment_controller_reference": {
+                            "schema_version": (
+                                "experiment_budget_controller_reference.v1"
+                            )
+                        },
+                        "experiment_controller_required": True,
                     }
                 }
             }
@@ -2857,6 +3492,15 @@ class ExperimentSandboxTests(unittest.TestCase):
                 reference,
             )
             self.assertEqual(context["experiment_authority_root"], tmp)
+            self.assertTrue(context["experiment_controller_required"])
+            self.assertEqual(
+                context["experiment_controller_reference"],
+                {
+                    "schema_version": (
+                        "experiment_budget_controller_reference.v1"
+                    )
+                },
+            )
 
     def test_trusted_argv_evaluation_waits_for_terminal_and_avoids_shell(self):
         with tempfile.TemporaryDirectory() as tmp:

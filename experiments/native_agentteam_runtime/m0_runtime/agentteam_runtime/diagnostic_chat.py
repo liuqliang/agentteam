@@ -47,6 +47,19 @@ def build_runtime_diagnostic_context(run_dir, topic=None, text_limit=_DEFAULT_TE
         "worker_results": worker_results,
         "backlog_tasks": backlog_tasks,
     }
+    controller_reference = _containing_experiment_controller_reference(
+        run_dir
+    )
+    if controller_reference is not None:
+        context.update(
+            {
+                "experiment_controller_reference": controller_reference,
+                "experiment_authority_root": controller_reference[
+                    "controller_root"
+                ],
+                "experiment_controller_required": True,
+            }
+        )
     context["prompt"] = render_runtime_diagnostic_context(context)
     return context
 
@@ -138,12 +151,26 @@ def run_runtime_diagnostic_chat(
     model=None,
     timeout_seconds=DEFAULT_CODEX_TIMEOUT_SECONDS,
 ):
+    context = dict(context)
     command = _interactive_codex_command(
         context,
         codex_command=codex_command,
         model=model,
     )
     run_dir = Path(context["run_dir"]).resolve()
+    controller_reference = _containing_experiment_controller_reference(
+        run_dir
+    )
+    if controller_reference is not None:
+        context.update(
+            {
+                "experiment_controller_reference": controller_reference,
+                "experiment_authority_root": controller_reference[
+                    "controller_root"
+                ],
+                "experiment_controller_required": True,
+            }
+        )
     runtime_session_id = f"DIAGNOSTIC-SESSION-{uuid.uuid4().hex}"
     lifecycle_owner_token = f"DIAGNOSTIC-OWNER-{uuid.uuid4().hex}"
     authority_root = (
@@ -194,6 +221,15 @@ def run_runtime_diagnostic_chat(
             else "not_applicable_adapter"
         ),
         "provider_usage_scope": None,
+        "experiment_controller_reference": context.get(
+            "experiment_controller_reference"
+        ),
+        "experiment_authority_root": context.get(
+            "experiment_authority_root"
+        ),
+        "experiment_controller_required": (
+            context.get("experiment_controller_required") is True
+        ),
     }
     invocation = ModelInvocationCall(
         authority_root,
@@ -265,6 +301,19 @@ def run_runtime_diagnostic_chat(
             "usage_status": terminal["usage_status"],
         },
     }
+
+
+def _containing_experiment_controller_reference(run_dir):
+    from .experiment_controller import (
+        discover_experiment_controller_reference,
+    )
+
+    run_dir = Path(run_dir).resolve()
+    for candidate in (run_dir, *run_dir.parents):
+        reference = discover_experiment_controller_reference(candidate)
+        if reference is not None:
+            return reference
+    return None
 
 
 def _interactive_codex_command(context, codex_command=None, model=None):

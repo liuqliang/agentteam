@@ -1,5 +1,7 @@
+import hashlib
 import json
 import os
+import stat
 import subprocess
 import time
 from copy import deepcopy
@@ -555,6 +557,7 @@ class TwoPhaseFileScheduler:
                 ),
             },
         }
+        _write_dispatch_authority(step_dir, message)
         inbox_path = step_dir / agent["inbox_path"]
         _append_jsonl(inbox_path, [message])
 
@@ -2303,6 +2306,12 @@ def _worker_invocation_context(
         "experiment_authority_root": task.get(
             "experiment_authority_root"
         ),
+        "experiment_controller_reference": task.get(
+            "experiment_controller_reference"
+        ),
+        "experiment_controller_required": (
+            task.get("experiment_controller_required") is True
+        ),
         "model_invocation_authority_root": str(Path(output_dir)),
         "provider_project_identity": project_identity,
         "provider_project_lifecycle_root": str(Path(output_dir).parent),
@@ -2705,6 +2714,106 @@ def _read_json_file_if_exists(path):
         return None
 
 
+def _write_dispatch_authority(step_dir, message):
+    message_id = message["message_id"]
+    file_id = hashlib.sha256(message_id.encode("utf-8")).hexdigest()
+    authority_path = (
+        Path(step_dir)
+        / "state"
+        / "mailbox_dispatch_authority"
+        / f"{file_id}.json"
+    )
+    authority_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": "mailbox_dispatch_authority.v1",
+        "message_id": message_id,
+        "message_sha256": hashlib.sha256(
+            json.dumps(
+                message,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+    encoded = (
+        json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    temporary_path = authority_path.with_name(
+        f".{authority_path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(temporary_path, flags, 0o600)
+    try:
+        view = memoryview(encoded)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short mailbox dispatch authority write")
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        try:
+            os.link(
+                temporary_path,
+                authority_path,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            _verify_dispatch_authority_bytes(
+                authority_path,
+                encoded,
+            )
+        else:
+            directory_fd = os.open(
+                authority_path.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _verify_dispatch_authority_bytes(authority_path, expected):
+    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    read_flags |= getattr(os, "O_NOFOLLOW", 0)
+    read_flags |= getattr(os, "O_NONBLOCK", 0)
+    existing_fd = os.open(authority_path, read_flags)
+    try:
+        metadata = os.fstat(existing_fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size != len(expected)
+        ):
+            raise RuntimeError(
+                "mailbox dispatch authority conflicts with retry"
+            )
+        chunks = []
+        remaining = len(expected)
+        while remaining:
+            chunk = os.read(existing_fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if b"".join(chunks) != expected:
+            raise RuntimeError(
+                "mailbox dispatch authority conflicts with retry"
+            )
+    finally:
+        os.close(existing_fd)
+
+
 def _read_text_if_exists(path):
     try:
         return Path(path).read_text(encoding="utf-8")
@@ -2799,13 +2908,32 @@ def _operator_report_from_state(state):
         if not isinstance(result, dict):
             continue
         task_reports.append(_operator_task_report(step, result))
+    blocked_task_ids = {
+        item.get("task_id")
+        for item in state.get("backlog", {}).get("items", [])
+        if isinstance(item, dict)
+        and item.get("backlog_status") == "blocked"
+        and item.get("task_id")
+    }
+    review_task_ids = {
+        report.get("task_id")
+        for report in task_reports
+        if _operator_task_needs_review(report) and report.get("task_id")
+    }
+    anonymous_review_count = sum(
+        1
+        for report in task_reports
+        if _operator_task_needs_review(report) and not report.get("task_id")
+    )
     token_usages = [report.get("token_usage") for report in task_reports]
     return {
         "report_schema_version": "operator_run_report.v1",
         "task_count": len(task_reports),
-        "blocked_count": sum(
-            1 for report in task_reports if _operator_task_needs_review(report)
+        "blocked_count": (
+            len(blocked_task_ids | review_task_ids)
+            + anonymous_review_count
         ),
+        "blocked_task_ids": sorted(blocked_task_ids | review_task_ids),
         "token_usage": aggregate_token_usage(token_usages, expected_count=len(task_reports)),
         "task_reports": task_reports,
     }

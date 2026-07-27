@@ -947,6 +947,8 @@ class ModelInvocationCall:
             systemd_runner_factory or SystemdGatedExecution
         )
         self.execution_group = None
+        self.experiment_controller = None
+        self.provider_admission = None
 
     def execute(
         self,
@@ -1023,55 +1025,140 @@ class ModelInvocationCall:
             self.lifecycle.context[
                 "experiment_sandbox_reference_sha256"
             ] = sandbox_reference["sha256"]
-        if self.supported:
-            runner_arguments = {
-                "cwd": cwd,
-                "input_text": input_text,
-                "timeout_seconds": timeout_seconds,
-            }
-            if environment is not None:
-                runner_arguments["environment"] = environment
-            runner = self.systemd_runner_factory(
-                self.lifecycle,
-                command,
-                **runner_arguments,
+        self._acquire_experiment_provider_admission()
+        try:
+            if self.supported:
+                runner_arguments = {
+                    "cwd": cwd,
+                    "input_text": input_text,
+                    "timeout_seconds": timeout_seconds,
+                }
+                if environment is not None:
+                    runner_arguments["environment"] = environment
+                runner = self.systemd_runner_factory(
+                    self.lifecycle,
+                    command,
+                    **runner_arguments,
+                )
+                self.execution_group = runner
+                try:
+                    identity = runner.prepare()
+                except Exception:
+                    runner.abort_before_permit()
+                    raise
+                try:
+                    self.lifecycle.publish_start(identity)
+                except Exception:
+                    runner.abort_before_permit()
+                    raise
+                return runner.permit_and_wait(
+                    progress_callback=progress_callback,
+                    progress_interval_seconds=progress_interval_seconds,
+                )
+
+            # Test provider commands are intentionally outside the supported
+            # live denominator, but still prove that start publication
+            # precedes Popen.
+            self.lifecycle.publish_start(
+                ExecutionGroupIdentity.not_applicable()
             )
-            self.execution_group = runner
-            identity = runner.prepare()
-            try:
-                self.lifecycle.publish_start(identity)
-            except Exception:
-                runner.abort_before_permit()
-                raise
-            return runner.permit_and_wait(
+            return _run_bounded_process(
+                command,
+                cwd=cwd,
+                input_text=input_text,
+                timeout_seconds=timeout_seconds,
+                environment=environment,
                 progress_callback=progress_callback,
                 progress_interval_seconds=progress_interval_seconds,
             )
-
-        # Test provider commands are intentionally outside the supported live
-        # denominator, but still prove that start publication precedes Popen.
-        self.lifecycle.publish_start(ExecutionGroupIdentity.not_applicable())
-        return _run_bounded_process(
-            command,
-            cwd=cwd,
-            input_text=input_text,
-            timeout_seconds=timeout_seconds,
-            environment=environment,
-            progress_callback=progress_callback,
-            progress_interval_seconds=progress_interval_seconds,
-        )
+        except Exception:
+            if (
+                self.provider_admission is not None
+                and not self.lifecycle.is_started
+            ):
+                self.provider_admission.abandon_before_start()
+                self.provider_admission = None
+            raise
 
     def finalize(self, terminal_status, execution, *, terminal_writer="worker"):
         try:
-            return self.lifecycle.finalize(
+            terminal = self.lifecycle.finalize(
                 terminal_status,
                 stdout=execution.stdout,
                 stderr=execution.stderr,
                 terminal_writer=terminal_writer,
             )
+            if self.provider_admission is not None:
+                self.experiment_controller.post_terminal_accounting(
+                    self.provider_admission,
+                    started_path=self.lifecycle.started_path,
+                    terminal_path=self.lifecycle.terminal_path,
+                )
+                self.provider_admission = None
+            return terminal
         finally:
             if self.execution_group is not None:
                 self.execution_group.cleanup_after_terminal()
+
+    def _acquire_experiment_provider_admission(self):
+        reference = self.lifecycle.context.get(
+            "experiment_controller_reference"
+        )
+        controller_required = (
+            self.lifecycle.context.get("experiment_controller_required")
+            is True
+            or reference is not None
+        )
+        authority_root = self.lifecycle.context.get(
+            "experiment_authority_root"
+        )
+        try:
+            from .experiment_controller import (
+                ExperimentControllerError,
+                ExperimentControllerIntegrityError,
+                ExperimentProviderAdmissionDenied,
+                discover_experiment_controller_reference,
+                load_experiment_controller,
+                validate_experiment_controller_reference,
+            )
+
+            if reference is not None:
+                validate_experiment_controller_reference(
+                    reference,
+                    expected_authority_root=authority_root,
+                )
+            elif authority_root is not None:
+                reference = discover_experiment_controller_reference(
+                    authority_root
+                )
+            if reference is None:
+                if controller_required:
+                    raise ExperimentControllerIntegrityError(
+                        "required experiment budget controller is unavailable"
+                    )
+                return
+            controller = load_experiment_controller(reference)
+            admission = controller.prelaunch_admission(
+                {
+                    "invocation_id": self.lifecycle.invocation_id,
+                    "lifecycle_root": str(self.lifecycle.authority_root),
+                    "run_id": self.lifecycle.context["run_id"],
+                }
+            )
+        except ExperimentProviderAdmissionDenied as exc:
+            raise ModelInvocationUnavailable(
+                f"experiment provider admission denied: {exc}"
+            ) from exc
+        except ExperimentControllerIntegrityError as exc:
+            raise ModelInvocationIntegrityError(
+                f"invalid experiment budget controller authority: {exc}"
+            ) from exc
+        except ExperimentControllerError as exc:
+            raise ModelInvocationIntegrityError(
+                f"experiment budget controller failed: {exc}"
+            ) from exc
+        self.experiment_controller = controller
+        self.provider_admission = admission
 
 
 class SystemdGatedExecution:
@@ -1657,6 +1744,12 @@ def invocation_context_from_message(message, *, model=None, backend="codex"):
         ),
         "experiment_authority_root": payload.get(
             "experiment_authority_root"
+        ),
+        "experiment_controller_reference": payload.get(
+            "experiment_controller_reference"
+        ),
+        "experiment_controller_required": (
+            payload.get("experiment_controller_required") is True
         ),
     }
     context["_explicit_context_fields"] = {

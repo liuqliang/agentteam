@@ -63,6 +63,11 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         operator_report.get("blocked_count", 0),
         task_reports,
     )
+    if isinstance(state, dict):
+        blocked_count = max(
+            blocked_count,
+            _operator_report_from_state(state).get("blocked_count", 0),
+        )
     integration_baseline = _integration_baseline_summary(run_dir, state)
     worker_diagnostics = _worker_diagnostics_for_run(run_dir)
     run_status = _run_status(payload, state)

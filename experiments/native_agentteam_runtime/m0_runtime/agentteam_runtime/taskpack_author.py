@@ -951,6 +951,12 @@ def _author_model_invocation_context(
         "experiment_authority_root": supplied.get(
             "experiment_authority_root"
         ),
+        "experiment_controller_reference": supplied.get(
+            "experiment_controller_reference"
+        ),
+        "experiment_controller_required": (
+            supplied.get("experiment_controller_required") is True
+        ),
     }
 
 

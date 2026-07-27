@@ -4253,6 +4253,53 @@ class TaskpackTests(unittest.TestCase):
                 "runtime_diagnostic_controller",
             )
 
+    def test_runtime_diagnostic_obeys_containing_experiment_controller(self):
+        from agentteam_runtime.diagnostic_chat import (
+            run_runtime_diagnostic_chat,
+        )
+        from agentteam_runtime.experiment_controller import (
+            create_experiment_controller,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = _write_failed_integration_run(
+                root / "runs" / "taskpack-5"
+            )
+            capture_path = root / "diagnostic-started"
+            fake_codex = root / "fake_codex.py"
+            fake_codex.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(capture_path)!r}).write_text('started')\n",
+                encoding="utf-8",
+            )
+            controller = create_experiment_controller(
+                root,
+                protocol_id="diagnostic-boundary",
+                max_total_tokens=100,
+                max_wall_time_seconds=3600,
+                soft_warning_ratio=0.8,
+                scored=True,
+            )
+            controller.interrupt()
+            context = build_runtime_diagnostic_context(run_dir)
+            self.assertTrue(context["experiment_controller_required"])
+            context.pop("experiment_controller_reference")
+            context.pop("experiment_authority_root")
+            context.pop("experiment_controller_required")
+
+            result = run_runtime_diagnostic_chat(
+                context,
+                codex_command=["python3", str(fake_codex)],
+            )
+
+            self.assertEqual(result["chat_status"], "failed")
+            self.assertIn(
+                "controller state is interrupted",
+                result["error"],
+            )
+            self.assertFalse(capture_path.exists())
+
     def test_agentteam_cli_report_renders_operator_summary_and_writes_report_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = _write_completed_operator_run(Path(tmp) / "runs" / "taskpack-7")
@@ -15746,6 +15793,12 @@ class TaskpackTests(unittest.TestCase):
                 "pursue_id": "PURSUE-1",
                 "round_index": 1,
                 "usage_stage": "taskpack_author",
+                "experiment_controller_reference": {
+                    "schema_version": (
+                        "experiment_budget_controller_reference.v1"
+                    )
+                },
+                "experiment_controller_required": True,
             },
         )
         follow_up = _author_model_invocation_context(
@@ -15763,6 +15816,11 @@ class TaskpackTests(unittest.TestCase):
 
         self.assertEqual(initial["usage_stage"], "taskpack_author")
         self.assertEqual(initial["round_index"], 1)
+        self.assertTrue(initial["experiment_controller_required"])
+        self.assertEqual(
+            initial["experiment_controller_reference"]["schema_version"],
+            "experiment_budget_controller_reference.v1",
+        )
         self.assertEqual(follow_up["usage_stage"], "follow_up_author")
         self.assertEqual(follow_up["role"], "follow_up_author")
         self.assertEqual(follow_up["round_index"], 2)

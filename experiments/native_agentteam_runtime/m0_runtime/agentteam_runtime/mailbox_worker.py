@@ -49,11 +49,17 @@ MODEL_INVOCATION_CONTEXT_FIELDS = (
     "experiment_sandbox_reference",
     "experiment_sandbox_required",
     "experiment_authority_root",
+    "experiment_controller_reference",
+    "experiment_controller_required",
 )
 
 
 class ProviderSessionProjectBindingError(RuntimeError):
     """Raised before launch when a provider session is bound to another project."""
+
+
+class MailboxDispatchIntegrityError(RuntimeError):
+    """Raised when a dispatch differs from scheduler-published authority."""
 
 
 class ProviderSessionCoordinator:
@@ -161,6 +167,12 @@ class FileMailboxWorker:
                 "poll_status": "idle",
                 "reason": "no_dispatch_message",
             }
+        if (
+            self.output_dir
+            / "state"
+            / "mailbox_dispatch_authority"
+        ).is_dir():
+            _validate_dispatch_authority(self.output_dir, message)
         lock_digest = hashlib.sha256(
             message["message_id"].encode("utf-8")
         ).hexdigest()
@@ -1370,6 +1382,42 @@ def _append_jsonl(path, records):
         for record in records:
             stream.write(json.dumps(record, sort_keys=True))
             stream.write("\n")
+
+
+def _validate_dispatch_authority(output_dir, message):
+    message_id = message.get("message_id")
+    if not isinstance(message_id, str) or not message_id:
+        raise MailboxDispatchIntegrityError(
+            "mailbox dispatch message_id is invalid"
+        )
+    file_id = hashlib.sha256(message_id.encode("utf-8")).hexdigest()
+    authority_path = (
+        Path(output_dir)
+        / "state"
+        / "mailbox_dispatch_authority"
+        / f"{file_id}.json"
+    )
+    try:
+        authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MailboxDispatchIntegrityError(
+            "mailbox dispatch authority is unavailable"
+        ) from exc
+    expected = {
+        "schema_version": "mailbox_dispatch_authority.v1",
+        "message_id": message_id,
+        "message_sha256": hashlib.sha256(
+            json.dumps(
+                message,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+    if authority != expected:
+        raise MailboxDispatchIntegrityError(
+            "mailbox dispatch differs from scheduler authority"
+        )
 
 
 def _write_json_best_effort(path, payload):
