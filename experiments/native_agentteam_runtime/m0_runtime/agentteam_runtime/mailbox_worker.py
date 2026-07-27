@@ -46,6 +46,9 @@ MODEL_INVOCATION_CONTEXT_FIELDS = (
     "previous_provider_session_id",
     "previous_provider_turn_id",
     "previous_invocation_id",
+    "experiment_sandbox_reference",
+    "experiment_sandbox_required",
+    "experiment_authority_root",
 )
 
 

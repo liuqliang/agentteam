@@ -536,6 +536,8 @@ or target mutation.
 Create a new object store containing only the exact source commit. Remove
 remote and alternate references, detach HEAD, verify the source tree and file
 inventory, reject symlink escapes, and publish a clean-reset attestation.
+The resulting experiment workspace is always a standalone repository with an
+in-workspace `.git` directory. Linked-worktree `.git` files fail closed.
 
 ### P2-02B Bwrap Evaluator And Gold Isolation
 
@@ -545,6 +547,40 @@ Build the exact provider sandbox, evaluator-only namespace, gold canary probe,
 bounded environment, and preregistered argv acceptance path. Reject gold-like
 protocol fields, unsafe mounts or environment additions, reused paths, and
 canary leakage. Run acceptance only after model invocations terminate.
+
+Sandbox certification and leak-scan scope are immutable controller-owned
+references under the run authority, not taskpack fields supplied by a worker.
+The controller publishes a multi-root invocation manifest that binds every
+authoring, worker, and follow-up lifecycle root to its taskpack and exact
+canary-probed sandbox reference. Each root is sealed before evaluation, and the
+evaluator must be the exact digest-bound executable from the protocol, running
+in a fixed-system-binary systemd cgroup.
+The systemd service starts the certified bwrap command directly. Inside that
+namespace, a fixed runtime loader receives the already digest-checked evaluator
+bytes over a bounded pipe, materializes them in namespace-private tmpfs, and
+executes it as a contract check. Only after that check succeeds does the fixed
+loader independently execute the preregistered acceptance argv, so evaluator
+code cannot silently skip acceptance. Neither a stale evaluator path nor
+evaluator/candidate code can bypass the namespace to read evaluator-only host
+state. The protocol itself is loaded through an immutable authority reference
+and must match the sandbox's certified Git baseline. Evaluation rechecks that
+the actual candidate HEAD descends from that baseline, records HEAD/tree/status
+plus bounded workspace-structure and Git-control inventories, overlays `.git`
+read-only inside the candidate namespace, and rejects workspace mutation during
+acceptance. Every mount source is canonicalized and bound to its root object
+identity so a post-probe source replacement fails before launch.
+Before any host Git probe, the controller parses the standalone `.git/config`
+against a closed safe-key set and runs a fixed Git binary with sanitized
+environment and dangerous extension points disabled.
+Mutable directory mount sources additionally carry a bounded tree digest;
+privileged system trees are accepted only through their root-owned,
+non-group/other-writable permission boundary.
+Evaluation evidence records the run, complete taskpack and invocation
+identities, authority-reference digest, and aggregate seal digest. P2-05
+publishes the complete retained scan roots and validates those expected
+bindings when bundling results. P2-06 injects the sandbox reference into every
+model-using role and returns all lifecycle roots to the common evaluator; the
+capability remains incomplete until both integrations pass.
 
 Tests use temporary Git repositories and prove cleanup preserves sealed result
 artifacts.
@@ -597,6 +633,13 @@ Implement versioned resumable snapshots and create-if-absent sealed terminal
 bundles before the real mode adapters. Add projection and concise show/compare
 rendering. Failed and budget-stopped results remain visible.
 
+The result authority also publishes the complete retained prompt, context,
+taskpack, and artifact roots used by the immutable evaluation scan-scope
+reference. Raw caller-selected subsets are not accepted as complete scope.
+Before sealing a result, it validates the evaluation record against the
+expected run, taskpacks, protocol, acceptance command, evaluator artifact, and
+multi-root invocation-manifest reference.
+
 ### P2-06 Three Execution-Mode Adapters
 
 **Risk:** L2
@@ -611,6 +654,31 @@ Each adapter emits the same mode lifecycle result and returns to the common
 evaluator/finalizer. The direct adapter verifies the declared taskpack digest;
 the full adapter rejects access to it. Every path uses the protocol's one
 model/reasoning profile and global provider lane.
+
+After each author, worker-attempt, or candidate workspace exists, the
+controller publishes and probes a workspace-specific immutable sandbox
+reference, then injects that reference, its independent run authority root,
+and `experiment_sandbox_required=true` before provider launch. These
+host-specific references are runtime state and never enter a frozen taskpack.
+Missing or stale references fail before launch. Before any provider launch, the
+controller allocates every workspace, sandbox reference, and distinct lifecycle
+authority under a fixed controller-trusted append-only run registry outside
+provider-visible mounts. This is an `O_EXCL`/authority trust boundary, not
+same-UID tamper-proof storage. `ModelInvocationCall` rejects unregistered
+roots. Provider processes
+cannot modify registry facts, and adapters do not self-report the authoritative
+final root set. The controller builds the
+manifest only by enumerating the complete registry and rejects missing, extra,
+unconsumed, or non-terminal registrations. It reloads each exact sandbox
+reference and binds its reference digest, derived policy digest, and canary
+probe through lifecycle records, seals, the immutable multi-root manifest, and
+common evaluation evidence.
+Each allocation also publishes an immutable registration record; manifest
+construction requires exact equality among that ledger, the registry
+directories, and the declared lifecycle roots.
+All author, worker-attempt, and candidate workspaces are standalone sanitized
+repositories; the experiment adapter does not reuse AgentTeam's ordinary
+linked worktrees.
 
 Deterministic fake adapters prove orchestration before any live Codex
 calibration.

@@ -1,0 +1,470 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/experiment_evaluation.schema.json",
+  "title": "Experiment trusted evaluation evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evaluation_status",
+    "evidence_status",
+    "started_at",
+    "finished_at",
+    "evaluator_started",
+    "promotion_eligible",
+    "execution_boundary",
+    "systemd_unit",
+    "argv",
+    "cwd",
+    "timeout_seconds",
+    "evaluator_artifact",
+    "evaluator_sha256",
+    "environment_sha256",
+    "candidate_repository",
+    "run_id",
+    "taskpack_ids",
+    "expected_invocation_ids",
+    "invocation_sets",
+    "invocation_set_reference_sha256",
+    "experiment_protocol_sha256",
+    "experiment_protocol_reference_sha256",
+    "acceptance_command_sha256",
+    "acceptance_executable_sha256",
+    "scan_scope_sha256",
+    "provider_sandbox_reference_sha256",
+    "provider_sandbox_policy_sha256",
+    "invocation_set_seal_sha256",
+    "terminal_invocations",
+    "pre_run_leak_scan",
+    "post_run_leak_scan",
+    "returncode",
+    "timed_out",
+    "stdout",
+    "stderr",
+    "stdout_sha256",
+    "stderr_sha256",
+    "stdout_truncated",
+    "stderr_truncated",
+    "max_output_bytes",
+    "failure_reason"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "experiment_evaluation.v1"
+    },
+    "evaluation_status": {
+      "enum": ["passed", "failed", "blocked"]
+    },
+    "evidence_status": {
+      "const": "complete"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "evaluator_started": {
+      "type": "boolean"
+    },
+    "promotion_eligible": {
+      "type": "boolean"
+    },
+    "execution_boundary": {
+      "enum": [
+        "not_started",
+        "systemd_user_transient_service"
+      ]
+    },
+    "systemd_unit": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^agentteam-eval-[0-9a-f]{24}\\.service$"
+    },
+    "argv": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "cwd": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 3600
+    },
+    "evaluator_artifact": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evaluator_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "environment_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "candidate_repository": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "baseline_commit",
+        "baseline_tree",
+        "head_commit",
+        "head_tree",
+        "git_object_format",
+        "tracked_status_sha256",
+        "working_tree_sha256",
+        "working_tree_files",
+        "working_tree_directories",
+        "working_tree_bytes",
+        "git_control_sha256",
+        "git_control_files",
+        "git_control_directories",
+        "git_control_bytes"
+      ],
+      "properties": {
+        "baseline_commit": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "baseline_tree": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "head_commit": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "head_tree": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "git_object_format": {
+          "enum": ["sha1", "sha256"]
+        },
+        "tracked_status_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "working_tree_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "working_tree_files": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "working_tree_directories": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "working_tree_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        },
+        "git_control_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "git_control_files": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "git_control_directories": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "git_control_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        }
+      }
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskpack_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 1024,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "expected_invocation_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 4096,
+      "items": {
+        "type": "string",
+        "pattern": "^INV-[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+      }
+    },
+    "invocation_sets": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "taskpack_id",
+          "expected_invocation_ids",
+          "sandbox_policy_sha256",
+          "sandbox_reference_sha256",
+          "seal_sha256"
+        ],
+        "properties": {
+          "taskpack_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_invocation_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^INV-[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+            }
+          },
+          "sandbox_policy_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "sandbox_reference_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "seal_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "invocation_set_reference_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "experiment_protocol_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "experiment_protocol_reference_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "acceptance_command_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "acceptance_executable_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scan_scope_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "provider_sandbox_policy_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "provider_sandbox_reference_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "invocation_set_seal_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "terminal_invocations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "invocation_id",
+          "taskpack_id",
+          "terminal_status",
+          "start_sha256",
+          "sandbox_policy_sha256",
+          "sandbox_reference_sha256",
+          "terminal_sha256"
+        ],
+        "properties": {
+          "invocation_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "taskpack_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "terminal_status": {
+            "enum": [
+              "completed",
+              "failed",
+              "blocked",
+              "cancelled",
+              "timed_out",
+              "launch_failed",
+              "missing_result",
+              "invalid_result",
+              "recovered_orphan"
+            ]
+          },
+          "start_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "sandbox_policy_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "sandbox_reference_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "terminal_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "pre_run_leak_scan": {
+      "$ref": "#/$defs/leakScan"
+    },
+    "post_run_leak_scan": {
+      "$ref": "#/$defs/leakScan"
+    },
+    "returncode": {
+      "type": ["integer", "null"]
+    },
+    "timed_out": {
+      "type": "boolean"
+    },
+    "stdout": {
+      "type": "string"
+    },
+    "stderr": {
+      "type": "string"
+    },
+    "stdout_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stderr_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stdout_truncated": {
+      "type": "boolean"
+    },
+    "stderr_truncated": {
+      "type": "boolean"
+    },
+    "max_output_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16777216
+    },
+    "failure_reason": {
+      "type": ["string", "null"]
+    }
+  },
+  "$defs": {
+    "leakScan": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "scan_status",
+        "scan_scope_sha256",
+        "canary_sha256",
+        "scanned_files",
+        "scanned_entries",
+        "scanned_bytes",
+        "group_file_counts",
+        "findings"
+      ],
+      "properties": {
+        "scan_status": {
+          "enum": ["clean", "leak_detected"]
+        },
+        "scan_scope_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "canary_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "scanned_files": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scanned_entries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scanned_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "group_file_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["prompt", "context", "taskpack", "artifacts"],
+          "properties": {
+            "prompt": {"type": "integer", "minimum": 0},
+            "context": {"type": "integer", "minimum": 0},
+            "taskpack": {"type": "integer", "minimum": 0},
+            "artifacts": {"type": "integer", "minimum": 0}
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["group", "path_sha256", "match"],
+            "properties": {
+              "group": {"type": "string", "minLength": 1},
+              "path_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "match": {
+                "enum": [
+                  "canary_content",
+                  "canary_sha256",
+                  "canary_path"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

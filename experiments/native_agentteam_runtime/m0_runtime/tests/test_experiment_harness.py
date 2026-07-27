@@ -1,8 +1,12 @@
 import copy
+import hashlib
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -32,6 +36,42 @@ from agentteam_runtime.experiment_workspace import (
     validate_clean_snapshot_attestation,
     verify_clean_snapshot,
 )
+from agentteam_runtime.experiment_sandbox import (
+    _capture_bounded_process,
+    _candidate_repository_state,
+    _approved_acceptance_executable,
+    _read_digest_bound_evaluator,
+    _run_bounded_argv,
+    _sandbox_policy_sha256,
+    ExperimentEvaluationBlocked,
+    ExperimentSandboxError,
+    ExperimentSandboxUnavailable,
+    _attach_namespace_evidence,
+    build_provider_sandbox_descriptor,
+    experiment_lifecycle_authority_root,
+    prepare_candidate_evaluation_launch,
+    prepare_provider_launch,
+    probe_gold_canary_denial,
+    publish_evaluator_reference,
+    publish_experiment_protocol_reference,
+    publish_model_invocation_set_reference,
+    publish_provider_sandbox_reference,
+    publish_scan_scope_reference,
+    run_trusted_argv_evaluator,
+    scan_canary_leakage,
+    scan_scope_sha256,
+    validate_evaluation_evidence,
+    validate_provider_sandbox_descriptor,
+)
+from agentteam_runtime.model_invocation import (
+    ExecutionGroupIdentity,
+    InvocationLifecycle,
+    ModelInvocationCall,
+    ModelInvocationIntegrityError,
+    ProviderExecution,
+    invocation_context_from_message,
+)
+from agentteam_runtime.mailbox_worker import _model_invocation_context_payload
 
 
 def _protocol():
@@ -53,7 +93,12 @@ def _protocol():
             ],
         },
         "acceptance": {
-            "command": ["python3", "-m", "unittest", "tests.test_fixture"],
+            "command": [
+                str(Path(sys.executable).resolve()),
+                "-m",
+                "unittest",
+                "tests.test_fixture",
+            ],
             "timeout_seconds": 120,
         },
         "modes": [
@@ -217,6 +262,171 @@ def _fixture_repository(
         "parent_commit": parent_commit,
         "source": source,
     }
+
+
+def _sandbox_fixture(root):
+    root = Path(root)
+    repository = root / "sandbox-repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    _git(repository, "config", "user.name", "Sandbox Fixture")
+    _git(repository, "config", "user.email", "sandbox@example.invalid")
+    (repository / "tracked.txt").write_text("fixture\n", encoding="utf-8")
+    _git(repository, "add", "tracked.txt")
+    _git(repository, "commit", "--quiet", "-m", "sandbox fixture")
+    repository_identity = {
+        "commit": _git(repository, "rev-parse", "HEAD").stdout.strip(),
+        "tree": _git(repository, "rev-parse", "HEAD^{tree}").stdout.strip(),
+        "git_object_format": _git(
+            repository,
+            "rev-parse",
+            "--show-object-format",
+        ).stdout.strip(),
+    }
+    credential = root / "provider-credential.json"
+    credential.write_text('{"token":"bounded-test-token"}\n', encoding="utf-8")
+    canary = root / "evaluator-only" / "gold-canary"
+    canary.parent.mkdir()
+    canary.write_bytes(b"agentteam-evaluator-only-canary")
+    bwrap = Path("/usr/bin/bwrap")
+    runtime_views = [
+        {"source": path, "target": path}
+        for path in ("/usr", "/lib", "/lib64", "/bin")
+        if Path(path).exists()
+    ]
+    descriptor = build_provider_sandbox_descriptor(
+        repository,
+        runtime_views=runtime_views,
+        credential_mounts=[
+            {
+                "source": str(credential),
+                "target": "/run/agentteam-credentials/provider.json",
+            }
+        ],
+        environment={
+            "AGENTTEAM_CREDENTIAL_FILE": (
+                "/run/agentteam-credentials/provider.json"
+            )
+        },
+        bwrap_path=bwrap,
+        repository_identity=repository_identity,
+        forbidden_paths=[canary],
+    )
+    evidence = {
+        "schema_version": "experiment_namespace_probe.v1",
+        "evidence_status": "complete",
+        "denial_status": "denied",
+        "policy_sha256": descriptor["policy_sha256"],
+        "canary_sha256": hashlib.sha256(canary.read_bytes()).hexdigest(),
+        "path_visible": False,
+        "content_readable": False,
+        "probe_returncode": 0,
+    }
+    return {
+        "repository": repository,
+        "repository_identity": repository_identity,
+        "credential": credential,
+        "canary": canary,
+        "evidence": evidence,
+        "descriptor": _attach_namespace_evidence(descriptor, evidence),
+        "uncertified_descriptor": descriptor,
+    }
+
+
+def _publish_test_sandbox_reference(authority_root, fixture):
+    with patch(
+        "agentteam_runtime.experiment_sandbox.probe_gold_canary_denial",
+        return_value=fixture["evidence"],
+    ):
+        return publish_provider_sandbox_reference(
+            authority_root,
+            fixture["uncertified_descriptor"],
+            fixture["canary"],
+        )
+
+
+def _sandbox_protocol(fixture):
+    protocol = _protocol()
+    protocol["repository"] = {
+        "source": str(fixture["repository"]),
+        **fixture["repository_identity"],
+    }
+    return protocol
+
+
+def _model_context(*, supported, sandbox_reference):
+    context = {
+        "project": "experiment-fixture",
+        "run_id": "RUN-EXPERIMENT-FIXTURE",
+        "pursue_id": None,
+        "round_index": None,
+        "taskpack_id": "phase2-fixture",
+        "implementation_run_id": None,
+        "gate_epoch": None,
+        "task_id": "P2-02B",
+        "attempt_id": "ATTEMPT-P2-02B",
+        "runtime_execution_session_id": "SESSION-P2-02B",
+        "requested_provider_session_id": None,
+        "provider_resume_mode": "new",
+        "provider_predecessor_invocation_id": None,
+        "provider_predecessor_turn_id": None,
+        "provider_predecessor_usage_snapshot": None,
+        "lifecycle_owner_token": "OWNER-P2-02B",
+        "agent_id": "agent-fixture",
+        "role": "implementation_worker",
+        "usage_stage": "implementation_worker",
+        "backend": "codex",
+        "model": "fixture-model",
+        "coverage_class": (
+            "supported_model_invocation"
+            if supported
+            else "not_applicable_adapter"
+        ),
+        "experiment_sandbox_reference": sandbox_reference,
+    }
+    context["_explicit_context_fields"] = {
+        field: True
+        for field in (
+            "project",
+            "run_id",
+            "taskpack_id",
+            "runtime_execution_session_id",
+            "lifecycle_owner_token",
+            "agent_id",
+            "role",
+            "usage_stage",
+        )
+    }
+    return context
+
+
+def _test_evaluator_execution(
+    argv,
+    *,
+    cwd,
+    environment,
+    timeout_seconds,
+    max_output_bytes,
+    cpu_limit,
+    memory_limit_bytes,
+    input_bytes=None,
+):
+    del cpu_limit, memory_limit_bytes
+    result = _capture_bounded_process(
+        argv,
+        cwd=cwd,
+        environment=environment,
+        timeout_seconds=timeout_seconds,
+        max_output_bytes=max_output_bytes,
+        input_bytes=input_bytes,
+    )
+    result.update(
+        {
+            "execution_boundary": "systemd_user_transient_service",
+            "systemd_unit": "agentteam-eval-" + "a" * 24 + ".service",
+        }
+    )
+    return result
 
 
 class ExperimentContractSchemaTests(unittest.TestCase):
@@ -868,6 +1078,1961 @@ class ExperimentWorkspaceTests(unittest.TestCase):
                 result_path.read_text(encoding="utf-8"),
                 '{"status":"failed"}\n',
             )
+
+
+class ExperimentSandboxTests(unittest.TestCase):
+    def test_evaluator_execution_uses_digest_bound_memory_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            evaluator = Path(tmp) / "evaluator.py"
+            original = b"#!/usr/bin/python3\nraise SystemExit(0)\n"
+            evaluator.write_bytes(original)
+            evaluator.chmod(0o700)
+            digest = hashlib.sha256(original).hexdigest()
+
+            content = _read_digest_bound_evaluator(
+                evaluator,
+                digest,
+            )
+            evaluator.write_text(
+                "#!/usr/bin/python3\nraise SystemExit(91)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(content, original)
+
+    def test_candidate_repository_must_descend_from_certified_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _sandbox_fixture(tmp)
+            repository = fixture["repository"]
+            baseline = fixture["repository_identity"]
+            state = _candidate_repository_state(repository, baseline)
+            self.assertEqual(state["baseline_commit"], baseline["commit"])
+            fsmonitor_marker = Path(tmp) / "fsmonitor-executed"
+            fsmonitor = Path(tmp) / "fsmonitor.sh"
+            fsmonitor.write_text(
+                "#!/bin/sh\n"
+                f"touch {str(fsmonitor_marker)!r}\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fsmonitor.chmod(0o700)
+            _git(repository, "config", "core.fsmonitor", str(fsmonitor))
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "Git config contains undeclared behavior",
+            ):
+                _candidate_repository_state(repository, baseline)
+            self.assertFalse(fsmonitor_marker.exists())
+            _git(repository, "config", "--unset", "core.fsmonitor")
+            tracked = repository / "tracked.txt"
+            tracked.write_text("first dirty value\n", encoding="utf-8")
+            first_dirty = _candidate_repository_state(repository, baseline)
+            tracked.write_text("second dirty value\n", encoding="utf-8")
+            second_dirty = _candidate_repository_state(repository, baseline)
+            self.assertEqual(
+                first_dirty["tracked_status_sha256"],
+                second_dirty["tracked_status_sha256"],
+            )
+            self.assertNotEqual(
+                first_dirty["working_tree_sha256"],
+                second_dirty["working_tree_sha256"],
+            )
+            (repository / "untracked.txt").write_text(
+                "untracked\n",
+                encoding="utf-8",
+            )
+            with_untracked = _candidate_repository_state(
+                repository,
+                baseline,
+            )
+            self.assertNotEqual(
+                second_dirty["working_tree_sha256"],
+                with_untracked["working_tree_sha256"],
+            )
+            (repository / "untracked.txt").chmod(0o755)
+            executable_untracked = _candidate_repository_state(
+                repository,
+                baseline,
+            )
+            self.assertNotEqual(
+                with_untracked["working_tree_sha256"],
+                executable_untracked["working_tree_sha256"],
+            )
+            (repository / ".git" / "info" / "exclude").write_text(
+                "ignored.txt\n",
+                encoding="utf-8",
+            )
+            (repository / "ignored.txt").write_text(
+                "ignored content\n",
+                encoding="utf-8",
+            )
+            with_ignored = _candidate_repository_state(
+                repository,
+                baseline,
+            )
+            self.assertNotEqual(
+                executable_untracked["working_tree_sha256"],
+                with_ignored["working_tree_sha256"],
+            )
+            empty_directory = repository / "empty-directory"
+            empty_directory.mkdir()
+            with_empty_directory = _candidate_repository_state(
+                repository,
+                baseline,
+            )
+            self.assertNotEqual(
+                with_ignored["working_tree_sha256"],
+                with_empty_directory["working_tree_sha256"],
+            )
+            empty_directory.rmdir()
+            git_config = repository / ".git" / "config"
+            original_git_config = git_config.read_bytes()
+            _git(repository, "config", "user.name", "Changed Safe Name")
+            with_git_config = _candidate_repository_state(
+                repository,
+                baseline,
+            )
+            self.assertNotEqual(
+                with_ignored["git_control_sha256"],
+                with_git_config["git_control_sha256"],
+            )
+            git_config.write_bytes(original_git_config)
+            hook = repository / ".git" / "hooks" / "post-commit"
+            hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            hook.chmod(0o700)
+            with_git_hook = _candidate_repository_state(
+                repository,
+                baseline,
+            )
+            self.assertNotEqual(
+                with_ignored["git_control_sha256"],
+                with_git_hook["git_control_sha256"],
+            )
+            hook.unlink()
+            _git(repository, "reset", "--quiet", "--hard", baseline["commit"])
+            (repository / "untracked.txt").unlink()
+            (repository / "ignored.txt").unlink()
+
+            _git(repository, "checkout", "--quiet", "--orphan", "unrelated")
+            _git(repository, "rm", "--quiet", "-rf", ".")
+            (repository / "unrelated.txt").write_text(
+                "unrelated\n",
+                encoding="utf-8",
+            )
+            _git(repository, "add", "unrelated.txt")
+            _git(repository, "commit", "--quiet", "-m", "unrelated")
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "does not descend",
+            ):
+                _candidate_repository_state(repository, baseline)
+
+    def test_candidate_repository_requires_standalone_git_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _sandbox_fixture(root)
+            linked = root / "linked-worktree"
+            _git(
+                fixture["repository"],
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                str(linked),
+                fixture["repository_identity"]["commit"],
+            )
+            self.assertTrue((linked / ".git").is_file())
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "candidate Git control directory must be a directory",
+            ):
+                _candidate_repository_state(
+                    linked,
+                    fixture["repository_identity"],
+                )
+
+    def test_provider_descriptor_rejects_non_system_bubblewrap_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _sandbox_fixture(tmp)
+            fake_bwrap = Path(tmp) / "bwrap"
+            shutil.copy2("/usr/bin/bwrap", fake_bwrap)
+            fake_bwrap.chmod(0o700)
+            forged = copy.deepcopy(fixture["descriptor"])
+            forged["bwrap_path"] = str(fake_bwrap)
+            forged["bwrap_sha256"] = hashlib.sha256(
+                fake_bwrap.read_bytes()
+            ).hexdigest()
+            forged["policy_sha256"] = _sandbox_policy_sha256(forged)
+
+            with self.assertRaisesRegex(
+                ExperimentSandboxUnavailable,
+                "identity is unavailable or changed",
+            ):
+                validate_provider_sandbox_descriptor(forged)
+
+    def test_provider_namespace_has_only_declared_views_and_bounded_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _sandbox_fixture(tmp)
+            descriptor = fixture["descriptor"]
+
+            serialized = json.dumps(descriptor, sort_keys=True)
+            self.assertNotIn(str(fixture["canary"]), serialized)
+            self.assertNotIn(
+                fixture["canary"].read_text(encoding="utf-8"),
+                serialized,
+            )
+            self.assertEqual(len(descriptor["credential_views"]), 1)
+            credential = descriptor["credential_views"][0]
+            self.assertFalse(credential["writable"])
+            self.assertEqual(credential["file_count"], 1)
+            self.assertLessEqual(credential["total_bytes"], 1024 * 1024)
+
+            prepared = prepare_provider_launch(
+                descriptor,
+                [str(Path(sys.executable).resolve()), "-c", "print('provider')"],
+                cwd=fixture["repository"],
+            )
+            command = list(prepared.command)
+            self.assertIn("--unshare-all", command)
+            self.assertIn("--clearenv", command)
+            self.assertIn("--cap-drop", command)
+            self.assertIn("--bind", command)
+            self.assertIn("--ro-bind", command)
+            self.assertEqual(prepared.cwd, "/")
+            self.assertEqual(
+                prepared.environment["AGENTTEAM_CREDENTIAL_FILE"],
+                "/run/agentteam-credentials/provider.json",
+            )
+            self.assertNotIn(str(fixture["canary"]), " ".join(command))
+
+            fake_python = Path(tmp) / "python3"
+            fake_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_python.chmod(0o700)
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "targets must not overlap",
+            ):
+                build_provider_sandbox_descriptor(
+                    fixture["repository"],
+                    runtime_views=[
+                        {"source": "/usr", "target": "/usr"},
+                        {
+                            "source": str(fake_python),
+                            "target": "/usr/bin/python3",
+                        },
+                    ],
+                    bwrap_path="/usr/bin/bwrap",
+                    forbidden_paths=[fixture["canary"]],
+                )
+            shadowing = build_provider_sandbox_descriptor(
+                fixture["repository"],
+                runtime_views=[
+                    {"source": "/usr", "target": "/runtime-usr"},
+                    {
+                        "source": str(fake_python),
+                        "target": "/usr/bin/python3",
+                    },
+                ],
+                bwrap_path="/usr/bin/bwrap",
+                forbidden_paths=[fixture["canary"]],
+            )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "executable is not approved",
+            ):
+                _approved_acceptance_executable(
+                    "/usr/bin/python3",
+                    cwd=fixture["repository"],
+                    environment={"PATH": "/usr/bin:/bin"},
+                    descriptor=shadowing,
+                )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "must be an absolute path",
+            ):
+                _approved_acceptance_executable(
+                    "python3",
+                    cwd=fixture["repository"],
+                    environment={"PATH": "/usr/bin:/bin"},
+                    descriptor=fixture["descriptor"],
+                )
+            symlink_runtime = Path(tmp) / "symlink-runtime"
+            (symlink_runtime / "bin").mkdir(parents=True)
+            os.symlink(
+                "/runtime-usr/bin/python3.12",
+                symlink_runtime / "bin" / "python3",
+            )
+            symlink_shadowing = build_provider_sandbox_descriptor(
+                fixture["repository"],
+                runtime_views=[
+                    {"source": "/usr", "target": "/runtime-usr"},
+                    {"source": str(symlink_runtime), "target": "/usr"},
+                ],
+                bwrap_path="/usr/bin/bwrap",
+                forbidden_paths=[fixture["canary"]],
+            )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "contains a symlink",
+            ):
+                _approved_acceptance_executable(
+                    "/usr/bin/python3",
+                    cwd=fixture["repository"],
+                    environment={"PATH": "/usr/bin:/bin"},
+                    descriptor=symlink_shadowing,
+                )
+            drift_source = Path(tmp) / "runtime-drift"
+            drift_source.mkdir()
+            drift_descriptor = build_provider_sandbox_descriptor(
+                fixture["repository"],
+                runtime_views=[
+                    {"source": str(drift_source), "target": "/runtime-drift"},
+                ],
+                bwrap_path="/usr/bin/bwrap",
+                forbidden_paths=[fixture["canary"]],
+            )
+            original_source = Path(tmp) / "runtime-drift-original"
+            drift_source.rename(original_source)
+            os.symlink(str(Path(tmp)), drift_source)
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "canonical non-symlink path",
+            ):
+                validate_provider_sandbox_descriptor(
+                    drift_descriptor,
+                    require_namespace_evidence=False,
+                )
+            mutable_runtime = Path(tmp) / "mutable-runtime"
+            mutable_runtime.mkdir()
+            mutable_tool = mutable_runtime / "tool"
+            mutable_tool.write_text("first\n", encoding="utf-8")
+            mutable_descriptor = build_provider_sandbox_descriptor(
+                fixture["repository"],
+                runtime_views=[
+                    {
+                        "source": str(mutable_runtime),
+                        "target": "/mutable-runtime",
+                    },
+                ],
+                bwrap_path="/usr/bin/bwrap",
+                forbidden_paths=[fixture["canary"]],
+            )
+            mutable_tool.write_text("second\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "identity is unavailable or changed",
+            ):
+                validate_provider_sandbox_descriptor(
+                    mutable_descriptor,
+                    require_namespace_evidence=False,
+                )
+
+    def test_evaluator_mount_or_inconclusive_probe_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _sandbox_fixture(tmp)
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "evaluator-only path overlaps",
+            ):
+                build_provider_sandbox_descriptor(
+                    fixture["repository"],
+                    runtime_views=[fixture["canary"].parent],
+                    bwrap_path=fixture["descriptor"]["bwrap_path"],
+                    forbidden_paths=[fixture["canary"]],
+                )
+
+            completed = subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=(
+                    '{"content_readable":false,"path_visible":false}'
+                ),
+                stderr="",
+            )
+            probe = probe_gold_canary_denial(
+                fixture["uncertified_descriptor"],
+                fixture["canary"],
+                runner=Mock(return_value=completed),
+                probe_python=str(Path(sys.executable).resolve()),
+            )
+            self.assertEqual(probe["denial_status"], "denied")
+            with self.assertRaisesRegex(
+                ExperimentSandboxUnavailable,
+                "inconclusive",
+            ):
+                probe_gold_canary_denial(
+                    fixture["uncertified_descriptor"],
+                    fixture["canary"],
+                    runner=Mock(
+                        return_value=subprocess.CompletedProcess(
+                            [],
+                            0,
+                            stdout="not-json",
+                            stderr="",
+                        )
+                    ),
+                    probe_python=str(Path(sys.executable).resolve()),
+                )
+
+    def test_real_bwrap_canary_denial_when_runner_supports_namespaces(self):
+        bwrap = shutil.which("bwrap")
+        if not bwrap or not sys.platform.startswith("linux"):
+            self.skipTest("real bubblewrap is unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repository"
+            repository.mkdir()
+            canary = root / "evaluator-only" / "gold-canary"
+            canary.parent.mkdir()
+            canary.write_text("real-bwrap-canary", encoding="utf-8")
+            views = [
+                {"source": path, "target": path}
+                for path in ("/usr", "/lib", "/lib64", "/bin")
+                if Path(path).exists()
+            ]
+            descriptor = build_provider_sandbox_descriptor(
+                repository,
+                runtime_views=views,
+                bwrap_path=bwrap,
+                forbidden_paths=[canary],
+            )
+            try:
+                evidence = probe_gold_canary_denial(
+                    descriptor,
+                    canary,
+                    probe_python="/usr/bin/python3",
+                )
+            except ExperimentSandboxUnavailable:
+                if os.environ.get("AGENTTEAM_REQUIRE_REAL_BWRAP") == "1":
+                    raise
+                self.skipTest("runner disallows unprivileged bubblewrap")
+            self.assertEqual(evidence["denial_status"], "denied")
+            self.assertFalse(evidence["path_visible"])
+            self.assertFalse(evidence["content_readable"])
+
+    def test_real_systemd_evaluator_contains_detached_child_when_required(self):
+        if os.environ.get("AGENTTEAM_REQUIRE_SYSTEMD_EVALUATOR") != "1":
+            self.skipTest("real systemd evaluator probe is opt-in")
+        if not shutil.which("systemd-run") or not shutil.which("systemctl"):
+            self.fail("systemd evaluator probe was required but is unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            expected_environment = {
+                "HOME": "/tmp",
+                "LANG": "C.UTF-8",
+                "PATH": "/usr/bin:/bin",
+                "TMPDIR": "/tmp",
+            }
+            script = (
+                "import json,os,pathlib,subprocess\n"
+                "child=subprocess.Popen(['/bin/sleep','60'],"
+                "start_new_session=True)\n"
+                "pathlib.Path('child.pid').write_text(str(child.pid))\n"
+                "pathlib.Path('environment.json').write_text("
+                "json.dumps(dict(os.environ),sort_keys=True))\n"
+            )
+            execution = _run_bounded_argv(
+                [str(Path(sys.executable).resolve()), "-c", script],
+                cwd=root,
+                environment=expected_environment,
+                timeout_seconds=10,
+                max_output_bytes=4096,
+                cpu_limit=1,
+                memory_limit_bytes=128 * 1024 * 1024,
+            )
+            child_pid = int((root / "child.pid").read_text(encoding="utf-8"))
+            time.sleep(0.1)
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                child_alive = False
+            else:
+                child_alive = True
+                os.kill(child_pid, 9)
+            self.assertFalse(child_alive)
+            self.assertEqual(
+                json.loads(
+                    (root / "environment.json").read_text(encoding="utf-8")
+                ),
+                expected_environment,
+            )
+            self.assertEqual(
+                execution["execution_boundary"],
+                "systemd_user_transient_service",
+            )
+            self.assertTrue(execution["systemd_unit"].endswith(".service"))
+
+    def test_real_systemd_bwrap_contains_detached_candidate_when_required(self):
+        if (
+            os.environ.get("AGENTTEAM_REQUIRE_SYSTEMD_EVALUATOR") != "1"
+            or os.environ.get("AGENTTEAM_REQUIRE_REAL_BWRAP") != "1"
+        ):
+            self.skipTest("real systemd plus bwrap probe is opt-in")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _sandbox_fixture(root)
+            evaluator = root / "contract-evaluator.py"
+            evaluator_content = (
+                b"#!/usr/bin/python3\n"
+                b"import sys\n"
+                b"raise SystemExit(0 if len(sys.argv) >= 3 "
+                b"and sys.argv[1] == '--' else 64)\n"
+            )
+            evaluator.write_bytes(evaluator_content)
+            evaluator.chmod(0o700)
+            child_started_path = fixture["repository"] / "child-started"
+            child_survived_path = fixture["repository"] / "child-survived"
+            git_writable_path = fixture["repository"] / "git-writable"
+            git_readonly_path = fixture["repository"] / "git-readonly"
+            git_probe_path = fixture["repository"] / ".git" / "write-probe"
+            child_script = (
+                "import pathlib,time;"
+                f"pathlib.Path({str(child_started_path)!r}).write_text('1');"
+                "time.sleep(4);"
+                f"pathlib.Path({str(child_survived_path)!r}).write_text('1')"
+            )
+            acceptance = [
+                str(Path(sys.executable).resolve()),
+                "-c",
+                (
+                    "import pathlib,subprocess,time;"
+                    "\ntry:\n"
+                    f" pathlib.Path({str(git_probe_path)!r}).write_text('1')\n"
+                    "except OSError:\n"
+                    f" pathlib.Path({str(git_readonly_path)!r}).write_text('1')\n"
+                    "else:\n"
+                    f" pathlib.Path({str(git_writable_path)!r}).write_text('1')\n"
+                    "child=subprocess.Popen("
+                    f"[{str(Path(sys.executable).resolve())!r},"
+                    f"'-c',{child_script!r}],"
+                    "start_new_session=True);"
+                    f"pathlib.Path({str(child_started_path)!r})."
+                    "write_text(str(child.pid));"
+                    "time.sleep(60)"
+                ),
+            ]
+            prepared = prepare_candidate_evaluation_launch(
+                fixture["descriptor"],
+                evaluator,
+                hashlib.sha256(evaluator_content).hexdigest(),
+                acceptance,
+                cwd=fixture["repository"],
+            )
+            try:
+                execution = _run_bounded_argv(
+                    list(prepared.command),
+                    cwd=prepared.cwd,
+                    environment=prepared.environment,
+                    timeout_seconds=2,
+                    max_output_bytes=4096,
+                    cpu_limit=1,
+                    memory_limit_bytes=128 * 1024 * 1024,
+                    input_bytes=evaluator_content,
+                )
+            except ExperimentSandboxUnavailable:
+                self.fail("required real systemd plus bwrap probe is unavailable")
+            self.assertTrue(execution["timed_out"], execution)
+            self.assertTrue(child_started_path.is_file())
+            self.assertTrue(git_readonly_path.is_file())
+            self.assertFalse(git_writable_path.exists())
+            time.sleep(2.5)
+            self.assertFalse(child_survived_path.exists())
+
+    def test_real_bwrap_main_exit_does_not_leave_child_when_required(self):
+        if (
+            os.environ.get("AGENTTEAM_REQUIRE_SYSTEMD_EVALUATOR") != "1"
+            or os.environ.get("AGENTTEAM_REQUIRE_REAL_BWRAP") != "1"
+        ):
+            self.skipTest("real systemd plus bwrap probe is opt-in")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _sandbox_fixture(root)
+            evaluator = root / "contract-evaluator.py"
+            evaluator_content = b"#!/usr/bin/python3\nraise SystemExit(0)\n"
+            evaluator.write_bytes(evaluator_content)
+            evaluator.chmod(0o700)
+            survived_path = fixture["repository"] / "detached-survived"
+            child_script = (
+                "import pathlib,time;"
+                "time.sleep(2);"
+                f"pathlib.Path({str(survived_path)!r}).write_text('1')"
+            )
+            acceptance = [
+                str(Path(sys.executable).resolve()),
+                "-c",
+                (
+                    "import subprocess;"
+                    "subprocess.Popen("
+                    f"[{str(Path(sys.executable).resolve())!r},"
+                    f"'-c',{child_script!r}],"
+                    "start_new_session=True)"
+                ),
+            ]
+            prepared = prepare_candidate_evaluation_launch(
+                fixture["descriptor"],
+                evaluator,
+                hashlib.sha256(evaluator_content).hexdigest(),
+                acceptance,
+                cwd=fixture["repository"],
+            )
+            execution = _run_bounded_argv(
+                list(prepared.command),
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+                timeout_seconds=5,
+                max_output_bytes=4096,
+                cpu_limit=1,
+                memory_limit_bytes=128 * 1024 * 1024,
+                input_bytes=evaluator_content,
+            )
+            self.assertFalse(execution["timed_out"], execution)
+            self.assertEqual(execution["returncode"], 0, execution)
+            time.sleep(2.5)
+            self.assertFalse(survived_path.exists())
+
+    def test_provider_environment_rejects_canary_content_and_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repository"
+            repository.mkdir()
+            canary = root / "evaluator-only" / "gold-canary"
+            canary.parent.mkdir()
+            canary.write_text("provider-must-not-see-this", encoding="utf-8")
+            digest = hashlib.sha256(canary.read_bytes()).hexdigest()
+            bwrap = Path("/usr/bin/bwrap")
+            for leaked_value in (canary.read_text(encoding="utf-8"), digest):
+                with self.subTest(leaked_value=leaked_value):
+                    with self.assertRaisesRegex(
+                        ExperimentSandboxError,
+                        "evaluator-only material",
+                    ):
+                        build_provider_sandbox_descriptor(
+                            repository,
+                            runtime_views=[Path(sys.executable).resolve()],
+                            environment={"LEAKED_GOLD": leaked_value},
+                            bwrap_path=bwrap,
+                            forbidden_paths=[canary],
+                        )
+
+    def test_common_model_invocation_policy_wraps_supported_and_fake_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _sandbox_fixture(tmp)
+            captures = []
+
+            class FakeGatedRunner:
+                def __init__(
+                    self,
+                    lifecycle,
+                    command,
+                    *,
+                    cwd,
+                    input_text,
+                    timeout_seconds,
+                    environment,
+                ):
+                    captures.append(
+                        {
+                            "command": command,
+                            "cwd": cwd,
+                            "environment": environment,
+                        }
+                    )
+
+                def prepare(self):
+                    return ExecutionGroupIdentity.not_applicable()
+
+                def permit_and_wait(self, **_kwargs):
+                    return ProviderExecution([], 0, "", "")
+
+                def abort_before_permit(self):
+                    return None
+
+                def cleanup_after_terminal(self):
+                    return None
+
+            supported_root = Path(tmp) / "supported-authority"
+            supported_root.mkdir()
+            supported_lifecycle_root = experiment_lifecycle_authority_root(
+                supported_root,
+                "supported",
+            )
+            supported_reference = _publish_test_sandbox_reference(
+                supported_root,
+                fixture,
+            )
+            supported_context = _model_context(
+                supported=True,
+                sandbox_reference=supported_reference,
+            )
+            supported_context["experiment_authority_root"] = str(
+                supported_root
+            )
+            supported = ModelInvocationCall(
+                supported_lifecycle_root,
+                supported_context,
+                supported=True,
+                systemd_runner_factory=FakeGatedRunner,
+            )
+            supported.execute(
+                [str(Path(sys.executable).resolve()), "-c", "print('supported')"],
+                cwd=fixture["repository"],
+                input_text="prompt",
+                timeout_seconds=10,
+            )
+            self.assertTrue(supported.lifecycle.started_path.is_file())
+            start_record = json.loads(
+                supported.lifecycle.started_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                start_record["experiment_sandbox_policy_sha256"],
+                fixture["descriptor"]["policy_sha256"],
+            )
+            self.assertEqual(
+                start_record["experiment_sandbox_reference_sha256"],
+                supported_reference["sha256"],
+            )
+            self.assertEqual(captures[0]["cwd"], "/")
+            self.assertEqual(
+                captures[0]["command"][0],
+                fixture["descriptor"]["bwrap_path"],
+            )
+            self.assertEqual(
+                captures[0]["environment"],
+                fixture["descriptor"]["environment"],
+            )
+
+            fake_root = Path(tmp) / "fake-authority"
+            fake_root.mkdir()
+            fake_lifecycle_root = experiment_lifecycle_authority_root(
+                fake_root,
+                "fake",
+            )
+            fake_reference = _publish_test_sandbox_reference(
+                fake_root,
+                fixture,
+            )
+            fake_context = _model_context(
+                supported=False,
+                sandbox_reference=fake_reference,
+            )
+            fake_context["experiment_authority_root"] = str(fake_root)
+            fake = ModelInvocationCall(
+                fake_lifecycle_root,
+                fake_context,
+                supported=False,
+            )
+            with patch(
+                "agentteam_runtime.model_invocation._run_bounded_process",
+                return_value=ProviderExecution([], 0, "", ""),
+            ) as bounded:
+                fake.execute(
+                    [str(Path(sys.executable).resolve()), "-c", "print('fake')"],
+                    cwd=fixture["repository"],
+                    input_text="prompt",
+                    timeout_seconds=10,
+                )
+            self.assertEqual(
+                bounded.call_args.args[0][0],
+                fixture["descriptor"]["bwrap_path"],
+            )
+            self.assertEqual(
+                bounded.call_args.kwargs["environment"],
+                fixture["descriptor"]["environment"],
+            )
+
+    def test_sandbox_publication_requires_fresh_probe_and_valid_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _sandbox_fixture(tmp)
+            tampered_environment = copy.deepcopy(fixture["descriptor"])
+            tampered_environment["environment"]["UNDECLARED_SECRET"] = "unsafe"
+            authority = Path(tmp) / "authority-valid"
+            authority.mkdir()
+            reference = _publish_test_sandbox_reference(authority, fixture)
+            self.assertTrue(Path(reference["path"]).is_file())
+
+            invalid_authority = Path(tmp) / "authority-invalid"
+            invalid_authority.mkdir()
+            with self.assertRaises(ExperimentSandboxError):
+                publish_provider_sandbox_reference(
+                    invalid_authority,
+                    tampered_environment,
+                    fixture["canary"],
+                )
+
+    def test_required_experiment_sandbox_cannot_be_omitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            context = _model_context(
+                supported=False,
+                sandbox_reference=None,
+            )
+            context["experiment_sandbox_required"] = True
+            invocation = ModelInvocationCall(
+                Path(tmp) / "authority",
+                context,
+                supported=False,
+            )
+            with patch(
+                "agentteam_runtime.model_invocation.subprocess.Popen"
+            ) as popen:
+                with self.assertRaisesRegex(
+                    ModelInvocationIntegrityError,
+                    "sandbox is required",
+                ):
+                    invocation.execute(
+                        [str(Path(sys.executable).resolve()), "-c", "print('unsafe')"],
+                        cwd=tmp,
+                        input_text="prompt",
+                        timeout_seconds=10,
+                    )
+            popen.assert_not_called()
+
+    def test_sandbox_authority_must_be_explicit_and_provider_invisible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _sandbox_fixture(root)
+            authority = root / "authority"
+            authority.mkdir()
+            reference = _publish_test_sandbox_reference(
+                authority,
+                fixture,
+            )
+            missing_authority = _model_context(
+                supported=False,
+                sandbox_reference=reference,
+            )
+            invocation = ModelInvocationCall(
+                authority / "missing-authority-output",
+                missing_authority,
+                supported=False,
+            )
+            with self.assertRaisesRegex(
+                ModelInvocationIntegrityError,
+                "authority root is required",
+            ):
+                invocation.execute(
+                    [str(Path(sys.executable).resolve()), "-c", "pass"],
+                    cwd=fixture["repository"],
+                    input_text="",
+                    timeout_seconds=10,
+                )
+
+            visible_authority = fixture["repository"] / "visible-authority"
+            visible_authority.mkdir()
+            visible_lifecycle_root = experiment_lifecycle_authority_root(
+                visible_authority,
+                "visible",
+            )
+            visible_reference = _publish_test_sandbox_reference(
+                visible_authority,
+                fixture,
+            )
+            visible_context = _model_context(
+                supported=False,
+                sandbox_reference=visible_reference,
+            )
+            visible_context["experiment_authority_root"] = str(
+                visible_authority
+            )
+            visible = ModelInvocationCall(
+                visible_lifecycle_root,
+                visible_context,
+                supported=False,
+            )
+            with self.assertRaisesRegex(
+                ModelInvocationIntegrityError,
+                "authority root is provider-visible",
+            ):
+                visible.execute(
+                    [str(Path(sys.executable).resolve()), "-c", "pass"],
+                    cwd=fixture["repository"],
+                    input_text="",
+                    timeout_seconds=10,
+                )
+
+    def test_sandbox_policy_survives_mailbox_context_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _sandbox_fixture(tmp)
+            reference = _publish_test_sandbox_reference(
+                tmp,
+                fixture,
+            )
+            message = {
+                "payload": {
+                    "model_invocation_context": {
+                        "experiment_sandbox_reference": reference,
+                        "experiment_sandbox_required": True,
+                        "experiment_authority_root": tmp,
+                    }
+                }
+            }
+            projected = _model_invocation_context_payload(message)
+            context = invocation_context_from_message(
+                {"payload": projected},
+                backend="codex",
+            )
+            self.assertTrue(context["experiment_sandbox_required"])
+            self.assertEqual(
+                context["experiment_sandbox_reference"],
+                reference,
+            )
+            self.assertEqual(context["experiment_authority_root"], tmp)
+
+    def test_trusted_argv_evaluation_waits_for_terminal_and_avoids_shell(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner_patch = patch(
+                "agentteam_runtime.experiment_sandbox._run_bounded_argv",
+                side_effect=_test_evaluator_execution,
+            )
+            runner_patch.start()
+            self.addCleanup(runner_patch.stop)
+            root = Path(tmp)
+            fixture = _sandbox_fixture(root)
+            sandbox_reference = _publish_test_sandbox_reference(
+                root,
+                fixture,
+            )
+            lifecycle_authority_root = (
+                experiment_lifecycle_authority_root(
+                    root,
+                    "fixture",
+                )
+            )
+            lifecycle_context = _model_context(
+                supported=False,
+                sandbox_reference=None,
+            )
+            lifecycle_context["experiment_sandbox_policy_sha256"] = fixture[
+                "descriptor"
+            ]["policy_sha256"]
+            lifecycle_context["experiment_sandbox_reference_sha256"] = (
+                sandbox_reference["sha256"]
+            )
+            lifecycle = InvocationLifecycle(
+                lifecycle_authority_root,
+                lifecycle_context,
+                invocation_id="INV-FIXTURE",
+            )
+            lifecycle.publish_start(ExecutionGroupIdentity.not_applicable())
+            evaluator = root / "trusted-evaluator.py"
+            evaluator.write_text(
+                "#!/usr/bin/python3\n"
+                "import sys\n"
+                "if len(sys.argv) < 3 or sys.argv[1] != '--':\n"
+                "    raise SystemExit(64)\n",
+                encoding="utf-8",
+            )
+            evaluator.chmod(0o700)
+            evaluator_reference = publish_evaluator_reference(root, evaluator)
+            evaluator_digest = evaluator_reference["sha256"]
+            evaluator.write_text(
+                "#!/usr/bin/python3\nraise SystemExit(91)\n",
+                encoding="utf-8",
+            )
+            prompt = root / "prompt.txt"
+            context = root / "context.json"
+            taskpack = root / "taskpack"
+            artifacts = root / "artifacts"
+            prompt.write_text("safe prompt\n", encoding="utf-8")
+            context.write_text("{}\n", encoding="utf-8")
+            taskpack.mkdir()
+            artifacts.mkdir()
+            (taskpack / "task.json").write_text("{}\n", encoding="utf-8")
+            scan_groups = {
+                "prompt": [prompt],
+                "context": [context],
+                "taskpack": [taskpack],
+                "artifacts": [artifacts],
+            }
+            scan_scope_reference = publish_scan_scope_reference(
+                root,
+                scan_groups,
+            )
+            invocation_set_reference = (
+                publish_model_invocation_set_reference(
+                    root,
+                    "RUN-EXPERIMENT-FIXTURE",
+                    [
+                        {
+                            "lifecycle_authority_root": (
+                                lifecycle_authority_root
+                            ),
+                            "taskpack_id": "phase2-fixture",
+                            "invocation_ids": ["INV-FIXTURE"],
+                            "sandbox_reference": sandbox_reference,
+                        }
+                    ],
+                )
+            )
+            marker = root / "shell-must-not-run"
+            command = [
+                str(Path(sys.executable).resolve()),
+                "-c",
+                "import sys; print(sys.argv[1])",
+                f"literal;touch {marker}",
+            ]
+            protocol = _sandbox_protocol(fixture)
+            protocol["acceptance"] = {
+                "command": command,
+                "timeout_seconds": 10,
+            }
+            protocol["evaluator"]["artifact_sha256"] = evaluator_digest
+            protocol_reference = publish_experiment_protocol_reference(
+                root,
+                protocol,
+                reference_id="main-protocol",
+            )
+
+            with patch(
+                "agentteam_runtime.experiment_sandbox.subprocess.Popen"
+            ) as popen:
+                with self.assertRaisesRegex(
+                    ExperimentEvaluationBlocked,
+                    "must terminate",
+                ):
+                    run_trusted_argv_evaluator(
+                        authority_root=root,
+                        invocation_set_reference=invocation_set_reference,
+                        provider_sandbox_reference=sandbox_reference,
+                        experiment_protocol_reference=protocol_reference,
+                        scan_scope_reference=scan_scope_reference,
+                        command=command,
+                        cwd=fixture["repository"],
+                        evaluator_reference=evaluator_reference,
+                        canary_path=fixture["canary"],
+                        timeout_seconds=10,
+                    )
+            popen.assert_not_called()
+
+            lifecycle.finalize(
+                "completed",
+                stdout="",
+                stderr="",
+            )
+            evidence_path = root / "evaluation.json"
+            evidence = run_trusted_argv_evaluator(
+                authority_root=root,
+                invocation_set_reference=invocation_set_reference,
+                provider_sandbox_reference=sandbox_reference,
+                experiment_protocol_reference=protocol_reference,
+                scan_scope_reference=scan_scope_reference,
+                command=command,
+                cwd=fixture["repository"],
+                evaluator_reference=evaluator_reference,
+                canary_path=fixture["canary"],
+                timeout_seconds=10,
+                evidence_path=evidence_path,
+            )
+
+            self.assertEqual(
+                evidence["evaluation_status"],
+                "passed",
+                evidence,
+            )
+            self.assertTrue(evidence["promotion_eligible"])
+            self.assertTrue(evidence["evaluator_started"])
+            self.assertFalse(marker.exists())
+            self.assertEqual(len(evidence["terminal_invocations"]), 1)
+            self.assertEqual(
+                evidence["provider_sandbox_policy_sha256"],
+                fixture["descriptor"]["policy_sha256"],
+            )
+            self.assertEqual(
+                evidence["evaluator_artifact"],
+                evaluator_reference["path"],
+            )
+            self.assertRegex(evidence["environment_sha256"], r"^[0-9a-f]{64}$")
+            self.assertNotIn(
+                "AGENTTEAM_CREDENTIAL_FILE",
+                "\0".join(evidence["argv"]),
+            )
+            self.assertNotIn(
+                str(fixture["credential"]),
+                "\0".join(evidence["argv"]),
+            )
+            self.assertEqual(
+                evidence["run_id"],
+                "RUN-EXPERIMENT-FIXTURE",
+            )
+            self.assertEqual(evidence["taskpack_ids"], ["phase2-fixture"])
+            self.assertEqual(
+                evidence["expected_invocation_ids"],
+                ["INV-FIXTURE"],
+            )
+            self.assertEqual(evidence["pre_run_leak_scan"]["scan_status"], "clean")
+            self.assertEqual(evidence["post_run_leak_scan"]["scan_status"], "clean")
+            self.assertEqual(
+                validate_evaluation_evidence(
+                    evidence,
+                    expected_run_id="RUN-EXPERIMENT-FIXTURE",
+                    expected_taskpack_ids=["phase2-fixture"],
+                    expected_protocol_sha256=evidence[
+                        "experiment_protocol_sha256"
+                    ],
+                    expected_protocol_reference_sha256=(
+                        protocol_reference["sha256"]
+                    ),
+                    expected_acceptance_command_sha256=evidence[
+                        "acceptance_command_sha256"
+                    ],
+                    expected_acceptance_executable_sha256=evidence[
+                        "acceptance_executable_sha256"
+                    ],
+                    expected_evaluator_sha256=evaluator_digest,
+                    expected_invocation_set_reference_sha256=(
+                        invocation_set_reference["sha256"]
+                    ),
+                    expected_provider_sandbox_reference_sha256=(
+                        sandbox_reference["sha256"]
+                    ),
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                    experiment_protocol_reference=protocol_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    canary_path=fixture["canary"],
+                ),
+                evidence,
+            )
+            self.assertTrue(evidence_path.is_file())
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "run_id binding mismatch",
+            ):
+                validate_evaluation_evidence(
+                    evidence,
+                    expected_run_id="RUN-OTHER",
+                )
+            forged_evidence = copy.deepcopy(evidence)
+            forged_evidence["expected_invocation_ids"] = ["INV-FORGED"]
+            forged_evidence["invocation_sets"][0][
+                "expected_invocation_ids"
+            ] = ["INV-FORGED"]
+            forged_evidence["terminal_invocations"][0]["invocation_id"] = (
+                "INV-FORGED"
+            )
+            forged_evidence["invocation_set_seal_sha256"] = hashlib.sha256(
+                json.dumps(
+                    forged_evidence["invocation_sets"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "invocation authority binding mismatch",
+            ):
+                validate_evaluation_evidence(
+                    forged_evidence,
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                )
+            forged_candidate = copy.deepcopy(evidence)
+            forged_candidate["provider_sandbox_reference_sha256"] = "f" * 64
+            forged_candidate["pre_run_leak_scan"]["canary_sha256"] = "e" * 64
+            forged_candidate["post_run_leak_scan"]["canary_sha256"] = "e" * 64
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "candidate sandbox binding mismatch",
+            ):
+                validate_evaluation_evidence(
+                    forged_candidate,
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                    experiment_protocol_reference=protocol_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    canary_path=fixture["canary"],
+                )
+
+            candidate_probe_command = [
+                str(Path(sys.executable).resolve()),
+                "-c",
+                (
+                    "from pathlib import Path\n"
+                    "p=Path('../evaluator-only/gold-canary')\n"
+                    "try:\n"
+                    " p.read_bytes()\n"
+                    "except OSError:\n"
+                    " raise SystemExit(0)\n"
+                    "raise SystemExit(91)\n"
+                ),
+            ]
+            candidate_probe_protocol = copy.deepcopy(protocol)
+            candidate_probe_protocol["acceptance"]["command"] = (
+                candidate_probe_command
+            )
+            candidate_probe_reference = publish_experiment_protocol_reference(
+                root,
+                candidate_probe_protocol,
+                reference_id="candidate-canary-probe",
+            )
+            use_real_candidate_boundary = (
+                os.environ.get("AGENTTEAM_REQUIRE_REAL_BWRAP") == "1"
+                and os.environ.get("AGENTTEAM_REQUIRE_SYSTEMD_EVALUATOR")
+                == "1"
+            )
+            if use_real_candidate_boundary:
+                runner_patch.stop()
+            try:
+                candidate_probe_evidence = run_trusted_argv_evaluator(
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    experiment_protocol_reference=candidate_probe_reference,
+                    scan_scope_reference=scan_scope_reference,
+                    command=candidate_probe_command,
+                    cwd=fixture["repository"],
+                    evaluator_reference=evaluator_reference,
+                    canary_path=fixture["canary"],
+                    timeout_seconds=10,
+                )
+            finally:
+                if use_real_candidate_boundary:
+                    runner_patch.start()
+            self.assertEqual(
+                candidate_probe_evidence["evaluation_status"],
+                "passed",
+                candidate_probe_evidence,
+            )
+
+            with self.assertRaisesRegex(
+                ExperimentEvaluationBlocked,
+                "preregistered acceptance command",
+            ):
+                run_trusted_argv_evaluator(
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    experiment_protocol_reference=protocol_reference,
+                    scan_scope_reference=scan_scope_reference,
+                    command=[
+                        str(Path(sys.executable).resolve()),
+                        "-c",
+                        "print('different evaluator')",
+                    ],
+                    cwd=fixture["repository"],
+                    evaluator_reference=evaluator_reference,
+                    canary_path=fixture["canary"],
+                    timeout_seconds=10,
+                )
+
+            different = root / "different-evaluator.py"
+            different.write_text(
+                "#!/usr/bin/python3\nraise SystemExit(0)\n",
+                encoding="utf-8",
+            )
+            different.chmod(0o700)
+            different_reference = publish_evaluator_reference(
+                root,
+                different,
+                reference_id="different-evaluator",
+            )
+            with self.assertRaisesRegex(
+                ExperimentEvaluationBlocked,
+                "trusted evaluator digest mismatch",
+            ):
+                run_trusted_argv_evaluator(
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    experiment_protocol_reference=protocol_reference,
+                    scan_scope_reference=scan_scope_reference,
+                    command=command,
+                    cwd=fixture["repository"],
+                    evaluator_reference=different_reference,
+                    canary_path=fixture["canary"],
+                    timeout_seconds=10,
+                )
+
+            shell_protocol = copy.deepcopy(protocol)
+            shell_command = ["/bin/bash", "-c", "true"]
+            shell_protocol["acceptance"]["command"] = shell_command
+            shell_protocol_reference = publish_experiment_protocol_reference(
+                root,
+                shell_protocol,
+                reference_id="shell-protocol",
+            )
+            with self.assertRaisesRegex(
+                ExperimentEvaluationBlocked,
+                "executable is not (approved|uniquely mapped)",
+            ):
+                run_trusted_argv_evaluator(
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    experiment_protocol_reference=shell_protocol_reference,
+                    scan_scope_reference=scan_scope_reference,
+                    command=shell_command,
+                    cwd=fixture["repository"],
+                    evaluator_reference=evaluator_reference,
+                    canary_path=fixture["canary"],
+                    timeout_seconds=10,
+                )
+
+            ignoring_evaluator = root / "ignoring-evaluator.py"
+            ignoring_evaluator.write_text(
+                "#!/usr/bin/python3\nraise SystemExit(0)\n",
+                encoding="utf-8",
+            )
+            ignoring_evaluator.chmod(0o700)
+            ignoring_reference = publish_evaluator_reference(
+                root,
+                ignoring_evaluator,
+                reference_id="ignoring-evaluator",
+            )
+            failing_command = [
+                str(Path(sys.executable).resolve()),
+                "-c",
+                "raise SystemExit(97)",
+            ]
+            failing_protocol = _sandbox_protocol(fixture)
+            failing_protocol["acceptance"] = {
+                "command": failing_command,
+                "timeout_seconds": 10,
+            }
+            failing_protocol["evaluator"]["artifact_sha256"] = (
+                ignoring_reference["sha256"]
+            )
+            failing_protocol_reference = (
+                publish_experiment_protocol_reference(
+                    root,
+                    failing_protocol,
+                    reference_id="ignored-acceptance-protocol",
+                )
+            )
+            ignored_acceptance = run_trusted_argv_evaluator(
+                authority_root=root,
+                invocation_set_reference=invocation_set_reference,
+                provider_sandbox_reference=sandbox_reference,
+                experiment_protocol_reference=failing_protocol_reference,
+                scan_scope_reference=scan_scope_reference,
+                command=failing_command,
+                cwd=fixture["repository"],
+                evaluator_reference=ignoring_reference,
+                canary_path=fixture["canary"],
+                timeout_seconds=10,
+            )
+            self.assertEqual(ignored_acceptance["evaluation_status"], "failed")
+            self.assertEqual(ignored_acceptance["returncode"], 97)
+            self.assertFalse(ignored_acceptance["promotion_eligible"])
+
+            fake_python = root / "python3"
+            fake_python.write_text(
+                "#!/bin/sh\nexit 0\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o700)
+            fake_command = [str(fake_python), "-c", "print('unsafe')"]
+            fake_protocol = copy.deepcopy(protocol)
+            fake_protocol["acceptance"]["command"] = fake_command
+            fake_protocol_reference = publish_experiment_protocol_reference(
+                root,
+                fake_protocol,
+                reference_id="fake-python-protocol",
+            )
+            with self.assertRaisesRegex(
+                ExperimentEvaluationBlocked,
+                "executable is not (approved|uniquely mapped)",
+            ):
+                run_trusted_argv_evaluator(
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    experiment_protocol_reference=fake_protocol_reference,
+                    scan_scope_reference=scan_scope_reference,
+                    command=fake_command,
+                    cwd=fixture["repository"],
+                    evaluator_reference=evaluator_reference,
+                    canary_path=fixture["canary"],
+                    timeout_seconds=10,
+                )
+
+            truncated_command = [
+                str(Path(sys.executable).resolve()),
+                "-c",
+                "import sys; sys.stdout.write('A' * 64)",
+            ]
+            truncated_protocol = _sandbox_protocol(fixture)
+            truncated_protocol["acceptance"] = {
+                "command": truncated_command,
+                "timeout_seconds": 10,
+            }
+            truncated_protocol["evaluator"]["artifact_sha256"] = (
+                evaluator_digest
+            )
+            truncated_protocol_reference = (
+                publish_experiment_protocol_reference(
+                    root,
+                    truncated_protocol,
+                    reference_id="truncated-protocol",
+                )
+            )
+            truncated = run_trusted_argv_evaluator(
+                authority_root=root,
+                invocation_set_reference=invocation_set_reference,
+                provider_sandbox_reference=sandbox_reference,
+                experiment_protocol_reference=truncated_protocol_reference,
+                scan_scope_reference=scan_scope_reference,
+                command=truncated_command,
+                cwd=fixture["repository"],
+                evaluator_reference=evaluator_reference,
+                canary_path=fixture["canary"],
+                timeout_seconds=10,
+                max_output_bytes=8,
+            )
+            self.assertEqual(truncated["evaluation_status"], "failed")
+            self.assertFalse(truncated["promotion_eligible"])
+            self.assertTrue(truncated["stdout_truncated"])
+            self.assertEqual(
+                truncated["failure_reason"],
+                "evaluator_output_truncated",
+            )
+
+            valid_terminal = lifecycle.terminal_path.read_text(encoding="utf-8")
+            terminal = json.loads(valid_terminal)
+            terminal["lifecycle_owner_token"] = "OWNER-TAMPERED"
+            lifecycle.terminal_path.write_text(
+                json.dumps(terminal, sort_keys=True, separators=(",", ":"))
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ExperimentEvaluationBlocked,
+                "does not bind its start and sandbox",
+            ):
+                run_trusted_argv_evaluator(
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    experiment_protocol_reference=(
+                        truncated_protocol_reference
+                    ),
+                    scan_scope_reference=scan_scope_reference,
+                    command=truncated_command,
+                    cwd=fixture["repository"],
+                    evaluator_reference=evaluator_reference,
+                    canary_path=fixture["canary"],
+                    timeout_seconds=10,
+                )
+            lifecycle.terminal_path.write_text(valid_terminal, encoding="utf-8")
+
+            terminal = json.loads(valid_terminal)
+            terminal.pop("experiment_sandbox_policy_sha256", None)
+            lifecycle.terminal_path.write_text(
+                json.dumps(terminal, sort_keys=True, separators=(",", ":"))
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ExperimentEvaluationBlocked,
+                "does not bind its start and sandbox",
+            ):
+                run_trusted_argv_evaluator(
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    experiment_protocol_reference=(
+                        truncated_protocol_reference
+                    ),
+                    scan_scope_reference=scan_scope_reference,
+                    command=truncated_command,
+                    cwd=fixture["repository"],
+                    evaluator_reference=evaluator_reference,
+                    canary_path=fixture["canary"],
+                    timeout_seconds=10,
+                )
+            lifecycle.terminal_path.write_text(valid_terminal, encoding="utf-8")
+
+            terminal = json.loads(
+                lifecycle.terminal_path.read_text(encoding="utf-8")
+            )
+            terminal["terminal_status"] = "running"
+            lifecycle.terminal_path.write_text(
+                json.dumps(terminal, sort_keys=True, separators=(",", ":"))
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ExperimentEvaluationBlocked,
+                "model invocation terminal schema failed",
+            ):
+                run_trusted_argv_evaluator(
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    experiment_protocol_reference=(
+                        truncated_protocol_reference
+                    ),
+                    scan_scope_reference=scan_scope_reference,
+                    command=truncated_command,
+                    cwd=fixture["repository"],
+                    evaluator_reference=evaluator_reference,
+                    canary_path=fixture["canary"],
+                    timeout_seconds=10,
+                )
+
+    def test_precreated_invocation_cannot_publish_after_evaluation_seal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _sandbox_fixture(root)
+            sandbox_reference = _publish_test_sandbox_reference(root, fixture)
+            lifecycle_authority_root = (
+                experiment_lifecycle_authority_root(
+                    root,
+                    "completed",
+                )
+            )
+            context = _model_context(supported=False, sandbox_reference=None)
+            context["experiment_sandbox_policy_sha256"] = fixture[
+                "descriptor"
+            ]["policy_sha256"]
+            context["experiment_sandbox_reference_sha256"] = (
+                sandbox_reference["sha256"]
+            )
+            completed = InvocationLifecycle(
+                lifecycle_authority_root,
+                context,
+                invocation_id="INV-COMPLETED",
+            )
+            completed.publish_start(ExecutionGroupIdentity.not_applicable())
+            completed.finalize("completed", stdout="", stderr="")
+            late = InvocationLifecycle(
+                lifecycle_authority_root,
+                context,
+                invocation_id="INV-LATE",
+            )
+            scan_paths = {}
+            for group in ("prompt", "context", "taskpack", "artifacts"):
+                path = root / f"{group}.txt"
+                path.write_text("{}\n", encoding="utf-8")
+                scan_paths[group] = [path]
+            scan_reference = publish_scan_scope_reference(root, scan_paths)
+            evaluator = root / "evaluator.py"
+            evaluator.write_text(
+                "#!/usr/bin/python3\nraise SystemExit(0)\n",
+                encoding="utf-8",
+            )
+            evaluator.chmod(0o700)
+            evaluator_reference = publish_evaluator_reference(root, evaluator)
+            shadow_authority = lifecycle_authority_root.parent / "shadow"
+            shadow_authority.mkdir()
+            shutil.copytree(
+                completed.invocation_dir,
+                shadow_authority / "model_invocations" / "INV-COMPLETED",
+                dirs_exist_ok=True,
+            )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "does not cover the lifecycle registry",
+            ):
+                publish_model_invocation_set_reference(
+                    root,
+                    "RUN-EXPERIMENT-FIXTURE",
+                    [
+                        {
+                            "lifecycle_authority_root": (
+                                lifecycle_authority_root
+                            ),
+                            "taskpack_id": "phase2-fixture",
+                            "invocation_ids": [
+                                "INV-COMPLETED",
+                                "INV-LATE",
+                            ],
+                            "sandbox_reference": sandbox_reference,
+                        }
+                    ],
+                    reference_id="shadow-manifest",
+                )
+            shutil.rmtree(shadow_authority)
+            hidden_authority = root / "temporarily-hidden-authority"
+            lifecycle_authority_root.rename(hidden_authority)
+            try:
+                with self.assertRaisesRegex(
+                    ExperimentSandboxError,
+                    "lifecycle authority.*unavailable",
+                ):
+                    publish_model_invocation_set_reference(
+                        root,
+                        "RUN-EXPERIMENT-FIXTURE",
+                        [
+                            {
+                                "lifecycle_authority_root": (
+                                    lifecycle_authority_root
+                                ),
+                                "taskpack_id": "phase2-fixture",
+                                "invocation_ids": [
+                                    "INV-COMPLETED",
+                                    "INV-LATE",
+                                ],
+                                "sandbox_reference": sandbox_reference,
+                            }
+                        ],
+                        reference_id="deleted-root-manifest",
+                    )
+            finally:
+                hidden_authority.rename(lifecycle_authority_root)
+            invocation_set_reference = (
+                publish_model_invocation_set_reference(
+                    root,
+                    "RUN-EXPERIMENT-FIXTURE",
+                    [
+                        {
+                            "lifecycle_authority_root": (
+                                lifecycle_authority_root
+                            ),
+                            "taskpack_id": "phase2-fixture",
+                            "invocation_ids": [
+                                "INV-COMPLETED",
+                                "INV-LATE",
+                            ],
+                            "sandbox_reference": sandbox_reference,
+                        }
+                    ],
+                )
+            )
+            protocol = _sandbox_protocol(fixture)
+            protocol["acceptance"]["command"] = [
+                str(Path(sys.executable).resolve()),
+                "-c",
+                "raise SystemExit(0)",
+            ]
+            protocol["acceptance"]["timeout_seconds"] = 10
+            protocol["evaluator"]["artifact_sha256"] = evaluator_reference[
+                "sha256"
+            ]
+            protocol_reference = publish_experiment_protocol_reference(
+                root,
+                protocol,
+            )
+
+            with self.assertRaisesRegex(
+                ExperimentEvaluationBlocked,
+                "durable start",
+            ):
+                run_trusted_argv_evaluator(
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    experiment_protocol_reference=protocol_reference,
+                    scan_scope_reference=scan_reference,
+                    command=protocol["acceptance"]["command"],
+                    cwd=fixture["repository"],
+                    evaluator_reference=evaluator_reference,
+                    canary_path=fixture["canary"],
+                    timeout_seconds=10,
+                )
+            with self.assertRaisesRegex(
+                ModelInvocationIntegrityError,
+                "invocation set is sealed",
+            ):
+                late.publish_start(ExecutionGroupIdentity.not_applicable())
+
+    def test_evaluation_seals_multiple_taskpack_authority_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch(
+                "agentteam_runtime.experiment_sandbox._run_bounded_argv",
+                side_effect=_test_evaluator_execution,
+            ):
+                root = Path(tmp)
+                fixture = _sandbox_fixture(root)
+                worker_sandbox_reference = (
+                    _publish_test_sandbox_reference(
+                        root,
+                        fixture,
+                    )
+                )
+                author_repository = root / "author-repository"
+                shutil.copytree(
+                    fixture["repository"],
+                    author_repository,
+                )
+                author_identity = {
+                    "commit": _git(
+                        author_repository,
+                        "rev-parse",
+                        "HEAD",
+                    ).stdout.strip(),
+                    "tree": _git(
+                        author_repository,
+                        "rev-parse",
+                        "HEAD^{tree}",
+                    ).stdout.strip(),
+                    "git_object_format": _git(
+                        author_repository,
+                        "rev-parse",
+                        "--show-object-format",
+                    ).stdout.strip(),
+                }
+                author_descriptor = build_provider_sandbox_descriptor(
+                    author_repository,
+                    runtime_views=[
+                        {
+                            "source": view["source"],
+                            "target": view["target"],
+                        }
+                        for view in fixture["descriptor"]["runtime_views"]
+                    ],
+                    bwrap_path="/usr/bin/bwrap",
+                    repository_target="/workspace-author",
+                    repository_identity=author_identity,
+                    forbidden_paths=[fixture["canary"]],
+                )
+                author_evidence = dict(fixture["evidence"])
+                author_evidence["policy_sha256"] = author_descriptor[
+                    "policy_sha256"
+                ]
+                with patch(
+                    "agentteam_runtime.experiment_sandbox."
+                    "probe_gold_canary_denial",
+                    return_value=author_evidence,
+                ):
+                    author_sandbox_reference = (
+                        publish_provider_sandbox_reference(
+                            root,
+                            author_descriptor,
+                            fixture["canary"],
+                            reference_id="author-sandbox",
+                        )
+                    )
+                author_authority = experiment_lifecycle_authority_root(
+                    root,
+                    "author-context",
+                )
+                cross_context = _model_context(
+                    supported=False,
+                    sandbox_reference=author_sandbox_reference,
+                )
+                cross_context["experiment_sandbox_required"] = True
+                cross_context["experiment_authority_root"] = str(root)
+                cross_invocation = ModelInvocationCall(
+                    author_authority,
+                    cross_context,
+                    supported=False,
+                )
+                with self.assertRaisesRegex(
+                    ModelInvocationIntegrityError,
+                    "cwd must remain inside",
+                ):
+                    cross_invocation.execute(
+                        [str(Path(sys.executable).resolve()), "-c", "pass"],
+                        cwd=fixture["repository"],
+                        input_text="",
+                        timeout_seconds=10,
+                    )
+                shutil.rmtree(cross_invocation.lifecycle.invocation_dir)
+                worker_authority = experiment_lifecycle_authority_root(
+                    root,
+                    "worker-output",
+                )
+                authorities = {
+                    "author-context": author_authority,
+                    "worker-output": worker_authority,
+                }
+                invocation_sets = []
+                for (
+                    authority_name,
+                    taskpack_id,
+                    sandbox_reference,
+                    sandbox_policy_sha256,
+                    workspace,
+                ) in (
+                    (
+                        "author-context",
+                        "taskpack-authoring",
+                        author_sandbox_reference,
+                        author_descriptor["policy_sha256"],
+                        author_repository,
+                    ),
+                    (
+                        "worker-output",
+                        "taskpack-implementation",
+                        worker_sandbox_reference,
+                        fixture["descriptor"]["policy_sha256"],
+                        fixture["repository"],
+                    ),
+                ):
+                    authority = authorities[authority_name]
+                    context = _model_context(
+                        supported=False,
+                        sandbox_reference=sandbox_reference,
+                    )
+                    context["taskpack_id"] = taskpack_id
+                    context["experiment_sandbox_required"] = True
+                    context["experiment_authority_root"] = str(root)
+                    invocation = ModelInvocationCall(
+                        authority,
+                        context,
+                        supported=False,
+                    )
+                    with patch(
+                        "agentteam_runtime.model_invocation."
+                        "_run_bounded_process",
+                        return_value=ProviderExecution([], 0, "", ""),
+                    ):
+                        invocation.execute(
+                            [
+                                str(Path(sys.executable).resolve()),
+                                "-c",
+                                "raise SystemExit(0)",
+                            ],
+                            cwd=workspace,
+                            input_text="",
+                            timeout_seconds=10,
+                        )
+                    invocation.lifecycle.finalize(
+                        "completed",
+                        stdout="",
+                        stderr="",
+                    )
+                    self.assertEqual(
+                        invocation.lifecycle.context[
+                            "experiment_sandbox_policy_sha256"
+                        ],
+                        sandbox_policy_sha256,
+                    )
+                    invocation_id = invocation.lifecycle.invocation_id
+                    invocation_sets.append(
+                        {
+                            "lifecycle_authority_root": authority,
+                            "taskpack_id": taskpack_id,
+                            "invocation_ids": [invocation_id],
+                            "sandbox_reference": sandbox_reference,
+                        }
+                    )
+                sandbox_reference = worker_sandbox_reference
+                scan_groups = {}
+                for group in ("prompt", "context", "taskpack", "artifacts"):
+                    path = root / f"{group}.json"
+                    path.write_text("{}\n", encoding="utf-8")
+                    scan_groups[group] = [path]
+                scan_reference = publish_scan_scope_reference(
+                    root,
+                    scan_groups,
+                )
+                invocation_reference = (
+                    publish_model_invocation_set_reference(
+                        root,
+                        "RUN-EXPERIMENT-FIXTURE",
+                        invocation_sets,
+                    )
+                )
+                evaluator = root / "multi-root-evaluator.py"
+                evaluator.write_text(
+                    "#!/usr/bin/python3\n"
+                    "import sys\n"
+                    "if len(sys.argv) < 3 or sys.argv[1] != '--':\n"
+                    "    raise SystemExit(64)\n",
+                    encoding="utf-8",
+                )
+                evaluator.chmod(0o700)
+                evaluator_reference = publish_evaluator_reference(
+                    root,
+                    evaluator,
+                )
+                protocol = _sandbox_protocol(fixture)
+                command = [
+                    str(Path(sys.executable).resolve()),
+                    "-c",
+                    "raise SystemExit(0)",
+                ]
+                protocol["acceptance"] = {
+                    "command": command,
+                    "timeout_seconds": 10,
+                }
+                protocol["evaluator"]["artifact_sha256"] = (
+                    evaluator_reference["sha256"]
+                )
+                protocol_reference = publish_experiment_protocol_reference(
+                    root,
+                    protocol,
+                )
+
+                evidence = run_trusted_argv_evaluator(
+                    authority_root=root,
+                    invocation_set_reference=invocation_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    experiment_protocol_reference=protocol_reference,
+                    scan_scope_reference=scan_reference,
+                    command=command,
+                    cwd=fixture["repository"],
+                    evaluator_reference=evaluator_reference,
+                    canary_path=fixture["canary"],
+                    timeout_seconds=10,
+                )
+
+            self.assertEqual(
+                evidence["evaluation_status"],
+                "passed",
+                evidence,
+            )
+            self.assertEqual(
+                evidence["taskpack_ids"],
+                ["taskpack-authoring", "taskpack-implementation"],
+            )
+            self.assertEqual(
+                evidence["expected_invocation_ids"],
+                sorted(
+                    invocation_id
+                    for item in invocation_sets
+                    for invocation_id in item["invocation_ids"]
+                ),
+            )
+            self.assertEqual(len(evidence["invocation_sets"]), 2)
+            self.assertEqual(len(evidence["terminal_invocations"]), 2)
+            self.assertEqual(
+                {
+                    item["sandbox_policy_sha256"]
+                    for item in evidence["invocation_sets"]
+                },
+                {
+                    author_descriptor["policy_sha256"],
+                    fixture["descriptor"]["policy_sha256"],
+                },
+            )
+
+    def test_prompt_context_taskpack_and_artifact_canary_scans_are_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _sandbox_fixture(tmp)
+            root = Path(tmp)
+            group_paths = {}
+            for group in ("prompt", "context", "taskpack", "artifacts"):
+                path = root / f"{group}.txt"
+                path.write_text(f"safe {group}\n", encoding="utf-8")
+                group_paths[group] = [path]
+            clean = scan_canary_leakage(
+                group_paths,
+                canary_path=fixture["canary"],
+            )
+            self.assertEqual(clean["scan_status"], "clean")
+
+            digest = hashlib.sha256(fixture["canary"].read_bytes()).hexdigest()
+            Path(group_paths["context"][0]).write_text(
+                f"context leaked {digest}\n",
+                encoding="utf-8",
+            )
+            leaked = scan_canary_leakage(
+                group_paths,
+                canary_path=fixture["canary"],
+            )
+            self.assertEqual(leaked["scan_status"], "leak_detected")
+            self.assertEqual(leaked["findings"][0]["group"], "context")
+            self.assertEqual(leaked["findings"][0]["match"], "canary_sha256")
+
+            with self.assertRaisesRegex(
+                ExperimentSandboxUnavailable,
+                "byte bound",
+            ):
+                scan_canary_leakage(
+                    group_paths,
+                    canary_path=fixture["canary"],
+                    max_bytes=1,
+                )
+            with self.assertRaisesRegex(
+                ExperimentSandboxUnavailable,
+                "entry bound",
+            ):
+                scan_canary_leakage(
+                    group_paths,
+                    canary_path=fixture["canary"],
+                    max_files=3,
+                )
 
 
 if __name__ == "__main__":

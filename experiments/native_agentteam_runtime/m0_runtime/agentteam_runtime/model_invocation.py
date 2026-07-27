@@ -737,10 +737,24 @@ class InvocationLifecycle:
         self.invocation_id = invocation_id or f"INV-{uuid.uuid4().hex}"
         self.context = dict(context)
         self.started_at = started_at or _utc_now()
+        self.authority_root.mkdir(parents=True, exist_ok=True)
+        invocation_root = self.authority_root / "model_invocations"
+        invocation_root.mkdir(parents=True, exist_ok=True)
         self.invocation_dir = (
-            self.authority_root / "model_invocations" / self.invocation_id
+            invocation_root / self.invocation_id
         )
-        self.invocation_dir.mkdir(parents=True, exist_ok=False)
+        lock_path = self.authority_root / "model_invocations.lock"
+        lock_path.touch(mode=0o600, exist_ok=True)
+        with lock_path.open("r+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                if (self.authority_root / "model_invocations.sealed.json").exists():
+                    raise ModelInvocationIntegrityError(
+                        "model invocation set is sealed"
+                    )
+                self.invocation_dir.mkdir(parents=False, exist_ok=False)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         _fsync_directory(self.invocation_dir.parent)
         self.started_path = self.invocation_dir / "started.json"
         self.revoked_path = self.invocation_dir / "revoked.json"
@@ -764,7 +778,18 @@ class InvocationLifecycle:
             },
             "started_at": self.started_at,
         }
-        _exclusive_publish_json(self.started_path, record)
+        lock_path = self.authority_root / "model_invocations.lock"
+        lock_path.touch(mode=0o600, exist_ok=True)
+        with lock_path.open("r+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                if (self.authority_root / "model_invocations.sealed.json").exists():
+                    raise ModelInvocationIntegrityError(
+                        "model invocation set is sealed"
+                    )
+                _exclusive_publish_json(self.started_path, record)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         return record
 
     def write_bounded_spools(self, stdout, stderr):
@@ -850,6 +875,7 @@ class InvocationLifecycle:
                 "usage_schema_version": "model_invocation_usage.v1",
                 "usage_event_id": _usage_event_id(self.invocation_id),
                 "invocation_id": self.invocation_id,
+                "start_sha256": _bounded_file_sha256(self.started_path),
                 **_terminal_context(self.context),
                 "provider_session_id": lineage["provider_session_id"],
                 "provider_predecessor_invocation_id": self.context.get(
@@ -933,13 +959,82 @@ class ModelInvocationCall:
         progress_interval_seconds=30.0,
     ):
         command = list(command)
+        environment = None
+        sandbox_reference = self.lifecycle.context.get(
+            "experiment_sandbox_reference"
+        )
+        sandbox_required = (
+            self.lifecycle.context.get("experiment_sandbox_required") is True
+        )
+        if sandbox_required and sandbox_reference is None:
+            raise ModelInvocationIntegrityError(
+                "experiment provider sandbox is required but unavailable"
+            )
+        if sandbox_reference is not None:
+            try:
+                from .experiment_sandbox import (
+                    ExperimentSandboxError,
+                    ExperimentSandboxUnavailable,
+                    load_provider_sandbox_reference,
+                    prepare_provider_launch,
+                    validate_experiment_lifecycle_authority,
+                    validate_provider_authority_separation,
+                )
+
+                experiment_authority_root = self.lifecycle.context.get(
+                    "experiment_authority_root"
+                )
+                if experiment_authority_root is None:
+                    raise ExperimentSandboxError(
+                        "experiment authority root is required"
+                    )
+                sandbox_descriptor = load_provider_sandbox_reference(
+                    sandbox_reference,
+                    experiment_authority_root,
+                )
+                validate_experiment_lifecycle_authority(
+                    experiment_authority_root,
+                    self.lifecycle.authority_root,
+                )
+                validate_provider_authority_separation(
+                    sandbox_descriptor,
+                    experiment_authority_root,
+                    self.lifecycle.authority_root,
+                )
+                prepared = prepare_provider_launch(
+                    sandbox_descriptor,
+                    command,
+                    cwd=cwd,
+                )
+            except ExperimentSandboxUnavailable as exc:
+                raise ModelInvocationUnavailable(
+                    f"experiment provider namespace unavailable: {exc}"
+                ) from exc
+            except ExperimentSandboxError as exc:
+                raise ModelInvocationIntegrityError(
+                    f"invalid experiment provider namespace: {exc}"
+                ) from exc
+            command = list(prepared.command)
+            cwd = prepared.cwd
+            environment = dict(prepared.environment)
+            self.lifecycle.context["experiment_sandbox_policy_sha256"] = (
+                prepared.policy_sha256
+            )
+            self.lifecycle.context[
+                "experiment_sandbox_reference_sha256"
+            ] = sandbox_reference["sha256"]
         if self.supported:
+            runner_arguments = {
+                "cwd": cwd,
+                "input_text": input_text,
+                "timeout_seconds": timeout_seconds,
+            }
+            if environment is not None:
+                runner_arguments["environment"] = environment
             runner = self.systemd_runner_factory(
                 self.lifecycle,
                 command,
-                cwd=cwd,
-                input_text=input_text,
-                timeout_seconds=timeout_seconds,
+                **runner_arguments,
             )
             self.execution_group = runner
             identity = runner.prepare()
@@ -961,6 +1056,7 @@ class ModelInvocationCall:
             cwd=cwd,
             input_text=input_text,
             timeout_seconds=timeout_seconds,
+            environment=environment,
             progress_callback=progress_callback,
             progress_interval_seconds=progress_interval_seconds,
         )
@@ -989,6 +1085,7 @@ class SystemdGatedExecution:
         cwd,
         input_text,
         timeout_seconds,
+        environment=None,
         command_runner=None,
     ):
         if not sys.platform.startswith("linux"):
@@ -1004,6 +1101,7 @@ class SystemdGatedExecution:
         self.cwd = str(cwd)
         self.input_text = str(input_text)
         self.timeout_seconds = timeout_seconds
+        self.environment = _validated_process_environment(environment)
         self.command_runner = command_runner or subprocess.run
         digest = hashlib.sha256(
             lifecycle.invocation_id.encode("utf-8")
@@ -1035,6 +1133,8 @@ class SystemdGatedExecution:
             ).hexdigest(),
             "max_stream_bytes": MAX_PROVIDER_STREAM_BYTES,
         }
+        if self.environment is not None:
+            spec["environment"] = self.environment
         _exclusive_publish_json(self.spec_path, spec)
         module_path = str(Path(__file__).resolve())
         self._checked_command(
@@ -1549,6 +1649,15 @@ def invocation_context_from_message(message, *, model=None, backend="codex"):
         ),
         "previous_provider_turn_id": payload.get("previous_provider_turn_id"),
         "previous_invocation_id": payload.get("previous_invocation_id"),
+        "experiment_sandbox_reference": payload.get(
+            "experiment_sandbox_reference"
+        ),
+        "experiment_sandbox_required": (
+            payload.get("experiment_sandbox_required") is True
+        ),
+        "experiment_authority_root": payload.get(
+            "experiment_authority_root"
+        ),
     }
     context["_explicit_context_fields"] = {
         "project": _nonempty(payload.get("project")) is not None,
@@ -1583,17 +1692,24 @@ def _run_bounded_process(
     cwd,
     input_text,
     timeout_seconds,
+    environment=None,
     progress_callback=None,
     progress_interval_seconds=30.0,
     max_stream_bytes=MAX_PROVIDER_STREAM_BYTES,
 ):
+    popen_arguments = {
+        "cwd": cwd,
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+    }
+    validated_environment = _validated_process_environment(environment)
+    if validated_environment is not None:
+        popen_arguments["env"] = validated_environment
     try:
         process = subprocess.Popen(
             command,
-            cwd=cwd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            **popen_arguments,
         )
     except OSError as exc:
         return ProviderExecution(
@@ -1741,14 +1857,20 @@ def _supervisor_main(spec_path):
 
 def _run_bounded_process_with_parent_death_safeguard(spec):
     command = list(spec["command"])
+    popen_arguments = {
+        "cwd": spec["cwd"],
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "preexec_fn": _provider_child_setup,
+    }
+    environment = _validated_process_environment(spec.get("environment"))
+    if environment is not None:
+        popen_arguments["env"] = environment
     try:
         process = subprocess.Popen(
             command,
-            cwd=spec["cwd"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            preexec_fn=_provider_child_setup,
+            **popen_arguments,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return ProviderExecution(
@@ -1960,7 +2082,14 @@ def _start_context(context):
         "model",
         "coverage_class",
     )
-    return {field: context.get(field) for field in fields}
+    result = {field: context.get(field) for field in fields}
+    policy_digest = context.get("experiment_sandbox_policy_sha256")
+    if policy_digest is not None:
+        result["experiment_sandbox_policy_sha256"] = policy_digest
+    reference_digest = context.get("experiment_sandbox_reference_sha256")
+    if reference_digest is not None:
+        result["experiment_sandbox_reference_sha256"] = reference_digest
+    return result
 
 
 def _terminal_context(context):
@@ -1975,6 +2104,8 @@ def _terminal_context(context):
         "task_id",
         "attempt_id",
         "runtime_execution_session_id",
+        "provider_predecessor_invocation_id",
+        "provider_predecessor_turn_id",
         "lifecycle_owner_token",
         "agent_id",
         "role",
@@ -1983,7 +2114,14 @@ def _terminal_context(context):
         "model",
         "coverage_class",
     )
-    return {field: context.get(field) for field in fields}
+    result = {field: context.get(field) for field in fields}
+    policy_digest = context.get("experiment_sandbox_policy_sha256")
+    if policy_digest is not None:
+        result["experiment_sandbox_policy_sha256"] = policy_digest
+    reference_digest = context.get("experiment_sandbox_reference_sha256")
+    if reference_digest is not None:
+        result["experiment_sandbox_reference_sha256"] = reference_digest
+    return result
 
 
 def _exclusive_publish_json(path, record):
@@ -2469,6 +2607,57 @@ def _nonempty(value):
 
 def _nullable_text(value):
     return _nonempty(value)
+
+
+def _validated_process_environment(environment):
+    if environment is None:
+        return None
+    if (
+        not isinstance(environment, dict)
+        or len(environment) > 64
+        or not all(
+            isinstance(name, str)
+            and name
+            and "=" not in name
+            and "\x00" not in name
+            and isinstance(value, str)
+            and "\x00" not in value
+            and len(value) <= 4096
+            for name, value in environment.items()
+        )
+    ):
+        raise ModelInvocationIntegrityError(
+            "provider process environment is not bounded"
+        )
+    return dict(environment)
+
+
+def _bounded_file_sha256(path, *, max_bytes=4 * 1024 * 1024):
+    path = Path(path)
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ModelInvocationIntegrityError(
+            f"model invocation artifact is unavailable: {path}"
+        ) from exc
+    if size < 0 or size > max_bytes:
+        raise ModelInvocationIntegrityError(
+            f"model invocation artifact exceeds bound: {path}"
+        )
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = handle.read(min(65536, remaining))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+    if remaining == 0:
+        raise ModelInvocationIntegrityError(
+            f"model invocation artifact exceeds bound: {path}"
+        )
+    return digest.hexdigest()
 
 
 _USAGE_STAGES = {

@@ -1,0 +1,3695 @@
+"""Fail-closed provider isolation and trusted experiment evaluation.
+
+Provider processes receive an explicit bubblewrap mount namespace and an
+explicit environment.  Evaluators run only after every model invocation has a
+terminal record, use an argv vector (never a shell), and retain bounded
+evidence including canary leakage scans.
+"""
+
+from __future__ import annotations
+
+import configparser
+import hashlib
+import json
+import os
+import re
+import signal
+import shutil
+import stat
+import subprocess
+import sys
+import threading
+import fcntl
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+from jsonschema import Draft202012Validator, FormatChecker
+
+
+PROVIDER_SANDBOX_SCHEMA_VERSION = "experiment_provider_sandbox.v1"
+NAMESPACE_PROBE_SCHEMA_VERSION = "experiment_namespace_probe.v1"
+EVALUATION_SCHEMA_VERSION = "experiment_evaluation.v1"
+SANDBOX_REFERENCE_SCHEMA_VERSION = "experiment_provider_sandbox_reference.v1"
+SCAN_SCOPE_REFERENCE_SCHEMA_VERSION = "experiment_scan_scope_reference.v1"
+EVALUATOR_REFERENCE_SCHEMA_VERSION = "experiment_evaluator_reference.v1"
+INVOCATION_SET_REFERENCE_SCHEMA_VERSION = (
+    "experiment_model_invocation_set_reference.v1"
+)
+PROTOCOL_REFERENCE_SCHEMA_VERSION = "experiment_protocol_reference.v1"
+DEFAULT_MAX_CREDENTIAL_BYTES = 1024 * 1024
+DEFAULT_MAX_CREDENTIAL_FILES = 32
+DEFAULT_MAX_SCAN_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_SCAN_FILES = 10_000
+DEFAULT_MAX_EVALUATOR_OUTPUT_BYTES = 4 * 1024 * 1024
+MAX_EVALUATION_TIMEOUT_SECONDS = 3600
+_CREDENTIAL_ROOT = Path("/run/agentteam-credentials")
+_TRUSTED_BWRAP_PATH = Path("/usr/bin/bwrap")
+_TRUSTED_ENV_PATH = Path("/usr/bin/env")
+_TRUSTED_GIT_PATH = Path("/usr/bin/git")
+_ENVIRONMENT_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_DEFAULT_ENVIRONMENT = {
+    "HOME": "/tmp/agentteam-home",
+    "LANG": "C.UTF-8",
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "TMPDIR": "/tmp",
+}
+_EVALUATOR_LOADER_SCRIPT = (
+    "import hashlib,os,subprocess,sys\n"
+    "expected=sys.argv[1]\n"
+    "command=sys.argv[2:]\n"
+    "data=sys.stdin.buffer.read(4194305)\n"
+    "if len(data)>4194304 or hashlib.sha256(data).hexdigest()!=expected:\n"
+    " raise SystemExit(70)\n"
+    "path='/tmp/agentteam-trusted-evaluator'\n"
+    "fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o500)\n"
+    "with os.fdopen(fd,'wb') as handle:\n"
+    " handle.write(data); handle.flush(); os.fsync(handle.fileno())\n"
+    "checked=subprocess.run([path,'--',*command],stdin=subprocess.DEVNULL,"
+    "check=False)\n"
+    "if checked.returncode!=0:\n"
+    " raise SystemExit(checked.returncode)\n"
+    "os.execv(command[0],command)\n"
+)
+
+
+class ExperimentSandboxError(RuntimeError):
+    """The declared provider or evaluator boundary is unsafe."""
+
+
+class ExperimentSandboxUnavailable(ExperimentSandboxError):
+    """The namespace boundary cannot be conclusively enforced."""
+
+
+class ExperimentEvaluationBlocked(ExperimentSandboxError):
+    """Evaluation was blocked before a trusted acceptance result existed."""
+
+    def __init__(self, message, evidence=None):
+        super().__init__(message)
+        self.evidence = evidence
+
+
+@dataclass(frozen=True)
+class PreparedProviderLaunch:
+    """Exact process arguments produced by one validated sandbox policy."""
+
+    command: tuple[str, ...]
+    cwd: str
+    environment: dict[str, str]
+    policy_sha256: str
+
+
+def build_provider_sandbox_descriptor(
+    repository_root,
+    *,
+    runtime_views,
+    library_views=(),
+    credential_mounts=(),
+    environment=None,
+    bwrap_path=None,
+    repository_target=None,
+    repository_identity=None,
+    forbidden_paths=(),
+):
+    """Build an immutable, least-view bubblewrap launch descriptor.
+
+    Runtime and library views are read-only.  The repository is the only
+    writable host view.  Credentials are read-only, inventory bounded, and
+    may only appear below ``/run/agentteam-credentials`` in the namespace.
+    Evaluator-only paths are accepted only as negative validation inputs and
+    are deliberately omitted from the returned descriptor.
+    """
+
+    repository_source = _existing_path(
+        repository_root,
+        "repository",
+        require_directory=True,
+    )
+    repository_target = _absolute_target(
+        repository_target or repository_source,
+        "repository",
+    )
+    forbidden = [
+        _existing_path(path, "evaluator-only path")
+        for path in forbidden_paths
+    ]
+    bwrap = bwrap_path or _TRUSTED_BWRAP_PATH
+    if not Path(bwrap).is_file():
+        raise ExperimentSandboxUnavailable("bubblewrap executable is unavailable")
+    bwrap = _existing_path(bwrap, "bubblewrap", require_file=True)
+    if bwrap != _TRUSTED_BWRAP_PATH:
+        raise ExperimentSandboxUnavailable(
+            "bubblewrap executable is not the controller-approved system binary"
+        )
+    if not os.access(bwrap, os.X_OK):
+        raise ExperimentSandboxUnavailable("bubblewrap executable is not executable")
+
+    runtime = _normalize_views(runtime_views, "runtime")
+    libraries = _normalize_views(library_views, "library")
+    credentials = _normalize_credentials(credential_mounts)
+    declared_sources = [
+        repository_source,
+        *(Path(view["source"]) for view in runtime),
+        *(Path(view["source"]) for view in libraries),
+        *(Path(view["source"]) for view in credentials),
+    ]
+    for evaluator_path in forbidden:
+        for source in declared_sources:
+            if _paths_overlap(source, evaluator_path):
+                raise ExperimentSandboxError(
+                    "evaluator-only path overlaps a provider mount"
+                )
+
+    bounded_environment = _normalize_environment(environment)
+    forbidden_markers = _forbidden_markers(forbidden)
+    for value in bounded_environment.values():
+        encoded = value.encode("utf-8")
+        if any(marker and marker in encoded for marker in forbidden_markers):
+            raise ExperimentSandboxError(
+                "evaluator-only material appears in provider environment"
+            )
+
+    descriptor = {
+        "schema_version": PROVIDER_SANDBOX_SCHEMA_VERSION,
+        "bwrap_path": str(bwrap),
+        "bwrap_sha256": hashlib.sha256(
+            _read_bounded_regular_file(bwrap, max_bytes=16 * 1024 * 1024)
+        ).hexdigest(),
+        "repository": {
+            "source": str(repository_source),
+            "target": str(repository_target),
+            "writable": True,
+            "source_identity": _mount_source_identity(
+                repository_source,
+                hash_directory=False,
+            ),
+        },
+        "repository_identity": _validated_repository_identity(
+            repository_source,
+            repository_identity,
+        ),
+        "runtime_views": runtime,
+        "library_views": libraries,
+        "credential_views": credentials,
+        "environment": bounded_environment,
+        "network_policy": "disabled",
+        "namespace_evidence": None,
+    }
+    descriptor["policy_sha256"] = _sandbox_policy_sha256(descriptor)
+    validate_provider_sandbox_descriptor(
+        descriptor,
+        require_namespace_evidence=False,
+    )
+    return descriptor
+
+
+def probe_gold_canary_denial(
+    descriptor,
+    canary_path,
+    *,
+    runner=None,
+    probe_python=None,
+    timeout_seconds=30,
+):
+    """Prove that the exact provider namespace cannot stat or read a canary."""
+
+    validate_provider_sandbox_descriptor(
+        descriptor,
+        require_namespace_evidence=False,
+    )
+    canary_path = _existing_path(
+        canary_path,
+        "gold canary",
+        require_file=True,
+        reject_symlink=True,
+    )
+    canary = _read_bounded_regular_file(canary_path, max_bytes=64 * 1024)
+    if not canary:
+        raise ExperimentSandboxError("gold canary must not be empty")
+    if len(canary) > 64 * 1024:
+        raise ExperimentSandboxError("gold canary exceeds the bounded probe size")
+    _validate_descriptor_excludes_canary(descriptor, canary_path)
+    probe_python = str(probe_python or _probe_python_for_descriptor(descriptor))
+    script = (
+        "import json,os,sys\n"
+        "p=sys.argv[1]\n"
+        "visible=os.path.lexists(p)\n"
+        "readable=False\n"
+        "try:\n"
+        " open(p,'rb').read(1); readable=True\n"
+        "except (OSError,PermissionError): pass\n"
+        "print(json.dumps({'path_visible':visible,'content_readable':readable},"
+        "sort_keys=True,separators=(',',':')))\n"
+        "raise SystemExit(1 if visible or readable else 0)\n"
+    )
+    prepared = prepare_provider_launch(
+        descriptor,
+        [probe_python, "-c", script, str(canary_path)],
+        cwd=descriptor["repository"]["source"],
+        require_namespace_evidence=False,
+    )
+    run = runner or subprocess.run
+    try:
+        completed = run(
+            list(prepared.command),
+            cwd=prepared.cwd,
+            env=dict(prepared.environment),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=min(max(float(timeout_seconds), 1.0), 60.0),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ExperimentSandboxUnavailable(
+            f"bubblewrap canary probe was unavailable: {type(exc).__name__}"
+        ) from exc
+    try:
+        observed = json.loads(str(completed.stdout).strip())
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ExperimentSandboxUnavailable(
+            "bubblewrap canary probe returned inconclusive output"
+        ) from exc
+    denied = (
+        completed.returncode == 0
+        and observed == {
+            "content_readable": False,
+            "path_visible": False,
+        }
+    )
+    if not denied:
+        raise ExperimentSandboxUnavailable(
+            "bubblewrap namespace did not conclusively deny the gold canary"
+        )
+    return {
+        "schema_version": NAMESPACE_PROBE_SCHEMA_VERSION,
+        "evidence_status": "complete",
+        "denial_status": "denied",
+        "policy_sha256": descriptor["policy_sha256"],
+        "canary_sha256": hashlib.sha256(canary).hexdigest(),
+        "path_visible": False,
+        "content_readable": False,
+        "probe_returncode": 0,
+    }
+
+
+def _attach_namespace_evidence(descriptor, evidence):
+    """Bind successful canary evidence to a sandbox descriptor."""
+
+    candidate = json.loads(json.dumps(descriptor))
+    _validate_namespace_evidence(candidate, evidence)
+    candidate["namespace_evidence"] = dict(evidence)
+    validate_provider_sandbox_descriptor(
+        candidate,
+        require_namespace_evidence=False,
+    )
+    return candidate
+
+
+def publish_provider_sandbox_reference(
+    authority_root,
+    descriptor,
+    canary_path,
+    *,
+    reference_id="provider-sandbox",
+):
+    validate_provider_sandbox_descriptor(
+        descriptor,
+        require_namespace_evidence=False,
+    )
+    if descriptor.get("namespace_evidence") is not None:
+        raise ExperimentSandboxError(
+            "sandbox publication requires a fresh controller probe"
+        )
+    evidence = probe_gold_canary_denial(descriptor, canary_path)
+    descriptor = _attach_namespace_evidence(descriptor, evidence)
+    validate_provider_sandbox_descriptor(
+        descriptor,
+        require_namespace_evidence=True,
+    )
+    authority_dir = _experiment_authority_dir(authority_root)
+    path = authority_dir / f"{_safe_reference_id(reference_id)}.sandbox.json"
+    _publish_immutable_json(path, descriptor)
+    payload = _read_bounded_regular_file(path, max_bytes=4 * 1024 * 1024)
+    return {
+        "schema_version": SANDBOX_REFERENCE_SCHEMA_VERSION,
+        "path": str(path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def load_provider_sandbox_reference(reference, authority_root):
+    _path, payload = _load_authority_reference(
+        reference,
+        authority_root,
+        schema_version=SANDBOX_REFERENCE_SCHEMA_VERSION,
+        suffix=".sandbox.json",
+    )
+    try:
+        descriptor = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExperimentSandboxUnavailable(
+            "provider sandbox authority is unreadable"
+        ) from exc
+    validate_provider_sandbox_descriptor(
+        descriptor,
+        require_namespace_evidence=True,
+    )
+    return descriptor
+
+
+def publish_evaluator_reference(
+    authority_root,
+    evaluator_artifact,
+    *,
+    reference_id="trusted-evaluator",
+):
+    source = _existing_path(
+        evaluator_artifact,
+        "trusted evaluator source",
+        require_file=True,
+        reject_symlink=True,
+    )
+    content = _read_bounded_regular_file(source, max_bytes=4 * 1024 * 1024)
+    authority_dir = _experiment_authority_dir(authority_root)
+    path = authority_dir / f"{_safe_reference_id(reference_id)}.evaluator"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o500)
+    except FileExistsError as exc:
+        raise ExperimentSandboxError(
+            f"trusted evaluator reference already exists: {path}"
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return {
+        "schema_version": EVALUATOR_REFERENCE_SCHEMA_VERSION,
+        "path": str(path),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
+def load_evaluator_reference(reference, authority_root):
+    path, content = _load_authority_reference(
+        reference,
+        authority_root,
+        schema_version=EVALUATOR_REFERENCE_SCHEMA_VERSION,
+        suffix=".evaluator",
+    )
+    if not os.access(path, os.X_OK):
+        raise ExperimentSandboxError(
+            "trusted evaluator authority is not executable"
+        )
+    return path, hashlib.sha256(content).hexdigest()
+
+
+def publish_experiment_protocol_reference(
+    authority_root,
+    protocol,
+    *,
+    reference_id="experiment-protocol",
+):
+    from .experiment_contract import validate_experiment_protocol
+
+    validate_experiment_protocol(protocol)
+    authority_dir = _experiment_authority_dir(authority_root)
+    path = authority_dir / f"{_safe_reference_id(reference_id)}.protocol.json"
+    _publish_immutable_json(path, protocol)
+    payload = _read_bounded_regular_file(path, max_bytes=4 * 1024 * 1024)
+    return {
+        "schema_version": PROTOCOL_REFERENCE_SCHEMA_VERSION,
+        "path": str(path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def load_experiment_protocol_reference(reference, authority_root):
+    _path, payload = _load_authority_reference(
+        reference,
+        authority_root,
+        schema_version=PROTOCOL_REFERENCE_SCHEMA_VERSION,
+        suffix=".protocol.json",
+    )
+    try:
+        protocol = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExperimentSandboxUnavailable(
+            "experiment protocol authority is unreadable"
+        ) from exc
+    from .experiment_contract import validate_experiment_protocol
+
+    validate_experiment_protocol(protocol)
+    return protocol
+
+
+def publish_model_invocation_set_reference(
+    authority_root,
+    run_id,
+    invocation_sets,
+    *,
+    reference_id="model-invocation-set",
+):
+    record = {
+        "schema_version": "experiment_model_invocation_manifest.v1",
+        "run_id": _nonempty_text(run_id, "model invocation run id"),
+        "invocation_sets": _normalize_invocation_sets(
+            invocation_sets,
+            authority_root=authority_root,
+        ),
+    }
+    authority_dir = _experiment_authority_dir(authority_root)
+    path = authority_dir / (
+        f"{_safe_reference_id(reference_id)}.invocation-set.json"
+    )
+    _publish_immutable_json(path, record)
+    payload = _read_bounded_regular_file(path, max_bytes=4 * 1024 * 1024)
+    return {
+        "schema_version": INVOCATION_SET_REFERENCE_SCHEMA_VERSION,
+        "path": str(path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def load_model_invocation_set_reference(reference, authority_root):
+    _path, payload = _load_authority_reference(
+        reference,
+        authority_root,
+        schema_version=INVOCATION_SET_REFERENCE_SCHEMA_VERSION,
+        suffix=".invocation-set.json",
+    )
+    try:
+        record = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExperimentSandboxUnavailable(
+            "model invocation set authority is unreadable"
+        ) from exc
+    if (
+        not isinstance(record, dict)
+        or set(record) != {"schema_version", "run_id", "invocation_sets"}
+        or record["schema_version"]
+        != "experiment_model_invocation_manifest.v1"
+    ):
+        raise ExperimentSandboxError(
+            "invalid model invocation set authority"
+        )
+    normalized = _normalize_invocation_sets(
+        record["invocation_sets"],
+        authority_root=authority_root,
+    )
+    if record["invocation_sets"] != normalized:
+        raise ExperimentSandboxError(
+            "model invocation set authority is not canonical"
+        )
+    _nonempty_text(record["run_id"], "model invocation run id")
+    return record
+
+
+def _validate_namespace_evidence(descriptor, evidence):
+    if not isinstance(evidence, dict):
+        raise ExperimentSandboxError("namespace evidence must be an object")
+    expected = {
+        "schema_version": NAMESPACE_PROBE_SCHEMA_VERSION,
+        "evidence_status": "complete",
+        "denial_status": "denied",
+        "policy_sha256": descriptor.get("policy_sha256"),
+        "path_visible": False,
+        "content_readable": False,
+        "probe_returncode": 0,
+    }
+    for field, value in expected.items():
+        if evidence.get(field) != value:
+            raise ExperimentSandboxError(
+                f"namespace evidence does not prove {field}"
+            )
+    digest = evidence.get("canary_sha256")
+    if not _is_sha256(digest):
+        raise ExperimentSandboxError("namespace evidence has invalid canary digest")
+
+
+def validate_provider_sandbox_descriptor(
+    descriptor,
+    *,
+    require_namespace_evidence=True,
+):
+    if not isinstance(descriptor, dict):
+        raise ExperimentSandboxError("provider sandbox descriptor must be an object")
+    required = {
+        "schema_version",
+        "bwrap_path",
+        "bwrap_sha256",
+        "repository",
+        "repository_identity",
+        "runtime_views",
+        "library_views",
+        "credential_views",
+        "environment",
+        "network_policy",
+        "namespace_evidence",
+        "policy_sha256",
+    }
+    if set(descriptor) != required:
+        raise ExperimentSandboxError(
+            "provider sandbox descriptor contains undeclared fields"
+        )
+    if descriptor["schema_version"] != PROVIDER_SANDBOX_SCHEMA_VERSION:
+        raise ExperimentSandboxError("unsupported provider sandbox descriptor")
+    if descriptor["network_policy"] != "disabled":
+        raise ExperimentSandboxError("provider network namespace must be disabled")
+    if descriptor["policy_sha256"] != _sandbox_policy_sha256(descriptor):
+        raise ExperimentSandboxError("provider sandbox policy digest mismatch")
+    bwrap = _existing_path(
+        descriptor["bwrap_path"],
+        "bubblewrap",
+        require_file=True,
+    )
+    if (
+        bwrap != _TRUSTED_BWRAP_PATH
+        or not os.access(bwrap, os.X_OK)
+        or not _is_sha256(descriptor["bwrap_sha256"])
+        or hashlib.sha256(
+            _read_bounded_regular_file(bwrap, max_bytes=16 * 1024 * 1024)
+        ).hexdigest()
+        != descriptor["bwrap_sha256"]
+    ):
+        raise ExperimentSandboxUnavailable(
+            "bubblewrap executable identity is unavailable or changed"
+        )
+    repository = descriptor["repository"]
+    if (
+        not isinstance(repository, dict)
+        or set(repository)
+        != {"source", "target", "writable", "source_identity"}
+        or repository.get("writable") is not True
+    ):
+        raise ExperimentSandboxError("repository must be the sole writable view")
+    repository_identity = descriptor["repository_identity"]
+    if repository_identity is not None:
+        _validated_repository_identity(
+            Path(repository["source"]),
+            repository_identity,
+            verify_workspace=False,
+        )
+    _validate_mount_source(
+        repository["source"],
+        repository["source_identity"],
+        "repository",
+        require_directory=True,
+    )
+    _absolute_target(repository["target"], "repository")
+    _validate_normalized_views(descriptor["runtime_views"], "runtime")
+    _validate_normalized_views(descriptor["library_views"], "library")
+    _validate_normalized_credentials(descriptor["credential_views"])
+    _deny_overlapping_targets(
+        [
+            repository,
+            *descriptor["runtime_views"],
+            *descriptor["library_views"],
+            *descriptor["credential_views"],
+        ]
+    )
+    repository_source = Path(repository["source"])
+    repository_target = Path(repository["target"])
+    for view in (
+        *descriptor["runtime_views"],
+        *descriptor["library_views"],
+        *descriptor["credential_views"],
+    ):
+        if _paths_overlap(repository_source, Path(view["source"])):
+            raise ExperimentSandboxError(
+                "repository source overlaps another provider mount"
+            )
+        if _paths_overlap(repository_target, Path(view["target"])):
+            raise ExperimentSandboxError(
+                "writable repository target overlaps a read-only mount"
+            )
+    if descriptor["environment"] != _normalize_environment(
+        descriptor["environment"]
+    ):
+        raise ExperimentSandboxError("provider environment is not canonical")
+    if require_namespace_evidence:
+        _validate_namespace_evidence(
+            descriptor,
+            descriptor.get("namespace_evidence"),
+        )
+    return descriptor
+
+
+def prepare_provider_launch(
+    descriptor,
+    command,
+    *,
+    cwd,
+    require_namespace_evidence=True,
+    include_credentials=True,
+):
+    """Apply one validated descriptor without spawning any process."""
+
+    validate_provider_sandbox_descriptor(
+        descriptor,
+        require_namespace_evidence=require_namespace_evidence,
+    )
+    command = _normalize_argv(command, "provider command")
+    repository_source = Path(descriptor["repository"]["source"])
+    cwd = _existing_path(cwd, "provider cwd", require_directory=True)
+    try:
+        relative_cwd = cwd.relative_to(repository_source)
+    except ValueError as exc:
+        raise ExperimentSandboxError(
+            "provider cwd must remain inside the declared repository"
+        ) from exc
+    sandbox_cwd = Path(descriptor["repository"]["target"]) / relative_cwd
+
+    arguments = [
+        descriptor["bwrap_path"],
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-all",
+        "--cap-drop",
+        "ALL",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--dir",
+        "/run",
+        "--dir",
+        str(_CREDENTIAL_ROOT),
+        "--dir",
+        "/tmp/agentteam-home",
+    ]
+    credential_views = (
+        descriptor["credential_views"] if include_credentials else []
+    )
+    views = [
+        descriptor["repository"],
+        *descriptor["runtime_views"],
+        *descriptor["library_views"],
+        *credential_views,
+    ]
+    arguments.extend(_target_parent_arguments(view["target"] for view in views))
+    arguments.extend(
+        [
+            "--bind",
+            descriptor["repository"]["source"],
+            descriptor["repository"]["target"],
+        ]
+    )
+    for view in (
+        *descriptor["runtime_views"],
+        *descriptor["library_views"],
+        *credential_views,
+    ):
+        arguments.extend(["--ro-bind", view["source"], view["target"]])
+    launch_environment = (
+        dict(descriptor["environment"])
+        if include_credentials
+        else _normalize_environment(None)
+    )
+    arguments.append("--clearenv")
+    for name, value in launch_environment.items():
+        arguments.extend(["--setenv", name, value])
+    arguments.extend(["--chdir", str(sandbox_cwd), "--", *command])
+    return PreparedProviderLaunch(
+        command=tuple(arguments),
+        cwd="/",
+        environment=launch_environment,
+        policy_sha256=descriptor["policy_sha256"],
+    )
+
+
+def prepare_candidate_evaluation_launch(
+    descriptor,
+    evaluator_artifact,
+    evaluator_sha256,
+    acceptance_command,
+    *,
+    cwd,
+):
+    """Build a runtime-owned bwrap command that contains the evaluator."""
+
+    artifact = _existing_path(
+        evaluator_artifact,
+        "trusted evaluator authority",
+        require_file=True,
+        reject_symlink=True,
+    )
+    for view in (
+        descriptor["repository"],
+        *descriptor["runtime_views"],
+        *descriptor["library_views"],
+        *descriptor["credential_views"],
+    ):
+        if _paths_overlap(artifact, Path(view["source"])):
+            raise ExperimentSandboxError(
+                "trusted evaluator overlaps a provider-visible mount"
+            )
+    if not _is_sha256(evaluator_sha256):
+        raise ExperimentSandboxError(
+            "trusted evaluator digest is invalid"
+        )
+    loader_python = _probe_python_for_descriptor(descriptor)
+    prepared = prepare_provider_launch(
+        descriptor,
+        [
+            str(loader_python),
+            "-c",
+            _EVALUATOR_LOADER_SCRIPT,
+            evaluator_sha256,
+            *_normalize_argv(
+                acceptance_command,
+                "candidate acceptance command",
+            ),
+        ],
+        cwd=cwd,
+        include_credentials=False,
+    )
+    repository_source = Path(descriptor["repository"]["source"])
+    git_source = _existing_path(
+        repository_source / ".git",
+        "candidate Git control directory",
+        require_directory=True,
+        reject_symlink=True,
+    )
+    repository_target = Path(descriptor["repository"]["target"])
+    command = list(prepared.command)
+    try:
+        chdir_index = command.index("--chdir")
+    except ValueError as exc:
+        raise ExperimentSandboxError(
+            "candidate sandbox command is missing its working directory"
+        ) from exc
+    command[chdir_index:chdir_index] = [
+        "--ro-bind",
+        str(git_source),
+        str(repository_target / ".git"),
+    ]
+    return PreparedProviderLaunch(
+        command=tuple(command),
+        cwd=prepared.cwd,
+        environment=dict(prepared.environment),
+        policy_sha256=prepared.policy_sha256,
+    )
+
+
+def validate_provider_authority_separation(descriptor, *authority_roots):
+    """Reject authority state that a provider-visible host mount can modify."""
+
+    provider_sources = [
+        Path(view["source"])
+        for view in (
+            descriptor["repository"],
+            *descriptor["runtime_views"],
+            *descriptor["library_views"],
+            *descriptor["credential_views"],
+        )
+    ]
+    for value in authority_roots:
+        root = _existing_path(
+            value,
+            "experiment authority root",
+            require_directory=True,
+            reject_symlink=True,
+        )
+        if any(_is_relative_to(root, source) for source in provider_sources):
+            raise ExperimentSandboxError(
+                "experiment authority root is provider-visible"
+            )
+
+
+def experiment_lifecycle_authority_root(authority_root, lifecycle_id):
+    """Allocate one controller-owned lifecycle root in the fixed registry."""
+
+    lifecycle_id = _safe_reference_id(lifecycle_id)
+    registry = _experiment_lifecycle_registry_dir(authority_root)
+    root = registry / lifecycle_id
+    root.mkdir(mode=0o700, exist_ok=False)
+    registration_path = _experiment_authority_dir(authority_root) / (
+        f"{lifecycle_id}.lifecycle-registration.json"
+    )
+    try:
+        _publish_immutable_json(
+            registration_path,
+            {
+                "schema_version": "experiment_lifecycle_registration.v1",
+                "lifecycle_id": lifecycle_id,
+                "lifecycle_authority_root": str(root),
+            },
+        )
+    except Exception:
+        root.rmdir()
+        raise
+    return root
+
+
+def validate_experiment_lifecycle_authority(
+    authority_root,
+    lifecycle_authority_root,
+):
+    root = _existing_path(
+        lifecycle_authority_root,
+        "model invocation lifecycle authority",
+        require_directory=True,
+        reject_symlink=True,
+    )
+    if root.parent != _experiment_lifecycle_registry_dir(authority_root):
+        raise ExperimentSandboxError(
+            "model invocation lifecycle authority is outside the registry"
+        )
+    if str(root) not in _registered_lifecycle_roots(authority_root):
+        raise ExperimentSandboxError(
+            "model invocation lifecycle authority is not registered"
+        )
+    return root
+
+
+def scan_canary_leakage(
+    scan_groups,
+    *,
+    canary_path,
+    max_files=DEFAULT_MAX_SCAN_FILES,
+    max_bytes=DEFAULT_MAX_SCAN_BYTES,
+):
+    """Scan bounded retained inputs/artifacts for canary, digest, or path."""
+
+    if not isinstance(scan_groups, dict) or set(scan_groups) != {
+        "prompt",
+        "context",
+        "taskpack",
+        "artifacts",
+    }:
+        raise ExperimentSandboxError(
+            "leak scan groups must be prompt, context, taskpack, and artifacts"
+        )
+    if any(
+        not isinstance(scan_groups[group], (str, os.PathLike, list, tuple))
+        or (
+            isinstance(scan_groups[group], (list, tuple))
+            and not scan_groups[group]
+        )
+        for group in scan_groups
+    ):
+        raise ExperimentSandboxError(
+            "every leak scan group must declare at least one path"
+        )
+    canary_path = _existing_path(
+        canary_path,
+        "gold canary",
+        require_file=True,
+        reject_symlink=True,
+    )
+    canary = _read_bounded_regular_file(canary_path, max_bytes=64 * 1024)
+    if not canary:
+        raise ExperimentSandboxError("gold canary must not be empty")
+    digest = hashlib.sha256(canary).hexdigest()
+    needles = (
+        ("canary_content", canary),
+        ("canary_sha256", digest.encode("ascii")),
+        ("canary_sha256", digest.upper().encode("ascii")),
+        ("canary_path", str(canary_path).encode("utf-8")),
+    )
+    try:
+        max_files = int(max_files)
+        max_bytes = int(max_bytes)
+    except (TypeError, ValueError) as exc:
+        raise ExperimentSandboxError("canary leak scan bounds are invalid") from exc
+    if not 1 <= max_files <= DEFAULT_MAX_SCAN_FILES:
+        raise ExperimentSandboxError("canary leak scan file bound is invalid")
+    if not 1 <= max_bytes <= DEFAULT_MAX_SCAN_BYTES:
+        raise ExperimentSandboxError("canary leak scan byte bound is invalid")
+
+    findings = []
+    scanned_files = 0
+    scanned_entries = 0
+    scanned_bytes = 0
+    group_counts = {}
+    for group in ("prompt", "context", "taskpack", "artifacts"):
+        files, entry_count = _bounded_regular_files(
+            scan_groups[group],
+            max_entries=max_files - scanned_entries,
+        )
+        scanned_entries += entry_count
+        group_counts[group] = len(files)
+        for path in files:
+            scanned_files += 1
+            if scanned_files > max_files:
+                raise ExperimentSandboxUnavailable(
+                    "canary leak scan file bound was exceeded"
+                )
+            content = _read_bounded_regular_file(
+                path,
+                max_bytes=max_bytes - scanned_bytes,
+            )
+            scanned_bytes += len(content)
+            for kind, needle in needles:
+                if needle and needle in content:
+                    findings.append(
+                        {
+                            "group": group,
+                            "path_sha256": hashlib.sha256(
+                                str(path).encode("utf-8")
+                            ).hexdigest(),
+                            "match": kind,
+                        }
+                    )
+    return {
+        "scan_status": "leak_detected" if findings else "clean",
+        "scan_scope_sha256": scan_scope_sha256(scan_groups),
+        "canary_sha256": digest,
+        "scanned_files": scanned_files,
+        "scanned_entries": scanned_entries,
+        "scanned_bytes": scanned_bytes,
+        "group_file_counts": group_counts,
+        "findings": findings,
+    }
+
+
+def run_trusted_argv_evaluator(
+    *,
+    authority_root,
+    invocation_set_reference,
+    provider_sandbox_reference,
+    experiment_protocol_reference,
+    scan_scope_reference,
+    command,
+    cwd,
+    evaluator_reference,
+    canary_path,
+    timeout_seconds,
+    evidence_path=None,
+    max_output_bytes=DEFAULT_MAX_EVALUATOR_OUTPUT_BYTES,
+):
+    """Run post-model acceptance and return schema-validated bounded evidence."""
+
+    started_at = _utc_timestamp()
+    base = {
+        "schema_version": EVALUATION_SCHEMA_VERSION,
+        "evaluation_status": "blocked",
+        "evidence_status": "complete",
+        "started_at": started_at,
+        "finished_at": started_at,
+        "evaluator_started": False,
+        "promotion_eligible": False,
+        "execution_boundary": "not_started",
+        "systemd_unit": None,
+        "argv": [],
+        "cwd": str(Path(cwd).resolve(strict=False)),
+        "timeout_seconds": timeout_seconds,
+        "evaluator_artifact": (
+            str(evaluator_reference.get("path"))
+            if isinstance(evaluator_reference, dict)
+            else "<unresolved>"
+        ),
+        "evaluator_sha256": (
+            evaluator_reference.get("sha256")
+            if isinstance(evaluator_reference, dict)
+            and _is_sha256(evaluator_reference.get("sha256"))
+            else "0" * 64
+        ),
+        "environment_sha256": "0" * 64,
+        "candidate_repository": None,
+        "run_id": "<unresolved>",
+        "taskpack_ids": [],
+        "expected_invocation_ids": [],
+        "invocation_sets": [],
+        "invocation_set_reference_sha256": (
+            invocation_set_reference.get("sha256")
+            if isinstance(invocation_set_reference, dict)
+            and _is_sha256(invocation_set_reference.get("sha256"))
+            else "0" * 64
+        ),
+        "experiment_protocol_sha256": "0" * 64,
+        "experiment_protocol_reference_sha256": (
+            experiment_protocol_reference.get("sha256")
+            if isinstance(experiment_protocol_reference, dict)
+            and _is_sha256(experiment_protocol_reference.get("sha256"))
+            else "0" * 64
+        ),
+        "acceptance_command_sha256": "0" * 64,
+        "acceptance_executable_sha256": "0" * 64,
+        "scan_scope_sha256": "0" * 64,
+        "provider_sandbox_reference_sha256": (
+            provider_sandbox_reference.get("sha256")
+            if isinstance(provider_sandbox_reference, dict)
+            and _is_sha256(provider_sandbox_reference.get("sha256"))
+            else "0" * 64
+        ),
+        "provider_sandbox_policy_sha256": "0" * 64,
+        "invocation_set_seal_sha256": "0" * 64,
+        "terminal_invocations": [],
+        "pre_run_leak_scan": None,
+        "post_run_leak_scan": None,
+        "returncode": None,
+        "timed_out": False,
+        "stdout": "",
+        "stderr": "",
+        "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+        "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+        "max_output_bytes": max_output_bytes,
+        "failure_reason": None,
+    }
+    try:
+        timeout_seconds = float(timeout_seconds)
+        if not 1 <= timeout_seconds <= MAX_EVALUATION_TIMEOUT_SECONDS:
+            raise ExperimentSandboxError("evaluation timeout is out of bounds")
+        base["timeout_seconds"] = timeout_seconds
+        authority_root = _existing_path(
+            authority_root,
+            "experiment authority root",
+            require_directory=True,
+            reject_symlink=True,
+        )
+        invocation_manifest = load_model_invocation_set_reference(
+            invocation_set_reference,
+            authority_root,
+        )
+        base["run_id"] = invocation_manifest["run_id"]
+        base["taskpack_ids"] = sorted(
+            {
+                item["taskpack_id"]
+                for item in invocation_manifest["invocation_sets"]
+            }
+        )
+        base["expected_invocation_ids"] = sorted(
+            invocation_id
+            for item in invocation_manifest["invocation_sets"]
+            for invocation_id in item["invocation_ids"]
+        )
+        base["invocation_set_reference_sha256"] = (
+            invocation_set_reference["sha256"]
+        )
+        experiment_protocol = load_experiment_protocol_reference(
+            experiment_protocol_reference,
+            authority_root,
+        )
+        base["experiment_protocol_reference_sha256"] = (
+            experiment_protocol_reference["sha256"]
+        )
+        expected_command = list(experiment_protocol["acceptance"]["command"])
+        if list(command) != expected_command:
+            raise ExperimentSandboxError(
+                "evaluator argv does not match the preregistered acceptance command"
+            )
+        if timeout_seconds != float(
+            experiment_protocol["acceptance"]["timeout_seconds"]
+        ):
+            raise ExperimentSandboxError(
+                "evaluation timeout does not match the preregistered protocol"
+            )
+        base["experiment_protocol_sha256"] = hashlib.sha256(
+            _canonical_json_bytes(experiment_protocol)
+        ).hexdigest()
+        base["acceptance_command_sha256"] = hashlib.sha256(
+            _canonical_json_bytes(expected_command)
+        ).hexdigest()
+        provider_sandbox_descriptor = load_provider_sandbox_reference(
+            provider_sandbox_reference,
+            authority_root,
+        )
+        validate_provider_authority_separation(
+            provider_sandbox_descriptor,
+            authority_root,
+        )
+        scan_groups, actual_scan_scope_sha256 = load_scan_scope_reference(
+            scan_scope_reference,
+            authority_root,
+        )
+        _validate_descriptor_excludes_canary(
+            provider_sandbox_descriptor,
+            canary_path,
+        )
+        repository_identity = provider_sandbox_descriptor[
+            "repository_identity"
+        ]
+        protocol_repository_identity = {
+            field: experiment_protocol["repository"][field]
+            for field in ("commit", "tree", "git_object_format")
+        }
+        if repository_identity != protocol_repository_identity:
+            raise ExperimentSandboxError(
+                "certified workspace does not match the authoritative protocol"
+            )
+        actual_canary_sha256 = hashlib.sha256(
+            _read_bounded_regular_file(
+                _existing_path(
+                    canary_path,
+                    "gold canary",
+                    require_file=True,
+                    reject_symlink=True,
+                ),
+                max_bytes=64 * 1024,
+            )
+        ).hexdigest()
+        if (
+            provider_sandbox_descriptor["namespace_evidence"][
+                "canary_sha256"
+            ]
+            != actual_canary_sha256
+        ):
+            raise ExperimentSandboxError(
+                "sandbox namespace evidence is bound to another canary"
+            )
+        base["scan_scope_sha256"] = actual_scan_scope_sha256
+        base["provider_sandbox_policy_sha256"] = provider_sandbox_descriptor[
+            "policy_sha256"
+        ]
+        terminal_invocations = []
+        invocation_set_evidence = []
+        for item in invocation_manifest["invocation_sets"]:
+            invocation_sandbox = load_provider_sandbox_reference(
+                item["sandbox_reference"],
+                authority_root,
+            )
+            if (
+                invocation_sandbox["namespace_evidence"]["canary_sha256"]
+                != actual_canary_sha256
+            ):
+                raise ExperimentSandboxError(
+                    "model invocation sandbox reference is bound to another canary"
+                )
+            terminals, seal_sha256 = _terminal_invocation_evidence(
+                Path(item["lifecycle_authority_root"])
+                / "model_invocations",
+                expected_invocation_ids=item["invocation_ids"],
+                expected_run_id=invocation_manifest["run_id"],
+                expected_taskpack_id=item["taskpack_id"],
+                expected_sandbox_policy_sha256=item[
+                    "sandbox_policy_sha256"
+                ],
+                expected_sandbox_reference_sha256=item[
+                    "sandbox_reference"
+                ]["sha256"],
+            )
+            terminal_invocations.extend(terminals)
+            invocation_set_evidence.append(
+                {
+                    "taskpack_id": item["taskpack_id"],
+                    "expected_invocation_ids": item["invocation_ids"],
+                    "sandbox_policy_sha256": item[
+                        "sandbox_policy_sha256"
+                    ],
+                    "sandbox_reference_sha256": item[
+                        "sandbox_reference"
+                    ]["sha256"],
+                    "seal_sha256": seal_sha256,
+                }
+            )
+        base["terminal_invocations"] = sorted(
+            terminal_invocations,
+            key=lambda item: item["invocation_id"],
+        )
+        base["invocation_sets"] = sorted(
+            invocation_set_evidence,
+            key=lambda item: (
+                item["taskpack_id"],
+                item["expected_invocation_ids"],
+            ),
+        )
+        base["invocation_set_seal_sha256"] = hashlib.sha256(
+            _canonical_json_bytes(base["invocation_sets"])
+        ).hexdigest()
+        candidate_repository = _candidate_repository_state(
+            provider_sandbox_descriptor["repository"]["source"],
+            repository_identity,
+        )
+        base["candidate_repository"] = candidate_repository
+        pre_scan = scan_canary_leakage(
+            scan_groups,
+            canary_path=canary_path,
+        )
+        base["pre_run_leak_scan"] = pre_scan
+        if pre_scan["scan_scope_sha256"] != actual_scan_scope_sha256:
+            raise ExperimentSandboxError("pre-run leak scan scope drift")
+        if pre_scan["scan_status"] != "clean":
+            raise ExperimentEvaluationBlocked(
+                "canary leakage detected before trusted evaluation"
+            )
+        artifact, evaluator_sha256 = load_evaluator_reference(
+            evaluator_reference,
+            authority_root,
+        )
+        if (
+            evaluator_sha256
+            != experiment_protocol["evaluator"]["artifact_sha256"]
+        ):
+            raise ExperimentSandboxError("trusted evaluator digest mismatch")
+        cwd_path = _existing_path(cwd, "evaluator cwd", require_directory=True)
+        if cwd_path != Path(
+            provider_sandbox_descriptor["repository"]["source"]
+        ):
+            raise ExperimentSandboxError(
+                "evaluator cwd does not match the certified workspace"
+            )
+        for view in (
+            provider_sandbox_descriptor["repository"],
+            *provider_sandbox_descriptor["runtime_views"],
+            *provider_sandbox_descriptor["library_views"],
+            *provider_sandbox_descriptor["credential_views"],
+        ):
+            if _paths_overlap(artifact, Path(view["source"])):
+                raise ExperimentSandboxError(
+                    "trusted evaluator overlaps a provider-visible mount"
+                )
+        bounded_environment = _normalize_environment(None)
+        base["environment_sha256"] = hashlib.sha256(
+            _canonical_json_bytes(bounded_environment)
+        ).hexdigest()
+        acceptance_argv = _normalize_argv(command, "acceptance command")
+        if _contains_canary_reference(
+            "\0".join([*acceptance_argv, str(cwd_path)]),
+            canary_path,
+        ):
+            raise ExperimentEvaluationBlocked(
+                "evaluator argv or cwd contains evaluator-only canary material"
+            )
+        executable = _approved_acceptance_executable(
+            acceptance_argv[0],
+            cwd=cwd_path,
+            environment=bounded_environment,
+            descriptor=provider_sandbox_descriptor,
+        )
+        base["acceptance_executable_sha256"] = hashlib.sha256(
+            _read_bounded_regular_file(
+                executable,
+                max_bytes=64 * 1024 * 1024,
+            )
+        ).hexdigest()
+        evaluator_content = _read_digest_bound_evaluator(
+            artifact,
+            evaluator_sha256,
+        )
+        candidate_launch = prepare_candidate_evaluation_launch(
+            provider_sandbox_descriptor,
+            artifact,
+            evaluator_sha256,
+            acceptance_argv,
+            cwd=cwd_path,
+        )
+        evaluator_argv = list(candidate_launch.command)
+        base["argv"] = evaluator_argv
+        base["cwd"] = str(cwd_path)
+        base["evaluator_artifact"] = str(artifact)
+        base["evaluator_sha256"] = evaluator_sha256
+        execution = _run_bounded_argv(
+            evaluator_argv,
+            cwd=cwd_path,
+            environment=bounded_environment,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=int(max_output_bytes),
+            cpu_limit=experiment_protocol["environment"]["cpu_limit"],
+            memory_limit_bytes=experiment_protocol["environment"][
+                "memory_limit_bytes"
+            ],
+            input_bytes=evaluator_content,
+        )
+        base["evaluator_started"] = True
+        base.update(
+            {
+                "execution_boundary": execution["execution_boundary"],
+                "systemd_unit": execution["systemd_unit"],
+                "returncode": execution["returncode"],
+                "timed_out": execution["timed_out"],
+                "stdout": execution["stdout"],
+                "stderr": execution["stderr"],
+                "stdout_sha256": hashlib.sha256(
+                    execution["stdout"].encode("utf-8")
+                ).hexdigest(),
+                "stderr_sha256": hashlib.sha256(
+                    execution["stderr"].encode("utf-8")
+                ).hexdigest(),
+                "stdout_truncated": execution["stdout_truncated"],
+                "stderr_truncated": execution["stderr_truncated"],
+            }
+        )
+        post_scan = scan_canary_leakage(
+            scan_groups,
+            canary_path=canary_path,
+        )
+        output_findings = _scan_output_bytes(
+            execution["stdout_bytes"],
+            execution["stderr_bytes"],
+            canary_path,
+        )
+        post_scan = dict(post_scan)
+        post_scan["findings"] = [
+            *post_scan["findings"],
+            *output_findings,
+        ]
+        if post_scan["findings"]:
+            post_scan["scan_status"] = "leak_detected"
+        base["post_run_leak_scan"] = post_scan
+        candidate_repository_unchanged = (
+            _candidate_repository_state(
+                provider_sandbox_descriptor["repository"]["source"],
+                repository_identity,
+            )
+            == candidate_repository
+        )
+        if post_scan["scan_scope_sha256"] != actual_scan_scope_sha256:
+            raise ExperimentSandboxError("post-run leak scan scope drift")
+        passed = (
+            execution["returncode"] == 0
+            and not execution["timed_out"]
+            and execution["execution_boundary"]
+            == "systemd_user_transient_service"
+            and bool(execution["systemd_unit"])
+            and not execution["stdout_truncated"]
+            and not execution["stderr_truncated"]
+            and post_scan["scan_status"] == "clean"
+            and candidate_repository_unchanged
+        )
+        base["evaluation_status"] = "passed" if passed else "failed"
+        base["promotion_eligible"] = passed
+        if not passed:
+            base["failure_reason"] = (
+                "post_run_canary_leak"
+                if post_scan["scan_status"] != "clean"
+                else "candidate_workspace_mutated_during_evaluation"
+                if not candidate_repository_unchanged
+                else "evaluator_timeout"
+                if execution["timed_out"]
+                else "evaluator_output_truncated"
+                if (
+                    execution["stdout_truncated"]
+                    or execution["stderr_truncated"]
+                )
+                else "evaluator_nonzero_exit"
+            )
+    except ExperimentEvaluationBlocked as exc:
+        base["failure_reason"] = str(exc)
+        _finish_evidence(base, evidence_path)
+        exc.evidence = base
+        raise
+    except ExperimentSandboxError as exc:
+        base["failure_reason"] = str(exc)
+        _finish_evidence(base, evidence_path)
+        raise ExperimentEvaluationBlocked(str(exc), base) from exc
+    _finish_evidence(
+        base,
+        evidence_path,
+        authority_root=authority_root,
+        invocation_set_reference=invocation_set_reference,
+        experiment_protocol_reference=experiment_protocol_reference,
+        provider_sandbox_reference=provider_sandbox_reference,
+        canary_path=canary_path,
+    )
+    return base
+
+
+def validate_evaluation_evidence(
+    evidence,
+    *,
+    expected_run_id=None,
+    expected_taskpack_ids=None,
+    expected_protocol_sha256=None,
+    expected_protocol_reference_sha256=None,
+    expected_acceptance_command_sha256=None,
+    expected_acceptance_executable_sha256=None,
+    expected_evaluator_sha256=None,
+    expected_invocation_set_reference_sha256=None,
+    expected_provider_sandbox_reference_sha256=None,
+    authority_root=None,
+    invocation_set_reference=None,
+    experiment_protocol_reference=None,
+    provider_sandbox_reference=None,
+    canary_path=None,
+):
+    schema_path = (
+        Path(__file__).resolve().parents[2]
+        / "schemas"
+        / "experiment_evaluation.schema.json"
+    )
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ExperimentSandboxError(
+            "experiment evaluation schema is unavailable"
+        ) from exc
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    errors = sorted(
+        validator.iter_errors(evidence),
+        key=lambda item: list(item.absolute_path),
+    )
+    if errors:
+        first = errors[0]
+        location = ".".join(str(item) for item in first.absolute_path) or "<root>"
+        raise ExperimentSandboxError(
+            f"evaluation evidence schema failed at {location}: {first.message}"
+        )
+    expected_bindings = {
+        "run_id": expected_run_id,
+        "experiment_protocol_sha256": expected_protocol_sha256,
+        "experiment_protocol_reference_sha256": (
+            expected_protocol_reference_sha256
+        ),
+        "acceptance_command_sha256": expected_acceptance_command_sha256,
+        "acceptance_executable_sha256": (
+            expected_acceptance_executable_sha256
+        ),
+        "evaluator_sha256": expected_evaluator_sha256,
+        "invocation_set_reference_sha256": (
+            expected_invocation_set_reference_sha256
+        ),
+        "provider_sandbox_reference_sha256": (
+            expected_provider_sandbox_reference_sha256
+        ),
+    }
+    for field, expected in expected_bindings.items():
+        if expected is not None and evidence[field] != expected:
+            raise ExperimentSandboxError(
+                f"evaluation evidence {field} binding mismatch"
+            )
+    if (
+        expected_taskpack_ids is not None
+        and evidence["taskpack_ids"] != sorted(set(expected_taskpack_ids))
+    ):
+        raise ExperimentSandboxError(
+            "evaluation evidence taskpack_ids binding mismatch"
+        )
+    if (authority_root is None) is not (invocation_set_reference is None):
+        raise ExperimentSandboxError(
+            "evaluation authority validation requires root and reference"
+        )
+    if experiment_protocol_reference is not None and authority_root is None:
+        raise ExperimentSandboxError(
+            "protocol authority validation requires an authority root"
+        )
+    if (provider_sandbox_reference is None) is not (canary_path is None):
+        raise ExperimentSandboxError(
+            "candidate sandbox validation requires reference and canary"
+        )
+    if provider_sandbox_reference is not None and authority_root is None:
+        raise ExperimentSandboxError(
+            "candidate sandbox validation requires an authority root"
+        )
+    if experiment_protocol_reference is not None:
+        protocol = load_experiment_protocol_reference(
+            experiment_protocol_reference,
+            authority_root,
+        )
+        protocol_sha256 = hashlib.sha256(
+            _canonical_json_bytes(protocol)
+        ).hexdigest()
+        command_sha256 = hashlib.sha256(
+            _canonical_json_bytes(protocol["acceptance"]["command"])
+        ).hexdigest()
+        if (
+            evidence["experiment_protocol_sha256"] != protocol_sha256
+            or evidence["experiment_protocol_reference_sha256"]
+            != experiment_protocol_reference["sha256"]
+            or evidence["acceptance_command_sha256"] != command_sha256
+            or evidence["evaluator_sha256"]
+            != protocol["evaluator"]["artifact_sha256"]
+        ):
+            raise ExperimentSandboxError(
+                "evaluation evidence protocol authority binding mismatch"
+            )
+    if authority_root is not None:
+        manifest = load_model_invocation_set_reference(
+            invocation_set_reference,
+            authority_root,
+        )
+        authority_sets = []
+        authority_terminals = []
+        actual_canary_sha256 = None
+        if canary_path is not None:
+            actual_canary_sha256 = hashlib.sha256(
+                _read_bounded_regular_file(
+                    _existing_path(
+                        canary_path,
+                        "gold canary",
+                        require_file=True,
+                        reject_symlink=True,
+                    ),
+                    max_bytes=64 * 1024,
+                )
+            ).hexdigest()
+        for item in manifest["invocation_sets"]:
+            invocation_sandbox = load_provider_sandbox_reference(
+                item["sandbox_reference"],
+                authority_root,
+            )
+            if (
+                actual_canary_sha256 is not None
+                and invocation_sandbox["namespace_evidence"][
+                    "canary_sha256"
+                ]
+                != actual_canary_sha256
+            ):
+                raise ExperimentSandboxError(
+                    "model invocation sandbox canary binding mismatch"
+                )
+            terminals, seal_sha256 = _terminal_invocation_evidence(
+                Path(item["lifecycle_authority_root"])
+                / "model_invocations",
+                expected_invocation_ids=item["invocation_ids"],
+                expected_run_id=manifest["run_id"],
+                expected_taskpack_id=item["taskpack_id"],
+                expected_sandbox_policy_sha256=item[
+                    "sandbox_policy_sha256"
+                ],
+                expected_sandbox_reference_sha256=item[
+                    "sandbox_reference"
+                ]["sha256"],
+            )
+            authority_terminals.extend(terminals)
+            authority_sets.append(
+                {
+                    "taskpack_id": item["taskpack_id"],
+                    "expected_invocation_ids": item["invocation_ids"],
+                    "sandbox_policy_sha256": item[
+                        "sandbox_policy_sha256"
+                    ],
+                    "sandbox_reference_sha256": item[
+                        "sandbox_reference"
+                    ]["sha256"],
+                    "seal_sha256": seal_sha256,
+                }
+            )
+        authority_sets = sorted(
+            authority_sets,
+            key=lambda item: (
+                item["taskpack_id"],
+                item["expected_invocation_ids"],
+            ),
+        )
+        authority_terminals = sorted(
+            authority_terminals,
+            key=lambda item: item["invocation_id"],
+        )
+        if (
+            evidence["run_id"] != manifest["run_id"]
+            or evidence["invocation_set_reference_sha256"]
+            != invocation_set_reference["sha256"]
+            or evidence["invocation_sets"] != authority_sets
+            or evidence["terminal_invocations"] != authority_terminals
+        ):
+            raise ExperimentSandboxError(
+                "evaluation evidence invocation authority binding mismatch"
+            )
+    if provider_sandbox_reference is not None:
+        candidate_sandbox = load_provider_sandbox_reference(
+            provider_sandbox_reference,
+            authority_root,
+        )
+        canary_sha256 = hashlib.sha256(
+            _read_bounded_regular_file(
+                _existing_path(
+                    canary_path,
+                    "gold canary",
+                    require_file=True,
+                    reject_symlink=True,
+                ),
+                max_bytes=64 * 1024,
+            )
+        ).hexdigest()
+        if (
+            evidence["provider_sandbox_reference_sha256"]
+            != provider_sandbox_reference["sha256"]
+            or evidence["provider_sandbox_policy_sha256"]
+            != candidate_sandbox["policy_sha256"]
+            or candidate_sandbox["namespace_evidence"]["canary_sha256"]
+            != canary_sha256
+            or evidence["pre_run_leak_scan"]["canary_sha256"]
+            != canary_sha256
+            or evidence["post_run_leak_scan"]["canary_sha256"]
+            != canary_sha256
+        ):
+            raise ExperimentSandboxError(
+                "evaluation evidence candidate sandbox binding mismatch"
+            )
+    for stream in ("stdout", "stderr"):
+        digest = hashlib.sha256(
+            evidence[stream].encode("utf-8")
+        ).hexdigest()
+        if evidence[f"{stream}_sha256"] != digest:
+            raise ExperimentSandboxError(
+                f"evaluation evidence {stream} digest mismatch"
+            )
+    pre_scan = evidence["pre_run_leak_scan"]
+    post_scan = evidence["post_run_leak_scan"]
+    passed = evidence["evaluation_status"] == "passed"
+    invocation_sets = evidence["invocation_sets"]
+    expected_pairs = {
+        (
+            invocation_id,
+            item["taskpack_id"],
+            item["sandbox_policy_sha256"],
+            item["sandbox_reference_sha256"],
+        )
+        for item in invocation_sets
+        for invocation_id in item["expected_invocation_ids"]
+    }
+    terminal_pairs = {
+        (
+            item["invocation_id"],
+            item["taskpack_id"],
+            item["sandbox_policy_sha256"],
+            item["sandbox_reference_sha256"],
+        )
+        for item in evidence["terminal_invocations"]
+    }
+    invocation_relation_valid = (
+        len(expected_pairs)
+        == sum(
+            len(item["expected_invocation_ids"])
+            for item in invocation_sets
+        )
+        and sorted(
+            invocation_id for invocation_id, _, _, _ in expected_pairs
+        )
+        == evidence["expected_invocation_ids"]
+        and sorted(
+            {taskpack_id for _, taskpack_id, _, _ in expected_pairs}
+        )
+        == evidence["taskpack_ids"]
+        and expected_pairs == terminal_pairs
+        and evidence["invocation_set_seal_sha256"]
+        == hashlib.sha256(
+            _canonical_json_bytes(invocation_sets)
+        ).hexdigest()
+    )
+    if evidence["promotion_eligible"] is not passed:
+        raise ExperimentSandboxError(
+            "evaluation promotion eligibility is inconsistent"
+        )
+    if passed and (
+        provider_sandbox_reference is None
+        or canary_path is None
+        or not evidence["evaluator_started"]
+        or evidence["returncode"] != 0
+        or evidence["timed_out"]
+        or evidence["execution_boundary"]
+        != "systemd_user_transient_service"
+        or not evidence["systemd_unit"]
+        or evidence["stdout_truncated"]
+        or evidence["stderr_truncated"]
+        or not evidence["terminal_invocations"]
+        or not invocation_relation_valid
+        or evidence["run_id"] == "<unresolved>"
+        or not isinstance(evidence["candidate_repository"], dict)
+        or not isinstance(pre_scan, dict)
+        or pre_scan["scan_status"] != "clean"
+        or not isinstance(post_scan, dict)
+        or post_scan["scan_status"] != "clean"
+        or evidence["failure_reason"] is not None
+        or any(
+            invocation["terminal_status"] != "completed"
+            for invocation in evidence["terminal_invocations"]
+        )
+    ):
+        raise ExperimentSandboxError(
+            "passing evaluation evidence lacks required proof"
+        )
+    for scan in (pre_scan, post_scan):
+        if isinstance(scan, dict):
+            if scan["scan_scope_sha256"] != evidence["scan_scope_sha256"]:
+                raise ExperimentSandboxError(
+                    "evaluation leak scan scope is inconsistent"
+                )
+            has_findings = bool(scan["findings"])
+            if (scan["scan_status"] == "leak_detected") is not has_findings:
+                raise ExperimentSandboxError(
+                    "evaluation leak scan status is inconsistent"
+                )
+    return evidence
+
+
+def _finish_evidence(evidence, evidence_path, **validation_authority):
+    evidence["finished_at"] = _utc_timestamp()
+    validate_evaluation_evidence(evidence, **validation_authority)
+    if evidence_path is not None:
+        _publish_immutable_json(evidence_path, evidence)
+
+
+def _terminal_invocation_evidence(
+    invocation_root,
+    *,
+    expected_invocation_ids,
+    expected_run_id,
+    expected_taskpack_id,
+    expected_sandbox_policy_sha256,
+    expected_sandbox_reference_sha256,
+):
+    root = _existing_path(
+        invocation_root,
+        "model invocation root",
+        require_directory=True,
+        reject_symlink=True,
+    )
+    if (
+        not isinstance(expected_invocation_ids, (list, tuple))
+        or not expected_invocation_ids
+        or not all(
+            isinstance(invocation_id, str) and invocation_id
+            for invocation_id in expected_invocation_ids
+        )
+        or len(set(expected_invocation_ids)) != len(expected_invocation_ids)
+    ):
+        raise ExperimentEvaluationBlocked(
+            "trusted evaluation requires a bounded expected invocation set"
+        )
+    if (
+        not _is_sha256(expected_sandbox_policy_sha256)
+        or not _is_sha256(expected_sandbox_reference_sha256)
+    ):
+        raise ExperimentEvaluationBlocked(
+            "trusted evaluation requires a sandbox reference identity"
+        )
+    if (
+        not isinstance(expected_run_id, str)
+        or not expected_run_id
+        or not isinstance(expected_taskpack_id, str)
+        or not expected_taskpack_id
+    ):
+        raise ExperimentEvaluationBlocked(
+            "trusted evaluation requires run and taskpack identities"
+        )
+    seal_sha256 = _seal_model_invocation_set(
+        root,
+        expected_invocation_ids=expected_invocation_ids,
+        expected_run_id=expected_run_id,
+        expected_taskpack_id=expected_taskpack_id,
+        expected_sandbox_policy_sha256=expected_sandbox_policy_sha256,
+        expected_sandbox_reference_sha256=(
+            expected_sandbox_reference_sha256
+        ),
+    )
+    invocation_dirs = sorted(root.iterdir())
+    actual_ids = [path.name for path in invocation_dirs]
+    if set(actual_ids) != set(expected_invocation_ids):
+        raise ExperimentEvaluationBlocked(
+            "model invocation set does not match the sealed expected set"
+        )
+    evidence = []
+    for invocation_dir in invocation_dirs:
+        if invocation_dir.is_symlink() or not invocation_dir.is_dir():
+            raise ExperimentEvaluationBlocked(
+                "model invocation root contains an unsafe entry"
+            )
+        start_path = invocation_dir / "started.json"
+        if start_path.is_symlink() or not start_path.is_file():
+            raise ExperimentEvaluationBlocked(
+                "all model invocations require a durable start before evaluation"
+            )
+        terminal_path = start_path.with_name("terminal.json")
+        if terminal_path.is_symlink() or not terminal_path.is_file():
+            raise ExperimentEvaluationBlocked(
+                "all model invocations must terminate before evaluation"
+            )
+        try:
+            start = json.loads(
+                _read_bounded_regular_file(
+                    start_path,
+                    max_bytes=4 * 1024 * 1024,
+                ).decode("utf-8")
+            )
+            terminal = json.loads(
+                _read_bounded_regular_file(
+                    terminal_path,
+                    max_bytes=4 * 1024 * 1024,
+                ).decode("utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ExperimentEvaluationBlocked(
+                "model invocation lifecycle evidence is unreadable"
+            ) from exc
+        _validate_schema_record(
+            start,
+            "model_invocation_started.schema.json",
+            "model invocation start",
+        )
+        _validate_schema_record(
+            terminal,
+            "model_invocation_usage.schema.json",
+            "model invocation terminal",
+        )
+        invocation_id = start.get("invocation_id")
+        terminal_status = terminal.get("terminal_status")
+        sandbox_policy_sha256 = start.get(
+            "experiment_sandbox_policy_sha256"
+        )
+        sandbox_reference_sha256 = start.get(
+            "experiment_sandbox_reference_sha256"
+        )
+        start_sha256 = hashlib.sha256(
+            _read_bounded_regular_file(
+                start_path,
+                max_bytes=4 * 1024 * 1024,
+            )
+        ).hexdigest()
+        shared_lifecycle_fields = (
+            "invocation_id",
+            "project",
+            "run_id",
+            "pursue_id",
+            "round_index",
+            "taskpack_id",
+            "implementation_run_id",
+            "gate_epoch",
+            "task_id",
+            "attempt_id",
+            "runtime_execution_session_id",
+            "provider_predecessor_invocation_id",
+            "provider_predecessor_turn_id",
+            "lifecycle_owner_token",
+            "agent_id",
+            "role",
+            "usage_stage",
+            "backend",
+            "model",
+            "coverage_class",
+            "experiment_sandbox_policy_sha256",
+            "experiment_sandbox_reference_sha256",
+            "started_at",
+        )
+        if (
+            not isinstance(invocation_id, str)
+            or terminal.get("invocation_id") != invocation_id
+            or invocation_dir.name != invocation_id
+            or start.get("run_id") != expected_run_id
+            or terminal.get("run_id") != expected_run_id
+            or start.get("taskpack_id") != expected_taskpack_id
+            or terminal.get("taskpack_id") != expected_taskpack_id
+            or terminal.get("experiment_sandbox_policy_sha256")
+            != expected_sandbox_policy_sha256
+            or terminal.get("experiment_sandbox_reference_sha256")
+            != expected_sandbox_reference_sha256
+            or terminal.get("start_sha256") != start_sha256
+            or any(
+                terminal.get(field) != start.get(field)
+                for field in shared_lifecycle_fields
+            )
+            or terminal_status
+            not in {
+                "completed",
+                "failed",
+                "blocked",
+                "cancelled",
+                "timed_out",
+                "launch_failed",
+                "missing_result",
+                "invalid_result",
+                "recovered_orphan",
+            }
+            or sandbox_policy_sha256 != expected_sandbox_policy_sha256
+            or sandbox_reference_sha256
+            != expected_sandbox_reference_sha256
+        ):
+            raise ExperimentEvaluationBlocked(
+                "model invocation terminal record does not bind its start and sandbox"
+            )
+        evidence.append(
+            {
+                "invocation_id": invocation_id,
+                "taskpack_id": expected_taskpack_id,
+                "terminal_status": terminal_status,
+                "start_sha256": start_sha256,
+                "sandbox_policy_sha256": sandbox_policy_sha256,
+                "sandbox_reference_sha256": sandbox_reference_sha256,
+                "terminal_sha256": hashlib.sha256(
+                    _read_bounded_regular_file(
+                        terminal_path,
+                        max_bytes=4 * 1024 * 1024,
+                    )
+                ).hexdigest(),
+            }
+        )
+    return evidence, seal_sha256
+
+
+def _seal_model_invocation_set(
+    invocation_root,
+    *,
+    expected_invocation_ids,
+    expected_run_id,
+    expected_taskpack_id,
+    expected_sandbox_policy_sha256,
+    expected_sandbox_reference_sha256,
+):
+    authority_root = Path(invocation_root).parent
+    lock_path = authority_root / "model_invocations.lock"
+    seal_path = authority_root / "model_invocations.sealed.json"
+    seal = {
+        "schema_version": "experiment_model_invocation_set.v1",
+        "expected_invocation_ids": sorted(expected_invocation_ids),
+        "run_id": expected_run_id,
+        "taskpack_id": expected_taskpack_id,
+        "sandbox_policy_sha256": expected_sandbox_policy_sha256,
+        "sandbox_reference_sha256": expected_sandbox_reference_sha256,
+    }
+    lock_path.touch(mode=0o600, exist_ok=True)
+    with lock_path.open("r+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            if seal_path.exists():
+                try:
+                    existing = json.loads(
+                        _read_bounded_regular_file(
+                            seal_path,
+                            max_bytes=64 * 1024,
+                        ).decode("utf-8")
+                    )
+                except (
+                    OSError,
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    raise ExperimentEvaluationBlocked(
+                        "model invocation set seal is unreadable"
+                    ) from exc
+                if existing != seal:
+                    raise ExperimentEvaluationBlocked(
+                        "model invocation set seal conflicts with evaluation"
+                    )
+            else:
+                _publish_immutable_json(seal_path, seal)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    return hashlib.sha256(
+        _read_bounded_regular_file(seal_path, max_bytes=64 * 1024)
+    ).hexdigest()
+
+
+def _run_bounded_argv(
+    argv,
+    *,
+    cwd,
+    environment,
+    timeout_seconds,
+    max_output_bytes,
+    cpu_limit,
+    memory_limit_bytes,
+    input_bytes=None,
+):
+    systemd_run = Path("/usr/bin/systemd-run")
+    systemctl = Path("/usr/bin/systemctl")
+    env_binary = _TRUSTED_ENV_PATH
+    if (
+        not sys.platform.startswith("linux")
+        or not systemd_run.is_file()
+        or not systemctl.is_file()
+        or not env_binary.is_file()
+    ):
+        raise ExperimentSandboxUnavailable(
+            "systemd user transient services are unavailable"
+        )
+    systemd_run = _existing_path(
+        systemd_run,
+        "systemd-run",
+        require_file=True,
+    )
+    systemctl = _existing_path(
+        systemctl,
+        "systemctl",
+        require_file=True,
+    )
+    env_binary = _existing_path(
+        env_binary,
+        "env",
+        require_file=True,
+    )
+    try:
+        cpu_limit = int(cpu_limit)
+        memory_limit_bytes = int(memory_limit_bytes)
+    except (TypeError, ValueError) as exc:
+        raise ExperimentSandboxError(
+            "evaluator resource limits are invalid"
+        ) from exc
+    if not 1 <= cpu_limit <= 64 or not 64 * 1024 * 1024 <= memory_limit_bytes:
+        raise ExperimentSandboxError("evaluator resource limits are invalid")
+    unit = f"agentteam-eval-{os.urandom(12).hex()}.service"
+    command = [
+        str(systemd_run),
+        "--user",
+        "--quiet",
+        "--wait",
+        "--collect",
+        "--pipe",
+        "--service-type=exec",
+        "--unit",
+        unit,
+        "--property",
+        "KillMode=control-group",
+        "--property",
+        "ExitType=cgroup",
+        "--property",
+        "TimeoutStopSec=5s",
+        "--property",
+        "TasksMax=256",
+        "--property",
+        f"MemoryMax={memory_limit_bytes}",
+        "--property",
+        f"CPUQuota={cpu_limit * 100}%",
+        "--working-directory",
+        str(cwd),
+    ]
+    if Path(argv[0]).resolve(strict=False) == _TRUSTED_BWRAP_PATH:
+        command.extend(["--", *argv])
+    else:
+        clean_environment_argv = [
+            str(env_binary),
+            "-i",
+            *(f"{name}={value}" for name, value in sorted(environment.items())),
+            *argv,
+        ]
+        command.extend(["--", *clean_environment_argv])
+
+    def terminate_unit():
+        subprocess.run(
+            [
+                str(systemctl),
+                "--user",
+                "kill",
+                "--kill-whom=all",
+                "--signal=SIGKILL",
+                unit,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+
+    result = _capture_bounded_process(
+        command,
+        cwd="/",
+        environment=dict(os.environ),
+        timeout_seconds=timeout_seconds,
+        max_output_bytes=max_output_bytes,
+        timeout_callback=terminate_unit,
+        input_bytes=input_bytes,
+    )
+    result.update(
+        {
+            "execution_boundary": "systemd_user_transient_service",
+            "systemd_unit": unit,
+        }
+    )
+    return result
+
+
+def _capture_bounded_process(
+    argv,
+    *,
+    cwd,
+    environment,
+    timeout_seconds,
+    max_output_bytes,
+    timeout_callback=None,
+    input_bytes=None,
+):
+    if not 1 <= max_output_bytes <= 16 * 1024 * 1024:
+        raise ExperimentSandboxError("evaluator output bound is invalid")
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=str(cwd),
+            env=environment,
+            stdin=(
+                subprocess.PIPE
+                if input_bytes is not None
+                else subprocess.DEVNULL
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise ExperimentSandboxError(
+            f"trusted evaluator launch failed: {type(exc).__name__}"
+        ) from exc
+    output = [bytearray(), bytearray()]
+    truncated = [False, False]
+
+    def drain(stream, target, index):
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            remaining = max_output_bytes - len(target)
+            if remaining > 0:
+                target.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                truncated[index] = True
+
+    threads = [
+        threading.Thread(
+            target=drain,
+            args=(process.stdout, output[0], 0),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=drain,
+            args=(process.stderr, output[1], 1),
+            daemon=True,
+        ),
+    ]
+    if input_bytes is not None:
+        if (
+            not isinstance(input_bytes, bytes)
+            or len(input_bytes) > 4 * 1024 * 1024
+        ):
+            process.kill()
+            process.wait()
+            raise ExperimentSandboxError(
+                "evaluator input is not bounded bytes"
+            )
+
+        def feed_input():
+            try:
+                process.stdin.write(input_bytes)
+                process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+            finally:
+                process.stdin.close()
+
+        threads.append(threading.Thread(target=feed_input, daemon=True))
+    for thread in threads:
+        thread.start()
+    timed_out = False
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        if timeout_callback is not None:
+            timeout_callback()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+    process.stdout.close()
+    process.stderr.close()
+    stdout_bytes = bytes(output[0])
+    stderr_bytes = bytes(output[1])
+    return {
+        "returncode": process.returncode,
+        "timed_out": timed_out,
+        "stdout": stdout_bytes.decode("utf-8", errors="replace"),
+        "stderr": stderr_bytes.decode("utf-8", errors="replace"),
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
+        "stdout_truncated": truncated[0],
+        "stderr_truncated": truncated[1],
+    }
+
+
+def _scan_output_bytes(stdout, stderr, canary_path):
+    canary_path = Path(canary_path)
+    canary = _read_bounded_regular_file(canary_path, max_bytes=64 * 1024)
+    digest = hashlib.sha256(canary).hexdigest()
+    needles = (
+        ("canary_content", canary),
+        ("canary_sha256", digest.encode("ascii")),
+        ("canary_sha256", digest.upper().encode("ascii")),
+        ("canary_path", str(canary_path).encode("utf-8")),
+    )
+    findings = []
+    for stream, encoded in (("stdout", stdout), ("stderr", stderr)):
+        for kind, needle in needles:
+            if needle and needle in encoded:
+                findings.append(
+                    {
+                        "group": "evaluator_output",
+                        "path_sha256": hashlib.sha256(
+                            stream.encode("ascii")
+                        ).hexdigest(),
+                        "match": kind,
+                    }
+                )
+    return findings
+
+
+def _contains_canary_reference(text, canary_path):
+    canary_path = Path(canary_path)
+    canary = _read_bounded_regular_file(canary_path, max_bytes=64 * 1024)
+    digest = hashlib.sha256(canary).hexdigest()
+    encoded = str(text).encode("utf-8")
+    return any(
+        needle and needle in encoded
+        for needle in (
+            canary,
+            digest.encode("ascii"),
+            digest.upper().encode("ascii"),
+            str(canary_path).encode("utf-8"),
+        )
+    )
+
+
+def scan_scope_sha256(scan_groups):
+    scope = _normalized_scan_scope(scan_groups)
+    return hashlib.sha256(_canonical_json_bytes(scope)).hexdigest()
+
+
+def publish_scan_scope_reference(
+    authority_root,
+    scan_groups,
+    *,
+    reference_id="evaluation-scan-scope",
+):
+    scope = _normalized_scan_scope(scan_groups)
+    scope_sha256 = hashlib.sha256(_canonical_json_bytes(scope)).hexdigest()
+    record = {
+        "schema_version": "experiment_scan_scope.v1",
+        "scan_groups": scope,
+        "scan_scope_sha256": scope_sha256,
+    }
+    authority_dir = _experiment_authority_dir(authority_root)
+    path = authority_dir / f"{_safe_reference_id(reference_id)}.scan-scope.json"
+    _publish_immutable_json(path, record)
+    payload = _read_bounded_regular_file(path, max_bytes=4 * 1024 * 1024)
+    return {
+        "schema_version": SCAN_SCOPE_REFERENCE_SCHEMA_VERSION,
+        "path": str(path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def load_scan_scope_reference(reference, authority_root):
+    _path, payload = _load_authority_reference(
+        reference,
+        authority_root,
+        schema_version=SCAN_SCOPE_REFERENCE_SCHEMA_VERSION,
+        suffix=".scan-scope.json",
+    )
+    try:
+        record = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExperimentSandboxUnavailable(
+            "leak scan scope authority is unreadable"
+        ) from exc
+    if (
+        not isinstance(record, dict)
+        or set(record)
+        != {"schema_version", "scan_groups", "scan_scope_sha256"}
+        or record["schema_version"] != "experiment_scan_scope.v1"
+    ):
+        raise ExperimentSandboxError("invalid leak scan scope authority")
+    scope = _normalized_scan_scope(record["scan_groups"])
+    digest = hashlib.sha256(_canonical_json_bytes(scope)).hexdigest()
+    if record["scan_groups"] != scope or record["scan_scope_sha256"] != digest:
+        raise ExperimentSandboxError("leak scan scope authority drift")
+    return scope, digest
+
+
+def _normalized_scan_scope(scan_groups):
+    if not isinstance(scan_groups, dict) or set(scan_groups) != {
+        "prompt",
+        "context",
+        "taskpack",
+        "artifacts",
+    }:
+        raise ExperimentSandboxError(
+            "leak scan groups must be prompt, context, taskpack, and artifacts"
+        )
+    scope = {}
+    for group in ("prompt", "context", "taskpack", "artifacts"):
+        values = scan_groups[group]
+        if isinstance(values, (str, os.PathLike)):
+            values = [values]
+        if not isinstance(values, (list, tuple)) or not values:
+            raise ExperimentSandboxError(
+                "every leak scan group must declare at least one path"
+            )
+        scope[group] = sorted(
+            str(
+                _existing_path(
+                    value,
+                    f"{group} leak scan path",
+                    reject_symlink=True,
+                )
+            )
+            for value in values
+        )
+    return scope
+
+
+def _normalize_invocation_sets(invocation_sets, *, authority_root):
+    if (
+        not isinstance(invocation_sets, (list, tuple))
+        or not invocation_sets
+        or len(invocation_sets) > 1024
+    ):
+        raise ExperimentSandboxError(
+            "model invocation manifest requires bounded invocation sets"
+        )
+    normalized = []
+    seen_roots = set()
+    seen_invocation_ids = set()
+    for item in invocation_sets:
+        required_keys = {
+            "lifecycle_authority_root",
+            "taskpack_id",
+            "invocation_ids",
+            "sandbox_reference",
+        }
+        if (
+            not isinstance(item, dict)
+            or set(item) not in (
+                required_keys,
+                required_keys | {"sandbox_policy_sha256"},
+            )
+        ):
+            raise ExperimentSandboxError(
+                "invalid model invocation set entry"
+            )
+        lifecycle_authority_root = validate_experiment_lifecycle_authority(
+            authority_root,
+            item["lifecycle_authority_root"],
+        )
+        root = _existing_path(
+            lifecycle_authority_root / "model_invocations",
+            "canonical model invocation root",
+            require_directory=True,
+            reject_symlink=True,
+        )
+        root_key = str(root)
+        if root_key in seen_roots:
+            raise ExperimentSandboxError(
+                "model invocation roots must be unique"
+            )
+        seen_roots.add(root_key)
+        taskpack_id = _nonempty_text(
+            item["taskpack_id"],
+            "model invocation taskpack id",
+        )
+        sandbox_reference = item["sandbox_reference"]
+        sandbox_descriptor = load_provider_sandbox_reference(
+            sandbox_reference,
+            authority_root,
+        )
+        validate_provider_authority_separation(
+            sandbox_descriptor,
+            authority_root,
+            lifecycle_authority_root,
+        )
+        sandbox_policy_sha256 = sandbox_descriptor["policy_sha256"]
+        if (
+            "sandbox_policy_sha256" in item
+            and item["sandbox_policy_sha256"] != sandbox_policy_sha256
+        ):
+            raise ExperimentSandboxError(
+                "model invocation sandbox policy does not match its reference"
+            )
+        invocation_ids = item["invocation_ids"]
+        if (
+            not isinstance(invocation_ids, (list, tuple))
+            or not invocation_ids
+            or len(invocation_ids) > 4096
+            or not all(
+                isinstance(invocation_id, str)
+                and invocation_id.startswith("INV-")
+                and len(invocation_id) <= 256
+                for invocation_id in invocation_ids
+            )
+            or len(set(invocation_ids)) != len(invocation_ids)
+        ):
+            raise ExperimentSandboxError(
+                "model invocation ids must be bounded and unique"
+            )
+        duplicate_ids = seen_invocation_ids.intersection(invocation_ids)
+        if duplicate_ids:
+            raise ExperimentSandboxError(
+                "model invocation ids must be globally unique"
+            )
+        seen_invocation_ids.update(invocation_ids)
+        normalized.append(
+            {
+                "lifecycle_authority_root": str(
+                    lifecycle_authority_root
+                ),
+                "taskpack_id": taskpack_id,
+                "invocation_ids": sorted(invocation_ids),
+                "sandbox_reference": dict(sandbox_reference),
+                "sandbox_policy_sha256": sandbox_policy_sha256,
+            }
+        )
+    try:
+        actual_roots = {
+            str(_existing_path(
+                entry.path,
+                "registered model invocation lifecycle authority",
+                require_directory=True,
+                reject_symlink=True,
+            ))
+            for entry in os.scandir(
+                _experiment_lifecycle_registry_dir(authority_root)
+            )
+        }
+    except OSError as exc:
+        raise ExperimentSandboxError(
+            "model invocation lifecycle registry is unavailable"
+        ) from exc
+    declared_roots = {
+        item["lifecycle_authority_root"]
+        for item in normalized
+    }
+    registered_roots = _registered_lifecycle_roots(authority_root)
+    if (
+        declared_roots != registered_roots
+        or actual_roots != registered_roots
+    ):
+        raise ExperimentSandboxError(
+            "model invocation manifest does not cover the lifecycle registry"
+        )
+    return sorted(
+        normalized,
+        key=lambda item: (
+            item["taskpack_id"],
+            item["sandbox_reference"]["sha256"],
+            item["sandbox_policy_sha256"],
+            item["lifecycle_authority_root"],
+            item["invocation_ids"],
+        ),
+    )
+
+
+def _experiment_authority_dir(authority_root):
+    root = Path(authority_root).resolve(strict=True)
+    path = root / "experiment_authority"
+    path.mkdir(mode=0o700, exist_ok=True)
+    metadata = path.stat()
+    if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise ExperimentSandboxError(
+            "experiment authority directory permissions are unsafe"
+        )
+    return path
+
+
+def _experiment_lifecycle_registry_dir(authority_root):
+    root = Path(authority_root).resolve(strict=True)
+    path = root / "experiment_lifecycles"
+    path.mkdir(mode=0o700, exist_ok=True)
+    metadata = path.stat()
+    if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise ExperimentSandboxError(
+            "experiment lifecycle registry permissions are unsafe"
+        )
+    return path
+
+
+def _registered_lifecycle_roots(authority_root):
+    authority_dir = _experiment_authority_dir(authority_root)
+    registrations = {}
+    try:
+        entries = list(os.scandir(authority_dir))
+    except OSError as exc:
+        raise ExperimentSandboxError(
+            "experiment lifecycle registration ledger is unavailable"
+        ) from exc
+    for entry in entries:
+        if not entry.name.endswith(".lifecycle-registration.json"):
+            continue
+        path = _existing_path(
+            entry.path,
+            "experiment lifecycle registration",
+            require_file=True,
+            reject_symlink=True,
+        )
+        try:
+            record = json.loads(
+                _read_bounded_regular_file(
+                    path,
+                    max_bytes=64 * 1024,
+                ).decode("utf-8")
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ExperimentSandboxError(
+                "experiment lifecycle registration is unreadable"
+            ) from exc
+        if (
+            not isinstance(record, dict)
+            or set(record)
+            != {
+                "schema_version",
+                "lifecycle_id",
+                "lifecycle_authority_root",
+            }
+            or record["schema_version"]
+            != "experiment_lifecycle_registration.v1"
+            or path.name
+            != f"{_safe_reference_id(record['lifecycle_id'])}."
+            "lifecycle-registration.json"
+        ):
+            raise ExperimentSandboxError(
+                "experiment lifecycle registration is invalid"
+            )
+        root = Path(record["lifecycle_authority_root"])
+        if (
+            root.parent != _experiment_lifecycle_registry_dir(authority_root)
+            or root.name != record["lifecycle_id"]
+            or str(root) in registrations
+        ):
+            raise ExperimentSandboxError(
+                "experiment lifecycle registration is invalid"
+            )
+        registrations[str(root)] = record["lifecycle_id"]
+    return set(registrations)
+
+
+def _safe_reference_id(value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 128
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-_"
+            for character in value
+        )
+    ):
+        raise ExperimentSandboxError("invalid experiment authority reference id")
+    return value
+
+
+def _load_authority_reference(
+    reference,
+    authority_root,
+    *,
+    schema_version,
+    suffix,
+):
+    if (
+        not isinstance(reference, dict)
+        or set(reference) != {"schema_version", "path", "sha256"}
+        or reference.get("schema_version") != schema_version
+        or not _is_sha256(reference.get("sha256"))
+    ):
+        raise ExperimentSandboxError("invalid experiment authority reference")
+    authority_dir = _experiment_authority_dir(authority_root)
+    path = _existing_path(
+        reference["path"],
+        "experiment authority reference",
+        require_file=True,
+        reject_symlink=True,
+    )
+    if path.parent != authority_dir or not path.name.endswith(suffix):
+        raise ExperimentSandboxError(
+            "experiment authority reference escapes the run authority"
+        )
+    metadata = path.stat()
+    if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise ExperimentSandboxError(
+            "experiment authority reference permissions are unsafe"
+        )
+    payload = _read_bounded_regular_file(path, max_bytes=4 * 1024 * 1024)
+    if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
+        raise ExperimentSandboxError("experiment authority reference digest mismatch")
+    return path, payload
+
+
+def _validate_descriptor_excludes_canary(descriptor, canary_path):
+    canary_path = _existing_path(
+        canary_path,
+        "gold canary",
+        require_file=True,
+        reject_symlink=True,
+    )
+    for view in (
+        descriptor["repository"],
+        *descriptor["runtime_views"],
+        *descriptor["library_views"],
+        *descriptor["credential_views"],
+    ):
+        if _paths_overlap(Path(view["source"]), canary_path):
+            raise ExperimentSandboxError(
+                "gold canary overlaps a provider mount source"
+            )
+    markers = _forbidden_markers([canary_path])
+    for value in descriptor["environment"].values():
+        encoded = value.encode("utf-8")
+        if any(marker and marker in encoded for marker in markers):
+            raise ExperimentSandboxError(
+                "evaluator-only material appears in provider environment"
+            )
+
+
+def _forbidden_markers(paths):
+    markers = []
+    for path in paths:
+        path = Path(path)
+        markers.append(str(path).encode("utf-8"))
+        if not path.is_file():
+            continue
+        content = _read_bounded_regular_file(path, max_bytes=64 * 1024)
+        markers.extend(
+            (
+                content,
+                hashlib.sha256(content).hexdigest().encode("ascii"),
+                hashlib.sha256(content).hexdigest().upper().encode("ascii"),
+            )
+        )
+    return tuple(markers)
+
+
+def _normalize_views(views, label):
+    if not isinstance(views, (list, tuple)):
+        raise ExperimentSandboxError(f"{label} views must be a list")
+    if len(views) > 64:
+        raise ExperimentSandboxError(f"{label} views exceed their bound")
+    normalized = []
+    for index, view in enumerate(views):
+        if isinstance(view, (str, os.PathLike)):
+            source = _existing_path(view, f"{label} view {index}")
+            target = _absolute_target(source, f"{label} view {index}")
+        elif isinstance(view, dict) and set(view) == {"source", "target"}:
+            source = _existing_path(view["source"], f"{label} view {index}")
+            target = _absolute_target(view["target"], f"{label} view {index}")
+        else:
+            raise ExperimentSandboxError(f"invalid {label} view {index}")
+        normalized.append(
+            {
+                "source": str(source),
+                "target": str(target),
+                "writable": False,
+                "source_identity": _mount_source_identity(source),
+            }
+        )
+    _deny_duplicate_targets(normalized)
+    return normalized
+
+
+def _validate_normalized_views(views, label):
+    if not isinstance(views, list):
+        raise ExperimentSandboxError(f"{label} views must be a list")
+    for index, view in enumerate(views):
+        if (
+            not isinstance(view, dict)
+            or set(view)
+            != {"source", "target", "writable", "source_identity"}
+            or view.get("writable") is not False
+        ):
+            raise ExperimentSandboxError(f"invalid {label} view {index}")
+        _validate_mount_source(
+            view["source"],
+            view["source_identity"],
+            f"{label} view {index}",
+        )
+        _absolute_target(view["target"], f"{label} view {index}")
+    _deny_duplicate_targets(views)
+
+
+def _normalize_credentials(mounts):
+    if not isinstance(mounts, (list, tuple)):
+        raise ExperimentSandboxError("credential mounts must be a list")
+    if len(mounts) > DEFAULT_MAX_CREDENTIAL_FILES:
+        raise ExperimentSandboxError("credential mounts exceed their bound")
+    normalized = []
+    for index, mount in enumerate(mounts):
+        if not isinstance(mount, dict) or set(mount) != {"source", "target"}:
+            raise ExperimentSandboxError(f"invalid credential mount {index}")
+        source = _existing_path(
+            mount["source"],
+            f"credential mount {index}",
+            reject_symlink=True,
+        )
+        target = _absolute_target(
+            mount["target"],
+            f"credential mount {index}",
+        )
+        if not _is_relative_to(target, _CREDENTIAL_ROOT) or target == _CREDENTIAL_ROOT:
+            raise ExperimentSandboxError(
+                "credential target must be below /run/agentteam-credentials"
+            )
+        inventory = _credential_inventory(source)
+        normalized.append(
+            {
+                "source": str(source),
+                "target": str(target),
+                "writable": False,
+                "source_identity": _mount_source_identity(source),
+                **inventory,
+            }
+        )
+    _deny_duplicate_targets(normalized)
+    return normalized
+
+
+def _validate_normalized_credentials(views):
+    if not isinstance(views, list):
+        raise ExperimentSandboxError("credential views must be a list")
+    rebuilt = _normalize_credentials(
+        [
+            {"source": view.get("source"), "target": view.get("target")}
+            for view in views
+            if isinstance(view, dict)
+        ]
+    )
+    if views != rebuilt:
+        raise ExperimentSandboxError("credential inventory or policy drift")
+
+
+def _credential_inventory(path):
+    files, _entry_count = _bounded_regular_files(
+        [path],
+        max_entries=DEFAULT_MAX_CREDENTIAL_FILES * 4,
+    )
+    count = 0
+    total = 0
+    digest = hashlib.sha256()
+    for candidate in sorted(files):
+        content = _read_bounded_regular_file(
+            candidate,
+            max_bytes=DEFAULT_MAX_CREDENTIAL_BYTES - total,
+        )
+        count += 1
+        total += len(content)
+        if count > DEFAULT_MAX_CREDENTIAL_FILES:
+            raise ExperimentSandboxError("credential file bound was exceeded")
+        if total > DEFAULT_MAX_CREDENTIAL_BYTES:
+            raise ExperimentSandboxError("credential byte bound was exceeded")
+        relative = (
+            candidate.name
+            if path.is_file()
+            else candidate.relative_to(path).as_posix()
+        )
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(hashlib.sha256(content).digest())
+    if count == 0:
+        raise ExperimentSandboxError("credential mount contains no regular files")
+    return {
+        "file_count": count,
+        "total_bytes": total,
+        "content_sha256": digest.hexdigest(),
+    }
+
+
+def _normalize_environment(environment):
+    values = dict(_DEFAULT_ENVIRONMENT)
+    if environment is not None:
+        if not isinstance(environment, dict):
+            raise ExperimentSandboxError("provider environment must be an object")
+        if not all(isinstance(name, str) for name in environment):
+            raise ExperimentSandboxError(
+                "provider environment names must be strings"
+            )
+        values.update(environment)
+    normalized = {}
+    for name in sorted(values):
+        value = values[name]
+        if (
+            not isinstance(name, str)
+            or _ENVIRONMENT_NAME.fullmatch(name) is None
+            or not isinstance(value, str)
+            or "\x00" in value
+            or len(value) > 4096
+        ):
+            raise ExperimentSandboxError("provider environment is not bounded")
+        normalized[name] = value
+    if len(normalized) > 64:
+        raise ExperimentSandboxError("provider environment has too many entries")
+    return normalized
+
+
+def _validated_repository_identity(
+    repository,
+    identity,
+    *,
+    verify_workspace=True,
+):
+    if identity is None:
+        return None
+    if not isinstance(identity, dict) or set(identity) != {
+        "commit",
+        "tree",
+        "git_object_format",
+    }:
+        raise ExperimentSandboxError(
+            "repository identity must bind commit, tree, and object format"
+        )
+    object_format = identity["git_object_format"]
+    digest_lengths = {"sha1": 40, "sha256": 64}
+    if object_format not in digest_lengths:
+        raise ExperimentSandboxError(
+            "repository identity object format is unsupported"
+        )
+    digest_length = digest_lengths[object_format]
+    for field in ("commit", "tree"):
+        value = identity[field]
+        if (
+            not isinstance(value, str)
+            or len(value) != digest_length
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ExperimentSandboxError(
+                f"repository identity {field} is invalid"
+            )
+    if not verify_workspace:
+        return dict(identity)
+    _validate_standalone_git_control(repository)
+    observed = {}
+    for field, arguments in (
+        ("commit", ("rev-parse", "--verify", "HEAD")),
+        ("tree", ("rev-parse", "HEAD^{tree}")),
+        ("git_object_format", ("rev-parse", "--show-object-format")),
+    ):
+        try:
+            completed = subprocess.run(
+                _sanitized_git_argv(repository, arguments),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=30,
+                env=_sanitized_git_environment(),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ExperimentSandboxError(
+                "repository identity is unavailable"
+            ) from exc
+        if completed.returncode != 0 or len(completed.stdout) > 4096:
+            raise ExperimentSandboxError(
+                "repository identity is unavailable"
+            )
+        observed[field] = completed.stdout.strip()
+    if observed != identity:
+        raise ExperimentSandboxError(
+            "repository identity does not match the certified workspace"
+        )
+    return dict(identity)
+
+
+def _sanitized_git_argv(repository, arguments):
+    git = _existing_path(
+        _TRUSTED_GIT_PATH,
+        "trusted Git executable",
+        require_file=True,
+        reject_symlink=True,
+    )
+    if git != _TRUSTED_GIT_PATH or not os.access(git, os.X_OK):
+        raise ExperimentSandboxUnavailable(
+            "trusted Git executable is unavailable"
+        )
+    return [
+        str(git),
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "submodule.recurse=false",
+        "-C",
+        str(repository),
+        *arguments,
+    ]
+
+
+def _sanitized_git_environment():
+    return {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_PAGER": "cat",
+        "GIT_TERMINAL_PROMPT": "0",
+        "HOME": "/nonexistent",
+        "LANG": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+    }
+
+
+def _candidate_repository_state(repository, baseline_identity):
+    repository = _existing_path(
+        repository,
+        "candidate repository",
+        require_directory=True,
+        reject_symlink=True,
+    )
+    git_directory = _validate_standalone_git_control(repository)
+
+    def git_output(*arguments, binary=False):
+        try:
+            completed = subprocess.run(
+                _sanitized_git_argv(repository, arguments),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=not binary,
+                check=False,
+                timeout=30,
+                env=_sanitized_git_environment(),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ExperimentSandboxError(
+                "candidate repository identity is unavailable"
+            ) from exc
+        stdout = completed.stdout
+        if (
+            completed.returncode != 0
+            or len(stdout) > 4 * 1024 * 1024
+        ):
+            raise ExperimentSandboxError(
+                "candidate repository identity is unavailable"
+            )
+        return stdout
+
+    head_commit = git_output("rev-parse", "--verify", "HEAD").strip()
+    head_tree = git_output("rev-parse", "HEAD^{tree}").strip()
+    object_format = git_output(
+        "rev-parse",
+        "--show-object-format",
+    ).strip()
+    try:
+        ancestor = subprocess.run(
+            _sanitized_git_argv(
+                repository,
+                (
+                    "merge-base",
+                    "--is-ancestor",
+                    baseline_identity["commit"],
+                    head_commit,
+                ),
+            ),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=30,
+            env=_sanitized_git_environment(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ExperimentSandboxError(
+            "candidate repository ancestry is unavailable"
+        ) from exc
+    if (
+        ancestor.returncode != 0
+        or object_format != baseline_identity["git_object_format"]
+    ):
+        raise ExperimentSandboxError(
+            "candidate repository does not descend from the certified baseline"
+        )
+    status = git_output(
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=no",
+        binary=True,
+    )
+    workspace_inventory = _bounded_tree_identity(
+        repository,
+        excluded_roots={git_directory},
+        max_entries=DEFAULT_MAX_SCAN_FILES,
+        max_bytes=DEFAULT_MAX_SCAN_BYTES,
+    )
+    git_control_inventory = _bounded_tree_identity(
+        git_directory,
+        excluded_roots={git_directory / "objects"},
+        max_entries=DEFAULT_MAX_SCAN_FILES,
+        max_bytes=DEFAULT_MAX_SCAN_BYTES,
+    )
+    return {
+        "baseline_commit": baseline_identity["commit"],
+        "baseline_tree": baseline_identity["tree"],
+        "head_commit": head_commit,
+        "head_tree": head_tree,
+        "git_object_format": object_format,
+        "tracked_status_sha256": hashlib.sha256(status).hexdigest(),
+        "working_tree_sha256": workspace_inventory["sha256"],
+        "working_tree_files": workspace_inventory["files"],
+        "working_tree_directories": workspace_inventory["directories"],
+        "working_tree_bytes": workspace_inventory["bytes"],
+        "git_control_sha256": git_control_inventory["sha256"],
+        "git_control_files": git_control_inventory["files"],
+        "git_control_directories": git_control_inventory["directories"],
+        "git_control_bytes": git_control_inventory["bytes"],
+    }
+
+
+def _validate_standalone_git_control(repository):
+    git_directory = _existing_path(
+        Path(repository) / ".git",
+        "candidate Git control directory",
+        require_directory=True,
+        reject_symlink=True,
+    )
+    config_path = git_directory / "config"
+    payload = _read_bounded_regular_file(
+        config_path,
+        max_bytes=64 * 1024,
+    )
+    parser = configparser.ConfigParser(
+        interpolation=None,
+        strict=True,
+    )
+    parser.optionxform = str.lower
+    try:
+        parser.read_string(payload.decode("utf-8"))
+    except (
+        UnicodeDecodeError,
+        configparser.Error,
+    ) as exc:
+        raise ExperimentSandboxError(
+            "candidate Git config is invalid"
+        ) from exc
+    allowed = {
+        "core": {
+            "repositoryformatversion",
+            "filemode",
+            "bare",
+            "logallrefupdates",
+            "ignorecase",
+            "precomposeunicode",
+            "symlinks",
+        },
+        "extensions": {"objectformat"},
+        "user": {"name", "email"},
+    }
+    for section in parser.sections():
+        normalized_section = section.lower()
+        if normalized_section not in allowed or any(
+            option.lower() not in allowed[normalized_section]
+            for option in parser.options(section)
+        ):
+            raise ExperimentSandboxError(
+                "candidate Git config contains undeclared behavior"
+            )
+    return git_directory
+
+
+def _bounded_tree_identity(root, *, excluded_roots, max_entries, max_bytes):
+    root = _existing_path(
+        root,
+        "bounded tree root",
+        require_directory=True,
+        reject_symlink=True,
+    )
+    excluded = {
+        Path(path).resolve(strict=False)
+        for path in excluded_roots
+    }
+    stack = [root]
+    entries = []
+    while stack:
+        directory = stack.pop()
+        try:
+            children = sorted(
+                os.scandir(directory),
+                key=lambda entry: os.fsencode(entry.name),
+            )
+        except OSError as exc:
+            raise ExperimentSandboxError(
+                "candidate repository changed during inventory"
+            ) from exc
+        for entry in children:
+            path = Path(entry.path)
+            if path in excluded:
+                continue
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise ExperimentSandboxError(
+                    "candidate repository changed during inventory"
+                ) from exc
+            relative = path.relative_to(root)
+            if entry.is_symlink():
+                kind = "symlink"
+            elif entry.is_dir(follow_symlinks=False):
+                kind = "directory"
+                stack.append(path)
+            elif entry.is_file(follow_symlinks=False):
+                kind = "file"
+            else:
+                raise ExperimentSandboxError(
+                    "candidate repository contains a non-regular entry"
+                )
+            entries.append((relative, path, kind, metadata))
+            if len(entries) > max_entries:
+                raise ExperimentSandboxError(
+                    "candidate repository inventory exceeds its entry bound"
+                )
+    digest = hashlib.sha256()
+    file_count = 0
+    directory_count = 0
+    content_bytes = 0
+    for relative, path, kind, metadata in sorted(
+        entries,
+        key=lambda item: os.fsencode(item[0]),
+    ):
+        if kind == "symlink":
+            try:
+                content = os.fsencode(os.readlink(path))
+            except OSError as exc:
+                raise ExperimentSandboxError(
+                    "candidate repository changed during inventory"
+                ) from exc
+            file_count += 1
+        elif kind == "file":
+            content = _read_bounded_regular_file(
+                path,
+                max_bytes=max_bytes - content_bytes,
+            )
+            file_count += 1
+        else:
+            content = b""
+            directory_count += 1
+        content_bytes += len(content)
+        if content_bytes > max_bytes:
+            raise ExperimentSandboxError(
+                "candidate repository exceeds its content bound"
+            )
+        digest.update(os.fsencode(relative) + b"\0")
+        digest.update(kind.encode("ascii") + b"\0")
+        digest.update(
+            f"{stat.S_IMODE(metadata.st_mode):04o}".encode("ascii") + b"\0"
+        )
+        digest.update(hashlib.sha256(content).digest())
+    return {
+        "sha256": digest.hexdigest(),
+        "files": file_count,
+        "directories": directory_count,
+        "bytes": content_bytes,
+    }
+
+
+def _sandbox_policy_sha256(descriptor):
+    policy = {
+        key: value
+        for key, value in descriptor.items()
+        if key not in {"policy_sha256", "namespace_evidence"}
+    }
+    return hashlib.sha256(_canonical_json_bytes(policy)).hexdigest()
+
+
+def _probe_python_for_descriptor(descriptor):
+    for view in (
+        *descriptor["runtime_views"],
+        *descriptor["library_views"],
+    ):
+        source = Path(view["source"])
+        target = Path(view["target"])
+        try:
+            relative = Path(sys_executable()).relative_to(source)
+        except ValueError:
+            continue
+        return target / relative
+    raise ExperimentSandboxUnavailable(
+        "probe Python is not present in declared runtime/library views"
+    )
+
+
+def sys_executable():
+    import sys
+
+    return str(Path(sys.executable).resolve())
+
+
+def _target_parent_arguments(targets):
+    directories = set()
+    for target in targets:
+        parent = Path(target).parent
+        while parent != Path("/"):
+            directories.add(str(parent))
+            parent = parent.parent
+    arguments = []
+    for directory in sorted(directories, key=lambda value: (value.count("/"), value)):
+        if directory in {"/proc", "/dev", "/tmp", "/run", str(_CREDENTIAL_ROOT)}:
+            continue
+        arguments.extend(["--dir", directory])
+    return arguments
+
+
+def _bounded_regular_files(paths, *, max_entries):
+    if isinstance(paths, (str, os.PathLike)):
+        paths = [paths]
+    if not isinstance(paths, (list, tuple)):
+        raise ExperimentSandboxError("leak scan paths must be a list")
+    if max_entries < 1:
+        raise ExperimentSandboxUnavailable(
+            "canary leak scan entry bound was exceeded"
+        )
+    files = []
+    stack = []
+    entry_count = 0
+    for raw in paths:
+        path = _existing_path(raw, "leak scan path", reject_symlink=True)
+        entry_count += 1
+        if entry_count > max_entries:
+            raise ExperimentSandboxUnavailable(
+                "canary leak scan entry bound was exceeded"
+            )
+        stack.append(path)
+    while stack:
+        candidate = stack.pop()
+        try:
+            metadata = candidate.lstat()
+        except OSError as exc:
+            raise ExperimentSandboxUnavailable(
+                "leak scan entry became unavailable"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ExperimentSandboxUnavailable(
+                "leak scan encountered a symlink"
+            )
+        if stat.S_ISREG(metadata.st_mode):
+            files.append(candidate)
+            continue
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ExperimentSandboxUnavailable(
+                "leak scan encountered a non-regular entry"
+            )
+        try:
+            with os.scandir(candidate) as entries:
+                children = []
+                for entry in entries:
+                    entry_count += 1
+                    if entry_count > max_entries:
+                        raise ExperimentSandboxUnavailable(
+                            "canary leak scan entry bound was exceeded"
+                        )
+                    children.append(Path(entry.path))
+        except OSError as exc:
+            raise ExperimentSandboxUnavailable(
+                "leak scan directory became unavailable"
+            ) from exc
+        stack.extend(
+            reversed(
+                sorted(
+                    children,
+                    key=lambda value: os.fsencode(value.name),
+                )
+            )
+        )
+    return files, entry_count
+
+
+def _read_bounded_regular_file(path, *, max_bytes):
+    if max_bytes < 0:
+        raise ExperimentSandboxUnavailable(
+            "canary leak scan byte bound was exceeded"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ExperimentSandboxUnavailable(
+            "leak scan file became unavailable"
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ExperimentSandboxUnavailable(
+                "leak scan encountered a non-regular entry"
+            )
+        content = bytearray()
+        while True:
+            chunk = os.read(descriptor, min(65536, max_bytes - len(content) + 1))
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > max_bytes:
+                raise ExperimentSandboxUnavailable(
+                    "canary leak scan byte bound was exceeded"
+                )
+        return bytes(content)
+    finally:
+        os.close(descriptor)
+
+
+def _read_digest_bound_evaluator(path, expected_sha256):
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ExperimentSandboxError(
+            "trusted evaluator authority cannot be opened"
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_size > 4 * 1024 * 1024
+        ):
+            raise ExperimentSandboxError(
+                "trusted evaluator authority is unsafe"
+            )
+        content = bytearray()
+        remaining = 4 * 1024 * 1024 + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            content.extend(chunk)
+            remaining -= len(chunk)
+        if (
+            remaining == 0
+            or hashlib.sha256(content).hexdigest() != expected_sha256
+        ):
+            raise ExperimentSandboxError(
+                "trusted evaluator authority changed before execution"
+            )
+        return bytes(content)
+    finally:
+        os.close(descriptor)
+
+
+def _approved_acceptance_executable(
+    value,
+    *,
+    cwd,
+    environment,
+    descriptor,
+):
+    del cwd, environment
+    value_path = Path(value)
+    if not value_path.is_absolute() or ".." in value_path.parts:
+        raise ExperimentSandboxError(
+            "acceptance command executable must be an absolute path"
+        )
+    mapped_sources = []
+    for view in (
+        *descriptor["runtime_views"],
+        *descriptor["library_views"],
+    ):
+        source_root = Path(view["source"])
+        try:
+            relative = value_path.relative_to(Path(view["target"]))
+        except ValueError:
+            continue
+        candidate = source_root
+        try:
+            for part in relative.parts:
+                candidate = candidate / part
+                metadata = candidate.lstat()
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise ExperimentSandboxError(
+                        "acceptance executable namespace path contains a symlink"
+                    )
+            metadata = candidate.stat()
+        except OSError as exc:
+            raise ExperimentSandboxError(
+                "acceptance executable namespace mapping is unavailable"
+            ) from exc
+        if stat.S_ISREG(metadata.st_mode) and os.access(candidate, os.X_OK):
+            mapped_sources.append(candidate)
+    if len(set(mapped_sources)) != 1:
+        raise ExperimentSandboxError(
+            "acceptance command executable is not uniquely mapped"
+        )
+    executable = mapped_sources[0]
+    approved_system_paths = {
+        path.resolve()
+        for path in (
+            Path(sys.executable),
+            Path("/usr/bin/python3"),
+            Path("/usr/local/bin/python3"),
+        )
+        if path.is_file()
+    }
+    if executable in approved_system_paths:
+        return executable
+    raise ExperimentSandboxError(
+        "acceptance command executable is not approved"
+    )
+
+
+def _validate_schema_record(record, schema_name, label):
+    schema_path = Path(__file__).resolve().parents[2] / "schemas" / schema_name
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ExperimentEvaluationBlocked(f"{label} schema is unavailable") from exc
+    errors = sorted(
+        Draft202012Validator(
+            schema,
+            format_checker=FormatChecker(),
+        ).iter_errors(record),
+        key=lambda item: list(item.absolute_path),
+    )
+    if errors:
+        first = errors[0]
+        location = ".".join(str(item) for item in first.absolute_path) or "<root>"
+        raise ExperimentEvaluationBlocked(
+            f"{label} schema failed at {location}: {first.message}"
+        )
+
+
+def _normalize_argv(command, label):
+    if (
+        not isinstance(command, (list, tuple))
+        or not command
+        or len(command) > 128
+        or not all(
+            isinstance(argument, str)
+            and argument
+            and "\x00" not in argument
+            for argument in command
+        )
+        or sum(len(argument) for argument in command) > 64 * 1024
+    ):
+        raise ExperimentSandboxError(f"{label} must be a bounded argv list")
+    return list(command)
+
+
+def _existing_path(
+    value,
+    label,
+    *,
+    require_directory=False,
+    require_file=False,
+    reject_symlink=False,
+):
+    try:
+        path = Path(value).expanduser()
+    except (TypeError, ValueError) as exc:
+        raise ExperimentSandboxError(f"{label} is not a path") from exc
+    if not path.is_absolute():
+        path = path.resolve(strict=False)
+    if reject_symlink and path.is_symlink():
+        raise ExperimentSandboxError(f"{label} must not be a symlink")
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ExperimentSandboxError(f"{label} is unavailable") from exc
+    if require_directory and not resolved.is_dir():
+        raise ExperimentSandboxError(f"{label} must be a directory")
+    if require_file and not resolved.is_file():
+        raise ExperimentSandboxError(f"{label} must be a file")
+    if not require_directory and not require_file and not (
+        resolved.is_file() or resolved.is_dir()
+    ):
+        raise ExperimentSandboxError(f"{label} is not a regular path")
+    return resolved
+
+
+def _mount_source_identity(path, *, hash_directory=True):
+    path = Path(path)
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ExperimentSandboxError(
+            "sandbox mount source identity is unavailable"
+        ) from exc
+    if stat.S_ISREG(metadata.st_mode):
+        kind = "file"
+        content_sha256 = hashlib.sha256(
+            _read_bounded_regular_file(
+                path,
+                max_bytes=64 * 1024 * 1024,
+            )
+        ).hexdigest()
+    elif stat.S_ISDIR(metadata.st_mode):
+        if not hash_directory:
+            kind = "directory_root"
+            content_sha256 = None
+        elif _is_privileged_system_tree(path):
+            kind = "privileged_system_directory"
+            content_sha256 = None
+        else:
+            tree = _bounded_tree_identity(
+                path,
+                excluded_roots=set(),
+                max_entries=DEFAULT_MAX_SCAN_FILES,
+                max_bytes=DEFAULT_MAX_SCAN_BYTES,
+            )
+            kind = "bounded_directory"
+            content_sha256 = tree["sha256"]
+    else:
+        raise ExperimentSandboxError(
+            "sandbox mount source must be a regular file or directory"
+        )
+    return {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "kind": kind,
+        "content_sha256": content_sha256,
+    }
+
+
+def _is_privileged_system_tree(path):
+    path = Path(path)
+    if not _is_relative_to(path, Path("/usr")) and not any(
+        _is_relative_to(path, root)
+        for root in (Path("/bin"), Path("/lib"), Path("/lib64"))
+    ):
+        return False
+    current = path
+    while True:
+        try:
+            metadata = current.stat()
+        except OSError:
+            return False
+        if (
+            metadata.st_uid != 0
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            return False
+        if current == Path("/"):
+            return True
+        current = current.parent
+
+
+def _validate_mount_source(
+    value,
+    expected_identity,
+    label,
+    *,
+    require_directory=False,
+):
+    try:
+        lexical = Path(value)
+    except (TypeError, ValueError) as exc:
+        raise ExperimentSandboxError(f"{label} source is not a path") from exc
+    if not lexical.is_absolute() or lexical.is_symlink():
+        raise ExperimentSandboxError(
+            f"{label} source must remain a canonical non-symlink path"
+        )
+    resolved = _existing_path(
+        lexical,
+        f"{label} source",
+        require_directory=require_directory,
+    )
+    hash_directory = expected_identity.get("kind") != "directory_root"
+    if (
+        resolved != lexical
+        or _mount_source_identity(
+            lexical,
+            hash_directory=hash_directory,
+        )
+        != expected_identity
+    ):
+        raise ExperimentSandboxError(
+            f"{label} source identity is unavailable or changed"
+        )
+    return resolved
+
+
+def _absolute_target(value, label):
+    try:
+        path = Path(value)
+    except (TypeError, ValueError) as exc:
+        raise ExperimentSandboxError(f"{label} target is not a path") from exc
+    if not path.is_absolute() or ".." in path.parts or path == Path("/"):
+        raise ExperimentSandboxError(f"{label} target must be a bounded absolute path")
+    return path
+
+
+def _deny_duplicate_targets(views):
+    targets = [str(view["target"]) for view in views]
+    if len(set(targets)) != len(targets):
+        raise ExperimentSandboxError("sandbox mount targets must be unique")
+
+
+def _deny_overlapping_targets(views):
+    for index, left in enumerate(views):
+        left_target = Path(left["target"])
+        for right in views[index + 1 :]:
+            if _paths_overlap(left_target, Path(right["target"])):
+                raise ExperimentSandboxError(
+                    "sandbox mount targets must not overlap"
+                )
+
+
+def _paths_overlap(left, right):
+    return _is_relative_to(left, right) or _is_relative_to(right, left)
+
+
+def _is_relative_to(path, root):
+    try:
+        Path(path).relative_to(Path(root))
+    except ValueError:
+        return False
+    return True
+
+
+def _is_sha256(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _nonempty_text(value, label):
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 1024
+        or "\x00" in value
+    ):
+        raise ExperimentSandboxError(f"{label} must be bounded text")
+    return value
+
+
+def _canonical_json_bytes(value):
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _publish_immutable_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _canonical_json_bytes(value) + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as exc:
+        raise ExperimentSandboxError(
+            f"evaluation evidence already exists: {path}"
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _utc_timestamp():
+    return (
+        datetime.now(UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )

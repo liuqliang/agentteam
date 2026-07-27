@@ -2214,6 +2214,15 @@ def _worker_invocation_context(
         "previous_provider_session_id": task.get("previous_provider_session_id"),
         "previous_provider_turn_id": task.get("previous_provider_turn_id"),
         "previous_invocation_id": task.get("previous_invocation_id"),
+        "experiment_sandbox_reference": task.get(
+            "experiment_sandbox_reference"
+        ),
+        "experiment_sandbox_required": (
+            task.get("experiment_sandbox_required") is True
+        ),
+        "experiment_authority_root": task.get(
+            "experiment_authority_root"
+        ),
         "model_invocation_authority_root": str(Path(output_dir)),
         "provider_project_identity": project_identity,
         "provider_project_lifecycle_root": str(Path(output_dir).parent),

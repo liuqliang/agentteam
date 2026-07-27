@@ -58,6 +58,9 @@
     "invocation_id": {
       "$ref": "#/$defs/invocationId"
     },
+    "start_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
     "project": {
       "$ref": "#/$defs/identifier"
     },
@@ -148,6 +151,12 @@
         "supported_model_invocation",
         "not_applicable_adapter"
       ]
+    },
+    "experiment_sandbox_policy_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "experiment_sandbox_reference_sha256": {
+      "$ref": "#/$defs/sha256"
     },
     "terminal_status": {
       "enum": [
@@ -542,6 +551,10 @@
     "invocationId": {
       "type": "string",
       "pattern": "^INV-[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     },
     "nullableToken": {
       "type": [

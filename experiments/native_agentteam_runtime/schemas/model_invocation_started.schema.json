@@ -150,6 +150,12 @@
         "not_applicable_adapter"
       ]
     },
+    "experiment_sandbox_policy_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "experiment_sandbox_reference_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
     "gated_supervisor_pid": {
       "$ref": "#/$defs/nullablePositiveInteger"
     },

@@ -942,6 +942,15 @@ def _author_model_invocation_context(
             else "not_applicable_adapter"
         ),
         "provider_usage_scope": supplied.get("provider_usage_scope"),
+        "experiment_sandbox_reference": supplied.get(
+            "experiment_sandbox_reference"
+        ),
+        "experiment_sandbox_required": (
+            supplied.get("experiment_sandbox_required") is True
+        ),
+        "experiment_authority_root": supplied.get(
+            "experiment_authority_root"
+        ),
     }
 
 

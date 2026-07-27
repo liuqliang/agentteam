@@ -67,7 +67,8 @@
       "default_max_entries": 5,
       "exact_path_exceptions": {
         "P2-01": 6,
-        "P2-02B": 7,
+        "P2-02B": 12,
+        "P2-06": 13,
         "P2-07B": 6
       },
       "exception_scope_rule": "production_and_schema_paths_exact_test_and_fixture_directory_scope_allowed",
@@ -254,6 +255,7 @@
       ],
       "acceptance_criteria": [
         "The snapshot has its own common directory and contains only the exact source history required for execution.",
+        "Every experiment workspace is a standalone Git repository with an in-workspace .git directory; linked worktree .git files fail closed.",
         "HEAD, tree OID, object format, and bounded file inventory match the protocol.",
         "No remote, alternate, extra ref, branch attachment, prior AgentTeam state, or symlink escape exists.",
         "Cleanup cannot remove experiment evidence."
@@ -288,10 +290,15 @@
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_workspace.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/mailbox_worker.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/m0_runtime.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
         "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
-        "experiments/native_agentteam_runtime/schemas/experiment_evaluation.schema.json"
+        "experiments/native_agentteam_runtime/schemas/experiment_evaluation.schema.json",
+        "experiments/native_agentteam_runtime/schemas/experiment_protocol.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_started.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_usage.schema.json"
       ],
       "required_deliverables": [
         "bwrap_provider_namespace",
@@ -299,7 +306,11 @@
         "gold_canary_denial_probe",
         "post_run_canary_leak_scan",
         "trusted_argv_evaluator",
-        "bounded_evaluation_evidence"
+        "bounded_evaluation_evidence",
+        "immutable_controller_authority_references",
+        "sealed_model_invocation_set",
+        "multi_root_invocation_manifest",
+        "systemd_cgroup_evaluator"
       ],
       "acceptance_criteria": [
         "The exact worker sandbox cannot read evaluator-only canary content or its path.",
@@ -307,6 +318,12 @@
         "Acceptance starts after all model invocations terminate and never uses shell execution.",
         "Prompt, context, taskpack, and bounded artifact scans contain no canary or digest.",
         "Every provider path applies the same launch policy inside ModelInvocationCall after supported-Codex detection and before process spawn.",
+        "Sandbox and scan-scope inputs are loaded only from digest-bound immutable references under the controller-owned run authority.",
+        "The evaluator executes the exact digest-bound artifact declared by the protocol inside a controller-created systemd cgroup.",
+        "The protocol is loaded from an immutable authority reference and matches the sandbox-certified Git baseline; systemd directly starts certified bwrap, a fixed in-namespace loader receives digest-checked evaluator bytes over a bounded pipe, and evaluator/candidate code cannot directly read evaluator-only host state.",
+        "Evaluation proves the actual candidate HEAD descends from the certified baseline, rejects undeclared standalone Git config before sanitized host Git probes, overlays candidate .git read-only, records HEAD/tree/status plus bounded workspace-structure and Git-control inventories, and rejects workspace mutation during acceptance.",
+        "A controller-owned manifest enumerates and exactly covers a fixed run-authority lifecycle registry, reloads each workspace's exact canary-probed sandbox reference, seals every authoring, worker, and follow-up invocation root with its own taskpack and sandbox-reference identity, prevents late provider starts, and validates every lifecycle record against its formal schema.",
+        "Evaluation evidence records the run, complete taskpack and invocation identities, authority-reference digest, and aggregate seal digest, and exposes expected-binding validation for result bundling.",
         "Unavailable or inconclusive namespace enforcement blocks blind-gold promotion."
       ],
       "stop_condition": "Stop if isolation relies only on directory convention or if evaluator secrets enter the provider namespace.",
@@ -505,6 +522,8 @@
         "An identical existing digest is idempotent and a conflicting digest fails terminalization.",
         "Artifact bytes exclude Git objects, caches, DBs, and raw spools.",
         "Raw spool bytes are reported separately from authoritative artifact bytes.",
+        "The controller publishes the complete retained prompt, context, taskpack, and artifact roots as the immutable scan-scope authority consumed by evaluation.",
+        "Result bundling validates evaluation evidence against the expected run, taskpacks, protocol, acceptance command, evaluator, and invocation-set authority digest.",
         "Projection rebuild preserves totals and bundle digests.",
         "Comparison never silently drops unsuccessful runs."
       ],
@@ -538,9 +557,18 @@
       "write_scope": [
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/mailbox_worker.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/m0_runtime.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/schemas/experiment_evaluation.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_started.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_usage.schema.json"
       ],
       "required_deliverables": [
         "common_mode_protocol",
@@ -554,10 +582,17 @@
       ],
       "acceptance_criteria": [
         "All modes consume the same protocol and independently sanitized snapshot.",
+        "Author, worker-attempt, and candidate workspaces are standalone sanitized repositories rather than linked Git worktrees.",
         "Single mode performs exactly one fresh task invocation without AgentTeam context.",
         "Direct mode verifies and executes only the preregistered taskpack with a trusted snapshot root override.",
         "Full mode authors normally and cannot read the direct taskpack.",
         "All roles use the same model and reasoning profile with one provider lane.",
+        "After each author, worker-attempt, or candidate workspace exists, the controller publishes and probes a workspace-specific immutable sandbox reference, then dynamically injects that reference, the independent run authority root, and experiment_sandbox_required=true; host-specific references never enter the frozen taskpack.",
+        "Every author and worker attempt receives a distinct lifecycle authority root outside all provider-visible mounts; no provider can modify its own start, terminal, or seal authority.",
+        "Before provider launch the controller allocates every workspace, lifecycle authority, and sandbox reference in an append-only registration ledger plus fixed registry that adapters cannot omit; ModelInvocationCall rejects unregistered lifecycle roots.",
+        "The controller builds the immutable multi-root invocation manifest only by enumerating the complete registry and rejects missing, extra, unconsumed, or non-terminal registrations before common evaluation.",
+        "Every manifest entry reloads the exact sandbox reference and binds its reference digest, derived policy digest, and canary probe through start, terminal, seal, and evaluation evidence.",
+        "Missing, stale, or unresolvable sandbox references fail before any provider process starts.",
         "Mode order follows the protocol-seeded counterbalanced rotation.",
         "Every adapter returns to the common evaluator and finalizer.",
         "Ordinary unit tests never launch a live provider."
