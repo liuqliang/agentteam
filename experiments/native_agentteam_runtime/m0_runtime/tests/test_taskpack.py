@@ -1,5 +1,6 @@
 import json
 import hashlib
+import copy
 import os
 import re
 import shutil
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import uuid
 import io
 import runpy
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
@@ -73,6 +75,7 @@ from agentteam_runtime.release_manager import (
     validate_run_binding,
 )
 import agentteam_runtime.agentteam as agentteam_module
+import agentteam_runtime.experiment_gates as experiment_gates_module
 import agentteam_runtime.projection_db as projection_db
 from agentteam_runtime.projection_db import (
     check_project_projection_db,
@@ -1088,7 +1091,1491 @@ def _timeout_text(value):
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
+def _phase2_controller_action_input(gate_id):
+    digest = "0" * 64
+    binding = {"path": "/fixture/authority.json", "sha256": digest}
+    if gate_id == "P2-08":
+        configuration = {
+            "promoted_at": "2026-07-29T00:00:00Z",
+            "readiness_reasons": {
+                capability_id: "Validated fixture evidence."
+                for capability_id in (
+                    experiment_gates_module._CAPABILITY_TEST_IDS
+                )
+            },
+            "capability_evidence": {
+                capability_id: [
+                    {
+                        "artifact_path": "tests/fixture.py",
+                        "sha256": digest,
+                        "test_id": test_id,
+                        "status": "passed",
+                    }
+                    for test_id in test_ids
+                ]
+                for capability_id, test_ids in (
+                    experiment_gates_module
+                    ._CAPABILITY_TEST_IDS.items()
+                )
+            },
+            "authority_artifacts": {
+                "protocol_template": dict(binding),
+                "deterministic_calibration": dict(binding),
+            },
+            "pilot_mode": "agentteam_full",
+            "pilot_repetition_index": 0,
+            "pilot_stable_request_key": "phase2-pilot",
+        }
+    elif gate_id == "P2-09":
+        configuration = {
+            "authority_artifacts": {
+                "evaluator": dict(binding),
+            },
+            "direct_taskpack": {
+                "path": "/fixture/frozen-taskpack",
+                "digest_sha256": digest,
+            },
+            "repeat_mode": "single_codex",
+            "sandbox_configuration": {},
+        }
+    else:
+        configuration = {
+            "finalized_at": "2026-07-29T00:00:00Z",
+        }
+    return {
+        "schema_version": "phase2_gate_action_input.v1",
+        "action": {
+            "P2-08": "promote_readiness",
+            "P2-09": "run_live_calibration",
+            "P2-10": "finalize_phase2",
+        }[gate_id],
+        "configuration": configuration,
+    }
+
+
+def _phase2_controller_gate_declarations():
+    schema_prefix = "experiments/native_agentteam_runtime/schemas/"
+    definitions = (
+        (
+            "P2-08",
+            [],
+            "acceptance/readiness.json",
+            "phase2_readiness_promotion.schema.json",
+            "phase2_readiness_controller_v1",
+            "phase2_readiness_relation_v1",
+            False,
+        ),
+        (
+            "P2-09",
+            ["P2-08"],
+            "acceptance/calibration.json",
+            "phase2_calibration.schema.json",
+            "phase2_live_calibration_controller_v1",
+            "phase2_live_calibration_relation_v1",
+            True,
+        ),
+        (
+            "P2-10",
+            ["P2-09"],
+            "acceptance/finalization.json",
+            "phase2_finalization.schema.json",
+            "phase2_finalization_controller_v1",
+            "phase2_finalization_relation_v1",
+            False,
+        ),
+    )
+    declarations = []
+    for (
+        gate_id,
+        dependencies,
+        evidence_artifact,
+        evidence_schema,
+        controller_entrypoint,
+        relation_validator,
+        authorization_required,
+    ) in definitions:
+        declaration = {
+            "gate_id": gate_id,
+            "depends_on": dependencies,
+            "executor": "deterministic_controller",
+            "evidence_artifact": evidence_artifact,
+            "evidence_schema": schema_prefix + evidence_schema,
+            "required_status_field": "controller_validation_status",
+            "required_status_value": "passed",
+            "controller_entrypoint": controller_entrypoint,
+            "relation_validator": relation_validator,
+            "operator_authorization_required": authorization_required,
+            "controller_action_input": (
+                _phase2_controller_action_input(gate_id)
+            ),
+        }
+        if authorization_required:
+            declaration.update(
+                {
+                    "operator_authorization_schema": (
+                        schema_prefix
+                        + "phase2_live_authorization.schema.json"
+                    ),
+                    "operator_authorization_required_decision": "approved",
+                }
+            )
+        declarations.append(declaration)
+    return declarations
+
+
 class TaskpackTests(unittest.TestCase):
+    def test_phase2_existing_promotion_release_is_revalidated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gate_root = root / "gates"
+            gate_root.mkdir()
+            source_commit = "1" * 40
+            recorded_release = {
+                "release_id": "phase2-readiness-fixture",
+                "release_root": "/recorded/release",
+                "runtime_root": "/recorded/runtime",
+                "release_manifest_sha256": "2" * 64,
+                "source_commit": source_commit,
+                "git_object_format": "sha1",
+            }
+            installed_release = {
+                **recorded_release,
+                "runtime_root": "/installed/runtime",
+            }
+            (
+                gate_root / "phase2-promotion-release.v1.json"
+            ).write_text(
+                json.dumps(
+                    {
+                        "schema_version": (
+                            "phase2_promotion_release.v1"
+                        ),
+                        "release_id": "phase2-readiness-fixture",
+                        "source_commit": source_commit,
+                        "runtime_release": recorded_release,
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                agentteam_module,
+                "selected_release_identity",
+                return_value=installed_release,
+            ) as selected:
+                with self.assertRaisesRegex(
+                    agentteam_module.Phase2GateError,
+                    "record conflicts",
+                ):
+                    agentteam_module._install_phase2_promotion_release(
+                        {
+                            "gate_root": gate_root,
+                            "work_root": root / "work",
+                        },
+                        source_commit,
+                    )
+            selected.assert_called_once_with(
+                root / "work",
+                "phase2-readiness-fixture",
+                expected={"source_commit": source_commit},
+            )
+
+    def test_p2_08_recovers_after_branch_advance_before_epoch_publish(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repository"
+            _init_repo(repository)
+            base = _git_head(repository)
+            branch = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository),
+                    "symbolic-ref",
+                    "--short",
+                    "HEAD",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            work_root = root / "work"
+            run_dir = work_root / "runs" / "promotion"
+            frozen_dir = work_root / "frozen" / "promotion"
+            run_dir.mkdir(parents=True)
+            frozen_dir.mkdir(parents=True)
+            declaration = _phase2_controller_gate_declarations()[0]
+            context = {
+                "work_root": work_root,
+                "project_root": repository,
+                "run_dir": run_dir,
+                "frozen_dir": frozen_dir,
+                "gate_root": run_dir / "state" / "gates",
+                "epochs_root": run_dir / "state" / "gates" / "epochs",
+                "declarations": [declaration],
+                "declarations_by_id": {
+                    "P2-08": declaration,
+                },
+            }
+            current = {
+                "record": {
+                    "epoch_number": 1,
+                    "integration_branch": branch,
+                    "integration_head_sha": base,
+                    "git_object_format": "sha1",
+                },
+                "digest": "1" * 64,
+            }
+            next_epoch = {
+                "record": {
+                    "epoch_number": 2,
+                    "integration_head_sha": None,
+                    "git_object_format": "sha1",
+                },
+                "digest": "2" * 64,
+            }
+            action_calls = []
+
+            def execute_action(
+                _input,
+                action_context,
+                **kwargs,
+            ):
+                action_calls.append(action_context["integration_head"])
+                worktree = Path(
+                    action_context["integration_worktree"]
+                )
+                readiness_path = (
+                    worktree
+                    / "experiments"
+                    / "native_agentteam_runtime"
+                    / "m0_runtime"
+                    / "agentteam_runtime"
+                    / "data"
+                    / "p0_experiment_readiness.v1.json"
+                )
+                readiness_path.parent.mkdir(parents=True)
+                readiness_path.write_text(
+                    "{}\n",
+                    encoding="utf-8",
+                )
+                subprocess.run(
+                    ["git", "add", "."],
+                    cwd=worktree,
+                    check=True,
+                )
+                subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "user.name=Phase 2 Test",
+                        "-c",
+                        "user.email=phase2@example.invalid",
+                        "commit",
+                        "--quiet",
+                        "-m",
+                        "prepare R",
+                    ],
+                    cwd=worktree,
+                    check=True,
+                )
+                head = _git_head(worktree)
+                next_epoch["record"]["integration_head_sha"] = head
+                artifact_path = run_dir / "acceptance" / "readiness.json"
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                artifact_path.write_text(
+                    '{"controller_validation_status":"passed"}\n',
+                    encoding="utf-8",
+                )
+                return {
+                    "gate_id": "P2-08",
+                    "action_status": "completed",
+                    "integration_head": head,
+                    "artifact_path": str(artifact_path),
+                    "artifact_sha256": hashlib.sha256(
+                        artifact_path.read_bytes()
+                    ).hexdigest(),
+                    "relation_context": {
+                        "protocol_path": str(
+                            run_dir / "protocol.json"
+                        ),
+                    },
+                }
+
+            publish_calls = []
+
+            def publish_epoch(
+                _context,
+                _current,
+                result_head,
+                **_kwargs,
+            ):
+                publish_calls.append(result_head)
+                if len(publish_calls) == 1:
+                    raise agentteam_module.Phase2GateError(
+                        "injected epoch publication failure"
+                    )
+                return next_epoch
+
+            with mock.patch.object(
+                agentteam_module,
+                "execute_readiness_promotion_action",
+                side_effect=execute_action,
+            ), mock.patch.object(
+                agentteam_module,
+                "_publish_phase2_action_epoch",
+                side_effect=publish_epoch,
+            ):
+                with self.assertRaisesRegex(
+                    agentteam_module.Phase2GateError,
+                    "injected epoch",
+                ):
+                    agentteam_module._execute_phase2_controller_action(
+                        context,
+                        current,
+                        declaration,
+                        {},
+                    )
+                recovered = (
+                    agentteam_module
+                    ._execute_phase2_controller_action(
+                        context,
+                        current,
+                        declaration,
+                        {},
+                    )
+                )
+            self.assertEqual(action_calls, [base])
+            self.assertEqual(len(publish_calls), 2)
+            self.assertTrue(recovered["epoch_refreshed"])
+            self.assertEqual(_git_head(repository), recovered[
+                "integration_head"
+            ])
+            self.assertTrue(
+                (
+                    context["epochs_root"]
+                    / "2"
+                    / "receipts"
+                    / "P2-08.receipt.v1.json"
+                ).is_file()
+            )
+
+    def test_p2_08_recovers_after_final_epoch_before_receipts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repository"
+            _init_repo(repository)
+            base = _git_head(repository)
+            readiness_path = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "m0_runtime"
+                / "agentteam_runtime"
+                / "data"
+                / "p0_experiment_readiness.v1.json"
+            )
+            readiness_path.parent.mkdir(parents=True)
+            readiness_path.write_text("{}\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "promote R"],
+                cwd=repository,
+                check=True,
+            )
+            readiness_head = _git_head(repository)
+            for relative in (
+                "experiments/native_agentteam_runtime/"
+                "implementation_artifacts/reports/"
+                "phase2-experiment-harness.md",
+                "experiments/native_agentteam_runtime/"
+                "implementation_artifacts/native_runtime_roadmap.md",
+            ):
+                path = repository / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("finalized\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "finalize F"],
+                cwd=repository,
+                check=True,
+            )
+            final_head = _git_head(repository)
+            branch = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository),
+                    "symbolic-ref",
+                    "--short",
+                    "HEAD",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            work_root = root / "work"
+            run_dir = work_root / "runs" / "promotion"
+            gate_root = run_dir / "state" / "gates"
+            (gate_root / "actions").mkdir(parents=True)
+            declaration = _phase2_controller_gate_declarations()[0]
+            context = {
+                "work_root": work_root,
+                "project_root": repository,
+                "run_dir": run_dir,
+                "gate_root": gate_root,
+                "epochs_root": gate_root / "epochs",
+                "declarations_by_id": {"P2-08": declaration},
+            }
+            current = {
+                "record": {
+                    "epoch_number": 3,
+                    "integration_branch": branch,
+                    "integration_head_sha": final_head,
+                    "git_object_format": "sha1",
+                },
+                "digest": "3" * 64,
+            }
+            base_epoch = {
+                "epoch_number": 1,
+                "integration_head_sha": base,
+            }
+            base_epoch_path = (
+                gate_root / "epochs" / "1" / "epoch.v1.json"
+            )
+            _write_json(base_epoch_path, base_epoch)
+            base_epoch_sha256 = agentteam_module._sha256_json(
+                base_epoch
+            )
+            artifact_path = (
+                run_dir / "acceptance" / "readiness.json"
+            )
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text(
+                '{"controller_validation_status":"passed"}\n',
+                encoding="utf-8",
+            )
+            action = {
+                "gate_id": "P2-08",
+                "action_status": "completed",
+                "integration_head": readiness_head,
+                "artifact_path": str(artifact_path),
+                "artifact_sha256": hashlib.sha256(
+                    artifact_path.read_bytes()
+                ).hexdigest(),
+                "relation_context": {
+                    "protocol_path": str(
+                        run_dir / "acceptance" / "protocol.json"
+                    )
+                },
+            }
+            _write_json(
+                gate_root
+                / "actions"
+                / "P2-08.action-journal.v1.json",
+                {
+                    "schema_version": "phase2_action_journal.v1",
+                    "gate_id": "P2-08",
+                    "base_epoch_number": 1,
+                    "base_epoch_sha256": base_epoch_sha256,
+                    "base_integration_head": base,
+                    "action_input_sha256": (
+                        agentteam_module._sha256_json(
+                            declaration["controller_action_input"]
+                        )
+                    ),
+                    "result_integration_head": readiness_head,
+                    "action": action,
+                    "prepared_at": "2026-07-29T00:00:00Z",
+                    "epoch_created_at": "2026-07-29T00:00:00Z",
+                },
+            )
+            recovered = (
+                agentteam_module._execute_phase2_controller_action(
+                    context,
+                    current,
+                    declaration,
+                    {},
+                )
+            )
+            self.assertFalse(recovered["epoch_refreshed"])
+            receipt = json.loads(
+                (
+                    gate_root
+                    / "epochs"
+                    / "3"
+                    / "receipts"
+                    / "P2-08.receipt.v1.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                receipt["expected_integration_head_sha"],
+                final_head,
+            )
+            artifact_path.write_text(
+                '{"controller_validation_status":"tampered"}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                agentteam_module.Phase2GateError,
+                "journal evidence binding",
+            ):
+                agentteam_module._execute_phase2_controller_action(
+                    context,
+                    current,
+                    declaration,
+                    {},
+                )
+
+    def test_phase2_authorization_rejects_protocol_parameter_drift(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            declaration = _phase2_controller_gate_declarations()[1]
+            context = {
+                "project_root": root,
+                "run_dir": root / "run",
+                "declarations_by_id": {
+                    "P2-08": _phase2_controller_gate_declarations()[0],
+                    "P2-09": declaration,
+                },
+            }
+            current = {
+                "record": {"epoch_number": 2},
+                "digest": "2" * 64,
+            }
+            contract = {
+                "protocol_sha256": "a" * 64,
+                "model": "gpt-5.6",
+                "reasoning_profile": "high",
+                "max_total_tokens": 1000,
+                "max_wall_time_seconds": 600,
+            }
+            with mock.patch.object(
+                agentteam_module,
+                "_require_post_backlog_gate_context",
+                return_value=context,
+            ), mock.patch.object(
+                agentteam_module,
+                "_require_operator_approval_context",
+            ), mock.patch.object(
+                agentteam_module,
+                "_gate_mutation_locks",
+                return_value=nullcontext(),
+            ), mock.patch.object(
+                agentteam_module,
+                "_require_current_gate_epoch",
+                return_value=current,
+            ), mock.patch.object(
+                agentteam_module,
+                "_evaluate_post_backlog_gates",
+                return_value={
+                    "gates": [
+                        {
+                            "gate_id": "P2-08",
+                            "state": "passed",
+                            "evidence_sha256": "b" * 64,
+                        }
+                    ]
+                },
+            ), mock.patch.object(
+                agentteam_module,
+                "_phase2_live_authorization_contract",
+                return_value=contract,
+            ), mock.patch.object(
+                agentteam_module,
+                "publish_live_authorization",
+            ) as publish:
+                with self.assertRaisesRegex(
+                    agentteam_module.AgentTeamCliError,
+                    "differ from the generated",
+                ):
+                    agentteam_module._gate_authorize(
+                        root,
+                        {},
+                        context["run_dir"],
+                        gate_id="P2-09",
+                        gate_epoch=2,
+                        protocol_sha256=contract[
+                            "protocol_sha256"
+                        ],
+                        model="wrong-model",
+                        reasoning_profile=contract[
+                            "reasoning_profile"
+                        ],
+                        max_total_tokens=contract[
+                            "max_total_tokens"
+                        ],
+                        max_wall_time_seconds=contract[
+                            "max_wall_time_seconds"
+                        ],
+                    )
+            publish.assert_not_called()
+
+    def test_phase2_status_renders_exact_authorization_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = {"run_dir": root / "phase2-run"}
+            current = {
+                "record": {"epoch_number": 2},
+                "digest": "2" * 64,
+            }
+            contract = {
+                "protocol_sha256": "a" * 64,
+                "model": "gpt-5.6",
+                "reasoning_profile": "high",
+                "max_total_tokens": 1000,
+                "max_wall_time_seconds": 600,
+            }
+            with mock.patch.object(
+                agentteam_module,
+                "_read_current_gate_epoch",
+                return_value=current,
+            ), mock.patch.object(
+                agentteam_module,
+                "_phase2_live_authorization_contract",
+                return_value=contract,
+            ):
+                command = (
+                    agentteam_module._post_backlog_gate_next_action(
+                        context,
+                        {
+                            "epoch_number": 2,
+                            "gates": [
+                                {
+                                    "gate_id": "P2-08",
+                                    "state": "passed",
+                                },
+                                {
+                                    "gate_id": "P2-09",
+                                    "state": (
+                                        "awaiting_operator_authorization"
+                                    ),
+                                },
+                            ],
+                        },
+                    )
+                )
+            self.assertIn("agentteam gate authorize", command)
+            self.assertIn("--protocol-sha256 " + "a" * 64, command)
+            self.assertIn("--model gpt-5.6", command)
+            self.assertIn("--max-total-tokens 1000", command)
+            self.assertIn("--approve", command)
+
+    def test_phase2_action_branch_advance_recovers_after_fast_forward(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repository"
+            _init_repo(repository)
+            base = _git_head(repository)
+            branch = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository),
+                    "symbolic-ref",
+                    "--short",
+                    "HEAD",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            action_worktree = root / "action"
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository),
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(action_worktree),
+                    base,
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            (action_worktree / "action.txt").write_text(
+                "prepared\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "action.txt"],
+                cwd=action_worktree,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Action Test",
+                    "-c",
+                    "user.email=action@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "prepared action",
+                ],
+                cwd=action_worktree,
+                check=True,
+            )
+            result_head = _git_head(action_worktree)
+            context = {"project_root": repository}
+            current = {
+                "record": {
+                    "integration_branch": branch,
+                    "integration_head_sha": base,
+                }
+            }
+            first = agentteam_module._advance_phase2_action_branch(
+                context,
+                current,
+                result_head=result_head,
+            )
+            second = agentteam_module._advance_phase2_action_branch(
+                context,
+                current,
+                result_head=result_head,
+            )
+            self.assertEqual(first, repository.resolve())
+            self.assertEqual(second, repository.resolve())
+            self.assertEqual(_git_head(repository), result_head)
+
+    def test_phase2_action_journal_is_idempotent_and_input_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            declaration = _phase2_controller_gate_declarations()[0]
+            context = {
+                "gate_root": root / "gates",
+            }
+            current = {
+                "record": {
+                    "epoch_number": 1,
+                    "integration_head_sha": "a" * 40,
+                },
+                "digest": "1" * 64,
+            }
+            action = {
+                "gate_id": "P2-08",
+                "action_status": "completed",
+                "integration_head": "b" * 40,
+                "relation_context": {"protocol_path": "/authority"},
+            }
+            first = agentteam_module._publish_phase2_action_journal(
+                context,
+                current,
+                declaration,
+                action,
+            )
+            second = agentteam_module._publish_phase2_action_journal(
+                context,
+                current,
+                declaration,
+                action,
+            )
+            self.assertEqual(first, second)
+            drifted = copy.deepcopy(declaration)
+            drifted["controller_action_input"]["configuration"][
+                "promoted_at"
+            ] = "2026-07-30T00:00:00Z"
+            with self.assertRaisesRegex(
+                agentteam_module.Phase2GateError,
+                "journal conflicts",
+            ):
+                agentteam_module._publish_phase2_action_journal(
+                    context,
+                    current,
+                    drifted,
+                    action,
+                )
+
+    def test_phase2_action_receipts_keep_epoch_scoped_relation_contexts(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            run_dir = work_root / "runs" / "promotion"
+            run_dir.mkdir(parents=True)
+            declaration = _phase2_controller_gate_declarations()[0]
+            context = {
+                "work_root": work_root,
+                "run_dir": run_dir,
+                "epochs_root": work_root / "gates" / "epochs",
+            }
+            head = "a" * 40
+
+            def current(number):
+                return {
+                    "record": {
+                        "epoch_number": number,
+                        "git_object_format": "sha1",
+                    },
+                    "digest": str(number) * 64,
+                }
+
+            first = agentteam_module._publish_phase2_action_receipt(
+                context,
+                current(2),
+                declaration,
+                integration_head=head,
+                relation_context={"authority": "readiness-at-r"},
+            )
+            replay = agentteam_module._publish_phase2_action_receipt(
+                context,
+                current(2),
+                declaration,
+                integration_head=head,
+                relation_context={"authority": "readiness-at-r"},
+            )
+            second = agentteam_module._publish_phase2_action_receipt(
+                context,
+                current(3),
+                declaration,
+                integration_head="b" * 40,
+                relation_context={"authority": "readiness-at-f"},
+            )
+            self.assertEqual(first, replay)
+            self.assertEqual(first["epoch_number"], 2)
+            self.assertEqual(second["epoch_number"], 3)
+            first_context = (
+                run_dir
+                / "state"
+                / "phase2_gate_contexts"
+                / "2"
+                / "P2-08.relation-context.v1.json"
+            )
+            second_context = (
+                run_dir
+                / "state"
+                / "phase2_gate_contexts"
+                / "3"
+                / "P2-08.relation-context.v1.json"
+            )
+            self.assertEqual(
+                json.loads(first_context.read_text())["authority"],
+                "readiness-at-r",
+            )
+            self.assertEqual(
+                json.loads(second_context.read_text())["authority"],
+                "readiness-at-f",
+            )
+
+    def test_phase2_controller_restarts_dependency_chain_after_epoch_refresh(
+        self,
+    ):
+        declarations = _phase2_controller_gate_declarations()
+        context = {
+            "declarations": declarations,
+            "declarations_by_id": {
+                item["gate_id"]: item for item in declarations
+            },
+            "locks_root": Path(tempfile.gettempdir())
+            / f"agentteam-gate-lock-test-{uuid.uuid4().hex}",
+        }
+        epoch_one = {
+            "record": {"epoch_number": 1},
+            "digest": "1" * 64,
+        }
+        epoch_two = {
+            "record": {"epoch_number": 2},
+            "digest": "2" * 64,
+        }
+        calls = []
+
+        def run_one(_context, current, declaration, prior):
+            calls.append(
+                (
+                    current["record"]["epoch_number"],
+                    declaration["gate_id"],
+                    tuple(prior),
+                )
+            )
+            if current is epoch_one:
+                return {
+                    "gate_id": "P2-08",
+                    "state": "epoch_refreshed",
+                    "epoch_refreshed": True,
+                }
+            if declaration["gate_id"] == "P2-08":
+                return {
+                    "gate_id": "P2-08",
+                    "state": "passed",
+                }
+            return {
+                "gate_id": declaration["gate_id"],
+                "state": "awaiting_operator_authorization",
+            }
+
+        with mock.patch.object(
+            agentteam_module,
+            "_read_current_gate_epoch",
+            side_effect=[epoch_one, epoch_two],
+        ), mock.patch.object(
+            agentteam_module,
+            "_run_one_available_phase2_gate_controller",
+            side_effect=run_one,
+        ):
+            results = (
+                agentteam_module
+                ._run_available_phase2_gate_controllers(context)
+            )
+        self.assertEqual(
+            calls,
+            [
+                (1, "P2-08", ()),
+                (2, "P2-08", ()),
+                (2, "P2-09", ("P2-08",)),
+            ],
+        )
+        self.assertEqual(
+            [item["state"] for item in results],
+            [
+                "passed",
+                "awaiting_operator_authorization",
+                "pending",
+            ],
+        )
+
+    def test_controller_only_blueprint_materializes_and_freezes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_relative = "plans/example.blueprint.json"
+            source_plan_relative = "plans/example.md"
+            review_schema_relative = "schemas/review.schema.json"
+            approval_relative = "reviews/approval.json"
+            (repo / source_plan_relative).parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            (repo / source_plan_relative).write_text(
+                "# Phase 2 promotion\n",
+                encoding="utf-8",
+            )
+            fixture_tests = repo / "tests"
+            fixture_tests.mkdir()
+            (fixture_tests / "test_gate.py").write_text(
+                "import unittest\n\n"
+                "class GateFixtureTests(unittest.TestCase):\n"
+                "    def test_repository_is_verifiable(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            (repo / ".gitignore").write_text(
+                "__pycache__/\n*.pyc\n",
+                encoding="utf-8",
+            )
+            _write_json(
+                repo / review_schema_relative,
+                {
+                    "$schema": (
+                        "https://json-schema.org/draft/2020-12/schema"
+                    ),
+                    "type": "object",
+                },
+            )
+            schema_root = (
+                repo
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "schemas"
+            )
+            schema_root.mkdir(parents=True)
+            for name in (
+                "phase2_readiness_promotion.schema.json",
+                "phase2_live_authorization.schema.json",
+                "phase2_calibration.schema.json",
+                "phase2_finalization.schema.json",
+            ):
+                shutil.copy2(
+                    REPO_ROOT
+                    / "experiments"
+                    / "native_agentteam_runtime"
+                    / "schemas"
+                    / name,
+                    schema_root / name,
+                )
+            schema_prefix = (
+                "experiments/native_agentteam_runtime/schemas/"
+            )
+            authority_root = repo / "authority"
+            authority_root.mkdir()
+            protocol_template = authority_root / "protocol.json"
+            deterministic_calibration = (
+                authority_root / "deterministic-calibration.json"
+            )
+            evaluator = authority_root / "evaluator.json"
+            for path, value in (
+                (protocol_template, {"protocol": "fixture"}),
+                (
+                    deterministic_calibration,
+                    {"calibration_status": "passed"},
+                ),
+                (evaluator, {"evaluator": "fixture"}),
+            ):
+                _write_json(path, value)
+            direct_draft = draft_taskpack_files(
+                project_root=repo,
+                goal="Run the direct Phase 2 fixture.",
+                draft_root=tmp_path / "direct-drafts",
+                taskpack_id="phase2-direct-fixture",
+                read_scope=["."],
+                write_scope=["src/"],
+            )
+            direct_frozen = freeze_taskpack(
+                direct_draft["taskpack_dir"],
+                authority_root / "direct-taskpacks",
+            )
+            direct_taskpack_path = Path(
+                direct_frozen["frozen_taskpack_dir"]
+            )
+            direct_taskpack_digest = direct_frozen["manifest"][
+                "digest_sha256"
+            ]
+
+            def authority_binding(path):
+                return {
+                    "path": str(path.resolve()),
+                    "sha256": hashlib.sha256(
+                        path.read_bytes()
+                    ).hexdigest(),
+                }
+
+            gates = [
+                {
+                    "gate_id": "P2-08",
+                    "depends_on": [],
+                    "executor": "deterministic_controller",
+                    "evidence_artifact": "acceptance/readiness.json",
+                    "evidence_schema": (
+                        schema_prefix
+                        + "phase2_readiness_promotion.schema.json"
+                    ),
+                    "required_status_field": (
+                        "controller_validation_status"
+                    ),
+                    "required_status_value": "passed",
+                    "controller_entrypoint": (
+                        "phase2_readiness_controller_v1"
+                    ),
+                    "relation_validator": (
+                        "phase2_readiness_relation_v1"
+                    ),
+                    "operator_authorization_required": False,
+                },
+                {
+                    "gate_id": "P2-09",
+                    "depends_on": ["P2-08"],
+                    "executor": "deterministic_controller",
+                    "evidence_artifact": "acceptance/calibration.json",
+                    "evidence_schema": (
+                        schema_prefix + "phase2_calibration.schema.json"
+                    ),
+                    "required_status_field": (
+                        "controller_validation_status"
+                    ),
+                    "required_status_value": "passed",
+                    "controller_entrypoint": (
+                        "phase2_live_calibration_controller_v1"
+                    ),
+                    "relation_validator": (
+                        "phase2_live_calibration_relation_v1"
+                    ),
+                    "operator_authorization_required": True,
+                    "operator_authorization_schema": (
+                        schema_prefix
+                        + "phase2_live_authorization.schema.json"
+                    ),
+                    "operator_authorization_required_decision": (
+                        "approved"
+                    ),
+                },
+                {
+                    "gate_id": "P2-10",
+                    "depends_on": ["P2-09"],
+                    "executor": "deterministic_controller",
+                    "evidence_artifact": "acceptance/finalization.json",
+                    "evidence_schema": (
+                        schema_prefix + "phase2_finalization.schema.json"
+                    ),
+                    "required_status_field": (
+                        "controller_validation_status"
+                    ),
+                    "required_status_value": "passed",
+                    "controller_entrypoint": (
+                        "phase2_finalization_controller_v1"
+                    ),
+                    "relation_validator": (
+                        "phase2_finalization_relation_v1"
+                    ),
+                    "operator_authorization_required": False,
+                },
+            ]
+            for gate in gates:
+                gate["controller_action_input"] = (
+                    _phase2_controller_action_input(
+                        gate["gate_id"]
+                    )
+                )
+                if gate["gate_id"] == "P2-08":
+                    gate["controller_action_input"]["configuration"][
+                        "authority_artifacts"
+                    ] = {
+                        "protocol_template": authority_binding(
+                            protocol_template
+                        ),
+                        "deterministic_calibration": authority_binding(
+                            deterministic_calibration
+                        ),
+                    }
+                elif gate["gate_id"] == "P2-09":
+                    gate["controller_action_input"]["configuration"][
+                        "authority_artifacts"
+                    ] = {
+                        "evaluator": authority_binding(evaluator),
+                    }
+                    gate["controller_action_input"]["configuration"][
+                        "direct_taskpack"
+                    ] = {
+                        "path": str(direct_taskpack_path.resolve()),
+                        "digest_sha256": direct_taskpack_digest,
+                    }
+            blueprint = {
+                "schema_version": "agentteam_taskpack_blueprint.v1",
+                "blueprint_id": "example-blueprint",
+                "source_plan": source_plan_relative,
+                "taskpack": {
+                    "taskpack_id": "example-blueprint",
+                    "goal_kind": "implementation",
+                    "goal": "Promote the Phase 2 experiment harness.",
+                    "overall_risk": "L3",
+                    "execution_mode": "controller_only",
+                },
+                "approval": {
+                    "record_path": approval_relative,
+                    "schema_path": review_schema_relative,
+                    "required_decision": "approved",
+                    "git_object_format_required": True,
+                    "runtime_release_binding_required": True,
+                    "digest_bindings": [
+                        "source_plan",
+                        "blueprint",
+                        "review_schema",
+                    ],
+                },
+                "agents": [],
+                "verification": {
+                    "command": [
+                        "python3",
+                        "-m",
+                        "unittest",
+                        "discover",
+                        "-s",
+                        "tests",
+                    ],
+                },
+                "policy": {
+                    "allow_merge": False,
+                    "merge_requires_verified_integration": True,
+                    "operator_review_required": True,
+                },
+                "tasks": [],
+                "post_backlog_gates": gates,
+            }
+            _write_json(repo / blueprint_relative, blueprint)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add promotion blueprint"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            release_head = _git_head(repo)
+            _write_blueprint_approval(repo, blueprint)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "approve promotion blueprint"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            active_release = {
+                "release_id": "fixture-release",
+                "source_commit": release_head,
+            }
+            with mock.patch.object(
+                taskpack_module,
+                "_active_taskpack_blueprint_release",
+                return_value=active_release,
+            ):
+                result = taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_relative,
+                    tmp_path / "drafts",
+                )
+                frozen = freeze_taskpack(
+                    result["taskpack_dir"],
+                    tmp_path / "frozen",
+                )
+
+            loaded = load_taskpack(frozen["frozen_taskpack_dir"])
+            self.assertEqual(
+                loaded["taskpack"]["execution_mode"],
+                "controller_only",
+            )
+            self.assertEqual(loaded["backlog"]["items"], [])
+            self.assertEqual(loaded["agent_pool"]["agents"], [])
+            self.assertEqual(
+                [
+                    gate["gate_id"]
+                    for gate in loaded["taskpack"][
+                        "post_backlog_gates"
+                    ]
+                ],
+                ["P2-08", "P2-09", "P2-10"],
+            )
+            with mock.patch.object(
+                agentteam_module,
+                "_launcher_runtime_selection",
+                return_value={"selection_version": "test"},
+            ), mock.patch.object(
+                agentteam_module,
+                "_prepare_bound_implementation_run",
+                return_value=None,
+            ), mock.patch.object(
+                agentteam_module,
+                "_run_runtime_command_with_progress",
+                side_effect=AssertionError(
+                    "worker runtime must not be started"
+                ),
+            ), mock.patch.object(
+                agentteam_module,
+                "_execute_phase2_controller_action",
+                return_value={
+                    "action_status": (
+                        "awaiting_operator_authorization"
+                    )
+                },
+            ):
+                completed = agentteam_module._run_frozen_taskpack(
+                    Path(frozen["frozen_taskpack_dir"]),
+                    tmp_path / "runs",
+                )
+            summary = json.loads(completed.stdout)
+            self.assertFalse(summary["worker_pool_started"])
+            self.assertEqual(
+                summary["status"],
+                "awaiting_post_backlog_gates",
+            )
+
+    def test_controller_only_authority_must_exist_before_freeze(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "must stay inside|does not exist",
+            ):
+                taskpack_module._validate_controller_action_authority(
+                    root,
+                    _phase2_controller_gate_declarations(),
+                )
+
+    def test_controller_only_taskpack_requires_blueprint_and_fixed_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            draft = draft_taskpack_files(
+                project_root=repo,
+                goal="Run deterministic Phase 2 promotion gates.",
+                draft_root=tmp_path / "drafts",
+                taskpack_id="phase2-controller-only",
+                write_scope=["src/"],
+            )
+            taskpack_dir = Path(draft["taskpack_dir"])
+            taskpack = json.loads(
+                (taskpack_dir / "taskpack.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            taskpack.update(
+                {
+                    "authoring_mode": "blueprint_materialized",
+                    "execution_mode": "controller_only",
+                    "context": {
+                        "runtime_release_id": "candidate-release",
+                        "runtime_release_source_commit": _git_head(repo),
+                    },
+                    "runtime": {
+                        "default_backend": "codex",
+                        "codex": {},
+                    },
+                    "post_backlog_gates": (
+                        _phase2_controller_gate_declarations()
+                    ),
+                }
+            )
+            _write_json(taskpack_dir / "taskpack.yaml", taskpack)
+            _write_json(
+                taskpack_dir / "backlog.json",
+                {
+                    "backlog_id": "BL-phase2-controller-only",
+                    "items": [],
+                },
+            )
+            agent_pool = json.loads(
+                (taskpack_dir / "agent_pool.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            agent_pool["agents"] = []
+            agent_pool["role_runtime_profiles"] = {}
+            _write_json(taskpack_dir / "agent_pool.json", agent_pool)
+
+            self.assertEqual(
+                validate_taskpack(taskpack_dir)["status"],
+                "accepted",
+            )
+
+            taskpack["authoring_mode"] = "legacy_direct"
+            _write_json(taskpack_dir / "taskpack.yaml", taskpack)
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "must be blueprint_materialized",
+            ):
+                validate_taskpack(taskpack_dir)
+            taskpack["authoring_mode"] = "blueprint_materialized"
+            taskpack["post_backlog_gates"][0][
+                "relation_validator"
+            ] = "phase2_finalization_relation_v1"
+            _write_json(taskpack_dir / "taskpack.yaml", taskpack)
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "registry binding mismatch",
+            ):
+                validate_taskpack(taskpack_dir)
+
+    def test_controller_only_launcher_rejects_handcrafted_frozen_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            work_root = tmp_path / "work"
+            frozen_dir = (
+                work_root / "frozen" / "phase2-controller-launch"
+            )
+            frozen_dir.mkdir(parents=True)
+            _write_json(
+                frozen_dir / "taskpack.yaml",
+                {
+                    "taskpack_schema_version": "taskpack.v1",
+                    "taskpack_id": "phase2-controller-launch",
+                    "status": "frozen",
+                    "authoring_mode": "blueprint_materialized",
+                    "execution_mode": "controller_only",
+                    "project_root": str(repo),
+                    "goal": "Run deterministic Phase 2 promotion gates.",
+                    "context": {
+                        "runtime_release_id": "candidate-release",
+                        "runtime_release_source_commit": _git_head(repo),
+                    },
+                    "runtime": {
+                        "default_backend": "codex",
+                        "codex": {},
+                    },
+                    "files": {
+                        "agent_pool": "agent_pool.json",
+                        "backlog": "backlog.json",
+                        "verification": "verification.json",
+                    },
+                    "post_backlog_gates": [
+                        {
+                            "gate_id": "P2-08",
+                            "depends_on": [],
+                            "executor": "deterministic_controller",
+                            "evidence_artifact": (
+                                "acceptance/readiness.json"
+                            ),
+                            "evidence_schema": (
+                                "experiments/native_agentteam_runtime/"
+                                "schemas/"
+                                "phase2_readiness_promotion.schema.json"
+                            ),
+                            "required_status_field": (
+                                "controller_validation_status"
+                            ),
+                            "required_status_value": "passed",
+                            "controller_entrypoint": (
+                                "phase2_readiness_controller_v1"
+                            ),
+                            "relation_validator": (
+                                "phase2_readiness_relation_v1"
+                            ),
+                            "operator_authorization_required": False,
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                frozen_dir / "agent_pool.json",
+                {
+                    "scheduler_agent_id": "agent-scheduler",
+                    "role_runtime_profiles": {},
+                    "agents": [],
+                },
+            )
+            _write_json(
+                frozen_dir / "backlog.json",
+                {
+                    "backlog_id": "BL-phase2-controller-launch",
+                    "items": [],
+                },
+            )
+            _write_json(
+                frozen_dir / "verification.json",
+                {
+                    "verification_schema_version": (
+                        "taskpack_verification.v1"
+                    ),
+                    "command": ["python3", "-c", "pass"],
+                    "success_criteria": ["command succeeds"],
+                },
+            )
+            with mock.patch.object(
+                agentteam_module,
+                "_run_runtime_command_with_progress",
+                side_effect=AssertionError(
+                    "worker runtime must not be started"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    agentteam_module.AgentTeamCliError,
+                    "frozen manifest is invalid",
+                ):
+                    agentteam_module._run_frozen_taskpack(
+                        frozen_dir,
+                        work_root / "runs",
+                    )
+
     def test_blueprint_materializes_all_tasks_edges_and_five_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

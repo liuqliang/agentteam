@@ -75,6 +75,12 @@
         },
         "integration_policy": {
           "$ref": "#/$defs/non_empty_string"
+        },
+        "execution_mode": {
+          "enum": [
+            "model_workers",
+            "controller_only"
+          ]
         }
       }
     },
@@ -129,7 +135,6 @@
     },
     "agents": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -171,7 +176,6 @@
     },
     "tasks": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "$ref": "#/$defs/task"
       }
@@ -183,11 +187,166 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "tasks": {
+            "maxItems": 0
+          }
+        },
+        "required": [
+          "tasks"
+        ]
+      },
+      "then": {
+        "required": [
+          "post_backlog_gates"
+        ],
+        "properties": {
+          "agents": {
+            "maxItems": 0
+          },
+          "post_backlog_gates": {
+            "minItems": 1
+          },
+          "approval": {
+            "properties": {
+              "runtime_release_binding_required": {
+                "const": true
+              }
+            },
+            "required": [
+              "runtime_release_binding_required"
+            ]
+          },
+          "taskpack": {
+            "properties": {
+              "execution_mode": {
+                "const": "controller_only"
+              }
+            },
+            "required": [
+              "execution_mode"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "agents": {
+            "minItems": 1
+          },
+          "tasks": {
+            "minItems": 1
+          },
+          "taskpack": {
+            "properties": {
+              "execution_mode": {
+                "enum": [
+                  "model_workers"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "non_empty_string": {
       "type": "string",
       "minLength": 1,
       "pattern": ".*\\S.*"
+    },
+    "controller_action_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "action",
+        "configuration"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "phase2_gate_action_input.v1"
+        },
+        "action": {
+          "enum": [
+            "promote_readiness",
+            "run_live_calibration",
+            "finalize_phase2"
+          ]
+        },
+        "configuration": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "promote_readiness"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "configuration": {
+                "required": [
+                  "promoted_at",
+                  "readiness_reasons",
+                  "capability_evidence",
+                  "authority_artifacts",
+                  "pilot_mode",
+                  "pilot_repetition_index",
+                  "pilot_stable_request_key"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "run_live_calibration"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "configuration": {
+                "required": [
+                  "authority_artifacts",
+                  "direct_taskpack",
+                  "repeat_mode",
+                  "sandbox_configuration"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "finalize_phase2"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "configuration": {
+                "required": [
+                  "finalized_at"
+                ]
+              }
+            }
+          }
+        }
+      ]
     },
     "non_empty_string_array": {
       "type": "array",
@@ -336,10 +495,12 @@
           "$ref": "#/$defs/non_empty_string"
         },
         "depends_on": {
-          "$ref": "#/$defs/non_empty_string_array"
+          "$ref": "#/$defs/string_array"
         },
         "executor": {
-          "$ref": "#/$defs/non_empty_string"
+          "enum": [
+            "deterministic_controller"
+          ]
         },
         "operator_authorization_required": {
           "type": "boolean"
@@ -392,6 +553,9 @@
         "controller_entrypoint": {
           "$ref": "#/$defs/non_empty_string"
         },
+        "controller_action_input": {
+          "$ref": "#/$defs/controller_action_input"
+        },
         "final_commit_changed_paths": {
           "$ref": "#/$defs/non_empty_string_array"
         }
@@ -431,6 +595,24 @@
             "required": [
               "operator_approval_schema",
               "operator_approval_required_decision"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "executor": {
+                "const": "deterministic_controller"
+              }
+            },
+            "required": [
+              "executor",
+              "controller_entrypoint"
+            ]
+          },
+          "then": {
+            "required": [
+              "controller_action_input"
             ]
           }
         }

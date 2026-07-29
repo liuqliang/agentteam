@@ -12,6 +12,7 @@
     "protocol_sha256",
     "pilot_guard_status",
     "operator_authorization_sha256",
+    "runtime_release",
     "mode_results",
     "repeat_result",
     "lifecycle_coverage_percent",
@@ -39,6 +40,9 @@
     },
     "operator_authorization_sha256": {
       "$ref": "#/$defs/sha256"
+    },
+    "runtime_release": {
+      "$ref": "#/$defs/runtime_release"
     },
     "mode_results": {
       "type": "array",
@@ -111,6 +115,44 @@
     "sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
+    },
+    "runtime_release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "release_id",
+        "release_root",
+        "runtime_root",
+        "release_manifest_sha256",
+        "source_commit",
+        "git_object_format"
+      ],
+      "properties": {
+        "release_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "release_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runtime_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "release_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_commit": {
+          "$ref": "#/$defs/git_oid"
+        },
+        "git_object_format": {
+          "enum": [
+            "sha1",
+            "sha256"
+          ]
+        }
+      }
     },
     "mode_result": {
       "type": "object",

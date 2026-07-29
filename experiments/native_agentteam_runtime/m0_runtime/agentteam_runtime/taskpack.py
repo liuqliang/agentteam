@@ -1040,6 +1040,48 @@ def _validate_taskpack_blueprint(
         errors.append("policy.operator_review_required must be a boolean")
 
     gates = blueprint.get("post_backlog_gates", [])
+    controller_only = not blueprint["tasks"]
+    if controller_only:
+        if (
+            blueprint["taskpack"].get("execution_mode")
+            != "controller_only"
+        ):
+            errors.append(
+                "controller-only blueprint requires "
+                "taskpack.execution_mode=controller_only"
+            )
+        if blueprint["agents"]:
+            errors.append(
+                "controller-only blueprint must not declare model agents"
+            )
+        if not gates:
+            errors.append(
+                "controller-only blueprint requires deterministic gates"
+            )
+        if not blueprint["approval"].get(
+            "runtime_release_binding_required"
+        ):
+            errors.append(
+                "controller-only blueprint requires candidate release binding"
+            )
+        try:
+            from .experiment_gates import (
+                Phase2GateError,
+                validate_controller_gate_graph,
+            )
+
+            validate_controller_gate_graph(gates)
+        except (ImportError, Phase2GateError) as exc:
+            errors.append(
+                f"controller gate graph validation failed: {exc}"
+            )
+        try:
+            _validate_controller_action_authority(
+                project_root,
+                gates,
+            )
+        except TaskpackValidationError as exc:
+            errors.append(str(exc))
     gate_ids = set()
     combined_graph = {key: list(value) for key, value in dependency_graph.items()}
     for gate in gates:
@@ -1047,6 +1089,29 @@ def _validate_taskpack_blueprint(
         if gate_id in task_id_set or gate_id in gate_ids:
             errors.append(f"duplicate task or gate ID: {gate_id}")
         gate_ids.add(gate_id)
+        if controller_only:
+            for field_name in (
+                "executor",
+                "evidence_schema",
+                "relation_validator",
+                "controller_entrypoint",
+            ):
+                if not _is_non_empty_string(gate.get(field_name)):
+                    errors.append(
+                        f"{gate_id} controller-only gate requires "
+                        f"{field_name}"
+                    )
+            try:
+                from .experiment_gates import (
+                    Phase2GateError,
+                    resolve_gate_spec,
+                )
+
+                resolve_gate_spec(gate)
+            except (ImportError, Phase2GateError) as exc:
+                errors.append(
+                    f"{gate_id} controller registry validation failed: {exc}"
+                )
         combined_graph[gate_id] = list(gate["depends_on"])
         for field_name in (
             "evidence_artifact",
@@ -1568,7 +1633,11 @@ def _generate_taskpack_blueprint(
             "verification": "verification.json",
         },
     }
-    for field_name in ("milestone", "integration_policy"):
+    for field_name in (
+        "milestone",
+        "integration_policy",
+        "execution_mode",
+    ):
         if field_name in taskpack_declaration:
             taskpack[field_name] = taskpack_declaration[field_name]
     if "post_backlog_gates" in blueprint:
@@ -1938,7 +2007,104 @@ def validate_taskpack(taskpack_dir):
     except TaskpackValidationError as exc:
         errors.append(str(exc))
 
-    idle_agent_roles = _validate_agent_pool(agent_pool, errors)
+    declared_items = (
+        backlog.get("items")
+        if isinstance(backlog, dict)
+        else None
+    )
+    post_backlog_gates = taskpack.get("post_backlog_gates")
+    controller_only = (
+        taskpack.get("execution_mode") == "controller_only"
+        and declared_items == []
+        and isinstance(post_backlog_gates, list)
+        and bool(post_backlog_gates)
+    )
+    if taskpack.get("execution_mode") == "controller_only":
+        if not controller_only:
+            errors.append(
+                "controller-only taskpack requires an empty backlog and "
+                "non-empty post_backlog_gates"
+            )
+        if taskpack.get("authoring_mode") != "blueprint_materialized":
+            errors.append(
+                "controller-only taskpack must be blueprint_materialized"
+            )
+        agents = (
+            agent_pool.get("agents")
+            if isinstance(agent_pool, dict)
+            else None
+        )
+        if agents != []:
+            errors.append(
+                "controller-only taskpack must not declare model agents"
+            )
+        if isinstance(agent_pool, dict):
+            for field_name in (
+                "role_runtime_profiles",
+                "role_prompt_contracts",
+                "role_context_packages",
+            ):
+                value = agent_pool.get(field_name)
+                if value is not None and value != {}:
+                    errors.append(
+                        "controller-only taskpack must not declare "
+                        + field_name
+                    )
+        release_context = (
+            taskpack.get("context")
+            if isinstance(taskpack.get("context"), dict)
+            else {}
+        )
+        for field_name in (
+            "runtime_release_id",
+            "runtime_release_source_commit",
+        ):
+            if not _is_non_empty_string(release_context.get(field_name)):
+                errors.append(
+                    "controller-only taskpack requires context."
+                    + field_name
+                )
+        for gate in (
+            post_backlog_gates
+            if isinstance(post_backlog_gates, list)
+            else []
+        ):
+            try:
+                from .experiment_gates import (
+                    Phase2GateError,
+                    resolve_gate_spec,
+                )
+
+                resolve_gate_spec(gate)
+            except (ImportError, Phase2GateError) as exc:
+                gate_id = (
+                    gate.get("gate_id")
+                    if isinstance(gate, dict)
+                    else "<unknown>"
+                )
+                errors.append(
+                    f"{gate_id} controller registry validation failed: {exc}"
+                )
+        try:
+            from .experiment_gates import (
+                Phase2GateError,
+                validate_controller_gate_graph,
+            )
+
+            validate_controller_gate_graph(post_backlog_gates)
+        except (ImportError, Phase2GateError) as exc:
+            errors.append(
+                f"controller gate graph validation failed: {exc}"
+            )
+    elif taskpack.get("execution_mode") not in {None, "model_workers"}:
+        errors.append(
+            "execution_mode must be model_workers or controller_only"
+        )
+    idle_agent_roles = _validate_agent_pool(
+        agent_pool,
+        errors,
+        allow_empty=controller_only,
+    )
 
     if not isinstance(backlog, dict):
         errors.append("backlog must be an object")
@@ -1948,7 +2114,7 @@ def validate_taskpack(taskpack_dir):
         if not isinstance(items, list):
             errors.append("backlog.items must be a list")
             items = []
-        elif not items:
+        elif not items and not controller_only:
             errors.append("backlog must contain at least one task")
     seen_task_ids = set()
     dependency_graph = {}
@@ -2145,6 +2311,13 @@ def validate_taskpack(taskpack_dir):
         errors.append("verification.command must be a non-empty string array")
     elif not _verification_command_allowed(command[0], taskpack.get("project_root")):
         errors.append(f"verification command is not allowed: {command[0]}")
+    elif controller_only and not _controller_verification_command_allowed(
+        command
+    ):
+        errors.append(
+            "controller-only verification command must use "
+            "python -m unittest discover"
+        )
 
     if errors:
         raise TaskpackValidationError("; ".join(errors))
@@ -2165,6 +2338,28 @@ def _verification_command_allowed(executable, project_root):
     except ValueError:
         return False
     return relative.as_posix() in {".venv/bin/python", "venv/bin/python"} and executable_path.is_file()
+
+
+def _controller_verification_command_allowed(command):
+    if not isinstance(command, list) or len(command) < 4:
+        return False
+    executable = Path(command[0]).name
+    if not (
+        executable in {"python", "python3"}
+        or (
+            executable.startswith("python3.")
+            and all(
+                part.isdigit()
+                for part in executable.removeprefix("python").split(".")
+            )
+        )
+    ):
+        return False
+    return (
+        command[1:3] == ["-m", "unittest"]
+        and command[3] == "discover"
+        and "-c" not in command
+    )
 
 
 def _normalize_taskpack_verification_profile(profile=None, project_root=None):
@@ -2768,6 +2963,14 @@ def freeze_taskpack(
     taskpack_dir = Path(taskpack_dir).resolve()
     validation = validate_taskpack(taskpack_dir)
     loaded = load_taskpack(taskpack_dir)
+    if (
+        loaded["taskpack"].get("execution_mode")
+        == "controller_only"
+    ):
+        _validate_controller_action_authority(
+            Path(loaded["taskpack"]["project_root"]).resolve(),
+            loaded["taskpack"].get("post_backlog_gates", []),
+        )
     taskpack_id = validation["taskpack_id"]
     frozen_root = Path(frozen_root).resolve()
     frozen_dir = (frozen_root / taskpack_id).resolve()
@@ -2775,6 +2978,22 @@ def freeze_taskpack(
     if frozen_dir.exists():
         raise TaskpackValidationError(f"frozen taskpack already exists: {frozen_dir}")
     frozen_root.mkdir(parents=True, exist_ok=True)
+    materialization_manifest_source = None
+    if (
+        loaded["taskpack"].get("authoring_mode")
+        == "blueprint_materialized"
+    ):
+        materialization_manifest_source = (
+            taskpack_dir.parent
+            / f"{taskpack_dir.name}.materialization_manifest.json"
+        )
+        if (
+            materialization_manifest_source.is_symlink()
+            or not materialization_manifest_source.is_file()
+        ):
+            raise TaskpackValidationError(
+                "blueprint materialization manifest is required before freeze"
+            )
 
     with tempfile.TemporaryDirectory(
         prefix="agentteam-freeze-source-"
@@ -2809,12 +3028,24 @@ def freeze_taskpack(
                 staged_frozen_dir / "taskpack.yaml",
                 frozen_taskpack,
             )
+            if materialization_manifest_source is not None:
+                shutil.copy2(
+                    materialization_manifest_source,
+                    staged_frozen_dir / "materialization_manifest.json",
+                )
 
+            frozen_inventory = _build_taskpack_artifact_inventory(
+                staged_frozen_dir
+            )
+            _validate_frozen_taskpack_inventory(
+                staged_frozen_dir,
+                frozen_inventory,
+            )
             digest = _digest_taskpack_files(
                 staged_frozen_dir,
                 [
                     relative_path
-                    for relative_path, _source_path in inventory
+                    for relative_path, _source_path in frozen_inventory
                 ],
             )
             manifest = {
@@ -2825,6 +3056,13 @@ def freeze_taskpack(
                 "source_taskpack_dir": str(taskpack_dir),
                 "validation": validation,
             }
+            if materialization_manifest_source is not None:
+                manifest["materialization_manifest_sha256"] = (
+                    _sha256_file(
+                        staged_frozen_dir
+                        / "materialization_manifest.json"
+                    )
+                )
             _write_json(staged_frozen_dir / "manifest.json", manifest)
             try:
                 _rename_noreplace(staged_frozen_dir, frozen_dir)
@@ -2860,6 +3098,21 @@ def verify_frozen_taskpack_digest(
         raise TaskpackValidationError(
             "frozen taskpack manifest is invalid"
         )
+    if loaded["taskpack"].get(
+        "authoring_mode"
+    ) == "blueprint_materialized":
+        materialization_path = (
+            taskpack_dir / "materialization_manifest.json"
+        )
+        if (
+            materialization_path.is_symlink()
+            or not materialization_path.is_file()
+            or manifest.get("materialization_manifest_sha256")
+            != _sha256_file(materialization_path)
+        ):
+            raise TaskpackValidationError(
+                "frozen blueprint materialization authority is invalid"
+            )
     inventory = _build_taskpack_artifact_inventory(taskpack_dir)
     _validate_frozen_taskpack_inventory(taskpack_dir, inventory)
     digest = _digest_taskpack_files(
@@ -3694,7 +3947,109 @@ def _require_contained_path(path, root, field_name):
         raise TaskpackValidationError(f"{field_name} must stay inside {root}") from exc
 
 
-def _validate_agent_pool(agent_pool, errors):
+def _validate_controller_action_authority(project_root, gates):
+    project_root = Path(project_root).resolve()
+    if not isinstance(gates, list):
+        raise TaskpackValidationError(
+            "controller action authority requires gate declarations"
+        )
+
+    def authority_path(value, label, *, directory=False):
+        if not isinstance(value, str) or not value:
+            raise TaskpackValidationError(
+                f"{label} path must be non-empty"
+            )
+        requested = Path(value).expanduser()
+        if not requested.is_absolute():
+            requested = project_root / requested
+        if _taskpack_path_contains_symlink(requested):
+            raise TaskpackValidationError(
+                f"{label} path is unsafe"
+            )
+        resolved = requested.resolve()
+        _require_contained_path(resolved, project_root, label)
+        available = (
+            resolved.is_dir() if directory else resolved.is_file()
+        )
+        if not available:
+            raise TaskpackValidationError(
+                f"{label} does not exist: {resolved}"
+            )
+        return resolved
+
+    for gate in gates:
+        if not isinstance(gate, dict):
+            raise TaskpackValidationError(
+                "controller gate declaration must be an object"
+            )
+        gate_id = gate.get("gate_id") or "<unknown>"
+        action_input = gate.get("controller_action_input")
+        configuration = (
+            action_input.get("configuration")
+            if isinstance(action_input, dict)
+            else None
+        )
+        if not isinstance(configuration, dict):
+            raise TaskpackValidationError(
+                f"{gate_id} controller action configuration is invalid"
+            )
+        bindings = configuration.get("authority_artifacts", {})
+        if not isinstance(bindings, dict):
+            raise TaskpackValidationError(
+                f"{gate_id} authority artifact inventory is invalid"
+            )
+        for name, binding in bindings.items():
+            if not isinstance(binding, dict):
+                raise TaskpackValidationError(
+                    f"{gate_id} {name} authority binding is invalid"
+                )
+            path = authority_path(
+                binding.get("path"),
+                f"{gate_id} {name} authority",
+            )
+            digest = binding.get("sha256")
+            if (
+                not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or hashlib.sha256(path.read_bytes()).hexdigest()
+                != digest
+            ):
+                raise TaskpackValidationError(
+                    f"{gate_id} {name} authority digest mismatch"
+                )
+        direct_taskpack = configuration.get("direct_taskpack")
+        if direct_taskpack is not None:
+            if not isinstance(direct_taskpack, dict):
+                raise TaskpackValidationError(
+                    f"{gate_id} direct taskpack binding is invalid"
+                )
+            path = authority_path(
+                direct_taskpack.get("path"),
+                f"{gate_id} direct taskpack",
+                directory=True,
+            )
+            digest = direct_taskpack.get("digest_sha256")
+            try:
+                verify_frozen_taskpack_digest(path, digest)
+            except TaskpackValidationError as exc:
+                raise TaskpackValidationError(
+                    f"{gate_id} direct taskpack digest mismatch: {exc}"
+                ) from exc
+
+
+def _taskpack_path_contains_symlink(path):
+    path = Path(path).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _validate_agent_pool(agent_pool, errors, *, allow_empty=False):
     idle_agent_roles = set()
     if not isinstance(agent_pool, dict):
         errors.append("agent_pool must be an object")
@@ -3704,8 +4059,12 @@ def _validate_agent_pool(agent_pool, errors):
         errors.append("agent_pool.scheduler_agent_id must be a non-empty string")
 
     agents = agent_pool.get("agents")
-    if not isinstance(agents, list) or not agents:
+    if not isinstance(agents, list):
         errors.append("agent_pool.agents must be a non-empty list")
+        return idle_agent_roles
+    if not agents:
+        if not allow_empty:
+            errors.append("agent_pool.agents must be a non-empty list")
         return idle_agent_roles
 
     _validate_role_runtime_profiles(agent_pool.get("role_runtime_profiles"), errors)
@@ -3828,6 +4187,11 @@ def _build_taskpack_artifact_inventory(taskpack_dir):
         ),
         taskpack_dir / "README.md",
     ]
+    materialization_manifest = (
+        taskpack_dir / "materialization_manifest.json"
+    )
+    if materialization_manifest.exists() or materialization_manifest.is_symlink():
+        artifacts.append(materialization_manifest)
 
     inventory = []
     seen_relative_paths = set()

@@ -19,6 +19,7 @@
     "pilot_guard_sha256",
     "pilot_guard_provider_calls",
     "pilot_guard_target_mutations",
+    "candidate_release",
     "changed_paths"
   ],
   "properties": {
@@ -97,6 +98,9 @@
     "pilot_guard_target_mutations": {
       "const": 0
     },
+    "candidate_release": {
+      "$ref": "#/$defs/runtime_release"
+    },
     "changed_paths": {
       "type": "array",
       "prefixItems": [
@@ -117,6 +121,44 @@
     "sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
+    },
+    "runtime_release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "release_id",
+        "release_root",
+        "runtime_root",
+        "release_manifest_sha256",
+        "source_commit",
+        "git_object_format"
+      ],
+      "properties": {
+        "release_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "release_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runtime_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "release_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_commit": {
+          "$ref": "#/$defs/git_oid"
+        },
+        "git_object_format": {
+          "enum": [
+            "sha1",
+            "sha256"
+          ]
+        }
+      }
     },
     "evidence": {
       "type": "array",

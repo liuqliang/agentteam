@@ -1,4 +1,5 @@
 import argparse
+import copy
 import ctypes
 import errno
 import fcntl
@@ -8,6 +9,7 @@ import json
 import os
 import re
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -61,6 +63,18 @@ from .experiment_readiness import (
     check_pilot_authorization,
     validate_experiment_manifest,
 )
+from .experiment_gates import (
+    Phase2GateError,
+    execute_live_calibration_action,
+    execute_phase2_finalization_action,
+    execute_readiness_promotion_action,
+    publish_live_authorization,
+    require_live_provider_authorization,
+    resolve_gate_spec,
+    run_gate_controller,
+    validate_gate_relation,
+)
+from .experiment_contract import canonical_json_sha256
 from .experiment_results import (
     ExperimentResultError,
     load_experiment_result_bundle,
@@ -115,6 +129,7 @@ from .notifications import (
 )
 from .taskpack import (
     REPO_MAP_HANDOFF_PATH,
+    TaskpackValidationError,
     build_taskpack_runtime_args,
     draft_taskpack_files,
     freeze_taskpack,
@@ -123,6 +138,7 @@ from .taskpack import (
     materialize_taskpack_blueprint,
     reuse_repo_map_handoff_in_taskpack,
     validate_taskpack,
+    verify_frozen_taskpack_digest,
 )
 from .taskpack_author import draft_taskpack_from_goal
 from .token_usage import format_token_usage, token_usage_from_state
@@ -136,6 +152,18 @@ _PHASE1_REPORT_REVIEW_PATHS = [
     "experiments/native_agentteam_runtime/implementation_artifacts/"
     "native_runtime_roadmap.md",
 ]
+_PHASE2_ROADMAP_PATH = (
+    "experiments/native_agentteam_runtime/implementation_artifacts/"
+    "native_runtime_roadmap.md"
+)
+_PHASE2_REPORT_PATH = (
+    "experiments/native_agentteam_runtime/implementation_artifacts/"
+    "reports/phase2-experiment-harness.md"
+)
+_PHASE2_READINESS_PATH = (
+    "experiments/native_agentteam_runtime/m0_runtime/"
+    "agentteam_runtime/data/p0_experiment_readiness.v1.json"
+)
 
 
 class AgentTeamCliError(RuntimeError):
@@ -1520,6 +1548,26 @@ def _add_gate_parser(subcommands):
     approve.add_argument("--approve", action="store_true", required=True)
     approve.add_argument("--json", action="store_true")
     approve.set_defaults(handler=_handle_gate)
+
+    authorize = gate_commands.add_parser(
+        "authorize",
+        help="Interactively publish an epoch-bound Phase 2 provider authorization.",
+    )
+    _add_gate_run_selection_arguments(authorize)
+    authorize.add_argument("--gate", required=True)
+    authorize.add_argument("--gate-epoch", required=True, type=int)
+    authorize.add_argument("--protocol-sha256", required=True)
+    authorize.add_argument("--model", required=True)
+    authorize.add_argument("--reasoning-profile", required=True)
+    authorize.add_argument("--max-total-tokens", required=True, type=int)
+    authorize.add_argument(
+        "--max-wall-time-seconds",
+        required=True,
+        type=float,
+    )
+    authorize.add_argument("--approve", action="store_true", required=True)
+    authorize.add_argument("--json", action="store_true")
+    authorize.set_defaults(handler=_handle_gate)
 
 
 def _add_gate_run_selection_arguments(parser):
@@ -3579,6 +3627,29 @@ def _handle_gate(args):
             expected_evidence_sha256=args.expected_evidence_sha256,
             expected_integration_head=args.expected_integration_head,
         )
+    elif args.gate_command == "authorize":
+        summary = _gate_authorize(
+            project_root,
+            profile,
+            run_dir,
+            gate_id=args.gate,
+            gate_epoch=args.gate_epoch,
+            protocol_sha256=args.protocol_sha256,
+            model=args.model,
+            reasoning_profile=args.reasoning_profile,
+            max_total_tokens=args.max_total_tokens,
+            max_wall_time_seconds=args.max_wall_time_seconds,
+        )
+        gate_context = _require_post_backlog_gate_context(
+            profile,
+            run_dir,
+        )
+        summary["controller_results"] = (
+            _run_available_phase2_gate_controllers(gate_context)
+        )
+        summary["post_backlog_gates"] = (
+            _evaluate_post_backlog_gates(gate_context)
+        )
     else:
         raise AgentTeamCliError("unsupported gate command", gate_command=args.gate_command)
     if args.json:
@@ -3698,8 +3769,15 @@ def _gate_seal_baseline(project_root, profile, run_dir, *, expected_integration_
             )
         task_counts = run_status.get("tasks") or {}
         integration_counts = run_status.get("integration") or {}
+        controller_only = (
+            context["taskpack"].get("execution_mode")
+            == "controller_only"
+        )
         if (
-            not int(task_counts.get("total") or 0)
+            (
+                not int(task_counts.get("total") or 0)
+                and not controller_only
+            )
             or int(task_counts.get("done") or 0) != int(task_counts.get("total") or 0)
             or int(task_counts.get("blocked") or 0)
             or int(task_counts.get("ready") or 0)
@@ -4454,6 +4532,15 @@ def _gate_register(
 ):
     context = _require_post_backlog_gate_context(profile, run_dir)
     declaration = _require_gate_declaration(context, gate_id)
+    phase2_spec = None
+    if (
+        declaration.get("controller_entrypoint")
+        or declaration.get("relation_validator")
+    ):
+        try:
+            phase2_spec = resolve_gate_spec(declaration)
+        except Phase2GateError as exc:
+            raise AgentTeamCliError(str(exc), gate_id=gate_id) from exc
     with _gate_mutation_locks(context, sorted(context["declarations_by_id"])):
         current = _require_current_gate_epoch(context, gate_epoch)
         head = _resolved_epoch_integration_head(project_root, current["record"])
@@ -4463,12 +4550,35 @@ def _gate_register(
             head,
             field_name="expected integration head",
         )
-        if head != current["record"]["integration_head_sha"]:
+        if (
+            phase2_spec is None
+            and head != current["record"]["integration_head_sha"]
+        ):
             raise AgentTeamCliError(
                 "gate evidence must be registered before the integration baseline changes",
                 epoch_integration_head=current["record"]["integration_head_sha"],
                 current_integration_head=head,
             )
+        if phase2_spec is not None:
+            baseline_relation = _git_completed(
+                project_root,
+                [
+                    "merge-base",
+                    "--is-ancestor",
+                    current["record"]["integration_head_sha"],
+                    head,
+                ],
+                check=False,
+            )
+            if baseline_relation.returncode != 0:
+                raise AgentTeamCliError(
+                    "Phase 2 evidence head does not descend from the "
+                    "sealed epoch baseline",
+                    epoch_integration_head=current["record"][
+                        "integration_head_sha"
+                    ],
+                    current_integration_head=head,
+                )
         if _open_gate_controller_invocations(context, gate_id=gate_id):
             raise AgentTeamCliError(
                 "open gate controller invocation blocks evidence registration",
@@ -4696,6 +4806,200 @@ def _gate_approve(
         if completion is not None:
             summary["run_completion"] = completion
         return summary
+
+
+def _gate_authorize(
+    project_root,
+    profile,
+    run_dir,
+    *,
+    gate_id,
+    gate_epoch,
+    protocol_sha256,
+    model,
+    reasoning_profile,
+    max_total_tokens,
+    max_wall_time_seconds,
+):
+    context = _require_post_backlog_gate_context(profile, run_dir)
+    if Path(project_root).resolve() != context["project_root"]:
+        raise AgentTeamCliError(
+            "selected project root does not match frozen gate authority"
+        )
+    declaration = _require_gate_declaration(context, gate_id)
+    try:
+        spec = resolve_gate_spec(declaration)
+    except Phase2GateError as exc:
+        raise AgentTeamCliError(str(exc), gate_id=gate_id) from exc
+    if not spec.authorization_required:
+        raise AgentTeamCliError(
+            "gate does not accept provider authorization",
+            gate_id=gate_id,
+        )
+    _require_operator_approval_context()
+    confirmation = (
+        f"authorize {context['run_dir'].name} {gate_id} "
+        f"epoch {gate_epoch}"
+    )
+    with _gate_mutation_locks(
+        context,
+        sorted(context["declarations_by_id"]),
+    ):
+        current = _require_current_gate_epoch(context, gate_epoch)
+        decisions = _evaluate_post_backlog_gates(
+            context,
+            current=current,
+        )
+        dependency_ids = [
+            dependency
+            for dependency in declaration.get("depends_on", [])
+            if dependency in context["declarations_by_id"]
+        ]
+        by_id = {
+            item["gate_id"]: item
+            for item in decisions.get("gates", [])
+        }
+        missing_dependencies = [
+            dependency
+            for dependency in dependency_ids
+            if by_id.get(dependency, {}).get("state") != "passed"
+        ]
+        if missing_dependencies:
+            raise AgentTeamCliError(
+                "provider authorization requires passed gate dependencies",
+                gate_id=gate_id,
+                dependencies=missing_dependencies,
+            )
+        readiness_sha256 = (
+            by_id.get("P2-08", {}).get("evidence_sha256")
+        )
+        if not isinstance(readiness_sha256, str):
+            raise AgentTeamCliError(
+                "P2-08 evidence digest is unavailable",
+                gate_id=gate_id,
+            )
+        try:
+            expected_contract = _phase2_live_authorization_contract(
+                context,
+                current,
+            )
+        except Phase2GateError as exc:
+            raise AgentTeamCliError(
+                str(exc),
+                gate_id=gate_id,
+            ) from exc
+        requested_contract = {
+            "protocol_sha256": protocol_sha256,
+            "model": model,
+            "reasoning_profile": reasoning_profile,
+            "max_total_tokens": max_total_tokens,
+            "max_wall_time_seconds": max_wall_time_seconds,
+        }
+        mismatches = [
+            field
+            for field, expected in expected_contract.items()
+            if requested_contract.get(field) != expected
+        ]
+        if mismatches:
+            raise AgentTeamCliError(
+                "provider authorization parameters differ from the "
+                "generated Phase 2 protocol",
+                gate_id=gate_id,
+                mismatches=mismatches,
+                expected=expected_contract,
+            )
+        sys.stderr.write(
+            "Review the current epoch, readiness evidence, model policy, "
+            "and immutable provider budgets.\n"
+            f"Type exactly `{confirmation}` to publish authorization: "
+        )
+        sys.stderr.flush()
+        if sys.stdin.readline().strip() != confirmation:
+            raise AgentTeamCliError(
+                "literal provider authorization confirmation did not match"
+            )
+        authorization = {
+            "schema_version": "phase2_live_authorization.v1",
+            "decision": "approved",
+            "operator_identity": (
+                f"{getpass.getuser()} (uid={os.getuid()})"
+            ),
+            "authorized_at": _format_utc_timestamp(datetime.now(UTC)),
+            "gate_id": gate_id,
+            "epoch_number": gate_epoch,
+            "epoch_sha256": current["digest"],
+            "protocol_sha256": protocol_sha256,
+            "readiness_promotion_sha256": readiness_sha256,
+            "model": model,
+            "reasoning_profile": reasoning_profile,
+            "max_total_tokens": max_total_tokens,
+            "max_wall_time_seconds": max_wall_time_seconds,
+            "max_inflight_model_invocations": 1,
+            "modes": [
+                "single_codex",
+                "agentteam_direct",
+                "agentteam_full",
+            ],
+        }
+        authorization_path = _gate_authorization_path(
+            context,
+            current["record"],
+            gate_id,
+        )
+        authorization_context = {
+            "repository_root": str(context["project_root"]),
+            "epoch_number": gate_epoch,
+            "epoch_sha256": current["digest"],
+            "protocol_sha256": protocol_sha256,
+            "readiness_promotion_sha256": readiness_sha256,
+            "model": model,
+            "reasoning_profile": reasoning_profile,
+            "max_total_tokens": max_total_tokens,
+            "max_wall_time_seconds": max_wall_time_seconds,
+        }
+        if authorization_path.exists():
+            try:
+                permit = require_live_provider_authorization(
+                    authorization_path,
+                    authorization_context,
+                )
+            except Phase2GateError as exc:
+                raise AgentTeamCliError(
+                    str(exc),
+                    gate_id=gate_id,
+                ) from exc
+            return {
+                "gate_action": "authorize",
+                "gate_status": "authorized",
+                "taskpack_id": context["run_dir"].name,
+                "gate_epoch": gate_epoch,
+                "gate_id": gate_id,
+                "path": str(authorization_path),
+                "evidence_sha256": permit[
+                    "authorization_sha256"
+                ],
+                "idempotent": True,
+                "provider_calls": 0,
+            }
+        try:
+            publication = publish_live_authorization(
+                authorization_path,
+                authorization,
+                authorization_context,
+            )
+        except Phase2GateError as exc:
+            raise AgentTeamCliError(str(exc), gate_id=gate_id) from exc
+        return {
+            "gate_action": "authorize",
+            "gate_status": "authorized",
+            "taskpack_id": context["run_dir"].name,
+            "gate_epoch": gate_epoch,
+            "gate_id": gate_id,
+            "path": publication["path"],
+            "evidence_sha256": publication["sha256"],
+            "idempotent": not publication["created"],
+            "provider_calls": 0,
+        }
 
 
 def _handle_notify(args):
@@ -8148,6 +8452,17 @@ def _resolved_epoch_integration_head(project_root, epoch):
     return head
 
 
+def _require_sealed_epoch_integration_head(project_root, epoch):
+    head = _resolved_epoch_integration_head(project_root, epoch)
+    if head != epoch["integration_head_sha"]:
+        raise AgentTeamCliError(
+            "integration branch moved outside the sealed gate epoch",
+            expected_integration_head=epoch["integration_head_sha"],
+            actual_integration_head=head,
+        )
+    return head
+
+
 def _require_path_within(path, root, label):
     try:
         Path(path).resolve().relative_to(Path(root).resolve())
@@ -8161,6 +8476,1650 @@ def _gate_receipt_path(context, epoch, gate_id):
 
 def _gate_approval_path(context, epoch, gate_id):
     return context["epochs_root"] / str(epoch["epoch_number"]) / "approvals" / f"{gate_id}.approval.v1.json"
+
+
+def _gate_authorization_path(context, epoch, gate_id):
+    return (
+        context["epochs_root"]
+        / str(epoch["epoch_number"])
+        / "authorizations"
+        / f"{gate_id}.authorization.v1.json"
+    )
+
+
+def _phase2_gate_relation_context(
+    context,
+    current,
+    declaration,
+    prior_decisions,
+    evidence_run,
+    integration_head,
+):
+    context_path = (
+        Path(evidence_run)
+        / "state"
+        / "phase2_gate_contexts"
+        / str(current["record"]["epoch_number"])
+        / f"{declaration['gate_id']}.relation-context.v1.json"
+    )
+    legacy_context_path = (
+        Path(evidence_run)
+        / "state"
+        / f"{declaration['gate_id']}.relation-context.v1.json"
+    )
+    if not context_path.exists() and legacy_context_path.exists():
+        context_path = legacy_context_path
+    if context_path.is_symlink() or not context_path.is_file():
+        raise Phase2GateError(
+            "Phase 2 relation context is missing or unsafe"
+        )
+    try:
+        relation_context = json.loads(
+            context_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Phase2GateError(
+            "Phase 2 relation context is not valid JSON"
+        ) from exc
+    if not isinstance(relation_context, dict):
+        raise Phase2GateError(
+            "Phase 2 relation context must be an object"
+        )
+    expected = {
+        "epoch_number": current["record"]["epoch_number"],
+        "epoch_sha256": current["digest"],
+        "integration_head": integration_head,
+    }
+    mismatches = [
+        field
+        for field, value in expected.items()
+        if relation_context.get(field) != value
+    ]
+    if mismatches:
+        raise Phase2GateError(
+            "Phase 2 relation context binding mismatch: "
+            + ", ".join(mismatches)
+        )
+    authorization_epoch_number = relation_context.get(
+        "provider_authorization_epoch_number",
+        current["record"]["epoch_number"],
+    )
+    if (
+        not isinstance(authorization_epoch_number, int)
+        or isinstance(authorization_epoch_number, bool)
+        or authorization_epoch_number < 1
+        or authorization_epoch_number
+        > current["record"]["epoch_number"]
+    ):
+        raise Phase2GateError(
+            "Phase 2 provider authorization epoch is invalid"
+        )
+    authorization_epoch_path = (
+        context["epochs_root"]
+        / str(authorization_epoch_number)
+        / "epoch.v1.json"
+    )
+    authorization_epoch_record = _read_json_if_exists(
+        authorization_epoch_path
+    )
+    if not authorization_epoch_record:
+        raise Phase2GateError(
+            "Phase 2 provider authorization epoch is unavailable"
+        )
+    try:
+        _validate_gate_record_schema(
+            "post_backlog_gate_epoch.schema.json",
+            authorization_epoch_record,
+        )
+    except AgentTeamCliError as exc:
+        raise Phase2GateError(str(exc)) from exc
+    authorization_epoch_sha256 = _sha256_json(
+        authorization_epoch_record
+    )
+    declared_authorization_epoch_sha256 = relation_context.get(
+        "provider_authorization_epoch_sha256"
+    )
+    if (
+        declared_authorization_epoch_sha256 is not None
+        and declared_authorization_epoch_sha256
+        != authorization_epoch_sha256
+    ):
+        raise Phase2GateError(
+            "Phase 2 provider authorization epoch digest mismatch"
+        )
+    relation_context = {
+        **relation_context,
+        "repository_root": str(
+            _gate_integration_worktree(
+                context,
+                current["record"],
+            )
+        ),
+        "authorization_epoch_number": authorization_epoch_number,
+        "authorization_epoch_sha256": authorization_epoch_sha256,
+        "authorization_path": str(
+            _gate_authorization_path(
+                context,
+                authorization_epoch_record,
+                declaration["gate_id"],
+            )
+        ),
+        "prior_gate_evidence": {
+            gate_id: decision.get("evidence_sha256")
+            for gate_id, decision in prior_decisions.items()
+            if isinstance(decision, dict)
+            and decision.get("state") == "passed"
+        },
+        "prior_gate_validated_code": {
+            gate_id: decision.get("validated_code_sha")
+            for gate_id, decision in prior_decisions.items()
+            if isinstance(decision, dict)
+            and decision.get("state") == "passed"
+            and decision.get("validated_code_sha")
+        },
+    }
+    if declaration["gate_id"] == "P2-10":
+        relation_context["integration_worktree"] = str(
+            _gate_integration_worktree(
+                context,
+                current["record"],
+            )
+        )
+        relation_context["full_verification_command"] = list(
+            _frozen_gate_verification_command(context)
+        )
+    return relation_context
+
+
+def _phase2_gate_controller_result_path(context, epoch, gate_id):
+    return (
+        context["epochs_root"]
+        / str(epoch["epoch_number"])
+        / "controller_results"
+        / f"{gate_id}.controller-result.v1.json"
+    )
+
+
+def _phase2_action_output_path(context, declaration):
+    relative = Path(declaration["evidence_artifact"])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise Phase2GateError(
+            "Phase 2 action evidence path is unsafe"
+        )
+    path = (context["run_dir"] / relative).resolve()
+    _require_path_within(
+        path,
+        context["run_dir"],
+        "Phase 2 action evidence",
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _phase2_action_relation_context_path(
+    context,
+    epoch_number,
+    gate_id,
+):
+    return (
+        context["run_dir"]
+        / "state"
+        / "phase2_gate_contexts"
+        / str(epoch_number)
+        / f"{gate_id}.relation-context.v1.json"
+    )
+
+
+def _phase2_live_authorization_contract(context, current):
+    sidecar_path = _phase2_action_relation_context_path(
+        context,
+        current["record"]["epoch_number"],
+        "P2-08",
+    )
+    if sidecar_path.is_symlink() or not sidecar_path.is_file():
+        raise Phase2GateError(
+            "P2-08 generated protocol authority is unavailable"
+        )
+    sidecar = _read_json_if_exists(sidecar_path)
+    integration_head = _resolved_epoch_integration_head(
+        context["project_root"],
+        current["record"],
+    )
+    expected_sidecar = {
+        "epoch_number": current["record"]["epoch_number"],
+        "epoch_sha256": current["digest"],
+        "integration_head": integration_head,
+    }
+    if any(
+        sidecar.get(field) != value
+        for field, value in expected_sidecar.items()
+    ):
+        raise Phase2GateError(
+            "P2-08 generated protocol authority binding mismatch"
+        )
+    requested_protocol_path = Path(
+        sidecar.get("protocol_path") or ""
+    ).expanduser()
+    if (
+        requested_protocol_path.is_symlink()
+        or not requested_protocol_path.is_file()
+    ):
+        raise Phase2GateError(
+            "P2-08 generated protocol is missing or unsafe"
+        )
+    protocol_path = requested_protocol_path.resolve()
+    _require_path_within(
+        protocol_path,
+        context["run_dir"],
+        "P2-08 generated protocol",
+    )
+    protocol = _read_json_if_exists(protocol_path)
+    environment = (
+        protocol.get("environment")
+        if isinstance(protocol, dict)
+        else None
+    )
+    budgets = (
+        protocol.get("budgets")
+        if isinstance(protocol, dict)
+        else None
+    )
+    repository = (
+        protocol.get("repository")
+        if isinstance(protocol, dict)
+        else None
+    )
+    if (
+        not isinstance(environment, dict)
+        or not isinstance(budgets, dict)
+        or not isinstance(repository, dict)
+        or repository.get("commit") != integration_head
+        or environment.get("max_inflight_model_invocations") != 1
+    ):
+        raise Phase2GateError(
+            "P2-08 generated protocol authorization contract is invalid"
+        )
+    contract = {
+        "protocol_sha256": canonical_json_sha256(protocol),
+        "model": environment.get("model"),
+        "reasoning_profile": environment.get("reasoning_profile"),
+        "max_total_tokens": budgets.get("max_total_tokens"),
+        "max_wall_time_seconds": budgets.get(
+            "max_wall_time_seconds"
+        ),
+    }
+    if (
+        any(
+            not isinstance(contract[field], str)
+            or not contract[field]
+            for field in ("model", "reasoning_profile")
+        )
+        or not isinstance(contract["max_total_tokens"], int)
+        or isinstance(contract["max_total_tokens"], bool)
+        or contract["max_total_tokens"] < 1
+        or not isinstance(
+            contract["max_wall_time_seconds"],
+            (int, float),
+        )
+        or isinstance(contract["max_wall_time_seconds"], bool)
+        or contract["max_wall_time_seconds"] <= 0
+    ):
+        raise Phase2GateError(
+            "P2-08 generated protocol provider policy is invalid"
+        )
+    return contract
+
+
+def _phase2_action_journal_path(context, gate_id):
+    return (
+        context["gate_root"]
+        / "actions"
+        / f"{gate_id}.action-journal.v1.json"
+    )
+
+
+def _read_phase2_action_journal(context, gate_id):
+    return _read_json_if_exists(
+        _phase2_action_journal_path(context, gate_id)
+    )
+
+
+def _publish_phase2_action_journal(
+    context,
+    current,
+    declaration,
+    action,
+):
+    path = _phase2_action_journal_path(
+        context,
+        declaration["gate_id"],
+    )
+    payload = {
+        "schema_version": "phase2_action_journal.v1",
+        "gate_id": declaration["gate_id"],
+        "base_epoch_number": current["record"]["epoch_number"],
+        "base_epoch_sha256": current["digest"],
+        "base_integration_head": current["record"][
+            "integration_head_sha"
+        ],
+        "action_input_sha256": _sha256_json(
+            declaration["controller_action_input"]
+        ),
+        "result_integration_head": action["integration_head"],
+        "action": action,
+        "prepared_at": _format_utc_timestamp(datetime.now(UTC)),
+        "epoch_created_at": _format_utc_timestamp(datetime.now(UTC)),
+    }
+    existing = _read_json_if_exists(path)
+    if existing:
+        immutable_fields = (
+            "gate_id",
+            "base_epoch_number",
+            "base_epoch_sha256",
+            "base_integration_head",
+            "action_input_sha256",
+            "result_integration_head",
+            "action",
+        )
+        if any(
+            existing.get(field) != payload[field]
+            for field in immutable_fields
+        ):
+            raise Phase2GateError(
+                "Phase 2 action journal conflicts with frozen authority"
+            )
+        return existing
+    _atomic_write_json(path, payload, replace=False)
+    return payload
+
+
+def _validate_phase2_action_journal(
+    context,
+    current,
+    declaration,
+    journal,
+):
+    expected_fields = {
+        "schema_version",
+        "gate_id",
+        "base_epoch_number",
+        "base_epoch_sha256",
+        "base_integration_head",
+        "action_input_sha256",
+        "result_integration_head",
+        "action",
+        "prepared_at",
+        "epoch_created_at",
+    }
+    gate_id = declaration["gate_id"]
+    if (
+        not isinstance(journal, dict)
+        or set(journal) != expected_fields
+        or journal.get("schema_version")
+        != "phase2_action_journal.v1"
+        or journal.get("gate_id") != gate_id
+        or not isinstance(journal.get("base_epoch_number"), int)
+        or isinstance(journal.get("base_epoch_number"), bool)
+        or journal["base_epoch_number"] < 1
+    ):
+        raise Phase2GateError(
+            "Phase 2 action journal schema is invalid"
+        )
+    for field in (
+        "base_epoch_sha256",
+        "action_input_sha256",
+    ):
+        value = journal.get(field)
+        if (
+            not isinstance(value, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value)
+        ):
+            raise Phase2GateError(
+                f"Phase 2 action journal {field} is invalid"
+            )
+    if journal["action_input_sha256"] != _sha256_json(
+        declaration["controller_action_input"]
+    ):
+        raise Phase2GateError(
+            "Phase 2 action journal input binding changed"
+        )
+    for field in ("prepared_at", "epoch_created_at"):
+        try:
+            datetime.fromisoformat(
+                journal[field].replace("Z", "+00:00")
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise Phase2GateError(
+                f"Phase 2 action journal {field} is invalid"
+            ) from exc
+    object_format = current["record"]["git_object_format"]
+    if (
+        not _valid_git_oid(
+            journal.get("base_integration_head"),
+            object_format,
+        )
+        or not _valid_git_oid(
+            journal.get("result_integration_head"),
+            object_format,
+        )
+    ):
+        raise Phase2GateError(
+            "Phase 2 action journal Git binding is invalid"
+        )
+    if current["digest"] == journal["base_epoch_sha256"]:
+        base_record = current["record"]
+    else:
+        base_epoch_path = (
+            context["epochs_root"]
+            / str(journal["base_epoch_number"])
+            / "epoch.v1.json"
+        )
+        base_record = _read_json_if_exists(base_epoch_path)
+        if (
+            not base_record
+            or _sha256_json(base_record)
+            != journal["base_epoch_sha256"]
+        ):
+            raise Phase2GateError(
+                "Phase 2 action journal base epoch is unavailable"
+            )
+    if (
+        base_record.get("epoch_number")
+        != journal["base_epoch_number"]
+        or base_record.get("integration_head_sha")
+        != journal["base_integration_head"]
+    ):
+        raise Phase2GateError(
+            "Phase 2 action journal base epoch binding mismatch"
+        )
+    action = journal["action"]
+    if (
+        not isinstance(action, dict)
+        or action.get("gate_id") != gate_id
+        or action.get("action_status") != "completed"
+        or action.get("integration_head")
+        != journal["result_integration_head"]
+        or not isinstance(action.get("relation_context"), dict)
+    ):
+        raise Phase2GateError(
+            "Phase 2 action journal result is invalid"
+        )
+    expected_artifact_path = (
+        context["run_dir"] / declaration["evidence_artifact"]
+    ).resolve()
+    artifact_path = Path(action.get("artifact_path") or "").expanduser()
+    artifact_digest = action.get("artifact_sha256")
+    if (
+        artifact_path.is_symlink()
+        or artifact_path.resolve() != expected_artifact_path
+        or not expected_artifact_path.is_file()
+        or not isinstance(artifact_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", artifact_digest)
+        or hashlib.sha256(
+            expected_artifact_path.read_bytes()
+        ).hexdigest()
+        != artifact_digest
+    ):
+        raise Phase2GateError(
+            "Phase 2 action journal evidence binding is invalid"
+        )
+    base_head = journal["base_integration_head"]
+    result_head = journal["result_integration_head"]
+    if gate_id == "P2-08":
+        valid_relation = (
+            _git_stdout(
+                context["project_root"],
+                ["rev-parse", f"{result_head}^"],
+            )
+            == base_head
+            and _git_stdout(
+                context["project_root"],
+                [
+                    "diff",
+                    "--name-only",
+                    f"{base_head}..{result_head}",
+                ],
+            ).splitlines()
+            == [_PHASE2_READINESS_PATH]
+        )
+    elif gate_id == "P2-09":
+        valid_relation = result_head == base_head
+    else:
+        valid_relation = _is_exact_phase2_finalization_child(
+            context["project_root"],
+            base_head,
+            result_head,
+        )
+    if not valid_relation:
+        raise Phase2GateError(
+            f"{gate_id} action journal Git relation is invalid"
+        )
+
+
+def _phase2_action_worktree(
+    context,
+    gate_id,
+    base_head,
+):
+    root = (
+        context["run_dir"]
+        / "controller_worktrees"
+        / gate_id
+    )
+    if root.exists():
+        completed = _git_completed(
+            context["project_root"],
+            ["worktree", "remove", "--force", str(root)],
+            check=False,
+        )
+        if completed.returncode != 0:
+            shutil.rmtree(root, ignore_errors=True)
+            _git_completed(
+                context["project_root"],
+                ["worktree", "prune"],
+                check=False,
+            )
+    root.parent.mkdir(parents=True, exist_ok=True)
+    completed = _git_completed(
+        context["project_root"],
+        ["worktree", "add", "--detach", str(root), base_head],
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise Phase2GateError(
+            completed.stderr.strip()
+            or "Phase 2 action worktree creation failed"
+        )
+    return root.resolve()
+
+
+def _phase2_action_authority_roots(
+    context,
+    *,
+    extra=(),
+):
+    return [
+        str(Path(path).resolve())
+        for path in (
+            context["frozen_dir"],
+            context["project_root"],
+            context["run_dir"],
+            *extra,
+        )
+    ]
+
+
+def _phase2_action_input(context, declaration):
+    value = copy.deepcopy(
+        declaration.get("controller_action_input")
+    )
+    if not isinstance(value, dict):
+        raise Phase2GateError(
+            "Phase 2 controller action input is unavailable"
+        )
+    configuration = value.get("configuration")
+    if not isinstance(configuration, dict):
+        raise Phase2GateError(
+            "Phase 2 controller action configuration is invalid"
+        )
+    return value
+
+
+def _publish_phase2_action_epoch(
+    context,
+    current,
+    integration_head,
+    *,
+    worktree=None,
+    created_at=None,
+):
+    record = current["record"]
+    if worktree is None:
+        worktree = _gate_integration_worktree(context, record)
+    resolved = _git_stdout(worktree, ["rev-parse", "HEAD"])
+    _require_expected_git_oid(
+        context["project_root"],
+        integration_head,
+        resolved,
+        field_name="Phase 2 action integration head",
+    )
+    _require_clean_worktree(
+        worktree,
+        "Phase 2 action changed the integration worktree after commit",
+    )
+    command = _frozen_gate_verification_command(context)
+    completed = subprocess.run(
+        command,
+        cwd=worktree,
+        env=_integration_verification_env(worktree),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        timeout=3600,
+    )
+    result_authority = {
+        "command": command,
+        "returncode": completed.returncode,
+        "normalized_stdout_sha256": _sha256_bytes(
+            _normalize_gate_verification_output(
+                completed.stdout
+            ).encode("utf-8")
+        ),
+        "normalized_stderr_sha256": _sha256_bytes(
+            _normalize_gate_verification_output(
+                completed.stderr
+            ).encode("utf-8")
+        ),
+    }
+    if completed.returncode != 0:
+        raise Phase2GateError(
+            "Phase 2 action full verification failed"
+        )
+    _require_clean_worktree(
+        worktree,
+        "Phase 2 action verification changed the integration worktree",
+    )
+    next_record = {
+        "schema_version": "post_backlog_gate_epoch.v1",
+        "implementation_run_id": context["run_dir"].name,
+        "epoch_number": record["epoch_number"] + 1,
+        "prior_epoch_sha256": current["digest"],
+        "gate_declaration_sha256": _sha256_json(
+            context["declarations"]
+        ),
+        "git_object_format": record["git_object_format"],
+        "target_branch": record["target_branch"],
+        "target_head_sha": record["target_head_sha"],
+        "integration_branch": record["integration_branch"],
+        "integration_head_sha": integration_head,
+        "validated_code_sha": integration_head,
+        "verification_command_sha256": _sha256_json(command),
+        "verification_result_sha256": _sha256_json(
+            result_authority
+        ),
+        "created_at": (
+            created_at
+            or _format_utc_timestamp(datetime.now(UTC))
+        ),
+    }
+    _validate_gate_record_schema(
+        "post_backlog_gate_epoch.schema.json",
+        next_record,
+    )
+    epoch_dir = (
+        context["epochs_root"]
+        / str(next_record["epoch_number"])
+    )
+    existing_record = _read_json_if_exists(
+        epoch_dir / "epoch.v1.json"
+    )
+    if existing_record:
+        if existing_record != next_record:
+            raise Phase2GateError(
+                "Phase 2 action epoch conflicts with recovery journal"
+            )
+    else:
+        epoch_dir = _publish_gate_epoch(context, next_record)
+    _atomic_write_json(
+        context["gate_root"] / "gate_state.v1.json",
+        {
+            "schema_version": "post_backlog_gate_state.v1",
+            "implementation_run_id": context["run_dir"].name,
+            "state": "gates_pending",
+            "gate_declaration_sha256": next_record[
+                "gate_declaration_sha256"
+            ],
+            "current_epoch": next_record["epoch_number"],
+            "current_epoch_sha256": _sha256_json(next_record),
+            "updated_at": _format_utc_timestamp(datetime.now(UTC)),
+        },
+    )
+    return {
+        "record": next_record,
+        "digest": _sha256_json(next_record),
+        "path": epoch_dir,
+    }
+
+
+def _normalize_gate_verification_output(value):
+    return re.sub(
+        r"(Ran\s+\d+\s+tests?\s+in\s+)"
+        r"\d+(?:\.\d+)?s",
+        r"\1<elapsed>",
+        value,
+    )
+
+
+def _publish_phase2_action_receipt(
+    context,
+    current,
+    declaration,
+    *,
+    integration_head,
+    relation_context,
+):
+    sidecar = {
+        **relation_context,
+        "epoch_number": current["record"]["epoch_number"],
+        "epoch_sha256": current["digest"],
+        "integration_head": integration_head,
+    }
+    sidecar_path = (
+        context["run_dir"]
+        / "state"
+        / "phase2_gate_contexts"
+        / str(current["record"]["epoch_number"])
+        / f"{declaration['gate_id']}.relation-context.v1.json"
+    )
+    if sidecar_path.exists():
+        if _read_json_if_exists(sidecar_path) != sidecar:
+            raise Phase2GateError(
+                "Phase 2 action relation context conflicts"
+            )
+    else:
+        _atomic_write_json(sidecar_path, sidecar, replace=False)
+    receipt_path = _gate_receipt_path(
+        context,
+        current["record"],
+        declaration["gate_id"],
+    )
+    existing_receipt = _read_json_if_exists(receipt_path)
+    if existing_receipt:
+        expected = {
+            "implementation_run_id": context["run_dir"].name,
+            "epoch_number": current["record"]["epoch_number"],
+            "epoch_sha256": current["digest"],
+            "gate_id": declaration["gate_id"],
+            "expected_integration_head_sha": integration_head,
+            "evidence_artifact": declaration["evidence_artifact"],
+            "evidence_schema": declaration["evidence_schema"],
+        }
+        if any(
+            existing_receipt.get(field) != value
+            for field, value in expected.items()
+        ):
+            raise Phase2GateError(
+                "Phase 2 action receipt conflicts"
+            )
+        return existing_receipt
+    receipt = {
+        "schema_version": "post_backlog_gate_receipt.v1",
+        "implementation_run_id": context["run_dir"].name,
+        "epoch_number": current["record"]["epoch_number"],
+        "epoch_sha256": current["digest"],
+        "gate_id": declaration["gate_id"],
+        "evidence_run_id": context["run_dir"].name,
+        "evidence_run_relative_path": (
+            context["run_dir"]
+            .relative_to(context["work_root"])
+            .as_posix()
+        ),
+        "expected_integration_head_sha": integration_head,
+        "git_object_format": current["record"]["git_object_format"],
+        "evidence_artifact": declaration["evidence_artifact"],
+        "evidence_schema": declaration["evidence_schema"],
+        "attempt_history": [],
+        "registered_at": _format_utc_timestamp(datetime.now(UTC)),
+    }
+    _validate_gate_record_schema(
+        "post_backlog_gate_receipt.schema.json",
+        receipt,
+    )
+    _atomic_write_json(receipt_path, receipt, replace=False)
+    return receipt
+
+
+def _phase2_promotion_release_path(context):
+    return (
+        context["gate_root"]
+        / "phase2-promotion-release.v1.json"
+    )
+
+
+def _install_phase2_promotion_release(
+    context,
+    integration_head,
+):
+    path = _phase2_promotion_release_path(context)
+    existing = _read_json_if_exists(path)
+    if existing:
+        if existing.get("source_commit") != integration_head:
+            raise Phase2GateError(
+                "Phase 2 promotion release source changed"
+            )
+        release_id = existing.get("release_id")
+        if not isinstance(release_id, str) or not release_id:
+            raise Phase2GateError(
+                "Phase 2 promotion release ID is invalid"
+            )
+        try:
+            runtime_release = selected_release_identity(
+                context["work_root"],
+                release_id,
+                expected={"source_commit": integration_head},
+            )
+        except Exception as exc:
+            raise Phase2GateError(
+                "Phase 2 promotion release revalidation failed"
+            ) from exc
+        if existing.get("runtime_release") != runtime_release:
+            raise Phase2GateError(
+                "Phase 2 promotion release record conflicts with "
+                "the installed release"
+            )
+        return runtime_release
+    release_id = f"phase2-readiness-{integration_head[:12]}"
+    try:
+        install_release_from_git(
+            context["project_root"],
+            integration_head,
+            context["work_root"],
+            release_id=release_id,
+            activate=False,
+        )
+        runtime_release = selected_release_identity(
+            context["work_root"],
+            release_id,
+        )
+    except Exception as exc:
+        raise Phase2GateError(
+            "Phase 2 promotion release installation failed"
+        ) from exc
+    _atomic_write_json(
+        path,
+        {
+            "schema_version": "phase2_promotion_release.v1",
+            "release_id": release_id,
+            "source_commit": integration_head,
+            "runtime_release": runtime_release,
+        },
+        replace=False,
+    )
+    return runtime_release
+
+
+def _run_phase2_candidate_pilot_guard(
+    context,
+    integration_head,
+    pilot_manifest_path,
+):
+    runtime_release = _install_phase2_promotion_release(
+        context,
+        integration_head,
+    )
+    runtime_root = Path(runtime_release["runtime_root"]).resolve()
+    script = (
+        "import json,sys;"
+        "from agentteam_runtime.experiment_readiness import "
+        "check_pilot_authorization;"
+        "print(json.dumps(check_pilot_authorization(sys.argv[1]),"
+        "sort_keys=True))"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(runtime_root)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(pilot_manifest_path),
+        ],
+        cwd=runtime_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        timeout=300,
+    )
+    if completed.returncode != 0:
+        raise Phase2GateError(
+            completed.stderr.strip()
+            or "candidate release pilot guard failed"
+        )
+    try:
+        pilot_guard = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise Phase2GateError(
+            "candidate release pilot guard returned invalid JSON"
+        ) from exc
+    return {
+        "pilot_guard": pilot_guard,
+        "runtime_release": runtime_release,
+    }
+
+
+def _is_exact_phase2_finalization_child(
+    project_root,
+    base_head,
+    candidate_head,
+):
+    try:
+        parent = _git_stdout(
+            project_root,
+            ["rev-parse", f"{candidate_head}^"],
+        )
+        changed = _git_stdout(
+            project_root,
+            [
+                "diff",
+                "--name-only",
+                f"{parent}..{candidate_head}",
+            ],
+        ).splitlines()
+    except Exception:
+        return False
+    return (
+        parent == base_head
+        and sorted(changed)
+        == sorted(
+            [
+                _PHASE2_ROADMAP_PATH,
+                _PHASE2_REPORT_PATH,
+            ]
+        )
+    )
+
+
+def _advance_phase2_action_branch(
+    context,
+    current,
+    *,
+    result_head,
+):
+    record = current["record"]
+    branch = record["integration_branch"]
+    actual_head = _git_stdout(
+        context["project_root"],
+        ["rev-parse", "--verify", f"{branch}^{{commit}}"],
+    )
+    base_head = record["integration_head_sha"]
+    if actual_head == base_head:
+        worktree = _git_worktree_for_branch(
+            context["project_root"],
+            branch,
+            base_head,
+        )
+        completed = _git_completed(
+            worktree,
+            ["merge", "--ff-only", result_head],
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise Phase2GateError(
+                completed.stderr.strip()
+                or "Phase 2 action branch advance failed"
+            )
+    elif actual_head == result_head:
+        worktree = _git_worktree_for_branch(
+            context["project_root"],
+            branch,
+            result_head,
+        )
+    else:
+        raise Phase2GateError(
+            "Phase 2 action branch is outside its recoverable transition"
+        )
+    _require_clean_worktree(
+        worktree,
+        "Phase 2 action integration worktree is dirty",
+    )
+    return worktree
+
+
+def _execute_phase2_controller_action(
+    context,
+    current,
+    declaration,
+    prior_decisions,
+):
+    gate_id = declaration["gate_id"]
+    action_input = _phase2_action_input(context, declaration)
+    artifact_path = _phase2_action_output_path(
+        context,
+        declaration,
+    )
+    journal = _read_phase2_action_journal(context, gate_id)
+    if journal:
+        _validate_phase2_action_journal(
+            context,
+            current,
+            declaration,
+            journal,
+        )
+    if gate_id == "P2-08":
+        if not journal:
+            integration_head = _require_sealed_epoch_integration_head(
+                context["project_root"],
+                current["record"],
+            )
+            action_worktree = _phase2_action_worktree(
+                context,
+                gate_id,
+                integration_head,
+            )
+            generated_root = (
+                context["run_dir"]
+                / "acceptance"
+                / "phase2-generated-authority"
+            )
+            action = execute_readiness_promotion_action(
+                action_input,
+                {
+                    "repository_root": str(action_worktree),
+                    "integration_worktree": str(action_worktree),
+                    "integration_head": integration_head,
+                    "authority_roots": (
+                        _phase2_action_authority_roots(
+                            context,
+                            extra=(action_worktree,),
+                        )
+                    ),
+                },
+                artifact_path=artifact_path,
+                pilot_guard_path=(
+                    context["run_dir"]
+                    / "acceptance"
+                    / "phase2-pilot-guard.v1.json"
+                ),
+                protocol_path=(
+                    generated_root / "protocol.v1.json"
+                ),
+                run_manifest_path=(
+                    generated_root / "pilot-run-manifest.v1.json"
+                ),
+                pilot_manifest_path=(
+                    generated_root / "pilot-manifest.v1.json"
+                ),
+                candidate_guard_runner=lambda head, manifest: (
+                    _run_phase2_candidate_pilot_guard(
+                        context,
+                        head,
+                        manifest,
+                    )
+                ),
+            )
+            journal = _publish_phase2_action_journal(
+                context,
+                current,
+                declaration,
+                action,
+            )
+        action = journal["action"]
+        result_head = journal["result_integration_head"]
+        current_is_base = (
+            current["digest"] == journal["base_epoch_sha256"]
+        )
+        current_is_result = (
+            current["record"]["integration_head_sha"]
+            == result_head
+        )
+        current_head = _resolved_epoch_integration_head(
+            context["project_root"],
+            current["record"],
+        )
+        current_is_finalized = (
+            not current_is_base
+            and not current_is_result
+            and _is_exact_phase2_finalization_child(
+                context["project_root"],
+                result_head,
+                current_head,
+            )
+        )
+        if (
+            not current_is_base
+            and not current_is_result
+            and not current_is_finalized
+        ):
+            raise Phase2GateError(
+                "P2-08 recovery journal is outside the current epoch"
+            )
+        refreshed = False
+        if current_is_base:
+            integration_worktree = _advance_phase2_action_branch(
+                context,
+                current,
+                result_head=result_head,
+            )
+            next_epoch = _publish_phase2_action_epoch(
+                context,
+                current,
+                result_head,
+                worktree=integration_worktree,
+                created_at=journal["epoch_created_at"],
+            )
+            refreshed = True
+        else:
+            next_epoch = current
+        _publish_phase2_action_receipt(
+            context,
+            next_epoch,
+            declaration,
+            integration_head=(
+                current_head if current_is_finalized else result_head
+            ),
+            relation_context=action["relation_context"],
+        )
+        return {
+            **action,
+            "epoch_refreshed": refreshed,
+            "gate_epoch": next_epoch["record"]["epoch_number"],
+        }
+    if gate_id == "P2-09":
+        integration_head = _resolved_epoch_integration_head(
+            context["project_root"],
+            current["record"],
+        )
+        worktree = _gate_integration_worktree(
+            context,
+            current["record"],
+        )
+        authorization_epoch = current["record"]
+        authorization_epoch_sha256 = current["digest"]
+        if journal:
+            base_epoch_path = (
+                context["epochs_root"]
+                / str(journal["base_epoch_number"])
+                / "epoch.v1.json"
+            )
+            authorization_epoch = _read_json_if_exists(
+                base_epoch_path
+            )
+            if not authorization_epoch:
+                raise Phase2GateError(
+                    "P2-09 authorization epoch is unavailable"
+                )
+            authorization_epoch_sha256 = _sha256_json(
+                authorization_epoch
+            )
+            action_head = journal["result_integration_head"]
+            if integration_head != action_head:
+                if not _is_exact_phase2_finalization_child(
+                    context["project_root"],
+                    action_head,
+                    integration_head,
+                ):
+                    raise Phase2GateError(
+                        "P2-09 journal is outside its historical "
+                        "finalization relation"
+                    )
+        else:
+            _require_expected_git_oid(
+                context["project_root"],
+                current["record"]["integration_head_sha"],
+                integration_head,
+                field_name="sealed Phase 2 integration head",
+            )
+        authorization_path = _gate_authorization_path(
+            context,
+            authorization_epoch,
+            gate_id,
+        )
+        if not authorization_path.is_file():
+            return {
+                "gate_id": gate_id,
+                "action_status": "awaiting_operator_authorization",
+            }
+        if not journal:
+            authorization = _read_json_if_exists(authorization_path)
+            runtime_release = _install_phase2_promotion_release(
+                context,
+                integration_head,
+            )
+            readiness_decision = prior_decisions.get("P2-08") or {}
+            readiness_sha256 = readiness_decision.get(
+                "evidence_sha256"
+            )
+            readiness_sidecar = _read_json_if_exists(
+                _phase2_action_relation_context_path(
+                    context,
+                    current["record"]["epoch_number"],
+                    "P2-08",
+                )
+            )
+            if not readiness_sidecar:
+                raise Phase2GateError(
+                    "P2-08 generated protocol authority is unavailable"
+                )
+            protocol_path = readiness_sidecar.get("protocol_path")
+            protocol_sha256 = canonical_json_sha256(
+                json.loads(
+                    Path(protocol_path).read_text(encoding="utf-8")
+                )
+            )
+            action_context = {
+                "repository_root": str(worktree),
+                "integration_head": integration_head,
+                "authorization_path": str(authorization_path),
+                "authorization_epoch_number": current["record"][
+                    "epoch_number"
+                ],
+                "authorization_epoch_sha256": (
+                    authorization_epoch_sha256
+                ),
+                "epoch_number": current["record"]["epoch_number"],
+                "epoch_sha256": current["digest"],
+                "protocol_path": protocol_path,
+                "protocol_sha256": protocol_sha256,
+                "readiness_promotion_sha256": readiness_sha256,
+                "model": authorization.get("model"),
+                "reasoning_profile": authorization.get(
+                    "reasoning_profile"
+                ),
+                "max_total_tokens": authorization.get(
+                    "max_total_tokens"
+                ),
+                "max_wall_time_seconds": authorization.get(
+                    "max_wall_time_seconds"
+                ),
+                "runtime_release": runtime_release,
+                "projection_root": str(
+                    context["run_dir"]
+                    / "phase2-live-calibration"
+                ),
+                "authority_roots": (
+                    _phase2_action_authority_roots(context)
+                ),
+            }
+            action = execute_live_calibration_action(
+                action_input,
+                action_context,
+                artifact_path=artifact_path,
+            )
+            journal = _publish_phase2_action_journal(
+                context,
+                current,
+                declaration,
+                action,
+            )
+        action = journal["action"]
+        authorization = _read_json_if_exists(authorization_path)
+        readiness_sha256 = (
+            prior_decisions.get("P2-08") or {}
+        ).get("evidence_sha256")
+        protocol_path = action["relation_context"]["protocol_path"]
+        protocol_sha256 = canonical_json_sha256(
+            json.loads(
+                Path(protocol_path).read_text(encoding="utf-8")
+            )
+        )
+        _publish_phase2_action_receipt(
+            context,
+            current,
+            declaration,
+            integration_head=integration_head,
+            relation_context={
+                **action["relation_context"],
+                "provider_authorization_epoch_number": current[
+                    "record"
+                ]["epoch_number"] if not journal else journal[
+                    "base_epoch_number"
+                ],
+                "provider_authorization_epoch_sha256": (
+                    authorization_epoch_sha256
+                ),
+                "protocol_sha256": protocol_sha256,
+                "readiness_promotion_sha256": readiness_sha256,
+                "model": authorization.get("model"),
+                "reasoning_profile": authorization.get(
+                    "reasoning_profile"
+                ),
+                "max_total_tokens": authorization.get(
+                    "max_total_tokens"
+                ),
+                "max_wall_time_seconds": authorization.get(
+                    "max_wall_time_seconds"
+                ),
+            },
+        )
+        return action
+    if not journal:
+        integration_head = _require_sealed_epoch_integration_head(
+            context["project_root"],
+            current["record"],
+        )
+        action_worktree = _phase2_action_worktree(
+            context,
+            gate_id,
+            integration_head,
+        )
+        readiness_decision = prior_decisions.get("P2-08") or {}
+        calibration_decision = prior_decisions.get("P2-09") or {}
+        prior_artifacts = {
+            "readiness_promotion": {
+                "path": str(
+                    context["run_dir"]
+                    / context["declarations_by_id"]["P2-08"][
+                        "evidence_artifact"
+                    ]
+                ),
+                "sha256": readiness_decision.get("evidence_sha256"),
+            },
+            "live_calibration": {
+                "path": str(
+                    context["run_dir"]
+                    / context["declarations_by_id"]["P2-09"][
+                        "evidence_artifact"
+                    ]
+                ),
+                "sha256": calibration_decision.get("evidence_sha256"),
+            },
+        }
+        action = execute_phase2_finalization_action(
+            action_input,
+            {
+                "repository_root": str(action_worktree),
+                "integration_worktree": str(action_worktree),
+                "integration_head": integration_head,
+                "prior_artifacts": prior_artifacts,
+                "full_verification_command": (
+                    _frozen_gate_verification_command(context)
+                ),
+                "authority_roots": (
+                    _phase2_action_authority_roots(
+                        context,
+                        extra=(action_worktree,),
+                    )
+                ),
+            },
+            artifact_path=artifact_path,
+            verification_path=(
+                context["run_dir"]
+                / "acceptance"
+                / "phase2-full-verification.v1.json"
+            ),
+        )
+        journal = _publish_phase2_action_journal(
+            context,
+            current,
+            declaration,
+            action,
+        )
+    action = journal["action"]
+    result_head = journal["result_integration_head"]
+    current_is_base = (
+        current["digest"] == journal["base_epoch_sha256"]
+    )
+    current_is_result = (
+        current["record"]["integration_head_sha"] == result_head
+    )
+    if not current_is_base and not current_is_result:
+        raise Phase2GateError(
+            "P2-10 recovery journal is outside the current epoch"
+        )
+    refreshed = False
+    if current_is_base:
+        integration_worktree = _advance_phase2_action_branch(
+            context,
+            current,
+            result_head=result_head,
+        )
+        next_epoch = _publish_phase2_action_epoch(
+            context,
+            current,
+            result_head,
+            worktree=integration_worktree,
+            created_at=journal["epoch_created_at"],
+        )
+        refreshed = True
+    else:
+        next_epoch = current
+    historical_authorization_epoch = current["record"][
+        "epoch_number"
+    ]
+    p2_09_sidecar = _read_json_if_exists(
+        _phase2_action_relation_context_path(
+            context,
+            journal["base_epoch_number"],
+            "P2-09",
+        )
+    )
+    if p2_09_sidecar:
+        historical_authorization_epoch = p2_09_sidecar.get(
+            "provider_authorization_epoch_number",
+            historical_authorization_epoch,
+        )
+    for prior_gate_id in ("P2-08", "P2-09"):
+        prior_declaration = context["declarations_by_id"][
+            prior_gate_id
+        ]
+        prior_sidecar = _read_json_if_exists(
+            _phase2_action_relation_context_path(
+                context,
+                journal["base_epoch_number"],
+                prior_gate_id,
+            )
+        )
+        if not prior_sidecar:
+            raise Phase2GateError(
+                f"{prior_gate_id} relation context is unavailable"
+            )
+        prior_sidecar.pop("epoch_number", None)
+        prior_sidecar.pop("epoch_sha256", None)
+        prior_sidecar.pop("integration_head", None)
+        if prior_gate_id == "P2-09":
+            prior_sidecar[
+                "provider_authorization_epoch_number"
+            ] = historical_authorization_epoch
+        _publish_phase2_action_receipt(
+            context,
+            next_epoch,
+            prior_declaration,
+            integration_head=result_head,
+            relation_context=prior_sidecar,
+        )
+    _publish_phase2_action_receipt(
+        context,
+        next_epoch,
+        declaration,
+        integration_head=result_head,
+        relation_context=action["relation_context"],
+    )
+    return {
+        **action,
+        "epoch_refreshed": refreshed,
+        "gate_epoch": next_epoch["record"]["epoch_number"],
+    }
+
+
+def _run_available_phase2_gate_controllers(context):
+    with _gate_mutation_locks(
+        context,
+        sorted(context["declarations_by_id"]),
+    ):
+        return _run_available_phase2_gate_controllers_locked(context)
+
+
+def _run_available_phase2_gate_controllers_locked(context):
+    refresh_budget = len(context["declarations"]) + 1
+    while refresh_budget > 0:
+        current = _read_current_gate_epoch(context)
+        if current is None:
+            return []
+        decisions = {}
+        results = []
+        unresolved = list(context["declarations"])
+        refreshed = False
+        while unresolved:
+            progressed = False
+            for declaration in list(unresolved):
+                dependencies = [
+                    dependency
+                    for dependency in declaration.get("depends_on", [])
+                    if dependency in context["declarations_by_id"]
+                ]
+                if any(
+                    dependency not in decisions
+                    for dependency in dependencies
+                ):
+                    continue
+                if any(
+                    decisions[dependency].get("state") != "passed"
+                    for dependency in dependencies
+                ):
+                    decision = {
+                        "gate_id": declaration["gate_id"],
+                        "state": "pending",
+                    }
+                else:
+                    decision = (
+                        _run_one_available_phase2_gate_controller(
+                            context,
+                            current,
+                            declaration,
+                            decisions,
+                        )
+                    )
+                decisions[declaration["gate_id"]] = decision
+                results.append(decision)
+                unresolved.remove(declaration)
+                progressed = True
+                if decision.get("epoch_refreshed"):
+                    refreshed = True
+                    break
+            if refreshed or not progressed:
+                break
+        if not refreshed:
+            return results
+        refresh_budget -= 1
+    raise AgentTeamCliError(
+        "Phase 2 controller exceeded its gate epoch refresh budget"
+    )
+
+
+def _run_one_available_phase2_gate_controller(
+    context,
+    current,
+    declaration,
+    prior_decisions,
+):
+    gate_id = declaration["gate_id"]
+    try:
+        spec = resolve_gate_spec(declaration)
+    except Phase2GateError as exc:
+        return {
+            "gate_id": gate_id,
+            "state": "failed",
+            "reason": str(exc),
+        }
+    receipt = _read_json_if_exists(
+        _gate_receipt_path(
+            context,
+            current["record"],
+            gate_id,
+        )
+    )
+    if not receipt:
+        try:
+            action = _execute_phase2_controller_action(
+                context,
+                current,
+                declaration,
+                prior_decisions,
+            )
+        except Exception as exc:
+            return {
+                "gate_id": gate_id,
+                "state": "failed",
+                "reason": str(exc),
+            }
+        if action.get("epoch_refreshed"):
+            return {
+                "gate_id": gate_id,
+                "state": "epoch_refreshed",
+                "epoch_refreshed": True,
+                "gate_epoch": action.get("gate_epoch"),
+            }
+        if action.get("action_status") == (
+            "awaiting_operator_authorization"
+        ):
+            return {
+                "gate_id": gate_id,
+                "state": "awaiting_operator_authorization",
+            }
+        receipt = _read_json_if_exists(
+            _gate_receipt_path(
+                context,
+                current["record"],
+                gate_id,
+            )
+        )
+        if not receipt:
+            return {
+                "gate_id": gate_id,
+                "state": "failed",
+                "reason": (
+                    "Phase 2 action completed without publishing a receipt"
+                ),
+            }
+    try:
+        relative_run = Path(receipt["evidence_run_relative_path"])
+        if relative_run.is_absolute() or ".." in relative_run.parts:
+            raise Phase2GateError("receipt evidence run path is unsafe")
+        evidence_run = (context["work_root"] / relative_run).resolve()
+        _require_path_within(
+            evidence_run,
+            context["work_root"] / "runs",
+            "evidence run",
+        )
+        artifact_path = (
+            evidence_run / declaration["evidence_artifact"]
+        ).resolve()
+        relation_context = _phase2_gate_relation_context(
+            context,
+            current,
+            declaration,
+            prior_decisions,
+            evidence_run,
+            receipt["expected_integration_head_sha"],
+        )
+        relation_context["current_integration_head"] = (
+            _resolved_epoch_integration_head(
+                context["project_root"],
+                current["record"],
+            )
+        )
+        if (
+            spec.authorization_required
+            and not Path(
+                relation_context["authorization_path"]
+            ).is_file()
+        ):
+            return {
+                "gate_id": gate_id,
+                "state": "awaiting_operator_authorization",
+            }
+        result = run_gate_controller(
+            spec,
+            artifact_path,
+            relation_context,
+            result_path=_phase2_gate_controller_result_path(
+                context,
+                current["record"],
+                gate_id,
+            ),
+        )
+    except Exception as exc:
+        return {
+            "gate_id": gate_id,
+            "state": "failed",
+            "reason": str(exc),
+        }
+    return {
+        "gate_id": gate_id,
+        "state": (
+            "passed"
+            if result.get("controller_status") == "passed"
+            else result.get("controller_status") or "failed"
+        ),
+        "controller_result": result,
+        "validated_code_sha": (
+            _read_json_if_exists(artifact_path) or {}
+        ).get("validated_code_sha"),
+        "evidence_sha256": result.get("evidence_sha256"),
+    }
 
 
 def _open_gate_controller_invocations(context, gate_id=None):
@@ -8564,6 +10523,7 @@ def _evaluate_post_backlog_gates(context, *, current=None):
 def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_decisions):
     gate_id = declaration["gate_id"]
     reasons = []
+    relation = None
     dependency_states = {
         dependency: prior_decisions[dependency]["state"]
         for dependency in declaration.get("depends_on", [])
@@ -8571,6 +10531,30 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
     }
     if any(state != "passed" for state in dependency_states.values()):
         reasons.append("declared gate dependency is not passed")
+    phase2_spec = None
+    if (
+        declaration.get("executor") == "deterministic_controller"
+        and (
+            declaration.get("controller_entrypoint")
+            or declaration.get("relation_validator")
+        )
+    ):
+        try:
+            phase2_spec = resolve_gate_spec(declaration)
+        except Phase2GateError as exc:
+            return {
+                "gate_id": gate_id,
+                "status": "failed",
+                "state": "failed",
+                "reasons": reasons + [str(exc)],
+            }
+        if reasons:
+            return {
+                "gate_id": gate_id,
+                "status": "pending",
+                "state": "pending",
+                "reasons": reasons,
+            }
     receipt_path = _gate_receipt_path(context, current["record"], gate_id)
     try:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -8601,11 +10585,48 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
             reasons.append(f"receipt {key} binding does not match")
     try:
         head = _resolved_epoch_integration_head(context["project_root"], current["record"])
-        if (
-            receipt.get("expected_integration_head_sha")
-            != current["record"]["integration_head_sha"]
+        receipt_head = receipt.get("expected_integration_head_sha")
+        if phase2_spec is None:
+            if receipt_head != current["record"]["integration_head_sha"]:
+                reasons.append(
+                    "receipt integration baseline binding is stale"
+                )
+        elif not _valid_git_oid(
+            receipt_head,
+            current["record"]["git_object_format"],
         ):
-            reasons.append("receipt integration baseline binding is stale")
+            reasons.append(
+                "receipt evidence integration head is not a canonical Git OID"
+            )
+        else:
+            baseline_to_receipt = _git_completed(
+                context["project_root"],
+                [
+                    "merge-base",
+                    "--is-ancestor",
+                    current["record"]["integration_head_sha"],
+                    receipt_head,
+                ],
+                check=False,
+            )
+            historical_relation = _git_completed(
+                context["project_root"],
+                [
+                    "merge-base",
+                    "--is-ancestor",
+                    receipt_head,
+                    head,
+                ],
+                check=False,
+            )
+            if (
+                baseline_to_receipt.returncode != 0
+                or historical_relation.returncode != 0
+            ):
+                reasons.append(
+                    "receipt evidence integration head is outside the "
+                    "sealed epoch lineage"
+                )
         _require_clean_gate_schema_paths(
             _gate_integration_worktree(context, current["record"]),
             declaration,
@@ -8628,6 +10649,64 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
             artifact,
         )
         evidence_sha256 = _sha256_bytes(artifact_bytes)
+        if phase2_spec is not None:
+            relation_context = _phase2_gate_relation_context(
+                context,
+                current,
+                declaration,
+                prior_decisions,
+                evidence_run,
+                receipt_head,
+            )
+            relation_context["current_integration_head"] = head
+            if (
+                phase2_spec.authorization_required
+                and not Path(
+                    relation_context["authorization_path"]
+                ).is_file()
+            ):
+                return {
+                    "gate_id": gate_id,
+                    "status": "pending",
+                    "state": "awaiting_operator_authorization",
+                    "reasons": [
+                        "bound operator authorization is missing"
+                    ],
+                    "authorization_path": relation_context[
+                        "authorization_path"
+                    ],
+                }
+            relation = validate_gate_relation(
+                phase2_spec,
+                artifact_path,
+                relation_context,
+            )
+            if context["taskpack"].get("execution_mode") == "controller_only":
+                controller_result_path = (
+                    _phase2_gate_controller_result_path(
+                        context,
+                        current["record"],
+                        gate_id,
+                    )
+                )
+                controller_result = _read_json_if_exists(
+                    controller_result_path
+                )
+                if (
+                    not controller_result
+                    or controller_result.get("controller_status")
+                    != "passed"
+                    or controller_result.get("evidence_sha256")
+                    != evidence_sha256
+                    or controller_result.get("gate_epoch")
+                    != current["record"]["epoch_number"]
+                    or controller_result.get("epoch_sha256")
+                    != current["digest"]
+                ):
+                    reasons.append(
+                        "registered Phase 2 controller result is "
+                        "missing or stale"
+                    )
         if artifact.get(declaration["required_status_field"]) != declaration["required_status_value"]:
             reasons.append("controller artifact required status does not match")
         commit_field = declaration.get("commit_field")
@@ -8636,12 +10715,12 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
             if not _valid_git_oid(commit_sha, current["record"]["git_object_format"]):
                 reasons.append(f"artifact {commit_field} is not a canonical Git OID")
             elif declaration.get("integration_head_relation") == "ancestor_of":
-                relation = _git_completed(
+                commit_relation = _git_completed(
                     context["project_root"],
                     ["merge-base", "--is-ancestor", commit_sha, head],
                     check=False,
                 )
-                if relation.returncode != 0:
+                if commit_relation.returncode != 0:
                     reasons.append(f"artifact {commit_field} is not an ancestor of integration head")
             elif declaration.get("integration_head_relation") == "equals" and commit_sha != head:
                 reasons.append(f"artifact {commit_field} does not equal integration head")
@@ -8667,7 +10746,13 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
                 and sorted(artifact["changed_paths"]) != sorted(_PHASE1_REPORT_REVIEW_PATHS)
             ):
                 reasons.append("finalization artifact changed_paths does not match review diff")
-    except (AgentTeamCliError, OSError, KeyError, json.JSONDecodeError) as exc:
+    except (
+        AgentTeamCliError,
+        Phase2GateError,
+        OSError,
+        KeyError,
+        json.JSONDecodeError,
+    ) as exc:
         reasons.append(str(exc) or exc.__class__.__name__)
         return {
             "gate_id": gate_id,
@@ -8732,6 +10817,8 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
         "evidence_schema_sha256": schema_sha256,
         "approval_schema_sha256": approval_schema_sha256 if declaration.get("operator_review_required") else None,
         "integration_head_sha": head,
+        "relation": relation,
+        "validated_code_sha": artifact.get("validated_code_sha"),
     }
 
 
@@ -9101,6 +11188,46 @@ def _post_backlog_gate_next_action(context, decision, operator_view=None):
                 f"agentteam gate approve --taskpack {run_id} --gate {gate_id} "
                 f"--gate-epoch {epoch} --expected-evidence-sha256 {evidence} "
                 f"--expected-integration-head {head} --approve"
+            )
+        if gate.get("state") == "awaiting_operator_authorization":
+            try:
+                current = _read_current_gate_epoch(context)
+                if (
+                    current is None
+                    or current["record"]["epoch_number"] != epoch
+                ):
+                    raise Phase2GateError(
+                        "current Phase 2 epoch changed"
+                    )
+                contract = _phase2_live_authorization_contract(
+                    context,
+                    current,
+                )
+            except Exception:
+                return (
+                    f"agentteam status --run-dir {context['run_dir']}"
+                )
+            return " ".join(
+                [
+                    "agentteam gate authorize",
+                    "--taskpack",
+                    shlex.quote(run_id),
+                    "--gate",
+                    shlex.quote(gate_id),
+                    "--gate-epoch",
+                    str(epoch),
+                    "--protocol-sha256",
+                    contract["protocol_sha256"],
+                    "--model",
+                    shlex.quote(contract["model"]),
+                    "--reasoning-profile",
+                    shlex.quote(contract["reasoning_profile"]),
+                    "--max-total-tokens",
+                    str(contract["max_total_tokens"]),
+                    "--max-wall-time-seconds",
+                    str(contract["max_wall_time_seconds"]),
+                    "--approve",
+                ]
             )
         return (
             f"agentteam gate register --taskpack {run_id} --gate {gate_id} "
@@ -10754,8 +12881,16 @@ def _run_frozen_taskpack(
     experiment_runtime_context=None,
 ):
     loaded_taskpack = load_taskpack(frozen_taskpack_dir)["taskpack"]
+    controller_only = (
+        loaded_taskpack.get("execution_mode") == "controller_only"
+    )
     post_backlog_gates = loaded_taskpack.get("post_backlog_gates")
-    if one_shot and isinstance(post_backlog_gates, list) and post_backlog_gates:
+    if (
+        not controller_only
+        and one_shot
+        and isinstance(post_backlog_gates, list)
+        and post_backlog_gates
+    ):
         raise AgentTeamCliError(
             "--one-shot cannot launch a taskpack with post-backlog gates; "
             "use the daemon worker-pool path so external controller gates can run",
@@ -10790,6 +12925,45 @@ def _run_frozen_taskpack(
             experiment_runtime_context,
         )
         max_inflight = 1
+    if controller_only:
+        try:
+            frozen_manifest = json.loads(
+                (
+                    Path(frozen_taskpack_dir)
+                    / "manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            verify_frozen_taskpack_digest(
+                frozen_taskpack_dir,
+                frozen_manifest["digest_sha256"],
+            )
+        except TaskpackValidationError as exc:
+            raise AgentTeamCliError(
+                f"controller-only taskpack validation failed: {exc}"
+            ) from exc
+        except (OSError, KeyError, json.JSONDecodeError) as exc:
+            raise AgentTeamCliError(
+                "controller-only frozen manifest is invalid"
+            ) from exc
+        if not _launcher_runtime_selection():
+            raise AgentTeamCliError(
+                "controller-only taskpack requires launcher-bound "
+                "candidate release identity"
+            )
+        if experiment_runtime_context is not None:
+            raise AgentTeamCliError(
+                "controller-only taskpack cannot run as an experiment model mode"
+            )
+        return _run_controller_only_taskpack(
+            loaded_taskpack,
+            frozen_taskpack_dir=Path(frozen_taskpack_dir).resolve(),
+            run_paths=run_paths,
+            work_root=inferred_work_root,
+            initial_integration_base_ref=initial_integration_base_ref,
+            notification_project=notification_project,
+            feishu_webhook_env=feishu_webhook_env,
+            feishu_signing_secret_env=feishu_signing_secret_env,
+        )
     runtime_args = build_taskpack_runtime_args(
         frozen_taskpack_dir,
         run_root=run_paths["run_root"],
@@ -10830,6 +13004,115 @@ def _run_frozen_taskpack(
     return _experiment_runtime_launcher_result(
         completed,
         run_dir=run_paths["run_dir"],
+    )
+
+
+def _run_controller_only_taskpack(
+    loaded_taskpack,
+    *,
+    frozen_taskpack_dir,
+    run_paths,
+    work_root,
+    initial_integration_base_ref,
+    notification_project,
+    feishu_webhook_env,
+    feishu_signing_secret_env,
+):
+    files = (
+        loaded_taskpack.get("files")
+        if isinstance(loaded_taskpack.get("files"), dict)
+        else {}
+    )
+    project_root = Path(loaded_taskpack["project_root"]).resolve()
+    run_dir = Path(run_paths["run_dir"]).resolve()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    profile = {
+        "project_key": notification_project or project_root.name,
+        "notification_project": notification_project,
+        "work_root": str(work_root),
+        "feishu": {
+            "enabled": bool(feishu_webhook_env),
+            "webhook_env": feishu_webhook_env,
+            "signing_secret_env": feishu_signing_secret_env,
+        },
+    }
+    scheduler = TwoPhaseFileScheduler(
+        frozen_taskpack_dir / files.get(
+            "agent_pool",
+            "agent_pool.json",
+        ),
+        frozen_taskpack_dir / files.get("backlog", "backlog.json"),
+        run_dir,
+        project_root=project_root,
+        initial_integration_base_ref=initial_integration_base_ref,
+        notification_sink=_post_backlog_gate_notification_sink(profile),
+    )
+    if scheduler.state.get("inflight_attempts"):
+        raise AgentTeamCliError(
+            "controller-only taskpack contains worker inflight state"
+        )
+    baseline = scheduler.state.get("integration_baseline")
+    if not isinstance(baseline, dict) or not baseline.get(
+        "integration_baseline_head_sha"
+    ):
+        baseline = scheduler._ensure_integration_baseline()
+    scheduler.state["scheduler_status"] = "idle"
+    scheduler._write_state()
+    _initialize_post_backlog_gate_state(profile, run_dir)
+    context = _require_post_backlog_gate_context(profile, run_dir)
+    current = _read_current_gate_epoch(context)
+    if current is None:
+        _gate_seal_baseline(
+            project_root,
+            profile,
+            run_dir,
+            expected_integration_head=baseline[
+                "integration_baseline_head_sha"
+            ],
+        )
+    context = _require_post_backlog_gate_context(profile, run_dir)
+    controller_results = _run_available_phase2_gate_controllers(
+        context
+    )
+    decision = _evaluate_post_backlog_gates(context)
+    if decision.get("all_passed"):
+        completion = _complete_gated_milestone_if_ready(context)
+        status = "completed"
+    else:
+        completion = None
+        states = {
+            item.get("state")
+            for item in decision.get("gates", [])
+        }
+        status = (
+            "awaiting_operator_authorization"
+            if "awaiting_operator_authorization" in states
+            else "awaiting_post_backlog_gates"
+        )
+        scheduler.state["scheduler_status"] = status
+        scheduler._write_state()
+    gate_provider_calls = sum(
+        item.get("controller_result", {}).get("provider_calls", 0)
+        for item in controller_results
+        if isinstance(item, dict)
+        and isinstance(item.get("controller_result"), dict)
+    )
+    summary = {
+        "status": status,
+        "execution_mode": "controller_only",
+        "taskpack_id": loaded_taskpack["taskpack_id"],
+        "worker_pool_started": False,
+        "gate_provider_calls": gate_provider_calls,
+        "controller_results": controller_results,
+        "post_backlog_gates": decision,
+        "completion": completion,
+        "run_dir": str(run_dir),
+    }
+    return subprocess.CompletedProcess(
+        ["agentteam-controller-only", loaded_taskpack["taskpack_id"]],
+        0,
+        stdout=json.dumps(summary, sort_keys=True) + "\n",
+        stderr="",
     )
 
 

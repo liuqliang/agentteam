@@ -11,6 +11,7 @@ import time
 import unittest
 import uuid
 from contextlib import contextmanager, redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -34,6 +35,20 @@ from agentteam_runtime.experiment_controller import (
     ExperimentControllerIntegrityError,
     ExperimentProviderAdmissionDenied,
     create_experiment_controller,
+)
+from agentteam_runtime.experiment_gates import (
+    Phase2GateError,
+    execute_live_calibration_action,
+    execute_phase2_finalization_action,
+    execute_readiness_promotion_action,
+    publish_live_authorization,
+    require_live_provider_authorization,
+    resolve_gate_spec,
+    run_gate_controller,
+    validate_gate_relation,
+)
+from agentteam_runtime.experiment_readiness import (
+    build_p0_readiness_summary,
 )
 from agentteam_runtime.experiment_ledger import (
     ExperimentLedgerError,
@@ -154,6 +169,7 @@ from agentteam_runtime.mailbox_worker import (
     _model_invocation_context_payload,
 )
 import agentteam_runtime.cli as cli_module
+import agentteam_runtime.experiment_gates as experiment_gates_module
 import agentteam_runtime.experiment_ledger as experiment_ledger_module
 from agentteam_runtime.operator_control import (
     answer_experiment_manual_gate,
@@ -281,6 +297,52 @@ def _release():
         "release_manifest_sha256": "6" * 64,
         "source_commit": "7" * 40,
         "git_object_format": "sha1",
+    }
+
+
+def _filesystem_release(
+    release_root,
+    source_commit,
+    *,
+    release_id="candidate-v1",
+):
+    release_root = Path(release_root).resolve()
+    runtime_root = (
+        release_root
+        / "experiments"
+        / "native_agentteam_runtime"
+        / "m0_runtime"
+    )
+    package_root = runtime_root / "agentteam_runtime"
+    package_root.mkdir(parents=True)
+    (package_root / "agentteam.py").write_text(
+        "# fixture runtime entrypoint\n",
+        encoding="utf-8",
+    )
+    manifest = {
+        "manifest_schema_version": "agentteam_release_manifest.v2",
+        "release_id": release_id,
+        "release_root": str(release_root),
+        "runtime_root": str(runtime_root),
+        "source_commit": source_commit,
+        "git_object_format": (
+            "sha1" if len(source_commit) == 40 else "sha256"
+        ),
+    }
+    manifest_path = release_root / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "release_id": release_id,
+        "release_root": str(release_root),
+        "runtime_root": str(runtime_root),
+        "release_manifest_sha256": hashlib.sha256(
+            manifest_path.read_bytes()
+        ).hexdigest(),
+        "source_commit": source_commit,
+        "git_object_format": manifest["git_object_format"],
     }
 
 
@@ -10353,6 +10415,10 @@ class ExperimentCalibrationTests(unittest.TestCase):
             },
             "source": source,
         }
+        runtime_release = _filesystem_release(
+            root / "candidate-runtime",
+            repository["repository"]["commit"],
+        )
         taskpack_draft = draft_taskpack_files(
             project_root=repository["source"],
             goal="Repair both deterministic calibration fixtures.",
@@ -10750,7 +10816,7 @@ class ExperimentCalibrationTests(unittest.TestCase):
                     mode=mode,
                     repetition_index=repetition,
                     stable_request_key=key,
-                    runtime_release=_release(),
+                    runtime_release=runtime_release,
                     bound_at="2026-07-27T00:00:00Z",
                 )
                 run_dir = Path(allocation["run_dir"])
@@ -10803,9 +10869,9 @@ class ExperimentCalibrationTests(unittest.TestCase):
                     sandbox_configuration=sandbox_configuration,
                     common_finalizer=ExperimentCommonFinalizer(
                         evaluator_artifact=evaluator,
-                        runtime_release_identity=_release(),
+                        runtime_release_identity=runtime_release,
                     ),
-                    runtime_release_identity=_release(),
+                    runtime_release_identity=runtime_release,
                 )
                 mode_result = mode_controller.execute(adapter)
                 results.append(
@@ -10844,6 +10910,7 @@ class ExperimentCalibrationTests(unittest.TestCase):
         return {
             "projection_root": projection_root,
             "protocol": protocol,
+            "release": runtime_release,
             "primary": primary,
             "repeat": repeat,
             "controlled": controlled,
@@ -10964,6 +11031,1867 @@ class ExperimentCalibrationTests(unittest.TestCase):
                         ),
                     },
                 )
+
+
+class Phase2GateTests(unittest.TestCase):
+    SCHEMAS = Path(__file__).resolve().parents[2] / "schemas"
+    REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+    CAPABILITY_TEST_IDS = {
+        "invocation_level_real_usage": (
+            "tests.test_phase1_usage_end_to_end."
+            "Phase1UsageEndToEndTests."
+            "test_positive_fixture_has_complete_exact_replay_stable_accounting",
+        ),
+        "three_mode_experiment_harness": (
+            "tests.test_experiment_harness."
+            "ExperimentContractSchemaTests."
+            "test_protocol_requires_complete_three_mode_equal_input_contract",
+            "tests.test_experiment_harness."
+            "ExperimentModeAdapterTests."
+            "test_counterbalanced_mode_order_is_enforced_and_immutable",
+        ),
+        "immutable_experiment_manifest": (
+            "tests.test_experiment_harness."
+            "ExperimentContractSchemaTests."
+            "test_run_manifest_binds_mode_repetition_request_and_protocol",
+            "tests.test_experiment_harness."
+            "ExperimentAllocationTests."
+            "test_tampered_published_protocol_fails_closed_without_provider",
+            "tests.test_experiment_harness."
+            "ExperimentLeaseAndResumeTests."
+            "test_resume_accepts_exact_binding_and_rejects_all_identity_drift",
+        ),
+        "clean_reset_and_blind_gold_isolation": (
+            "tests.test_experiment_harness."
+            "ExperimentWorkspaceTests."
+            "test_allocates_independent_exact_commit_snapshot_and_attestation",
+            "tests.test_experiment_harness."
+            "ExperimentSandboxTests."
+            "test_provider_environment_rejects_canary_content_and_digest",
+        ),
+        "actual_budget_enforcement": (
+            "tests.test_experiment_harness."
+            "ExperimentProviderBudgetBoundaryTests."
+            "test_denied_prelaunch_creates_no_runner_start_or_process",
+            "tests.test_experiment_harness."
+            "ExperimentProviderBudgetBoundaryTests."
+            "test_interruption_resume_preserves_original_remaining_budget",
+            "tests.test_experiment_harness."
+            "TwoPhaseSchedulerExperimentBoundaryTests."
+            "test_scheduler_denies_worker_dispatch_after_budget_exhaustion",
+        ),
+        "operator_action_ledger": (
+            "tests.test_experiment_harness."
+            "ExperimentOperatorActionLedgerTests."
+            "test_experiment_gateways_account_before_applying_runtime_input",
+            "tests.test_experiment_harness."
+            "ExperimentOperatorActionLedgerTests."
+            "test_experiment_stop_capability_validates_against_real_ledger",
+        ),
+        "machine_readable_result_bundle": (
+            "tests.test_experiment_harness."
+            "ExperimentResultBundleTests."
+            "test_terminal_bundle_is_atomic_idempotent_and_conflict_safe",
+            "tests.test_experiment_harness."
+            "ExperimentResultBundleTests."
+            "test_projection_rebuild_preserves_all_outcomes_and_digests",
+        ),
+    }
+
+    def _action_input(self, gate_id):
+        digest = "0" * 64
+        binding = {
+            "path": "/fixture/authority.json",
+            "sha256": digest,
+        }
+        if gate_id == "P2-08":
+            configuration = {
+                "promoted_at": "2026-07-29T00:00:00Z",
+                "readiness_reasons": {
+                    capability_id: "Validated fixture evidence."
+                    for capability_id in self.CAPABILITY_TEST_IDS
+                },
+                "capability_evidence": {
+                    capability_id: [
+                        {
+                            "artifact_path": "tests/fixture.py",
+                            "sha256": digest,
+                            "test_id": test_id,
+                            "status": "passed",
+                        }
+                        for test_id in test_ids
+                    ]
+                    for capability_id, test_ids in (
+                        self.CAPABILITY_TEST_IDS.items()
+                    )
+                },
+                "authority_artifacts": {
+                    "protocol_template": dict(binding),
+                    "deterministic_calibration": dict(binding),
+                },
+                "pilot_mode": "agentteam_full",
+                "pilot_repetition_index": 0,
+                "pilot_stable_request_key": "phase2-pilot",
+            }
+        elif gate_id == "P2-09":
+            configuration = {
+                "authority_artifacts": {
+                    "evaluator": dict(binding),
+                },
+                "direct_taskpack": {
+                    "path": "/fixture/frozen-taskpack",
+                    "digest_sha256": digest,
+                },
+                "repeat_mode": "single_codex",
+                "sandbox_configuration": {},
+            }
+        else:
+            configuration = {
+                "finalized_at": "2026-07-29T00:00:00Z",
+            }
+        return {
+            "schema_version": "phase2_gate_action_input.v1",
+            "action": {
+                "P2-08": "promote_readiness",
+                "P2-09": "run_live_calibration",
+                "P2-10": "finalize_phase2",
+            }[gate_id],
+            "configuration": configuration,
+        }
+
+    def _repository(self, root):
+        repository = Path(root) / "repository"
+        repository.mkdir()
+        _git(repository, "init", "--quiet")
+        _git(repository, "config", "user.name", "Phase 2 Gate Test")
+        _git(
+            repository,
+            "config",
+            "user.email",
+            "phase2-gate@example.invalid",
+        )
+        return repository
+
+    def test_gate_registry_rejects_incomplete_action_contract(self):
+        declaration = {
+            "gate_id": "P2-10",
+            "executor": "deterministic_controller",
+            "controller_entrypoint": (
+                "phase2_finalization_controller_v1"
+            ),
+            "relation_validator": (
+                "phase2_finalization_relation_v1"
+            ),
+            "evidence_schema": (
+                "experiments/native_agentteam_runtime/schemas/"
+                "phase2_finalization.schema.json"
+            ),
+            "operator_authorization_required": False,
+            "controller_action_input": {
+                "schema_version": "phase2_gate_action_input.v1",
+                "action": "finalize_phase2",
+                "configuration": {"fixture": True},
+            },
+        }
+        with self.assertRaisesRegex(
+            Phase2GateError,
+            "configuration is incomplete",
+        ):
+            resolve_gate_spec(declaration)
+
+    def test_gate_registry_rejects_unsafe_pilot_request_key(self):
+        action_input = self._action_input("P2-08")
+        action_input["configuration"][
+            "pilot_stable_request_key"
+        ] = "../unsafe"
+        with self.assertRaisesRegex(
+            Phase2GateError,
+            "stable request key is invalid",
+        ):
+            resolve_gate_spec(
+                {
+                    "gate_id": "P2-08",
+                    "executor": "deterministic_controller",
+                    "controller_entrypoint": (
+                        "phase2_readiness_controller_v1"
+                    ),
+                    "relation_validator": (
+                        "phase2_readiness_relation_v1"
+                    ),
+                    "evidence_schema": (
+                        "experiments/native_agentteam_runtime/schemas/"
+                        "phase2_readiness_promotion.schema.json"
+                    ),
+                    "operator_authorization_required": False,
+                    "controller_action_input": action_input,
+                }
+            )
+
+    def test_action_authority_rejects_symlink_parent_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            allowed = root / "allowed"
+            outside = root / "outside"
+            allowed.mkdir()
+            outside.mkdir()
+            artifact = outside / "artifact.json"
+            artifact.write_text("{}\n", encoding="utf-8")
+            (allowed / "escape").symlink_to(
+                outside,
+                target_is_directory=True,
+            )
+            with self.assertRaisesRegex(
+                Phase2GateError,
+                "outside its declared authority roots",
+            ):
+                experiment_gates_module._action_authority_files(
+                    {
+                        "evaluator": {
+                            "path": str(
+                                allowed
+                                / "escape"
+                                / "artifact.json"
+                            ),
+                            "sha256": hashlib.sha256(
+                                artifact.read_bytes()
+                            ).hexdigest(),
+                        }
+                    },
+                    required=("evaluator",),
+                    authority_roots=[allowed],
+                )
+
+    def test_action_authority_rejects_symlink_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            actual = root / "actual"
+            actual.mkdir()
+            linked = root / "linked"
+            linked.symlink_to(actual, target_is_directory=True)
+            artifact = actual / "artifact.json"
+            artifact.write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                Phase2GateError,
+                "outside its declared authority roots",
+            ):
+                experiment_gates_module._action_authority_files(
+                    {
+                        "evaluator": {
+                            "path": str(artifact),
+                            "sha256": hashlib.sha256(
+                                artifact.read_bytes()
+                            ).hexdigest(),
+                        }
+                    },
+                    required=("evaluator",),
+                    authority_roots=[linked],
+                )
+
+    def _repository_clone(self, root):
+        repository = Path(root) / "repository"
+        _git(
+            Path(root),
+            "clone",
+            "--quiet",
+            "--no-hardlinks",
+            str(self.REPOSITORY_ROOT),
+            str(repository),
+        )
+        _git(repository, "config", "user.name", "Phase 2 Gate Test")
+        _git(
+            repository,
+            "config",
+            "user.email",
+            "phase2-gate@example.invalid",
+        )
+        return repository
+
+    def test_live_authorization_is_epoch_bound_and_precedes_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = self._repository(root)
+            schema_dir = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "schemas"
+            )
+            schema_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(
+                self.SCHEMAS / "phase2_live_authorization.schema.json",
+                schema_dir / "phase2_live_authorization.schema.json",
+            )
+            context = {
+                "repository_root": str(repository),
+                "epoch_number": 2,
+                "epoch_sha256": "1" * 64,
+                "protocol_sha256": "2" * 64,
+                "readiness_promotion_sha256": "3" * 64,
+                "model": "gpt-5.6",
+                "reasoning_profile": "high",
+                "max_total_tokens": 5000,
+                "max_wall_time_seconds": 600.0,
+            }
+            declaration = {
+                "gate_id": "P2-09",
+                "executor": "deterministic_controller",
+                "controller_entrypoint": (
+                    "phase2_live_calibration_controller_v1"
+                ),
+                "relation_validator": (
+                    "phase2_live_calibration_relation_v1"
+                ),
+                "evidence_schema": (
+                    "experiments/native_agentteam_runtime/schemas/"
+                    "phase2_calibration.schema.json"
+                ),
+                "operator_authorization_required": True,
+                "operator_authorization_schema": (
+                    "experiments/native_agentteam_runtime/schemas/"
+                    "phase2_live_authorization.schema.json"
+                ),
+                "controller_action_input": self._action_input("P2-09"),
+            }
+            spec = resolve_gate_spec(declaration)
+            provider_launcher = Mock()
+            missing = run_gate_controller(
+                spec,
+                root / "missing-calibration.json",
+                context,
+                result_path=root / "controller-result.json",
+                provider_launcher=provider_launcher,
+            )
+            self.assertEqual(
+                missing["controller_status"],
+                "awaiting_operator_authorization",
+            )
+            self.assertEqual(missing["provider_calls"], 0)
+            provider_launcher.assert_not_called()
+            self.assertFalse((root / "controller-result.json").exists())
+
+            authorization = {
+                "schema_version": "phase2_live_authorization.v1",
+                "decision": "approved",
+                "operator_identity": "phase2-test",
+                "authorized_at": "2026-07-26T00:00:00Z",
+                "gate_id": "P2-09",
+                "epoch_number": 2,
+                "epoch_sha256": "1" * 64,
+                "protocol_sha256": "2" * 64,
+                "readiness_promotion_sha256": "3" * 64,
+                "model": "gpt-5.6",
+                "reasoning_profile": "high",
+                "max_total_tokens": 5000,
+                "max_wall_time_seconds": 600.0,
+                "max_inflight_model_invocations": 1,
+                "modes": [
+                    "single_codex",
+                    "agentteam_direct",
+                    "agentteam_full",
+                ],
+            }
+            authorization_path = root / "authorization.json"
+            first = publish_live_authorization(
+                authorization_path,
+                authorization,
+                context,
+            )
+            second = publish_live_authorization(
+                authorization_path,
+                authorization,
+                context,
+            )
+            self.assertTrue(first["created"])
+            self.assertFalse(second["created"])
+            self.assertEqual(first["sha256"], second["sha256"])
+            permitted = require_live_provider_authorization(
+                authorization_path,
+                context,
+            )
+            self.assertTrue(permitted["provider_launch_authorized"])
+            with self.assertRaisesRegex(
+                Phase2GateError,
+                "model",
+            ):
+                require_live_provider_authorization(
+                    authorization_path,
+                    {**context, "model": "drifted-model"},
+                )
+
+    def test_live_action_denies_before_run_allocation_without_authorization(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = self._repository(root)
+            (repository / "tracked.txt").write_text(
+                "baseline\n",
+                encoding="utf-8",
+            )
+            _git(repository, "add", "tracked.txt")
+            _git(repository, "commit", "--quiet", "-m", "baseline")
+            head = _git(
+                repository,
+                "rev-parse",
+                "HEAD",
+            ).stdout.strip()
+            with patch(
+                "agentteam_runtime.experiment_gates."
+                "allocate_experiment_run"
+            ) as allocate:
+                with self.assertRaisesRegex(
+                    Phase2GateError,
+                    "authorization",
+                ):
+                    execute_live_calibration_action(
+                        self._action_input("P2-09"),
+                        {
+                            "repository_root": str(repository),
+                            "integration_head": head,
+                            "authorization_path": str(
+                                root / "missing-authorization.json"
+                            ),
+                        },
+                        artifact_path=root / "calibration.json",
+                    )
+            allocate.assert_not_called()
+
+    def test_live_action_runs_three_modes_and_one_repeat_after_authorization(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = self._repository(root)
+            schema_dir = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "schemas"
+            )
+            schema_dir.mkdir(parents=True)
+            shutil.copy2(
+                self.SCHEMAS / "phase2_live_authorization.schema.json",
+                schema_dir / "phase2_live_authorization.schema.json",
+            )
+            (repository / "tracked.txt").write_text(
+                "baseline\n",
+                encoding="utf-8",
+            )
+            _git(repository, "add", ".")
+            _git(repository, "commit", "--quiet", "-m", "baseline")
+            head = _git(
+                repository,
+                "rev-parse",
+                "HEAD",
+            ).stdout.strip()
+            tree = _git(
+                repository,
+                "rev-parse",
+                "HEAD^{tree}",
+            ).stdout.strip()
+            protocol = _protocol()
+            protocol["repository"] = {
+                "source": str(repository),
+                "commit": head,
+                "tree": tree,
+                "git_object_format": "sha1",
+            }
+            protocol_path = root / "protocol.json"
+            protocol_path.write_bytes(canonical_json_bytes(protocol))
+            protocol_sha256 = canonical_json_sha256(protocol)
+            evaluator = root / "evaluator.json"
+            evaluator.write_text(
+                '{"evaluator":"fixture"}\n',
+                encoding="utf-8",
+            )
+            readiness_sha256 = "3" * 64
+            context = {
+                "repository_root": str(repository),
+                "integration_head": head,
+                "authorization_epoch_number": 2,
+                "authorization_epoch_sha256": "1" * 64,
+                "epoch_number": 2,
+                "epoch_sha256": "1" * 64,
+                "protocol_sha256": protocol_sha256,
+                "readiness_promotion_sha256": readiness_sha256,
+                "model": protocol["environment"]["model"],
+                "reasoning_profile": protocol["environment"][
+                    "reasoning_profile"
+                ],
+                "max_total_tokens": protocol["budgets"][
+                    "max_total_tokens"
+                ],
+                "max_wall_time_seconds": protocol["budgets"][
+                    "max_wall_time_seconds"
+                ],
+                "runtime_release": _filesystem_release(
+                    root / "candidate-runtime",
+                    head,
+                ),
+                "projection_root": str(root / "projection"),
+            }
+            authorization = {
+                "schema_version": "phase2_live_authorization.v1",
+                "decision": "approved",
+                "operator_identity": "phase2-test",
+                "authorized_at": "2026-07-29T00:00:00Z",
+                "gate_id": "P2-09",
+                "epoch_number": 2,
+                "epoch_sha256": "1" * 64,
+                "protocol_sha256": protocol_sha256,
+                "readiness_promotion_sha256": readiness_sha256,
+                "model": context["model"],
+                "reasoning_profile": context["reasoning_profile"],
+                "max_total_tokens": context["max_total_tokens"],
+                "max_wall_time_seconds": context[
+                    "max_wall_time_seconds"
+                ],
+                "max_inflight_model_invocations": 1,
+                "modes": list(protocol["modes"]),
+            }
+            authorization_path = root / "authorization.json"
+            publish_live_authorization(
+                authorization_path,
+                authorization,
+                context,
+            )
+            context["authorization_path"] = str(authorization_path)
+            allocated = {}
+
+            def allocate(
+                projection_root,
+                _protocol_value,
+                *,
+                mode,
+                repetition_index,
+                stable_request_key,
+                runtime_release,
+            ):
+                run_dir = (
+                    Path(projection_root)
+                    / "runs"
+                    / f"{repetition_index}-{mode}"
+                )
+                run_dir.mkdir(parents=True)
+                allocated[str(run_dir.resolve())] = mode
+                return {
+                    "run_dir": str(run_dir),
+                    "run_manifest": {
+                        "mode": mode,
+                        "repetition_index": repetition_index,
+                        "stable_request_key": stable_request_key,
+                    },
+                }
+
+            def load_result(run_dir):
+                mode = allocated[str(Path(run_dir).resolve())]
+                return {
+                    "bundle_sha256": hashlib.sha256(
+                        str(run_dir).encode("utf-8")
+                    ).hexdigest(),
+                    "bundle": {
+                        "mode": mode,
+                        "terminal_status": "completed",
+                        "acceptance_result": {"status": "passed"},
+                        "started_at": "2026-07-29T00:00:00Z",
+                        "finished_at": "2026-07-29T00:00:01Z",
+                        "usage_coverage": {
+                            "total_invocations": 1,
+                            "covered_invocations": 1,
+                        },
+                        "usage_totals": {"total_tokens": 100},
+                    },
+                }
+
+            action_input = {
+                "schema_version": "phase2_gate_action_input.v1",
+                "action": "run_live_calibration",
+                "configuration": {
+                    "authority_artifacts": {
+                        "evaluator": {
+                            "path": str(evaluator),
+                            "sha256": hashlib.sha256(
+                                evaluator.read_bytes()
+                            ).hexdigest(),
+                        },
+                    },
+                    "direct_taskpack": {
+                        "path": str(root),
+                        "digest_sha256": "5" * 64,
+                    },
+                    "repeat_mode": "single_codex",
+                    "sandbox_configuration": {},
+                },
+            }
+            context.update(
+                {
+                    "protocol_path": str(protocol_path),
+                    "authority_roots": [
+                        str(root),
+                        str(repository),
+                    ],
+                }
+            )
+            drift_context = {
+                **context,
+                "model": "authorized-drift-model",
+            }
+            drift_authorization = {
+                **authorization,
+                "model": "authorized-drift-model",
+            }
+            drift_path = root / "drift-authorization.json"
+            publish_live_authorization(
+                drift_path,
+                drift_authorization,
+                drift_context,
+            )
+            drift_context["authorization_path"] = str(drift_path)
+            with patch(
+                "agentteam_runtime.experiment_gates."
+                "allocate_experiment_run"
+            ) as drift_allocate, patch(
+                "agentteam_runtime.taskpack."
+                "verify_frozen_taskpack_digest",
+                return_value={"digest_sha256": "5" * 64},
+            ):
+                with self.assertRaisesRegex(
+                    Phase2GateError,
+                    "provider policy or budgets",
+                ):
+                    execute_live_calibration_action(
+                        action_input,
+                        drift_context,
+                        artifact_path=root / "drift-calibration.json",
+                    )
+            drift_allocate.assert_not_called()
+            projection_target = root / "projection-target"
+            projection_target.mkdir()
+            projection_link = root / "projection-link"
+            projection_link.symlink_to(
+                projection_target,
+                target_is_directory=True,
+            )
+            with patch(
+                "agentteam_runtime.experiment_gates."
+                "allocate_experiment_run"
+            ) as unsafe_allocate, patch(
+                "agentteam_runtime.taskpack."
+                "verify_frozen_taskpack_digest",
+                return_value={"digest_sha256": "5" * 64},
+            ):
+                with self.assertRaisesRegex(
+                    Phase2GateError,
+                    "projection root is unsafe",
+                ):
+                    execute_live_calibration_action(
+                        action_input,
+                        {
+                            **context,
+                            "projection_root": str(projection_link),
+                        },
+                        artifact_path=(
+                            root / "unsafe-projection-calibration.json"
+                        ),
+                    )
+            unsafe_allocate.assert_not_called()
+            with patch(
+                "agentteam_runtime.experiment_gates."
+                "allocate_experiment_run",
+                side_effect=allocate,
+            ) as allocate_mock, patch(
+                "agentteam_runtime.experiment_gates."
+                "execute_bound_experiment_mode",
+                return_value={"sealed_result": {}},
+            ) as execute_mock, patch(
+                "agentteam_runtime.experiment_gates."
+                "load_experiment_result_bundle",
+                side_effect=load_result,
+            ), patch(
+                "agentteam_runtime.taskpack."
+                "verify_frozen_taskpack_digest",
+                return_value={"digest_sha256": "5" * 64},
+            ):
+                action = execute_live_calibration_action(
+                    action_input,
+                    context,
+                    artifact_path=root / "live-calibration.json",
+                )
+            self.assertEqual(action["action_status"], "completed")
+            self.assertEqual(action["provider_calls"], 4)
+            self.assertEqual(allocate_mock.call_count, 4)
+            self.assertEqual(execute_mock.call_count, 4)
+            self.assertEqual(
+                [
+                    item["mode"]
+                    for item in json.loads(
+                        (root / "live-calibration.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )["mode_results"]
+                ],
+                list(protocol["modes"]),
+            )
+
+    def test_readiness_relation_recomputes_pilot_and_exact_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = self._repository_clone(root)
+            schema_dir = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "schemas"
+            )
+            schema_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(
+                self.SCHEMAS / "phase2_readiness_promotion.schema.json",
+                schema_dir / "phase2_readiness_promotion.schema.json",
+            )
+            readiness_path = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "m0_runtime"
+                / "agentteam_runtime"
+                / "data"
+                / "p0_experiment_readiness.v1.json"
+            )
+            readiness_path.parent.mkdir(parents=True, exist_ok=True)
+            packaged_readiness = (
+                Path(__file__).resolve().parents[1]
+                / "agentteam_runtime"
+                / "data"
+                / "p0_experiment_readiness.v1.json"
+            )
+            readiness = json.loads(
+                packaged_readiness.read_text(encoding="utf-8")
+            )
+            evidence = {}
+            for capability in readiness["capabilities"]:
+                evidence_path = (
+                    repository
+                    / "evidence"
+                    / f"{capability['capability_id']}.json"
+                )
+                evidence_path.parent.mkdir(parents=True, exist_ok=True)
+                evidence_path.write_text(
+                    '{"status":"passed"}\n',
+                    encoding="utf-8",
+                )
+                evidence[capability["capability_id"]] = [
+                    {
+                        "artifact_path": evidence_path.relative_to(
+                            repository
+                        ).as_posix(),
+                        "sha256": hashlib.sha256(
+                            evidence_path.read_bytes()
+                        ).hexdigest(),
+                        "test_id": test_id,
+                        "status": "passed",
+                    }
+                    for test_id in self.CAPABILITY_TEST_IDS[
+                        capability["capability_id"]
+                    ]
+                ]
+            readiness_path.write_text(
+                json.dumps(readiness, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            _git(repository, "add", ".")
+            _git(repository, "commit", "--quiet", "-m", "readiness base")
+            parent = _git(repository, "rev-parse", "HEAD").stdout.strip()
+            before_sha256 = hashlib.sha256(
+                readiness_path.read_bytes()
+            ).hexdigest()
+            for capability in readiness["capabilities"]:
+                capability["status"] = "passed"
+                capability["reason"] = "Phase 2 deterministic evidence."
+                capability["evidence"] = sorted({
+                    item["artifact_path"]
+                    for item in evidence[capability["capability_id"]]
+                })
+            readiness["overall_status"] = "passed"
+            readiness["pilot_authorized"] = True
+            readiness["next_required_phase"] = "P2 live calibration"
+            readiness_path.write_text(
+                json.dumps(readiness, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            after_sha256 = hashlib.sha256(
+                readiness_path.read_bytes()
+            ).hexdigest()
+            readiness_summary = build_p0_readiness_summary(
+                readiness_path
+            )
+            _git(repository, "add", readiness_path)
+            _git(repository, "commit", "--quiet", "-m", "promote readiness")
+            head = _git(repository, "rev-parse", "HEAD").stdout.strip()
+
+            protocol = root / "protocol.json"
+            run_manifest = root / "run-manifest.json"
+            calibration = root / "deterministic-calibration.json"
+            pilot_manifest = root / "pilot-manifest.json"
+            pilot_guard = root / "pilot-guard.json"
+            protocol_value = _protocol()
+            protocol_value["repository"] = {
+                "source": str(repository),
+                "commit": head,
+                "tree": _git(
+                    repository,
+                    "rev-parse",
+                    "HEAD^{tree}",
+                ).stdout.strip(),
+                "git_object_format": "sha1",
+            }
+            protocol.write_bytes(
+                canonical_json_bytes(protocol_value)
+            )
+            run_manifest.write_bytes(
+                canonical_json_bytes(
+                    build_experiment_run_manifest(
+                        protocol_value,
+                        mode="agentteam_full",
+                        repetition_index=0,
+                        stable_request_key="phase2-pilot",
+                    )
+                )
+            )
+            calibration.write_text(
+                '{"calibration_status":"passed"}\n',
+                encoding="utf-8",
+            )
+            pilot_manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": (
+                            "agentteam_experiment_manifest.v1"
+                        ),
+                        "experiment_id": "p2-calibration",
+                        "instance_id": "fixture-001",
+                        "repository": {
+                            "source": "/tmp/repository.git",
+                            "commit": head,
+                            "git_object_format": "sha1",
+                        },
+                        "goal": {
+                            "summary": "Validate Phase 2 readiness.",
+                            "constraints": [
+                                "Do not read evaluator-only state."
+                            ],
+                        },
+                        "acceptance": {
+                            "command": [
+                                "python3",
+                                "-m",
+                                "unittest",
+                            ]
+                        },
+                        "mode": "agentteam_full",
+                        "runtime": {
+                            "backend": "codex",
+                            "model": "gpt-5.6",
+                            "sandbox_policy": "workspace-write",
+                        },
+                        "seed": 7,
+                        "blind_gold": {
+                            "policy": "unavailable_to_runtime"
+                        },
+                        "budgets": {
+                            "max_total_tokens": 1000,
+                            "max_wall_time_seconds": 60,
+                            "stop_boundary": "scheduler_safe",
+                        },
+                        "usage_contract_version": (
+                            "model_invocation_usage.v1"
+                        ),
+                        "readiness_binding": {
+                            "schema_version": (
+                                "p0_experiment_readiness.v1"
+                            ),
+                            "record_sha256": readiness_summary[
+                                "record_sha256"
+                            ],
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            pilot_guard.write_text(
+                json.dumps(
+                    {
+                        "pilot_authorized": True,
+                        "provider_calls": 0,
+                        "target_mutations": 0,
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            candidate_release = _filesystem_release(
+                root / "candidate-runtime",
+                head,
+            )
+            artifact = {
+                "schema_version": "phase2_readiness_promotion.v1",
+                "controller_validation_status": "passed",
+                "validated_code_sha": parent,
+                "protocol_sha256": canonical_json_sha256(
+                    json.loads(protocol.read_text(encoding="utf-8"))
+                ),
+                "run_manifest_sha256": canonical_json_sha256(
+                    json.loads(
+                        run_manifest.read_text(encoding="utf-8")
+                    )
+                ),
+                "deterministic_calibration_sha256": hashlib.sha256(
+                    calibration.read_bytes()
+                ).hexdigest(),
+                "readiness_before_sha256": before_sha256,
+                "readiness_after_sha256": after_sha256,
+                "capability_evidence": evidence,
+                "pilot_guard_status": "passed",
+                "pilot_manifest_sha256": canonical_json_sha256(
+                    json.loads(
+                        pilot_manifest.read_text(encoding="utf-8")
+                    )
+                ),
+                "pilot_guard_sha256": hashlib.sha256(
+                    pilot_guard.read_bytes()
+                ).hexdigest(),
+                "pilot_guard_provider_calls": 0,
+                "pilot_guard_target_mutations": 0,
+                "candidate_release": candidate_release,
+                "changed_paths": [
+                    "experiments/native_agentteam_runtime/m0_runtime/"
+                    "agentteam_runtime/data/"
+                    "p0_experiment_readiness.v1.json"
+                ],
+            }
+            artifact_path = root / "readiness-promotion.json"
+            artifact_path.write_text(
+                json.dumps(artifact, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            spec = resolve_gate_spec(
+                {
+                    "gate_id": "P2-08",
+                    "executor": "deterministic_controller",
+                    "controller_entrypoint": (
+                        "phase2_readiness_controller_v1"
+                    ),
+                    "relation_validator": (
+                        "phase2_readiness_relation_v1"
+                    ),
+                    "evidence_schema": (
+                        "experiments/native_agentteam_runtime/schemas/"
+                        "phase2_readiness_promotion.schema.json"
+                    ),
+                    "operator_authorization_required": False,
+                    "controller_action_input": self._action_input(
+                        "P2-08"
+                    ),
+                }
+            )
+            relation = validate_gate_relation(
+                spec,
+                artifact_path,
+                {
+                    "repository_root": str(repository),
+                    "integration_head": head,
+                    "protocol_path": str(protocol),
+                    "run_manifest_path": str(run_manifest),
+                    "deterministic_calibration_path": str(calibration),
+                    "pilot_manifest_path": str(pilot_manifest),
+                    "pilot_guard_path": str(pilot_guard),
+                    "runtime_release": candidate_release,
+                },
+            )
+            self.assertEqual(relation["relation_status"], "passed")
+            self.assertEqual(relation["capability_count"], 7)
+            capability_id = "machine_readable_result_bundle"
+            artifact["capability_evidence"][capability_id][0][
+                "test_id"
+            ] = "tests.test_experiment_harness.Phase2GateTests.test_fake"
+            artifact_path.write_text(
+                json.dumps(artifact, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                Phase2GateError,
+                "fixed capability test",
+            ):
+                validate_gate_relation(
+                    spec,
+                    artifact_path,
+                    {
+                        "repository_root": str(repository),
+                        "integration_head": head,
+                        "protocol_path": str(protocol),
+                        "run_manifest_path": str(run_manifest),
+                        "deterministic_calibration_path": str(calibration),
+                        "pilot_manifest_path": str(pilot_manifest),
+                        "pilot_guard_path": str(pilot_guard),
+                        "runtime_release": candidate_release,
+                    },
+                )
+
+    def test_readiness_action_creates_exact_promoted_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = self._repository_clone(root)
+            shutil.copy2(
+                self.SCHEMAS / "phase2_readiness_promotion.schema.json",
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "schemas"
+                / "phase2_readiness_promotion.schema.json",
+            )
+            _git(
+                repository,
+                "add",
+                "experiments/native_agentteam_runtime/schemas/"
+                "phase2_readiness_promotion.schema.json",
+            )
+            _git(
+                repository,
+                "commit",
+                "--quiet",
+                "-m",
+                "update readiness evidence schema",
+            )
+            readiness_path = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "m0_runtime"
+                / "agentteam_runtime"
+                / "data"
+                / "p0_experiment_readiness.v1.json"
+            )
+            readiness = json.loads(
+                readiness_path.read_text(encoding="utf-8")
+            )
+            harness_path = (
+                "experiments/native_agentteam_runtime/m0_runtime/"
+                "tests/test_experiment_harness.py"
+            )
+            usage_path = (
+                "experiments/native_agentteam_runtime/m0_runtime/"
+                "tests/test_phase1_usage_end_to_end.py"
+            )
+            evidence = {}
+            for capability_id, test_ids in (
+                self.CAPABILITY_TEST_IDS.items()
+            ):
+                evidence_path = (
+                    usage_path
+                    if capability_id == "invocation_level_real_usage"
+                    else harness_path
+                )
+                evidence_bytes = (
+                    repository / evidence_path
+                ).read_bytes()
+                evidence[capability_id] = [
+                    {
+                        "artifact_path": evidence_path,
+                        "sha256": hashlib.sha256(
+                            evidence_bytes
+                        ).hexdigest(),
+                        "test_id": test_id,
+                        "status": "passed",
+                    }
+                    for test_id in test_ids
+                ]
+            promoted_at = "2026-07-29T00:00:00Z"
+            expected_readiness = copy.deepcopy(readiness)
+            for capability in expected_readiness["capabilities"]:
+                capability_id = capability["capability_id"]
+                capability.update(
+                    {
+                        "status": "passed",
+                        "reason": "Validated by the fixed Phase 2 test.",
+                        "evidence": sorted(
+                            {
+                                item["artifact_path"]
+                                for item in evidence[capability_id]
+                            }
+                        ),
+                    }
+                )
+            expected_readiness.update(
+                {
+                    "updated_at": promoted_at,
+                    "overall_status": "passed",
+                    "pilot_authorized": True,
+                    "next_required_phase": (
+                        "P2 bounded live calibration"
+                    ),
+                }
+            )
+            protocol = root / "protocol-template.json"
+            calibration = root / "calibration.json"
+            calibration.write_text(
+                '{"calibration_status":"passed"}\n',
+                encoding="utf-8",
+            )
+            parent = _git(
+                repository,
+                "rev-parse",
+                "HEAD",
+            ).stdout.strip()
+            protocol_template = _protocol()
+            protocol_template["repository"] = {
+                "source": str(repository),
+                "commit": parent,
+                "tree": _git(
+                    repository,
+                    "rev-parse",
+                    "HEAD^{tree}",
+                ).stdout.strip(),
+                "git_object_format": "sha1",
+            }
+            protocol.write_bytes(
+                canonical_json_bytes(protocol_template)
+            )
+
+            def binding(path):
+                return {
+                    "path": str(path),
+                    "sha256": hashlib.sha256(
+                        path.read_bytes()
+                    ).hexdigest(),
+                }
+
+            artifact_path = root / "readiness-promotion.json"
+            pilot_guard_path = root / "pilot-guard.json"
+
+            def candidate_guard(head, manifest_path):
+                self.assertEqual(
+                    _git(
+                        repository,
+                        "rev-parse",
+                        "HEAD",
+                    ).stdout.strip(),
+                    head,
+                )
+                generated_manifest = json.loads(
+                    Path(manifest_path).read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    generated_manifest["repository"]["commit"],
+                    head,
+                )
+                runtime_release = _filesystem_release(
+                    root / "candidate-runtime",
+                    head,
+                )
+                return {
+                    "pilot_guard": {
+                        "pilot_authorized": True,
+                        "provider_calls": 0,
+                        "target_mutations": 0,
+                    },
+                    "runtime_release": runtime_release,
+                }
+
+            action = execute_readiness_promotion_action(
+                {
+                    "schema_version": "phase2_gate_action_input.v1",
+                    "action": "promote_readiness",
+                    "configuration": {
+                        "promoted_at": promoted_at,
+                        "readiness_reasons": {
+                            capability_id: (
+                                "Validated by the fixed Phase 2 test."
+                            )
+                            for capability_id in evidence
+                        },
+                        "capability_evidence": evidence,
+                        "authority_artifacts": {
+                            "protocol_template": binding(protocol),
+                            "deterministic_calibration": binding(
+                                calibration
+                            ),
+                        },
+                        "pilot_mode": "agentteam_full",
+                        "pilot_repetition_index": 0,
+                        "pilot_stable_request_key": "phase2-pilot",
+                    },
+                },
+                {
+                    "repository_root": str(repository),
+                    "integration_worktree": str(repository),
+                    "integration_head": parent,
+                    "authority_roots": [str(root)],
+                },
+                artifact_path=artifact_path,
+                pilot_guard_path=pilot_guard_path,
+                protocol_path=root / "generated-protocol.json",
+                run_manifest_path=root / "generated-run.json",
+                pilot_manifest_path=root / "generated-pilot.json",
+                candidate_guard_runner=candidate_guard,
+            )
+            self.assertEqual(action["action_status"], "completed")
+            self.assertEqual(
+                _git(
+                    repository,
+                    "diff",
+                    "--name-only",
+                    f"{parent}..{action['integration_head']}",
+                ).stdout.splitlines(),
+                [
+                    "experiments/native_agentteam_runtime/m0_runtime/"
+                    "agentteam_runtime/data/"
+                    "p0_experiment_readiness.v1.json"
+                ],
+            )
+            spec = resolve_gate_spec(
+                {
+                    "gate_id": "P2-08",
+                    "executor": "deterministic_controller",
+                    "controller_entrypoint": (
+                        "phase2_readiness_controller_v1"
+                    ),
+                    "relation_validator": (
+                        "phase2_readiness_relation_v1"
+                    ),
+                    "evidence_schema": (
+                        "experiments/native_agentteam_runtime/schemas/"
+                        "phase2_readiness_promotion.schema.json"
+                    ),
+                    "operator_authorization_required": False,
+                    "controller_action_input": self._action_input(
+                        "P2-08"
+                    ),
+                }
+            )
+            relation = validate_gate_relation(
+                spec,
+                artifact_path,
+                {
+                    "repository_root": str(repository),
+                    "integration_head": action["integration_head"],
+                    **action["relation_context"],
+                },
+            )
+            self.assertEqual(relation["relation_status"], "passed")
+
+    def test_live_calibration_relation_recomputes_sealed_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = ExperimentCalibrationTests()._real_calibration_fixture(
+                root
+            )
+            repository = Path(
+                fixture["protocol"]["repository"]["source"]
+            )
+            schema_dir = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "schemas"
+            )
+            schema_dir.mkdir(parents=True)
+            for name in (
+                "phase2_calibration.schema.json",
+                "phase2_live_authorization.schema.json",
+            ):
+                shutil.copy2(self.SCHEMAS / name, schema_dir / name)
+            protocol_sha256 = canonical_json_sha256(fixture["protocol"])
+            readiness_sha256 = "3" * 64
+            integration_head = fixture["protocol"]["repository"]["commit"]
+            budgets = fixture["protocol"]["budgets"]
+            context = {
+                "repository_root": str(repository),
+                "integration_head": integration_head,
+                "epoch_number": 4,
+                "epoch_sha256": "1" * 64,
+                "protocol_sha256": protocol_sha256,
+                "readiness_promotion_sha256": readiness_sha256,
+                "model": fixture["protocol"]["environment"]["model"],
+                "reasoning_profile": fixture["protocol"][
+                    "environment"
+                ]["reasoning_profile"],
+                "max_total_tokens": budgets["max_total_tokens"],
+                "max_wall_time_seconds": budgets[
+                    "max_wall_time_seconds"
+                ],
+            }
+            authorization = {
+                "schema_version": "phase2_live_authorization.v1",
+                "decision": "approved",
+                "operator_identity": "phase2-test",
+                "authorized_at": "2026-07-26T00:00:00Z",
+                "gate_id": "P2-09",
+                "epoch_number": 4,
+                "epoch_sha256": "1" * 64,
+                "protocol_sha256": protocol_sha256,
+                "readiness_promotion_sha256": readiness_sha256,
+                "model": context["model"],
+                "reasoning_profile": context["reasoning_profile"],
+                "max_total_tokens": budgets["max_total_tokens"],
+                "max_wall_time_seconds": budgets[
+                    "max_wall_time_seconds"
+                ],
+                "max_inflight_model_invocations": 1,
+                "modes": [
+                    "single_codex",
+                    "agentteam_direct",
+                    "agentteam_full",
+                ],
+            }
+            authorization_path = root / "authorization.json"
+            authorization_publication = publish_live_authorization(
+                authorization_path,
+                authorization,
+                context,
+            )
+            primary_by_mode = {
+                item["manifest"]["mode"]: item
+                for item in fixture["primary"]
+            }
+
+            def result_item(run):
+                loaded = load_experiment_result_bundle(run["run_dir"])
+                bundle = loaded["bundle"]
+                started = datetime.fromisoformat(
+                    bundle["started_at"].replace("Z", "+00:00")
+                )
+                finished = datetime.fromisoformat(
+                    bundle["finished_at"].replace("Z", "+00:00")
+                )
+                return {
+                    "mode": bundle["mode"],
+                    "result_bundle_sha256": loaded["bundle_sha256"],
+                    "total_tokens": bundle["usage_totals"][
+                        "total_tokens"
+                    ],
+                    "wall_time_seconds": (
+                        finished - started
+                    ).total_seconds(),
+                }
+
+            artifact = {
+                "schema_version": "phase2_calibration.v1",
+                "controller_validation_status": "passed",
+                "validated_code_sha": integration_head,
+                "readiness_promotion_sha256": readiness_sha256,
+                "protocol_sha256": protocol_sha256,
+                "pilot_guard_status": "passed",
+                "operator_authorization_sha256": (
+                    authorization_publication["sha256"]
+                ),
+                "runtime_release": fixture["release"],
+                "mode_results": [
+                    result_item(primary_by_mode[mode])
+                    for mode in (
+                        "single_codex",
+                        "agentteam_direct",
+                        "agentteam_full",
+                    )
+                ],
+                "repeat_result": result_item(fixture["repeat"]),
+                "lifecycle_coverage_percent": 100,
+                "token_coverage_percent": 100,
+                "projection_rebuild_status": "passed",
+            }
+            artifact_path = root / "live-calibration.json"
+            artifact_path.write_text(
+                json.dumps(artifact, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            spec = resolve_gate_spec(
+                {
+                    "gate_id": "P2-09",
+                    "executor": "deterministic_controller",
+                    "controller_entrypoint": (
+                        "phase2_live_calibration_controller_v1"
+                    ),
+                    "relation_validator": (
+                        "phase2_live_calibration_relation_v1"
+                    ),
+                    "evidence_schema": (
+                        "experiments/native_agentteam_runtime/schemas/"
+                        "phase2_calibration.schema.json"
+                    ),
+                    "operator_authorization_required": True,
+                    "operator_authorization_schema": (
+                        "experiments/native_agentteam_runtime/schemas/"
+                        "phase2_live_authorization.schema.json"
+                    ),
+                    "controller_action_input": self._action_input(
+                        "P2-09"
+                    ),
+                }
+            )
+            relation_context = {
+                **context,
+                "authorization_path": str(authorization_path),
+                "mode_run_records": {
+                    mode: primary_by_mode[mode]
+                    for mode in (
+                        "single_codex",
+                        "agentteam_direct",
+                        "agentteam_full",
+                    )
+                },
+                "repeat_run_record": fixture["repeat"],
+                "projection_root": str(fixture["projection_root"]),
+                "protocol_path": str(
+                    fixture["projection_root"]
+                    / "protocols"
+                    / f"{protocol_sha256}.json"
+                ),
+                "runtime_release": fixture["release"],
+            }
+            expected_provider_calls = sum(
+                load_experiment_result_bundle(run["run_dir"])[
+                    "bundle"
+                ]["usage_coverage"]["total_invocations"]
+                for run in [
+                    *fixture["primary"],
+                    fixture["repeat"],
+                ]
+            )
+            launcher = Mock(
+                return_value={
+                    "artifact_path": str(artifact_path),
+                    "provider_calls": expected_provider_calls,
+                    "target_mutations": 0,
+                }
+            )
+            controlled = run_gate_controller(
+                spec,
+                root / "artifact-created-by-launcher.json",
+                relation_context,
+                result_path=root / "live-controller-result.json",
+                provider_launcher=launcher,
+            )
+            launcher.assert_called_once()
+            self.assertEqual(
+                controlled["provider_calls"],
+                expected_provider_calls,
+            )
+            relation = validate_gate_relation(
+                spec,
+                artifact_path,
+                relation_context,
+            )
+            self.assertEqual(relation["relation_status"], "passed")
+            report = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "implementation_artifacts"
+                / "reports"
+                / "phase2-experiment-harness.md"
+            )
+            roadmap = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "implementation_artifacts"
+                / "native_runtime_roadmap.md"
+            )
+            report.parent.mkdir(parents=True, exist_ok=True)
+            roadmap.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text("# Phase 2 report\n", encoding="utf-8")
+            roadmap.write_text("# Roadmap\n", encoding="utf-8")
+            _git(repository, "add", report, roadmap)
+            _git(
+                repository,
+                "commit",
+                "--quiet",
+                "-m",
+                "finalize phase 2 report",
+            )
+            final_head = _git(
+                repository,
+                "rev-parse",
+                "HEAD",
+            ).stdout.strip()
+            historical_context = {
+                **relation_context,
+                "integration_head": final_head,
+                "epoch_number": 5,
+                "epoch_sha256": "9" * 64,
+                "authorization_epoch_number": 4,
+                "authorization_epoch_sha256": "1" * 64,
+            }
+            historical = validate_gate_relation(
+                spec,
+                artifact_path,
+                historical_context,
+            )
+            self.assertEqual(
+                historical["validated_code_sha"],
+                integration_head,
+            )
+            self.assertEqual(
+                historical["integration_head"],
+                final_head,
+            )
+            artifact["mode_results"][0]["total_tokens"] += 1
+            artifact_path.write_text(
+                json.dumps(artifact, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                Phase2GateError,
+                "token total",
+            ):
+                validate_gate_relation(
+                    spec,
+                    artifact_path,
+                    historical_context,
+                )
+
+    def test_finalization_relation_recomputes_exact_git_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = self._repository(root)
+            schema_path = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "schemas"
+                / "phase2_finalization.schema.json"
+            )
+            schema_path.parent.mkdir(parents=True)
+            shutil.copy2(
+                self.SCHEMAS / "phase2_finalization.schema.json",
+                schema_path,
+            )
+            roadmap = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "implementation_artifacts"
+                / "native_runtime_roadmap.md"
+            )
+            report = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "implementation_artifacts"
+                / "reports"
+                / "phase2-experiment-harness.md"
+            )
+            roadmap.parent.mkdir(parents=True, exist_ok=True)
+            report.parent.mkdir(parents=True, exist_ok=True)
+            roadmap.write_text("before roadmap\n", encoding="utf-8")
+            report.write_text("before report\n", encoding="utf-8")
+            _git(repository, "add", ".")
+            _git(repository, "commit", "--quiet", "-m", "baseline")
+            parent = _git(repository, "rev-parse", "HEAD").stdout.strip()
+            roadmap.write_text("after roadmap\n", encoding="utf-8")
+            report.write_text("after report\n", encoding="utf-8")
+            _git(repository, "add", ".")
+            _git(repository, "commit", "--quiet", "-m", "final report")
+            head = _git(repository, "rev-parse", "HEAD").stdout.strip()
+            verification_command = [
+                str(Path(sys.executable).resolve()),
+                "-c",
+                "pass",
+            ]
+            empty_sha256 = hashlib.sha256(b"").hexdigest()
+            verification = root / "full-verification.json"
+            verification.write_text(
+                json.dumps(
+                    {
+                        "command": verification_command,
+                        "returncode": 0,
+                        "stdout_sha256": empty_sha256,
+                        "stderr_sha256": empty_sha256,
+                        "normalized_stdout_sha256": empty_sha256,
+                        "normalized_stderr_sha256": empty_sha256,
+                        "integration_head": head,
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            artifact = {
+                "schema_version": "phase2_finalization.v1",
+                "controller_validation_status": "passed",
+                "validated_code_sha": parent,
+                "final_report_sha": head,
+                "readiness_promotion_sha256": "4" * 64,
+                "live_calibration_sha256": "5" * 64,
+                "report_sha256": hashlib.sha256(
+                    report.read_bytes()
+                ).hexdigest(),
+                "roadmap_sha256": hashlib.sha256(
+                    roadmap.read_bytes()
+                ).hexdigest(),
+                "full_verification_sha256": hashlib.sha256(
+                    verification.read_bytes()
+                ).hexdigest(),
+                "changed_paths": [
+                    "experiments/native_agentteam_runtime/"
+                    "implementation_artifacts/native_runtime_roadmap.md",
+                    "experiments/native_agentteam_runtime/"
+                    "implementation_artifacts/reports/"
+                    "phase2-experiment-harness.md",
+                ],
+                "merge_recommendation": "ready_for_operator_review",
+            }
+            artifact_path = root / "finalization.json"
+            artifact_path.write_text(
+                json.dumps(artifact, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            spec = resolve_gate_spec(
+                {
+                    "gate_id": "P2-10",
+                    "executor": "deterministic_controller",
+                    "controller_entrypoint": (
+                        "phase2_finalization_controller_v1"
+                    ),
+                    "relation_validator": (
+                        "phase2_finalization_relation_v1"
+                    ),
+                    "evidence_schema": (
+                        "experiments/native_agentteam_runtime/schemas/"
+                        "phase2_finalization.schema.json"
+                    ),
+                    "operator_authorization_required": False,
+                    "controller_action_input": self._action_input(
+                        "P2-10"
+                    ),
+                }
+            )
+            context = {
+                "repository_root": str(repository),
+                "integration_head": head,
+                "readiness_promotion_sha256": "4" * 64,
+                "live_calibration_sha256": "5" * 64,
+                "full_verification_path": str(verification),
+                "full_verification_command": verification_command,
+                "integration_worktree": str(repository),
+                "prior_gate_validated_code": {"P2-09": parent},
+                "prior_gate_evidence": {
+                    "P2-08": "4" * 64,
+                    "P2-09": "5" * 64,
+                },
+            }
+            relation = validate_gate_relation(
+                spec,
+                artifact_path,
+                context,
+            )
+            self.assertEqual(relation["relation_status"], "passed")
+            (repository / "unexpected.txt").write_text(
+                "unexpected\n",
+                encoding="utf-8",
+            )
+            _git(repository, "add", "unexpected.txt")
+            _git(repository, "commit", "--quiet", "-m", "unexpected")
+            unexpected_head = _git(
+                repository,
+                "rev-parse",
+                "HEAD",
+            ).stdout.strip()
+            with self.assertRaisesRegex(
+                Phase2GateError,
+                "single-child|exact report paths",
+            ):
+                validate_gate_relation(
+                    spec,
+                    artifact_path,
+                    {**context, "integration_head": unexpected_head},
+                )
+
+    def test_finalization_action_creates_exact_report_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = self._repository(root)
+            schema_path = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "schemas"
+                / "phase2_finalization.schema.json"
+            )
+            schema_path.parent.mkdir(parents=True)
+            shutil.copy2(
+                self.SCHEMAS / "phase2_finalization.schema.json",
+                schema_path,
+            )
+            roadmap = (
+                repository
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "implementation_artifacts"
+                / "native_runtime_roadmap.md"
+            )
+            roadmap.parent.mkdir(parents=True)
+            roadmap.write_text("# Roadmap\n", encoding="utf-8")
+            _git(repository, "add", ".")
+            _git(repository, "commit", "--quiet", "-m", "baseline")
+            parent = _git(
+                repository,
+                "rev-parse",
+                "HEAD",
+            ).stdout.strip()
+            readiness = root / "readiness.json"
+            calibration = root / "calibration.json"
+            readiness.write_text(
+                json.dumps(
+                    {
+                        "controller_validation_status": "passed",
+                        "validated_code_sha": parent,
+                        "capability_evidence": {
+                            str(index): []
+                            for index in range(7)
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            calibration.write_text(
+                json.dumps(
+                    {
+                        "mode_results": [
+                            {
+                                "mode": mode,
+                                "total_tokens": index + 1,
+                                "wall_time_seconds": index + 0.25,
+                            }
+                            for index, mode in enumerate(
+                                (
+                                    "single_codex",
+                                    "agentteam_direct",
+                                    "agentteam_full",
+                                )
+                            )
+                        ],
+                        "repeat_result": {
+                            "mode": "single_codex",
+                        },
+                        "lifecycle_coverage_percent": 100,
+                        "token_coverage_percent": 100,
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            prior = {
+                "readiness_promotion": {
+                    "path": str(readiness),
+                    "sha256": hashlib.sha256(
+                        readiness.read_bytes()
+                    ).hexdigest(),
+                },
+                "live_calibration": {
+                    "path": str(calibration),
+                    "sha256": hashlib.sha256(
+                        calibration.read_bytes()
+                    ).hexdigest(),
+                },
+            }
+            artifact_path = root / "finalization.json"
+            verification_path = root / "verification.json"
+            verification_command = [
+                str(Path(sys.executable).resolve()),
+                "-c",
+                "pass",
+            ]
+            action = execute_phase2_finalization_action(
+                {
+                    "schema_version": "phase2_gate_action_input.v1",
+                    "action": "finalize_phase2",
+                    "configuration": {
+                        "finalized_at": "2026-07-29T00:00:00Z",
+                    },
+                },
+                {
+                    "repository_root": str(repository),
+                    "integration_worktree": str(repository),
+                    "integration_head": parent,
+                    "prior_artifacts": prior,
+                    "full_verification_command": verification_command,
+                    "authority_roots": [str(root)],
+                },
+                artifact_path=artifact_path,
+                verification_path=verification_path,
+            )
+            self.assertEqual(action["action_status"], "completed")
+            final_head = action["integration_head"]
+            self.assertEqual(
+                _git(
+                    repository,
+                    "diff",
+                    "--name-only",
+                    f"{parent}..{final_head}",
+                ).stdout.splitlines(),
+                [
+                    "experiments/native_agentteam_runtime/"
+                    "implementation_artifacts/native_runtime_roadmap.md",
+                    "experiments/native_agentteam_runtime/"
+                    "implementation_artifacts/reports/"
+                    "phase2-experiment-harness.md",
+                ],
+            )
+            spec = resolve_gate_spec(
+                {
+                    "gate_id": "P2-10",
+                    "executor": "deterministic_controller",
+                    "controller_entrypoint": (
+                        "phase2_finalization_controller_v1"
+                    ),
+                    "relation_validator": (
+                        "phase2_finalization_relation_v1"
+                    ),
+                    "evidence_schema": (
+                        "experiments/native_agentteam_runtime/schemas/"
+                        "phase2_finalization.schema.json"
+                    ),
+                    "operator_authorization_required": False,
+                    "controller_action_input": self._action_input(
+                        "P2-10"
+                    ),
+                }
+            )
+            relation = validate_gate_relation(
+                spec,
+                artifact_path,
+                {
+                    "repository_root": str(repository),
+                    "integration_head": final_head,
+                    "integration_worktree": str(repository),
+                    "readiness_promotion_sha256": prior[
+                        "readiness_promotion"
+                    ]["sha256"],
+                    "live_calibration_sha256": prior[
+                        "live_calibration"
+                    ]["sha256"],
+                    "full_verification_path": str(
+                        verification_path
+                    ),
+                    "full_verification_command": verification_command,
+                    "prior_gate_validated_code": {
+                        "P2-09": parent,
+                    },
+                    "prior_gate_evidence": {
+                        "P2-08": prior["readiness_promotion"][
+                            "sha256"
+                        ],
+                        "P2-09": prior["live_calibration"]["sha256"],
+                    },
+                },
+            )
+            self.assertEqual(relation["relation_status"], "passed")
 
 
 if __name__ == "__main__":
