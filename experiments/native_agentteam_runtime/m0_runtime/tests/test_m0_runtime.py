@@ -3277,7 +3277,67 @@ class M0RuntimeTests(unittest.TestCase):
                     "status": "reconciled_to_worktree",
                     "reported_changed_files": ["historical/change.py"],
                     "actual_changed_files": [],
+                    "preserved_runtime_artifacts": [],
                 },
+            )
+
+    def test_file_mailbox_worker_preserves_declared_runtime_artifact(self):
+        class RuntimeArtifactAdapter:
+            def run(self, message, worktree_path=None):
+                artifact = ".agentteam/generated/repo-map.json"
+                target = Path(worktree_path) / artifact
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("{}\n", encoding="utf-8")
+                return {
+                    "result_status": "completed",
+                    "changed_files": [artifact],
+                    "output": {"summary": "runtime artifact produced"},
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            inbox = (
+                output_dir
+                / "mailboxes"
+                / "agent-repo-map"
+                / "inbox.jsonl"
+            )
+            outbox = (
+                output_dir
+                / "mailboxes"
+                / "agent-repo-map"
+                / "outbox.jsonl"
+            )
+            _init_git_repo(repo)
+            message = _mailbox_dispatch_message(
+                message_id="MSG-MAILBOX-ARTIFACT-001",
+                agent_id="agent-repo-map",
+                write_scope=[".agentteam/generated/"],
+            )
+            message["payload"]["expected_output_artifacts"] = [
+                ".agentteam/generated/repo-map.json"
+            ]
+            _append_test_jsonl(inbox, [message])
+
+            worker = FileMailboxWorker(
+                FIXTURES / "sample_agent_pool.json",
+                output_dir,
+                "agent-repo-map",
+                runtime_adapter=RuntimeArtifactAdapter(),
+                clock=FixedClock(),
+            )
+            summary = worker.poll_once(worktree_path=repo)
+            payload = _read_first_jsonl(outbox)["payload"]
+
+            self.assertEqual(
+                summary["changed_files"],
+                [".agentteam/generated/repo-map.json"],
+            )
+            self.assertEqual(
+                payload["changed_files"],
+                [".agentteam/generated/repo-map.json"],
             )
 
     def test_file_mailbox_worker_poll_once_writes_token_usage_to_outbox(self):
@@ -6802,7 +6862,7 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue(scheduler.state["steps"][0]["result"]["retryable"])
             self.assertEqual(
                 {task["task_id"]: task["task_status"] for task in state["tasks"]},
-                {"TASK-001": "running"},
+                {"TASK-001": "blocked"},
             )
             self.assertEqual(
                 scheduler.state["backlog"]["items"][0]["blockers"],

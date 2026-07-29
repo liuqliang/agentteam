@@ -277,6 +277,10 @@ class FileMailboxWorker:
         runtime_result = _reconcile_runtime_changed_files(
             runtime_result,
             worktree_path,
+            expected_output_artifacts=runtime_message.get(
+                "payload",
+                {},
+            ).get("expected_output_artifacts", []),
         )
         result_message = self._result_message(runtime_message, runtime_result)
         _append_jsonl(self.outbox_path, [result_message])
@@ -1336,14 +1340,39 @@ def _authoritative_worktree_changed_files(worktree_path):
     return sorted(set(changed_files))
 
 
-def _reconcile_runtime_changed_files(result, worktree_path):
+def _reconcile_runtime_changed_files(
+    result,
+    worktree_path,
+    *,
+    expected_output_artifacts=(),
+):
     actual_changed_files = _authoritative_worktree_changed_files(
         worktree_path
     )
     if actual_changed_files is None:
         return result
     reported_changed_files = result.get("changed_files")
-    if reported_changed_files == actual_changed_files:
+    reported_paths = (
+        [
+            path
+            for path in reported_changed_files
+            if isinstance(path, str)
+        ]
+        if isinstance(reported_changed_files, list)
+        else []
+    )
+    expected_artifacts = {
+        path
+        for path in expected_output_artifacts
+        if isinstance(path, str)
+    }
+    preserved_runtime_artifacts = sorted(
+        set(reported_paths).intersection(expected_artifacts)
+    )
+    authoritative_changed_files = sorted(
+        set(actual_changed_files).union(preserved_runtime_artifacts)
+    )
+    if reported_changed_files == authoritative_changed_files:
         return result
     output = (
         dict(result.get("output"))
@@ -1358,10 +1387,11 @@ def _reconcile_runtime_changed_files(result, worktree_path):
             else []
         ),
         "actual_changed_files": actual_changed_files,
+        "preserved_runtime_artifacts": preserved_runtime_artifacts,
     }
     return {
         **result,
-        "changed_files": actual_changed_files,
+        "changed_files": authoritative_changed_files,
         "output": output,
     }
 

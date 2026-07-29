@@ -1180,6 +1180,9 @@ class TwoPhaseFileScheduler:
         result["retry_allowed"] = retry_allowed
         if transition["task_status"] == "retryable":
             result["task_status"] = "ready" if retry_allowed else "blocked"
+        projected_task_status = (
+            "ready" if retry_allowed else result["task_status"]
+        )
         if result["task_status"] == "done" and diff_audit:
             runtime_artifacts = self._persist_runtime_artifacts(
                 task,
@@ -1365,7 +1368,7 @@ class TwoPhaseFileScheduler:
                             {
                                 "task_id": inflight["task_id"],
                                 "attempt_id": inflight["attempt_id"],
-                                "task_status": result["task_status"],
+                                "task_status": projected_task_status,
                                 "lease_id": inflight["lease_id"],
                                 "update_type": "integration_outcome",
                                 "failure_category": result["failure_category"],
@@ -1395,7 +1398,7 @@ class TwoPhaseFileScheduler:
                             {
                                 "task_id": inflight["task_id"],
                                 "attempt_id": inflight["attempt_id"],
-                                "task_status": result["task_status"],
+                                "task_status": projected_task_status,
                                 "lease_id": inflight["lease_id"],
                                 "update_type": "validation_outcome",
                                 "failure_category": result[
