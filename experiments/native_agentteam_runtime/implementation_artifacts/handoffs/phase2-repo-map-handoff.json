@@ -1,8 +1,9 @@
 {
-  "schema_version": "phase2_repo_map_handoff.v1",
+  "schema_version": "phase2_repo_map_handoff.v2",
   "handoff_id": "phase2-experiment-harness-repo-map",
   "task_id": "P2-MAP",
   "source_contract": {
+    "repository_commit": "645c61e8b618111945a73fe43e7cfb71c3748a12",
     "blueprint": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-27-phase2-experiment-harness-and-calibration.blueprint.json",
     "plan": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-27-phase2-experiment-harness-and-calibration.md",
     "consumer_tasks": [
@@ -11,55 +12,60 @@
       "P2-06",
       "P2-07B"
     ],
-    "scope": "Existing provider launch, scheduler/integration boundaries, frozen-taskpack project-root plumbing, projection, release binding, post-backlog gates, and P0 readiness validation.",
+    "scope": "Provider launch, scheduler safe boundaries, frozen-taskpack snapshot-root override, projection, release binding, post-backlog gates, and P0 readiness validation.",
     "exclusions": [
       "This handoff is implementation guidance, not benchmark evidence.",
       "It must not be supplied to single_codex mode.",
-      "It does not replace the immutable protocol, run manifest, release binding, or gate epoch."
+      "It does not replace immutable protocol, run-manifest, release, sandbox, invocation-set, result-bundle, or gate-epoch authority."
     ]
   },
   "repo_map_handoff": {
     "status": "ready",
+    "implementation_state": "The mapped Phase 2 seams are present at the bound repository commit; consumers should extend or repair these common seams instead of adding parallel launch, scheduling, projection, or gate paths.",
     "compact_architecture": [
       {
-        "flow": "provider",
+        "flow": "provider_launch",
         "sequence": [
-          "caller builds command and classifies it with is_supported_codex_command",
-          "ModelInvocationCall.execute performs the common prelaunch policy",
-          "SystemdGatedExecution.prepare creates a gated supervisor",
-          "InvocationLifecycle.publish_start durably records authority",
-          "SystemdGatedExecution.permit_and_wait permits the provider process",
-          "ModelInvocationCall.finalize writes terminal usage and performs post-terminal accounting"
+          "experiment_modes._register_provider_launch or TwoPhaseFileScheduler._register_experiment_attempt_launch publishes controller-owned lifecycle and sandbox registration",
+          "ModelInvocationCall.__init__ reloads the immutable registration with _bind_registered_experiment_launch",
+          "ModelInvocationCall.execute validates the registered Codex command, reloads the sandbox reference, builds bwrap launch policy, and acquires protocol-global admission before process preparation",
+          "InvocationLifecycle.publish_start records start before SystemdGatedExecution.permit_and_wait",
+          "ModelInvocationCall.finalize publishes terminal usage and calls ExperimentController.post_terminal_accounting"
         ]
       },
       {
         "flow": "worker_and_integration",
         "sequence": [
-          "TwoPhaseFileScheduler.dispatch_ready creates one attempt",
-          "worker provider lifecycle is imported by collect_ready_results",
-          "TwoPhaseFileScheduler._collect_result validates the result",
-          "TwoPhaseFileScheduler._integrate_accepted_result owns the uninterrupted integration transaction",
-          "TwoPhaseFileScheduler._verified_backlog_transition advances the backlog"
+          "TwoPhaseFileScheduler.dispatch_ready checks pre_provider_launch and allocates a standalone experiment attempt repository",
+          "collect_ready_results imports or reconciles durable invocation lifecycles",
+          "_collect_result checks pre_integration before mutation and marks integration_active for the transaction",
+          "_integrate_accepted_result applies, verifies, commits, or rolls back without an intervening budget stop",
+          "_collect_result clears integration_active and observes post_integration before terminal scheduler state"
+        ]
+      },
+      {
+        "flow": "mode_and_finalization",
+        "sequence": [
+          "execute_bound_experiment_mode validates allocated protocol/run authority",
+          "ExperimentModeController executes exactly the declared adapter",
+          "single, direct, and full adapters register every model lifecycle through the common launch seam",
+          "ExperimentCommonFinalizer returns every mode to common evaluation, scan-scope publication, result sealing, and projection reconciliation"
         ]
       },
       {
         "flow": "post_backlog_gate",
         "sequence": [
-          "TwoPhaseFileScheduler.complete_verified_backlog enters awaiting_post_backlog_gates",
-          "agentteam gate state publishes a digest-chained epoch",
-          "a controller creates and registers evidence against the epoch",
-          "_evaluate_post_backlog_gates recomputes schema and relation evidence",
-          "_complete_gated_milestone_if_ready emits run_completed exactly once"
+          "taskpack validation admits an empty backlog only for a candidate-release-bound controller_only taskpack with registered deterministic gates",
+          "agentteam._run_controller_only_taskpack seals or reloads the gate epoch",
+          "_run_available_phase2_gate_controllers resolves the closed P2-08/P2-09/P2-10 registry",
+          "run_gate_controller recomputes the relation and pauses P2-09 until epoch-bound authorization exists",
+          "_evaluate_post_backlog_gates requires a current immutable controller result before milestone completion"
         ]
       }
     ],
-    "known_absences": [
-      "No experiment_protocol.v1 or experiment_run_manifest.v2 execution path exists yet.",
-      "No common launch-policy or global experiment-budget callback exists on ModelInvocationCall.",
-      "No trusted frozen-taskpack project-root override exists.",
-      "No experiment result tables or comparison reader exist in projection_db.py.",
-      "post_backlog_gates declarations carry relation_validator and controller_entrypoint, but current gate execution does not dispatch either field.",
-      "Blueprint, taskpack, and agent-pool validation currently reject an empty model backlog/controller-only taskpack."
+    "bounded_gaps": [
+      "The public experiment CLI exposes readiness, legacy validation/pilot guard, show, and compare; execution and resume currently enter through execute_bound_experiment_mode and controller APIs rather than experiment run/resume parser commands.",
+      "Legacy agentteam_experiment_manifest.v1 remains validation-only in experiment_readiness.py and must not be reused as Phase 2 execution authority."
     ]
   },
   "provider_launch_extension_points": {
@@ -70,32 +76,59 @@
         "ModelInvocationCall.__init__",
         "ModelInvocationCall.execute",
         "ModelInvocationCall.finalize",
+        "ModelInvocationCall._acquire_experiment_provider_admission",
         "InvocationLifecycle.publish_start",
         "InvocationLifecycle.finalize",
         "SystemdGatedExecution.prepare",
         "SystemdGatedExecution.permit_and_wait",
-        "_run_bounded_process",
-        "_run_bounded_process_with_parent_death_safeguard",
-        "_validate_call_context",
-        "_USAGE_STAGES",
-        "_CONTROLLER_USAGE_STAGES"
+        "_bind_registered_experiment_launch",
+        "_validate_registered_codex_command",
+        "_validate_call_context"
       ],
-      "current_contract": [
-        "Supported Codex calls use a gated systemd supervisor.",
-        "started.json is durable before the launch permit.",
-        "Terminal usage becomes authoritative only in InvocationLifecycle.finalize.",
-        "Fake commands use the same lifecycle but bypass systemd and spawn in _run_bounded_process."
+      "ordering_contract": [
+        "Supported-Codex classification occurs before ModelInvocationCall construction.",
+        "Immutable experiment launch registration is reloaded in ModelInvocationCall.__init__ and overrides only matching caller context.",
+        "Sandbox-reference validation and bwrap preparation occur in ModelInvocationCall.execute before provider admission and before runner preparation or Popen.",
+        "Protocol-global provider admission occurs before InvocationLifecycle.publish_start and process permit.",
+        "Post-terminal accounting consumes only InvocationLifecycle.finalize output and releases the provider lane after durable terminal authority exists."
       ],
-      "phase2_insertion_order": [
-        "Keep supported-command classification at the caller.",
-        "Inside ModelInvocationCall.execute, after classification and before SystemdGatedExecution.prepare or _run_bounded_process, apply one immutable experiment launch descriptor.",
-        "The descriptor must perform protocol-global lease and budget admission before any provider process can exist.",
-        "The same descriptor must supply the bwrap command, exact cwd, and bounded environment for both supported and deterministic fake paths.",
-        "After InvocationLifecycle.finalize returns authoritative terminal usage, invoke post-terminal budget accounting exactly once."
-      ],
-      "do_not_split": "Sandbox policy, provider-lane lease, and prelaunch budget admission must be one common ModelInvocationCall policy. Scheduler-only wrapping misses authoring, repo-map, follow-up, direct-mode, diagnostic, and future controller calls."
+      "future_extension_rule": "Any new counted provider path must construct ModelInvocationCall and must not spawn Codex directly."
     },
-    "call_site_inventory": [
+    "registration_and_sandbox_seams": [
+      {
+        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
+        "symbols": [
+          "_register_provider_launch",
+          "_experiment_invocation_context",
+          "_experiment_runtime_context"
+        ],
+        "purpose": "Allocate per-lifecycle authority for single and author launches and build the immutable runtime context consumed by direct/full schedulers."
+      },
+      {
+        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
+        "symbols": [
+          "TwoPhaseFileScheduler._register_experiment_attempt_launch",
+          "_load_experiment_runtime_context",
+          "_worker_invocation_context"
+        ],
+        "purpose": "Allocate a workspace-specific sandbox reference and lifecycle registration before dispatching each worker attempt."
+      },
+      {
+        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
+        "symbols": [
+          "publish_provider_sandbox_reference",
+          "load_provider_sandbox_reference",
+          "prepare_provider_launch",
+          "publish_experiment_launch_registration",
+          "load_experiment_launch_registration",
+          "publish_registered_model_invocation_set_reference",
+          "run_trusted_argv_evaluator",
+          "validate_evaluation_evidence"
+        ],
+        "purpose": "Own immutable sandbox, lifecycle registry, complete invocation-set sealing, trusted evaluator execution, and evaluation binding validation."
+      }
+    ],
+    "provider_call_sites": [
       {
         "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/m0_runtime.py",
         "symbol": "CodexRuntimeAdapter.run",
@@ -105,8 +138,7 @@
           "implementation_worker",
           "review_or_repair",
           "semantic_architecture"
-        ],
-        "note": "Primary worker path constructed by the scheduler."
+        ]
       },
       {
         "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
@@ -114,8 +146,14 @@
         "routes": [
           "taskpack_author",
           "follow_up_author"
-        ],
-        "note": "Used by normal authoring and therefore by agentteam_full."
+        ]
+      },
+      {
+        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
+        "symbol": "NativeSingleCodexProvider.__call__",
+        "routes": [
+          "single_codex"
+        ]
       },
       {
         "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/diagnostic_chat.py",
@@ -123,15 +161,15 @@
         "routes": [
           "runtime_diagnostic"
         ],
-        "note": "Out-of-band provider use must be denied or explicitly accounted while a scored experiment binding is active."
+        "constraint": "A diagnostic launched inside an experiment controller is budget-admitted; scored execution must deny it or give it a registered sandbox lifecycle."
       },
       {
         "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_smoke.py",
-        "symbol": "DevelopmentSmokeCodexRuntimeAdapter._run_controller_invocation",
+        "symbol": "CodexRuntimeAdapter._run_controller_invocation",
         "routes": [
           "development_smoke"
         ],
-        "note": "Existing registered-controller lifecycle pattern."
+        "constraint": "Development smoke is a controller lifecycle, not a benchmark mode."
       },
       {
         "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/usage_live_smoke.py",
@@ -139,225 +177,178 @@
         "routes": [
           "acceptance_live_smoke"
         ],
-        "note": "Existing epoch-bound live acceptance path and negative authorization reference."
+        "constraint": "Phase 1 live acceptance remains separate from Phase 2 epoch-authorized live calibration."
       }
     ],
-    "context_extension": {
-      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
-      "symbols": [
-        "invocation_context_from_message",
-        "_start_context",
-        "_terminal_context",
-        "_validate_call_context",
-        "import_registered_controller_lifecycles"
+    "context_projection_seams": {
+      "files": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/mailbox_worker.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/m0_runtime.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py"
       ],
-      "required_change": "Carry immutable experiment protocol/run identity and admit registered experiment-controller usage stages without overloading implementation_run_id/gate_epoch.",
-      "current_constraint": "_validate_call_context currently reserves implementation_run_id and gate_epoch for acceptance_live_smoke and rejects them on other stages."
-    },
-    "spawn_environment_gap": {
-      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
       "symbols": [
-        "SystemdGatedExecution.prepare",
-        "_run_bounded_process",
-        "_run_bounded_process_with_parent_death_safeguard"
+        "mailbox_worker._model_invocation_context_payload",
+        "mailbox_worker._invocation_authority_root",
+        "model_invocation.invocation_context_from_message",
+        "model_invocation._start_context",
+        "model_invocation._terminal_context"
       ],
-      "current_state": "Both Popen paths inherit the host environment; the supervisor spec contains command, cwd, input, timeout, and spool limit but no explicit environment.",
-      "required_change": "Thread one validated environment map through the supervisor spec and both Popen paths, or prove the bwrap wrapper fully clears and rebuilds the environment."
+      "invariant": "experiment_run_id, mode, protocol/run-manifest digests, sandbox reference, controller reference, lifecycle authority, model, and reasoning profile must survive mailbox projection and start/terminal replay."
     },
     "integration_risks": [
-      "Applying bwrap only in CodexRuntimeAdapter.run leaves taskpack author and controller paths unsandboxed.",
-      "Running admission after SystemdGatedExecution.prepare creates provider-side execution authority before budget or lease approval.",
-      "Accounting before terminalization can infer or double-count incomplete provider usage.",
-      "Adding experiment fields without extending start/terminal projections loses the binding during replay.",
-      "A host-inherited environment can leak evaluator paths or credentials despite a correct mount namespace."
+      "A direct Codex Popen or per-adapter wrapper bypasses sandbox, provider-lane, budget, and lifecycle authority.",
+      "Admission after runner preparation can create execution authority before the global budget decision.",
+      "Accounting before durable terminal publication can infer, lose, or double-count usage.",
+      "Accepting caller context that differs from immutable launch registration lets a provider substitute workspace, model, mode, or authority root.",
+      "Incomplete lifecycle registry sealing lets author, follow-up, or late provider starts escape evaluation coverage."
     ]
   },
   "scheduler_and_gate_extension_points": {
     "budget_safe_boundaries": [
       {
         "boundary": "pre_provider_launch",
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
-        "symbols": [
-          "ModelInvocationCall.execute"
+        "files": [
+          "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
+          "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py"
         ],
-        "action": "Acquire the protocol-global provider lease and run budget admission before preparing or spawning a provider."
+        "symbols": [
+          "ModelInvocationCall._acquire_experiment_provider_admission",
+          "ExperimentController.prelaunch_admission",
+          "TwoPhaseFileScheduler.dispatch_ready",
+          "TwoPhaseFileScheduler._prepare_experiment_dispatch"
+        ],
+        "invariant": "Both the common invocation seam and scheduler dispatch fail closed; the common invocation seam is authoritative for every provider path."
       },
       {
         "boundary": "post_invocation_terminal",
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
+        "files": [
+          "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
+          "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py"
+        ],
         "symbols": [
           "ModelInvocationCall.finalize",
-          "InvocationLifecycle.finalize"
+          "ExperimentController.post_terminal_accounting",
+          "ExperimentController._account_terminal_locked"
         ],
-        "action": "Consume only authoritative terminal usage, persist warning/exhaustion once, and expose one-lane overshoot."
+        "invariant": "Only authoritative terminal provider totals advance consumption; one already-admitted invocation may expose visible overshoot."
       },
       {
         "boundary": "pre_integration",
         "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
         "symbols": [
           "TwoPhaseFileScheduler._collect_result",
-          "TwoPhaseFileScheduler._integrate_accepted_result"
+          "TwoPhaseFileScheduler._preserve_accepted_patch"
         ],
-        "action": "Check stop state after result validation and before the first integration mutation. A stopped run may retain the accepted patch without beginning integration."
+        "invariant": "A denied integration preserves the accepted patch and does not mutate the baseline."
       },
       {
         "boundary": "post_integration",
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
-        "symbols": [
-          "TwoPhaseFileScheduler._integrate_accepted_result",
-          "TwoPhaseFileScheduler._verified_backlog_transition"
+        "files": [
+          "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
+          "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py"
         ],
-        "action": "Complete apply, verification, commit, rollback, event publication, and baseline update as one uninterrupted transaction; only then persist budget_stopped."
+        "symbols": [
+          "TwoPhaseFileScheduler._collect_result",
+          "TwoPhaseFileScheduler._integrate_accepted_result",
+          "TwoPhaseFileScheduler._observe_experiment_boundary",
+          "ExperimentController.observe_boundary"
+        ],
+        "invariant": "budget_stopped is reached only after the provider lane, scheduler inflight set, open invocation set, and integration transaction are all empty."
       }
     ],
-    "scheduler_drain_and_resume": {
+    "drain_resume_and_recovery": {
       "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
       "symbols": [
-        "TwoPhaseFileScheduler.tick",
-        "TwoPhaseFileScheduler.dispatch_ready",
         "TwoPhaseFileScheduler.collect_ready_results",
-        "TwoPhaseFileScheduler._apply_run_stop_request",
-        "TwoPhaseFileScheduler._active_inflight_count",
-        "TwoPhaseFileScheduler.run_until_idle",
+        "TwoPhaseFileScheduler._reconcile_experiment_inflight",
+        "TwoPhaseFileScheduler._recover_experiment_integration_state",
+        "TwoPhaseFileScheduler._prepare_experiment_dispatch",
         "reconcile_orphaned_invocation"
       ],
-      "reuse": [
-        "dispatch_ready is the admission point for new worker attempts.",
-        "collect_ready_results already imports durable invocation lifecycles before accepting results.",
-        "reconcile_orphaned_invocation already distinguishes live ambiguous work from proven-dead execution."
+      "controller_symbols": [
+        "ExperimentController.interrupt",
+        "ExperimentController.resume_interrupted",
+        "ExperimentController.reconcile_provider_lane"
       ],
-      "required_change": "Budget exhaustion must disable dispatch, keep collection and reconciliation active until all inflight calls terminalize, then transition to durable budget_stopped. Interruption resume must reload the original budget snapshot rather than reinitialize counters."
+      "invariant": "Resume reloads the original controller reference and frozen budget, reconciles open execution before dispatch, and never repeats a completed integration step."
     },
     "post_backlog_gate_core": {
-      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
-      "symbols": [
-        "_post_backlog_gate_context",
-        "_initialize_post_backlog_gate_state",
-        "_gate_seal_baseline",
-        "_gate_refresh_baseline",
-        "_gate_register",
-        "_read_current_gate_epoch",
-        "_evaluate_post_backlog_gates",
-        "_evaluate_one_post_backlog_gate",
-        "_complete_gated_milestone_if_ready",
-        "_post_backlog_gate_summary",
-        "_post_backlog_gate_next_action",
-        "_integrate_run_baseline"
-      ],
-      "reusable_contract": [
-        "Epoch records are digest chained and schema validated.",
-        "Receipts bind implementation run, epoch digest, gate ID, evidence run, evidence schema, and integration head.",
-        "Gate schema is read from the committed integration head.",
-        "Integration fails closed until every gate passes.",
-        "Canonical run_completed emission is idempotent."
-      ],
-      "phase2_gap": "The declaration fields relation_validator and controller_entrypoint are preserved by materialization but ignored by _evaluate_one_post_backlog_gate and _post_backlog_gate_next_action. P1-06E relations are hard-coded instead."
-    },
-    "automatic_gate_progression": {
       "files": [
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_gates.py"
       ],
       "symbols": [
-        "_run_frozen_taskpack",
-        "_evaluate_post_backlog_gates",
-        "_complete_gated_milestone_if_ready"
+        "agentteam._post_backlog_gate_context",
+        "agentteam._gate_seal_baseline",
+        "agentteam._phase2_gate_relation_context",
+        "agentteam._run_available_phase2_gate_controllers",
+        "agentteam._run_one_available_phase2_gate_controller",
+        "agentteam._evaluate_post_backlog_gates",
+        "agentteam._complete_gated_milestone_if_ready",
+        "experiment_gates.GATE_SPECS",
+        "experiment_gates.validate_controller_gate_graph",
+        "experiment_gates.resolve_gate_spec",
+        "experiment_gates.run_gate_controller",
+        "experiment_gates.publish_live_authorization",
+        "experiment_gates.require_live_provider_authorization"
       ],
-      "required_change": [
-        "Resolve controller_entrypoint and relation_validator through a closed registry in experiment_gates.py; never import arbitrary declaration strings.",
-        "For P2-08, run the deterministic controller, register its evidence, and continue automatically.",
-        "For P2-09, publish an epoch-bound authorization request and pause before any provider call; resume only after the immutable authorization artifact passes the declared schema and relation validator.",
-        "For P2-10, run the deterministic finalization controller and complete automatically after its relation validator passes."
-      ],
-      "write_scope_constraint": "P2-07B cannot modify cli.py. The controller-only branch must be selected in agentteam.py before _run_frozen_taskpack delegates to agentteam_runtime.cli."
-    },
-    "controller_lifecycle_reuse": {
-      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
-      "symbols": [
-        "import_registered_controller_lifecycles",
-        "_CONTROLLER_USAGE_STAGES"
-      ],
-      "related_files": [
-        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/live_codex_smoke.py",
-        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/diagnostic_chat.py"
-      ],
-      "required_change": "Register Phase 2 gate/live-calibration controller stages and claims at fixed run-relative roots so status, projection, and open-controller fencing see the same durable lifecycle."
+      "invariant": "Only the closed P2-08/P2-09/P2-10 registry is executable; relation validation recomputes committed evidence, and P2-09 returns awaiting_operator_authorization with zero provider calls until current-epoch authorization passes."
     },
     "integration_risks": [
-      "A stop check inside _integrate_accepted_result can interrupt apply/verify/commit and corrupt the baseline.",
-      "Marking budget_stopped while inflight invocations remain open loses terminal usage and violates drain-before-stop.",
-      "Trusting schema-valid gate strings without calling the declared relation validator repeats the P0-A gap.",
-      "Treating P2-09 like the current operator_review_required flow is insufficient: authorization must exist before the live provider call, not after evidence exists.",
-      "Launching a zero-backlog promotion taskpack through the worker-pool CLI path either fails validation or starts unnecessary model workers."
+      "A stop check inside the integration mutation sequence can leave apply, verification, commit, rollback, and scheduler state inconsistent.",
+      "Terminalizing budget_stopped while an invocation or provider lane remains open loses authoritative usage.",
+      "Trusting schema-valid gate claims without validate_gate_relation repeats the readiness gap.",
+      "Treating P2-09 authorization as post-run approval permits an unauthorized live provider call.",
+      "Executing a controller_only taskpack through the model-worker path can start providers despite an empty backlog."
     ]
   },
   "taskpack_snapshot_root_override": {
     "primary_seam": {
       "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
       "symbol": "build_taskpack_runtime_args",
-      "current_behavior": "Reads project_root from frozen taskpack.yaml and emits it as --project-root to agentteam_runtime.cli.",
-      "required_change": "Add a controller-supplied trusted_project_root_override used only for the emitted runtime --project-root. Validate it as a resolved Git repository and keep the frozen taskpack bytes unchanged."
+      "parameter": "trusted_project_root",
+      "behavior": "After validating the frozen taskpack, _validated_trusted_project_root selects the controller-supplied standalone snapshot only for emitted --project-root; _rebase_taskpack_command rebases the trusted verification command without rewriting frozen taskpack bytes."
     },
     "caller_seam": {
       "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
       "symbols": [
         "_run_frozen_taskpack",
-        "_handle_run",
-        "_handle_continue"
+        "_publish_experiment_runtime_context"
       ],
-      "required_change": "Only experiment_modes.agentteam_direct may pass the sanitized snapshot root through _run_frozen_taskpack. Ordinary CLI run/continue retain declared-root behavior."
+      "behavior": "experiment_modes supplies trusted_project_root and an immutable experiment_runtime_context; _run_frozen_taskpack forces max_inflight=1 and passes the protocol model as trusted_model."
     },
-    "frozen_digest_authority": {
-      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
+    "mode_binding": {
+      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
       "symbols": [
-        "validate_taskpack",
-        "freeze_taskpack",
-        "_blueprint_taskpack_freeze_source",
-        "_build_taskpack_artifact_inventory",
-        "_validate_taskpack_artifact_inventory",
-        "_digest_taskpack_files"
+        "AgentTeamDirectModeAdapter.preflight",
+        "AgentTeamDirectModeAdapter.execute",
+        "AgentTeamFullModeAdapter.execute"
       ],
       "rules": [
-        "Validate and hash the reviewed taskpack before applying the root override.",
-        "Compare the protocol-declared direct-taskpack digest to the frozen artifact inventory.",
-        "Do not rewrite taskpack.yaml project_root, because that changes the reviewed digest.",
-        "Do not expose the override as an untrusted taskpack field or general worker-controlled CLI flag.",
-        "Bind the override to the clean-reset attestation and exact protocol commit/tree before runtime launch."
+        "Direct mode calls verify_frozen_taskpack_digest before applying the snapshot root.",
+        "Direct mode passes only the preregistered frozen taskpack and request.project_root.",
+        "Full mode authors in an independent standalone repository and rejects a digest equal to the preregistered direct taskpack."
       ]
     },
-    "controller_only_conflicts": [
-      {
-        "file": "experiments/native_agentteam_runtime/schemas/taskpack_blueprint.schema.json",
-        "anchors": [
-          "properties.agents.minItems",
-          "properties.tasks.minItems",
-          "$defs.post_backlog_gate.controller_entrypoint",
-          "$defs.post_backlog_gate.relation_validator"
-        ],
-        "current_state": "agents and tasks both require at least one item."
-      },
-      {
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
-        "symbols": [
-          "_validate_taskpack_blueprint",
-          "_generate_taskpack_blueprint",
-          "validate_taskpack",
-          "_validate_agent_pool"
-        ],
-        "current_state": "Blueprint validation assumes task ancestors; generated agent_pool and backlog assume model work; validate_taskpack rejects empty agents and empty backlog."
-      },
-      {
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
-        "symbol": "_run_frozen_taskpack",
-        "current_state": "Every gated taskpack is delegated to daemon two-phase worker-pool execution."
-      }
-    ],
-    "controller_only_required_invariant": "Permit empty tasks/agents only for an explicit controller-only form with a non-empty deterministic post_backlog_gates list, committed schemas, closed registry entrypoints and relation validators, approval binding to the candidate release, and no path into model worker dispatch.",
+    "controller_only_guard": {
+      "files": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py"
+      ],
+      "symbols": [
+        "taskpack._validate_taskpack_blueprint",
+        "taskpack.validate_taskpack",
+        "taskpack._validate_controller_action_authority",
+        "agentteam._run_controller_only_taskpack"
+      ],
+      "invariant": "Zero tasks and agents are valid only with execution_mode=controller_only, non-empty registered deterministic gates, blueprint_materialized provenance, candidate release binding, and no worker-pool launch."
+    },
     "integration_risks": [
-      "Mutating taskpack.yaml to point at the snapshot invalidates the preregistered direct-taskpack digest.",
-      "Applying the override before validating the declared taskpack can conceal a stale or malicious original root.",
-      "A general CLI override allows ordinary runs or workers to redirect integration outside the attested snapshot.",
-      "Relaxing empty-backlog validation without the controller-only predicate creates taskpacks that falsely complete without model work or deterministic gates."
+      "Rewriting taskpack.yaml project_root invalidates the reviewed direct-taskpack digest.",
+      "Applying the root override before taskpack validation can conceal stale or malicious frozen authority.",
+      "Exposing trusted_project_root as a worker-controlled field can redirect execution outside the certified snapshot.",
+      "Reusing ordinary linked worktrees leaks object, ref, and prior-mode state.",
+      "Relaxing empty-backlog validation outside the controller_only predicate creates false completion."
     ]
   },
   "projection_and_release_extension_points": {
@@ -367,50 +358,54 @@
         "PROJECTION_SCHEMA_VERSION",
         "rebuild_project_projection_db",
         "check_project_projection_db",
-        "build_project_stats",
-        "_scan_work_root",
-        "_scan_runs",
-        "_scan_invocations",
+        "read_projected_experiment_results",
+        "read_projected_experiment_recovery",
+        "_scan_experiment_results",
+        "_scan_experiment_recovery",
         "_create_projection_schema",
         "_write_projection_rows",
         "_projection_counts",
-        "_database_counts",
-        "_project_stats_from_database",
-        "_project_stats_from_projection"
+        "_database_experiment_result_digest",
+        "_database_experiment_recovery_digest"
       ],
-      "current_authority_model": "Files and canonical events are authoritative; agentteam.db is replaced from a full scan and checked by counts plus content digests.",
-      "phase2_extension": [
-        "Scan immutable protocol/run bindings, operator ledger entries, recovery metadata, and sealed result bundles from the experiment root.",
-        "Add experiment run/result rows keyed by protocol digest, run ID, mode, repetition, terminal status, and result-bundle digest.",
-        "Project unsuccessful and budget-stopped bundles; never filter them at scan time.",
-        "Include experiment totals and bundle digests in _projection_counts and _database_counts so rebuild equality is mechanically checkable.",
-        "Keep raw spools and the SQLite file outside authoritative artifact-byte totals."
-      ]
+      "tables": [
+        "experiment_results",
+        "experiment_recovery"
+      ],
+      "authority_model": "Sealed result bundles and recovery snapshots remain authoritative files. SQLite is rebuilt from files, checked by counts and content digests, and readers fall back to files when stale or invalid.",
+      "extension_rule": "New experiment fields must be added to file scanning, table schema, row writing, projection counts, database counts, and digest reconciliation together."
+    },
+    "result_publication": {
+      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
+      "symbols": [
+        "publish_result_scan_scope",
+        "measure_experiment_artifacts",
+        "build_experiment_result_bundle",
+        "write_experiment_recovery_snapshot",
+        "seal_experiment_result_bundle",
+        "load_experiment_result_bundle",
+        "render_experiment_result",
+        "render_experiment_comparison"
+      ],
+      "invariant": "All terminal outcomes are create-if-absent sealed bundles; recovery snapshots are separate, and raw spools, Git objects, caches, DB files, and result staging are excluded from authoritative artifact bytes."
     },
     "release": {
       "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/release_manager.py",
       "symbols": [
         "install_release_from_checkout",
         "install_release_from_git",
-        "activate_release",
         "selected_release_identity",
         "active_release_identity",
         "publish_implementation_run",
-        "validate_run_binding",
-        "validate_acceptance_run_identity"
+        "validate_run_binding"
       ],
-      "related_taskpack_symbols": [
-        "taskpack._taskpack_blueprint_context",
+      "related_symbols": [
         "taskpack._validate_taskpack_blueprint_approval",
         "taskpack._active_taskpack_blueprint_release",
-        "agentteam._prepare_bound_implementation_run"
+        "agentteam._install_phase2_promotion_release",
+        "agentteam._run_controller_only_taskpack"
       ],
-      "reuse": [
-        "Candidate releases are immutable exported trees with manifest-bound source commit and Git object format.",
-        "Blueprint materialization already requires the approval-bound active release to match ID and source commit.",
-        "Implementation runs already bind a selected release before the runtime child starts."
-      ],
-      "phase2_boundary": "P2-07B finishes under the preflight release. Only after operator installation/activation of the integration commit may a separately approved controller-only promotion blueprint bind and execute the candidate release."
+      "boundary": "The implementation taskpack remains bound to its preflight release. After operator review, the integration commit is installed as an immutable candidate release; only a separately frozen, candidate-bound controller_only taskpack may execute P2-08 through P2-10."
     },
     "readiness": {
       "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_readiness.py",
@@ -418,216 +413,202 @@
         "build_p0_readiness_summary",
         "validate_experiment_manifest",
         "check_pilot_authorization",
-        "_check_pilot_authorization_with_record",
-        "canonical_json_sha256",
-        "_resolve_bound_artifact",
-        "_verify_phase1_git_promotion"
+        "_check_pilot_authorization_with_record"
+      ],
+      "gate_relation_symbols": [
+        "experiment_gates._validate_readiness_relation",
+        "experiment_gates._validate_live_calibration_relation",
+        "experiment_gates._validate_live_authorization",
+        "experiment_gates._validate_finalization_relation"
       ],
       "packaged_record": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/data/p0_experiment_readiness.v1.json",
-      "phase2_schemas": [
-        "experiments/native_agentteam_runtime/schemas/phase2_readiness_promotion.schema.json",
-        "experiments/native_agentteam_runtime/schemas/phase2_live_authorization.schema.json",
-        "experiments/native_agentteam_runtime/schemas/phase2_calibration.schema.json",
-        "experiments/native_agentteam_runtime/schemas/phase2_finalization.schema.json"
-      ],
-      "phase2_extension": [
-        "P2-08 must recompute all seven capability evidence bindings, readiness before/after digests, pilot manifest binding, and zero provider-call/target-mutation guard before changing only the packaged readiness record.",
-        "P2-09 must bind current gate epoch, P2-08 receipt, protocol, model/reasoning, immutable budgets, one provider lane, and exactly three unique modes before any live call.",
-        "P2-10 must verify a single-parent final report descendant whose exact changed paths are the roadmap and Phase 2 report.",
-        "Keep legacy agentteam_experiment_manifest.v1 validation-only; do not route Phase 2 execution through validate_experiment_manifest."
-      ]
-    },
-    "cli_surface": {
-      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
-      "symbols": [
-        "_add_experiment_parser",
-        "_handle_experiment",
-        "_handle_db"
-      ],
-      "current_state": "Experiment CLI exposes only readiness, legacy manifest validation, and pilot guard; DB CLI already exposes rebuild/check.",
-      "phase2_extension": "P2-06 adds run/resume/show/compare dispatch to experiment_controller/results while preserving existing readiness commands."
+      "invariant": "P2-08 recomputes seven capability bindings and a zero-call pilot guard, P2-09 validates current-epoch authorization and sealed three-mode results, and P2-10 validates the exact single-parent report/roadmap child relation."
     },
     "integration_risks": [
-      "Making agentteam.db authoritative lets projection loss or staleness change experiment truth.",
-      "Omitting failed/interrupted/budget-stopped bundles biases comparison output.",
-      "Using the mutable active-release pointer after run binding permits release drift.",
-      "Attempting to hot-load P2-07B from the implementation run violates the two-taskpack release boundary.",
-      "Schema validation alone does not prove Git ancestry, exact changed paths, evidence digests, or zero-provider-call guards."
+      "Making agentteam.db authoritative lets staleness or deletion change experiment truth.",
+      "Dropping failed, infrastructure_failed, interrupted, or budget_stopped bundles biases comparison.",
+      "Consulting the mutable active-release pointer after run binding permits runtime drift.",
+      "Hot-loading P2-07B from its own implementation run violates the two-taskpack release boundary.",
+      "Schema validation alone does not prove Git ancestry, exact changed paths, evidence digests, or zero-call guards."
     ]
   },
   "l2_task_map": [
     {
       "task_id": "P2-02B",
-      "objective": "Enforce bwrap provider isolation, evaluator-only canary denial, trusted argv evaluation, and leakage scanning.",
-      "primary_files": [
+      "implementation_files": [
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_workspace.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/mailbox_worker.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/m0_runtime.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py"
       ],
-      "existing_symbols": [
+      "schema_files": [
+        "experiments/native_agentteam_runtime/schemas/experiment_evaluation.schema.json",
+        "experiments/native_agentteam_runtime/schemas/experiment_protocol.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_started.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_usage.schema.json"
+      ],
+      "symbols": [
+        "experiment_sandbox.build_provider_sandbox_descriptor",
+        "experiment_sandbox.publish_experiment_launch_registration",
+        "experiment_sandbox.publish_registered_model_invocation_set_reference",
+        "experiment_sandbox.run_trusted_argv_evaluator",
+        "experiment_sandbox.validate_evaluation_evidence",
         "model_invocation.ModelInvocationCall.execute",
-        "model_invocation.SystemdGatedExecution.prepare",
-        "model_invocation._run_bounded_process",
-        "model_invocation._run_bounded_process_with_parent_death_safeguard",
         "m0_runtime.CodexRuntimeAdapter.run",
-        "taskpack_author._run_codex_author_command"
+        "taskpack_author._run_codex_author_command",
+        "two_phase_scheduler.TwoPhaseFileScheduler._register_experiment_attempt_launch"
       ],
-      "test_anchors": [
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py::test_model_invocation_test_provider_start_is_durable_before_launch",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py::test_model_invocation_codex_worker_start_precedes_permit_and_terminal",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py::test_model_invocation_systemd_resolves_provider_before_service_launch",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_live_codex_smoke.py::test_concurrent_same_id_permits_exactly_one_provider_launch",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      "tests": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentSandboxTests.test_common_model_invocation_policy_wraps_supported_and_fake_paths",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentSandboxTests.test_mode_authority_requires_registered_launch_policy",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentSandboxTests.test_sandbox_policy_survives_mailbox_context_projection",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentSandboxTests.test_trusted_argv_evaluation_waits_for_terminal_and_avoids_shell",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentSandboxTests.test_evaluation_seals_multiple_taskpack_authority_roots",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentSandboxTests.test_prompt_context_taskpack_and_artifact_canary_scans_are_bounded"
       ],
-      "required_tests": [
-        "Exact worker namespace cannot read canary content or canary path.",
-        "Supported worker, authoring, repo-map, follow-up, and direct-mode calls all use the same launch policy.",
-        "Unsafe mount/environment additions fail before durable provider start.",
-        "Acceptance runs only after all terminal invocation records exist and uses argv without shell execution.",
-        "Bounded prompt/context/taskpack/artifact scans detect canary or digest leakage.",
-        "Cleanup failure preserves the sealed result bundle."
-      ],
-      "highest_risks": [
+      "integration_risks": [
         "per-adapter sandbox bypass",
-        "host environment leakage",
-        "evaluator data mounted into provider namespace",
-        "acceptance started before provider terminalization"
+        "provider-visible controller or evaluator authority",
+        "incomplete lifecycle registry or late provider start",
+        "candidate Git control substitution",
+        "acceptance before terminal invocation sealing"
       ]
     },
     {
       "task_id": "P2-03B",
-      "objective": "Integrate global budget admission, drain, stop, and interruption recovery at provider and scheduler safe boundaries.",
-      "primary_files": [
+      "implementation_files": [
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
-        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py"
+      ],
+      "test_files": [
         "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
       ],
-      "existing_symbols": [
-        "model_invocation.ModelInvocationCall.execute",
-        "model_invocation.ModelInvocationCall.finalize",
-        "two_phase_scheduler.TwoPhaseFileScheduler.dispatch_ready",
-        "two_phase_scheduler.TwoPhaseFileScheduler.collect_ready_results",
-        "two_phase_scheduler.TwoPhaseFileScheduler._collect_result",
-        "two_phase_scheduler.TwoPhaseFileScheduler._integrate_accepted_result",
-        "two_phase_scheduler.reconcile_orphaned_invocation"
+      "symbols": [
+        "ExperimentController.prelaunch_admission",
+        "ExperimentController.post_terminal_accounting",
+        "ExperimentController.observe_boundary",
+        "ExperimentController.resume_interrupted",
+        "ModelInvocationCall._acquire_experiment_provider_admission",
+        "ModelInvocationCall.finalize",
+        "TwoPhaseFileScheduler._prepare_experiment_dispatch",
+        "TwoPhaseFileScheduler._collect_result",
+        "TwoPhaseFileScheduler._preserve_accepted_patch",
+        "TwoPhaseFileScheduler._recover_experiment_integration_state"
       ],
-      "test_anchors": [
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py::test_two_phase_scheduler_can_commit_verified_integration_patch",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py::test_two_phase_failed_integration_verification_does_not_advance_baseline",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py::test_stop_run_marker_prevents_active_two_phase_tick_from_restarting_run",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py::test_scheduler_collect_imports_every_worker_retry_lifecycle_once",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      "tests": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentProviderBudgetBoundaryTests.test_denied_prelaunch_creates_no_runner_start_or_process",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentProviderBudgetBoundaryTests.test_accounting_occurs_only_after_authoritative_terminal",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentProviderBudgetBoundaryTests.test_interruption_resume_preserves_original_remaining_budget",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::TwoPhaseSchedulerExperimentBoundaryTests.test_scheduler_drains_inflight_and_exposes_terminal_overshoot",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::TwoPhaseSchedulerExperimentBoundaryTests.test_preintegration_exhaustion_preserves_patch_and_baseline",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::TwoPhaseSchedulerExperimentBoundaryTests.test_budget_stop_is_deferred_through_successful_integration",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::TwoPhaseSchedulerExperimentBoundaryTests.test_interrupted_scheduler_reconciles_before_original_budget_resume"
       ],
-      "required_tests": [
-        "Exhaustion before launch yields zero additional provider starts.",
-        "One inflight invocation may overshoot and its authoritative total remains visible.",
-        "Exhaustion drains inflight work before durable budget_stopped.",
-        "A pre-integration stop preserves the accepted patch without mutating the baseline.",
-        "A stop observed during integration is deferred until apply/verify/commit or rollback completes.",
-        "Interruption resume reloads original consumption and rejects scored budget extension."
-      ],
-      "highest_risks": [
+      "integration_risks": [
         "interrupting an integration transaction",
-        "resetting consumption on replay",
-        "counting partial usage",
-        "run-local rather than protocol-global provider locking"
+        "resetting consumption on replay or resume",
+        "counting partial or nonterminal usage",
+        "run-local rather than protocol-global locking",
+        "terminal stop before inflight reconciliation"
       ]
     },
     {
       "task_id": "P2-06",
-      "objective": "Run single_codex, agentteam_direct, and agentteam_full through one controller, evaluator, finalizer, and provider lane.",
-      "primary_files": [
+      "implementation_files": [
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
-        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/mailbox_worker.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/m0_runtime.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py"
       ],
-      "existing_symbols": [
+      "schema_files": [
+        "experiments/native_agentteam_runtime/schemas/experiment_evaluation.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_started.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_usage.schema.json"
+      ],
+      "symbols": [
+        "execute_bound_experiment_mode",
+        "ExperimentModeController.execute",
+        "ExperimentCommonFinalizer.__call__",
+        "SingleCodexModeAdapter.execute",
+        "NativeSingleCodexProvider.__call__",
+        "AgentTeamDirectModeAdapter.preflight",
+        "AgentTeamDirectModeAdapter.execute",
+        "AgentTeamFullModeAdapter.execute",
         "taskpack.build_taskpack_runtime_args",
-        "taskpack.validate_taskpack",
-        "taskpack.freeze_taskpack",
         "agentteam._run_frozen_taskpack",
-        "agentteam._handle_start",
-        "agentteam._add_experiment_parser",
-        "agentteam._handle_experiment",
-        "m0_runtime.CodexRuntimeAdapter.run",
-        "taskpack_author._run_codex_author_command"
+        "two_phase_scheduler.TwoPhaseFileScheduler._register_experiment_attempt_launch"
       ],
-      "test_anchors": [
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py::test_build_taskpack_runtime_args_uses_frozen_files",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py::test_blueprint_manifest_exactly_matches_complete_backlog",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py::test_blueprint_materialization_rejects_committed_gate_schema_drift",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_m0_runtime.py::test_model_invocation_codex_worker_start_precedes_permit_and_terminal",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      "tests": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentModeAdapterTests.test_single_mode_receives_no_agentteam_task_context",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentModeAdapterTests.test_native_single_provider_uses_registered_live_contract",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentModeAdapterTests.test_counterbalanced_mode_order_is_enforced_and_immutable",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentModeAdapterTests.test_direct_mode_verifies_digest_and_overrides_project_root",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentModeAdapterTests.test_full_mode_authors_without_direct_taskpack_input",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentModeAdapterTests.test_independent_attempt_workspace_has_distinct_object_store",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::ExperimentModeAdapterTests.test_registered_codex_command_binds_model_and_reasoning"
       ],
-      "required_tests": [
-        "All three adapters receive the same commit/tree, goal, constraints, acceptance, environment, model/reasoning, seed, budgets, and operator limits.",
-        "single_codex performs exactly one fresh invocation and receives no taskpack or repo-map context.",
-        "agentteam_direct verifies the preregistered taskpack digest and uses only the attested snapshot root override.",
-        "agentteam_full cannot read the direct taskpack and performs normal author/freeze/run/follow-up orchestration.",
-        "Seeded counterbalanced order is deterministic and cannot change after results.",
-        "Every adapter returns the same lifecycle result shape to the common evaluator/finalizer without live calls in unit tests."
-      ],
-      "highest_risks": [
-        "different task facts between modes",
+      "integration_risks": [
+        "different task facts or operator limits between modes",
         "direct taskpack digest mutation",
         "snapshot root override exposed to workers",
-        "mode-specific provider or evaluator path"
+        "full mode reading the direct taskpack",
+        "mode-specific evaluator or provider lane"
       ]
     },
     {
       "task_id": "P2-07B",
-      "objective": "Implement executable Phase 2 relation validators, epoch-bound live authorization, and controller-only promotion taskpacks.",
-      "primary_files": [
+      "implementation_files": [
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_gates.py",
         "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
-        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py"
+      ],
+      "schema_files": [
         "experiments/native_agentteam_runtime/schemas/taskpack_blueprint.schema.json"
       ],
-      "existing_symbols": [
+      "test_files": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
+      ],
+      "symbols": [
+        "experiment_gates.GATE_SPECS",
+        "experiment_gates.validate_controller_gate_graph",
+        "experiment_gates.resolve_gate_spec",
+        "experiment_gates.run_gate_controller",
+        "experiment_gates._validate_readiness_relation",
+        "experiment_gates._validate_live_calibration_relation",
+        "experiment_gates._validate_finalization_relation",
+        "agentteam._run_controller_only_taskpack",
+        "agentteam._run_available_phase2_gate_controllers",
         "agentteam._evaluate_post_backlog_gates",
-        "agentteam._evaluate_one_post_backlog_gate",
-        "agentteam._complete_gated_milestone_if_ready",
-        "agentteam._run_frozen_taskpack",
         "taskpack._validate_taskpack_blueprint",
-        "taskpack._generate_taskpack_blueprint",
-        "taskpack.validate_taskpack",
-        "taskpack._validate_taskpack_blueprint_approval",
-        "taskpack._active_taskpack_blueprint_release",
-        "experiment_readiness.build_p0_readiness_summary",
-        "release_manager.selected_release_identity"
+        "taskpack.validate_taskpack"
       ],
-      "test_anchors": [
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py::test_post_backlog_gate_seal_register_and_integrate_enforcement",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py::test_post_backlog_context_maps_versioned_run_to_versioned_frozen_taskpack",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py::test_post_backlog_repair_publishes_new_epoch_with_candidate_environment",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py::test_post_backlog_gate_git_oid_format_and_operator_tty_fail_closed",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_readiness.py::test_current_readiness_blocks_structurally_valid_pilot",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_projection_db_operator_paths.py::test_report_only_commit_validator_rejects_tamper_and_extra_scope",
-        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      "tests": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::Phase2GateTests.test_live_authorization_is_epoch_bound_and_precedes_provider",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::Phase2GateTests.test_live_action_denies_before_run_allocation_without_authorization",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::Phase2GateTests.test_readiness_relation_recomputes_pilot_and_exact_commit",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::Phase2GateTests.test_live_calibration_relation_recomputes_sealed_results",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py::Phase2GateTests.test_finalization_relation_recomputes_exact_git_child",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py::TaskpackTests.test_controller_only_blueprint_materializes_and_freezes",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py::TaskpackTests.test_controller_only_taskpack_requires_blueprint_and_fixed_registry",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py::TaskpackTests.test_phase2_existing_promotion_release_is_revalidated"
       ],
-      "required_tests": [
-        "Controller-only blueprint accepts zero tasks/agents only with non-empty deterministic gates and candidate-release approval binding.",
-        "P2-08 recomputes evidence digests, readiness counts, pilot binding, zero provider calls, zero target mutations, and exact one-path change.",
-        "P2-09 rejects duplicate modes, stale epoch authorization, protocol/readiness/model drift, and budget extension before any provider call.",
-        "A valid immutable authorization resumes the same epoch deterministically and permits the bounded live controller.",
-        "P2-10 accepts only the single-parent exact two-path report commit relation.",
-        "Gate artifacts are create-if-absent, digest-bound, and idempotent; conflicting replay fails closed.",
-        "The implementation taskpack completes without executing newly integrated controllers; only the activated candidate release runs the promotion taskpack."
-      ],
-      "highest_risks": [
+      "integration_risks": [
         "schema-only gate acceptance",
-        "provider launch before current authorization",
-        "arbitrary entrypoint import",
-        "self-hot-loading the candidate runtime",
-        "empty backlog falsely treated as ordinary completion"
+        "provider launch before current-epoch authorization",
+        "arbitrary declaration-driven import",
+        "self-hot-loading the implementation commit",
+        "empty backlog entering ordinary completion"
       ]
     }
   ]
