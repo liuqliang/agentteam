@@ -30,7 +30,7 @@ branch integrates the accepted prefix and separately records these repairs:
 
 The recovery blueprint
 `2026-07-29-phase2-experiment-harness-recovery.blueprint.json` starts at P2-04
-against this committed prefix. It adds P2-05C as an explicit production
+against this committed prefix after a bounded P2-MAP-R refresh. It adds P2-05C as an explicit production
 cleanup task. P2-05C must seal and validate the terminal result before removing
 the disposable snapshot, publish an immutable cleanup receipt bound to the
 sealed result, retain cleanup failure as evidence, and make projection/show
@@ -38,7 +38,7 @@ report the receipt-derived status. A permanently pending bundle without a
 durable receipt is not accepted.
 
 Review v4 binds the recovery blueprint and this amended plan to runtime release
-`phase2-recovery-0a3f29f`. Approval of v4 authorizes only P2-04R through
+`phase2-recovery-0a3f29f`. Approval of v4 authorizes only P2-MAP-R through
 P2-07B-R. It does not authorize P2-08, live provider calibration, branch
 promotion, merge to the source branch, or push.
 
