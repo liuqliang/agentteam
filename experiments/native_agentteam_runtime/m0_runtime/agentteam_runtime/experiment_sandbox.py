@@ -27,6 +27,11 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
 
+from .experiment_contract import (
+    ExperimentContractError,
+    publish_immutable_json,
+)
+
 
 PROVIDER_SANDBOX_SCHEMA_VERSION = "experiment_provider_sandbox.v1"
 NAMESPACE_PROBE_SCHEMA_VERSION = "experiment_namespace_probe.v1"
@@ -4390,6 +4395,8 @@ def _is_privileged_system_tree(path):
         trusted_system_uid = _TRUSTED_BWRAP_PATH.stat().st_uid
     except OSError:
         return False
+    if trusted_system_uid != 0:
+        return False
     current = path
     while True:
         try:
@@ -4512,27 +4519,18 @@ def _canonical_json_bytes(value):
 
 def _publish_immutable_json(path, value):
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = _canonical_json_bytes(value) + b"\n"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags, 0o600)
-    except FileExistsError as exc:
+        publication = publish_immutable_json(
+            path,
+            value,
+            label="experiment sandbox authority",
+        )
+    except ExperimentContractError as exc:
+        raise ExperimentSandboxError(str(exc)) from exc
+    if not publication["created"]:
         raise ExperimentSandboxError(
             f"evaluation evidence already exists: {path}"
-        ) from exc
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except Exception:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+        )
 
 
 def _utc_timestamp():

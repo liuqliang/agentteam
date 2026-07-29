@@ -121,6 +121,7 @@ from agentteam_runtime.experiment_sandbox import (
     _candidate_repository_state,
     _approved_acceptance_executable,
     _read_digest_bound_evaluator,
+    _is_privileged_system_tree,
     _run_bounded_argv,
     _sandbox_policy_sha256,
     ExperimentEvaluationBlocked,
@@ -7717,23 +7718,23 @@ class ExperimentContractSchemaTests(unittest.TestCase):
     def test_immutable_publication_digest_uses_serialized_snapshot(self):
         value = {"identity": "before-open"}
         snapshot = copy.deepcopy(value)
-        real_open = os.open
+        real_mkstemp = tempfile.mkstemp
 
         with tempfile.TemporaryDirectory() as tmp:
             artifact_path = Path(tmp) / "authority.json"
             mutation_done = False
 
-            def mutate_after_artifact_open(path, flags, mode=0o777):
+            def mutate_after_temporary_open(*args, **kwargs):
                 nonlocal mutation_done
-                fd = real_open(path, flags, mode)
-                if Path(path) == artifact_path and not mutation_done:
+                temporary = real_mkstemp(*args, **kwargs)
+                if not mutation_done:
                     value["identity"] = "after-open"
                     mutation_done = True
-                return fd
+                return temporary
 
             with patch(
-                "agentteam_runtime.experiment_contract.os.open",
-                side_effect=mutate_after_artifact_open,
+                "agentteam_runtime.experiment_contract.tempfile.mkstemp",
+                side_effect=mutate_after_temporary_open,
             ):
                 publication = publish_immutable_json(artifact_path, value)
 
@@ -7746,6 +7747,47 @@ class ExperimentContractSchemaTests(unittest.TestCase):
                 publication["sha256"],
                 canonical_json_sha256(snapshot),
             )
+
+    def test_immutable_publication_exposes_only_fsynced_payload(self):
+        value = {"identity": "complete-before-visible"}
+        expected = canonical_json_bytes(value) + b"\n"
+        real_link = os.link
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_path = Path(tmp) / "authority.json"
+
+            def inspect_before_publish(source, target, **kwargs):
+                self.assertFalse(Path(target).exists())
+                self.assertEqual(Path(source).read_bytes(), expected)
+                return real_link(source, target, **kwargs)
+
+            with patch(
+                "agentteam_runtime.experiment_contract.os.link",
+                side_effect=inspect_before_publish,
+            ):
+                publication = publish_immutable_json(artifact_path, value)
+
+            self.assertTrue(publication["created"])
+            self.assertEqual(artifact_path.read_bytes(), expected)
+
+    def test_immutable_publication_failure_does_not_poison_authority_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_path = Path(tmp) / "authority.json"
+            with patch(
+                "agentteam_runtime.experiment_contract.os.link",
+                side_effect=OSError("simulated publish interruption"),
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "simulated publish interruption",
+                ):
+                    publish_immutable_json(
+                        artifact_path,
+                        {"identity": "not-published"},
+                    )
+
+            self.assertFalse(artifact_path.exists())
+            self.assertEqual(list(Path(tmp).glob(".authority.json.*.tmp")), [])
 
 
 class ExperimentAllocationTests(unittest.TestCase):
@@ -8350,6 +8392,47 @@ class ExperimentWorkspaceTests(unittest.TestCase):
             self.assertFalse((run_dir / "repository").exists())
             self.assertFalse((run_dir / "clean-snapshot.json").exists())
 
+    def test_nested_tracked_prior_agentteam_state_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp)
+            nested_state = (
+                fixture["source"]
+                / "nested"
+                / ".agentteam"
+                / "prior-run.json"
+            )
+            nested_state.parent.mkdir(parents=True)
+            nested_state.write_text("{}\n", encoding="utf-8")
+            _git(fixture["source"], "add", str(nested_state))
+            _git(
+                fixture["source"],
+                "commit",
+                "--quiet",
+                "-m",
+                "track nested prior run state",
+            )
+            fixture["repository"]["commit"] = _git(
+                fixture["source"],
+                "rev-parse",
+                "HEAD",
+            ).stdout.strip()
+            fixture["repository"]["tree"] = _git(
+                fixture["source"],
+                "rev-parse",
+                "HEAD^{tree}",
+            ).stdout.strip()
+            run_dir = Path(tmp) / "experiment-run-nested-prior-state"
+            run_dir.mkdir()
+
+            with self.assertRaisesRegex(
+                ExperimentWorkspaceError,
+                "prior AgentTeam run state",
+            ):
+                allocate_clean_snapshot(run_dir, fixture["repository"])
+
+            self.assertFalse((run_dir / "repository").exists())
+            self.assertFalse((run_dir / "clean-snapshot.json").exists())
+
     def test_cleanup_preserves_sealed_result_and_records_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = _fixture_repository(tmp)
@@ -8425,6 +8508,15 @@ class ExperimentWorkspaceTests(unittest.TestCase):
 
 
 class ExperimentSandboxTests(unittest.TestCase):
+    def test_privileged_system_tree_requires_root_owned_bwrap(self):
+        fake_bwrap = Mock()
+        fake_bwrap.stat.return_value.st_uid = 12345
+        with patch(
+            "agentteam_runtime.experiment_sandbox._TRUSTED_BWRAP_PATH",
+            fake_bwrap,
+        ):
+            self.assertFalse(_is_privileged_system_tree(Path("/usr")))
+
     def test_evaluator_execution_uses_digest_bound_memory_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
             evaluator = Path(tmp) / "evaluator.py"

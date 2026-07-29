@@ -790,10 +790,8 @@ def _prior_run_state_paths(inventory):
         _, separator, path = entry.partition(b"\t")
         if not separator:
             raise ExperimentWorkspaceError("snapshot Git inventory is malformed")
-        if any(
-            path == root or path.startswith(root + b"/")
-            for root in _PRIOR_RUN_ROOTS
-        ):
+        path_parts = path.split(b"/")
+        if any(root in path_parts for root in _PRIOR_RUN_ROOTS):
             paths.append(os.fsdecode(path))
     return sorted(paths)
 

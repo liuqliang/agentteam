@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -274,45 +275,40 @@ def publish_immutable_json(path, value, *, label="immutable JSON artifact"):
     canonical_payload = canonical_json_bytes(value)
     payload = canonical_payload + b"\n"
     payload_sha256 = hashlib.sha256(canonical_payload).hexdigest()
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    created = False
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=parent,
+    )
+    temporary_path = Path(temporary_name)
     try:
-        fd = os.open(path, flags, 0o600)
-        created = True
-    except FileExistsError:
-        existing = _read_file_bytes(path, label)
-        if existing != payload:
-            raise ExperimentContractError(
-                f"{label} already exists with different or non-canonical content: {path}"
-            )
-        return {
-            "path": str(path),
-            "sha256": payload_sha256,
-            "created": False,
-        }
-    except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            raise ExperimentContractError(f"{label} path is a symlink: {path}") from exc
-        raise
-    try:
-        _write_all(fd, payload)
-        os.fsync(fd)
-    except Exception:
-        os.close(fd)
-        if created:
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-        raise
-    else:
-        os.close(fd)
-    _fsync_directory(parent)
+        try:
+            _write_all(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        try:
+            os.link(temporary_path, path, follow_symlinks=False)
+        except FileExistsError:
+            existing = _read_file_bytes(path, label)
+            if existing != payload:
+                raise ExperimentContractError(
+                    f"{label} already exists with different or "
+                    f"non-canonical content: {path}"
+                )
+            created = False
+        else:
+            created = True
+            _fsync_directory(parent)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
     return {
         "path": str(path),
         "sha256": payload_sha256,
-        "created": True,
+        "created": created,
     }
 
 
