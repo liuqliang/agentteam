@@ -1,8 +1,8 @@
 # Phase 2 Experiment Harness And Short Calibration Taskpack Set
 
-Status: operator-approved v2 architecture direction; implementation remains
-blocked until P2-00 review approves the final plan and deterministic blueprint
-digests.
+Status: P2-01 through P2-07B implementation and contract repair are complete;
+P2-08 remains blocked until a new P2-00 review approves the repaired plan and
+deterministic blueprint digests.
 
 ## Purpose
 
@@ -704,7 +704,8 @@ Create a small deterministic repository fixture with a mechanical source
 change and acceptance command. Execute all three modes through deterministic
 adapters, then repeat one mode. Prove equal source/acceptance inputs, 100%
 usage coverage, no double counting, projection rebuild equality, result
-retention on a controlled failure, and concise comparison output.
+retention for `failed`, `infrastructure_failed`, `interrupted`, and
+`budget_stopped`, and concise comparison output.
 
 Add a bounded multi-file fixture with one repair opportunity. Exercise clean
 snapshot, canary denial, budget stop, intervention ledger, and all bundle
@@ -736,18 +737,20 @@ stops for operator review. The operator installs `C` as the candidate release
 and approves/freezes the controller-only promotion taskpack. Its deterministic
 controller then:
 
-1. recomputes all capability evidence and creates a single-child commit `R`
-   from `C` that changes only the packaged readiness record;
+1. recomputes all capability evidence, validates the canonical deterministic
+   calibration report against `C`, and creates a single-child commit `R` from
+   `C` that changes only the packaged readiness record;
 2. builds a candidate runtime release from `R`;
-3. refreshes the gate epoch to `R` and registers the P2-08 evidence against
-   that epoch;
-4. runs `check-pilot` against a newly bound protocol/run pair using the
-   candidate release;
-5. proves the pilot guard performed zero provider calls and zero target
-   mutations.
+3. runs `check-pilot` against a newly bound protocol/run pair using the
+   candidate release and proves zero provider calls and zero target mutations;
+4. durably journals the complete P2-08 action, advances the integration branch
+   to `R`, refreshes the gate epoch to `R`, and registers the complete P2-08
+   evidence against that epoch.
 
 The readiness evidence binds exact artifact digests and test IDs. A
-schema-valid assertion without recomputation cannot pass.
+schema-valid assertion without recomputation cannot pass. No partial P2-08
+receipt is published before the pilot guard completes; recovery resumes from
+the create-if-absent action journal.
 
 ### P2-09 Bounded Live Calibration
 
@@ -778,7 +781,8 @@ push, or release activation.
 - `invocation_level_real_usage` passes only from the validated Phase 1
   completion promotion chain.
 - `three_mode_experiment_harness` passes only after P2-07 executes all modes
-  from one protocol family.
+  from one protocol family and publishes a canonical calibration report bound
+  to the validated code commit.
 - `immutable_experiment_manifest` passes only after protocol/run publication,
   stable-request binding,
   tamper, and resume tests.
@@ -790,7 +794,9 @@ push, or release activation.
   normalize and replay idempotently.
 - `machine_readable_result_bundle` passes only after success, task failure,
   infrastructure failure, interruption, and budget-stop bundles reconcile
-  before and after projection rebuild.
+  before and after projection rebuild. The P2-08 relation validator parses the
+  calibration report and rejects a digest-bound file that does not satisfy
+  this terminal-status inventory.
 
 No worker may promote a capability from prose confidence. Every promotion
 requires deterministic evidence paths in the readiness record.

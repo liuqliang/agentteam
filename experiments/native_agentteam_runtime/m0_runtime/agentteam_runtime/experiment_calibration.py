@@ -296,6 +296,8 @@ def validate_deterministic_calibration_report(report):
         or controlled.get("retention_status") != "passed"
         or not controlled.get("controlled_failure_run_ids")
         or not controlled.get("budget_stopped_run_ids")
+        or set(controlled.get("terminal_statuses", []))
+        != _CONTROLLED_FAILURE_STATUSES | {"budget_stopped"}
     ):
         raise ExperimentCalibrationError(
             "deterministic calibration controlled outcomes are invalid"
@@ -379,8 +381,10 @@ def validate_deterministic_calibration_report(report):
         not isinstance(comparison, dict)
         or comparison.get("status") != "complete"
         or not _is_sha256(comparison.get("sha256"))
-        or "budget_stopped" not in retained
-        or not retained.intersection(_CONTROLLED_FAILURE_STATUSES)
+        or not (
+            _CONTROLLED_FAILURE_STATUSES
+            | {"budget_stopped", "completed"}
+        ).issubset(retained)
     ):
         raise ExperimentCalibrationError(
             "deterministic calibration comparison evidence is invalid"
@@ -790,11 +794,23 @@ def _validate_isolation(runs):
 
 
 def _validate_controlled_outcomes(controlled):
+    failures_by_status = {
+        status: [
+            item
+            for item in controlled
+            if item["bundle"]["terminal_status"] == status
+        ]
+        for status in _CONTROLLED_FAILURE_STATUSES
+    }
+    missing_failures = sorted(
+        status
+        for status, items in failures_by_status.items()
+        if not items
+    )
     failures = [
         item
-        for item in controlled
-        if item["bundle"]["terminal_status"]
-        in _CONTROLLED_FAILURE_STATUSES
+        for items in failures_by_status.values()
+        for item in items
     ]
     budget_stops = []
     for item in controlled:
@@ -814,9 +830,10 @@ def _validate_controlled_outcomes(controlled):
                 "budget stop is not backed by exhausted controller evidence"
             )
         budget_stops.append(item)
-    if not failures or not budget_stops:
+    if missing_failures or not budget_stops:
         raise ExperimentCalibrationError(
-            "calibration must retain controlled failure and budget stop"
+            "calibration must retain failed, infrastructure_failed, "
+            "interrupted, and budget_stopped outcomes"
         )
     return {
         "controlled_failure_run_ids": sorted(
@@ -824,6 +841,12 @@ def _validate_controlled_outcomes(controlled):
         ),
         "budget_stopped_run_ids": sorted(
             item["bundle"]["experiment_run_id"] for item in budget_stops
+        ),
+        "terminal_statuses": sorted(
+            {
+                item["bundle"]["terminal_status"]
+                for item in [*failures, *budget_stops]
+            }
         ),
         "retention_status": "passed",
     }

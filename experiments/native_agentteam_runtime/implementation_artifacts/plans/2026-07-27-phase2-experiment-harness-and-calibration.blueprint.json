@@ -68,7 +68,7 @@
       "exact_path_exceptions": {
         "P2-01": 6,
         "P2-02B": 12,
-        "P2-06": 13,
+        "P2-06": 14,
         "P2-07B": 6
       },
       "exception_scope_rule": "production_and_schema_paths_exact_test_and_fixture_directory_scope_allowed",
@@ -76,7 +76,7 @@
     }
   },
   "approval": {
-    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase2-experiment-harness-contract-review.v1.json",
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase2-experiment-harness-contract-review.v2.json",
     "schema_path": "experiments/native_agentteam_runtime/schemas/phase2_contract_review.schema.json",
     "required_decision": "approved",
     "git_object_format_required": true,
@@ -636,7 +636,7 @@
         "three_mode_equal_input_evidence",
         "one_mode_repeat_drift_evidence",
         "clean_snapshot_and_canary_evidence",
-        "controlled_failure_and_budget_stop_evidence",
+        "all_terminal_status_and_budget_stop_evidence",
         "operator_ledger_evidence",
         "projection_rebuild_equality",
         "readiness_promotion_candidate"
@@ -648,7 +648,7 @@
         "The bwrap canary is denied and absent from retained runtime artifacts.",
         "Cached and non-cached input remain distinct.",
         "Projection rebuild preserves experiment totals and bundle digests.",
-        "Controlled failure and budget stop remain in comparison output.",
+        "Failed, infrastructure_failed, interrupted, and budget_stopped outcomes remain in comparison output.",
         "Calibration output makes no benchmark superiority claim."
       ],
       "stop_condition": "Stop if deterministic evidence cannot authorize readiness without a live provider or if calibration is presented as scored evidence.",
@@ -711,13 +711,14 @@
         "authorization_pause_and_resume"
       ],
       "acceptance_criteria": [
-        "P2-08 recomputes capability evidence digests, readiness counts, pilot manifest binding, zero provider calls, and zero target mutations.",
+        "P2-08 validates a canonical deterministic calibration report bound to the validated code commit and recomputes capability evidence digests, readiness counts, pilot manifest binding, zero provider calls, and zero target mutations.",
         "P2-09 rejects duplicate modes, protocol drift, stale readiness, stale epoch authorization, model-policy drift, and budget extension.",
         "P2-10 accepts only a single-parent final report commit changing the report and roadmap paths declared by the promotion blueprint and finalization schema.",
         "The implementation taskpack completes under the preflight release without attempting to hot-load its own integrated runtime changes.",
         "The candidate release can materialize a controller-only promotion blueprint with an empty model backlog and non-empty deterministic gates.",
         "After operator review, the candidate release runs that separately frozen promotion taskpack; gates progress automatically and pause only at P2-09 authorization.",
         "The controller resumes deterministically after a valid authorization artifact is registered.",
+        "P2-08 completes the zero-call pilot guard before journaling the complete action, advancing to R, refreshing the epoch, and registering the receipt.",
         "Gate evidence and authorization artifacts are create-if-absent, digest-bound, and registered to the current gate epoch."
       ],
       "stop_condition": "Stop if a gate can pass from schema-valid claims without recomputing source evidence or if a live provider call can occur without current operator authorization.",

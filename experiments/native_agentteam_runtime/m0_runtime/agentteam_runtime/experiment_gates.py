@@ -21,6 +21,7 @@ from .experiment_calibration import (
     _validate_mode_family,
     _validate_unique_results,
     _validate_usage_coverage,
+    load_deterministic_calibration_report,
 )
 from .experiment_contract import (
     allocate_experiment_run,
@@ -79,6 +80,9 @@ _CAPABILITY_TEST_IDS = {
         "tests.test_experiment_harness."
         "ExperimentModeAdapterTests."
         "test_counterbalanced_mode_order_is_enforced_and_immutable",
+        "tests.test_experiment_harness."
+        "ExperimentCalibrationTests."
+        "test_deterministic_l1_l2_calibration_rebuilds_all_evidence",
     ),
     "immutable_experiment_manifest": (
         "tests.test_experiment_harness."
@@ -101,6 +105,12 @@ _CAPABILITY_TEST_IDS = {
     ),
     "actual_budget_enforcement": (
         "tests.test_experiment_harness."
+        "ExperimentBudgetTests."
+        "test_token_warning_and_exhaustion_include_exact_boundaries",
+        "tests.test_experiment_harness."
+        "ExperimentBudgetTests."
+        "test_one_lane_terminal_completion_exposes_overshoot",
+        "tests.test_experiment_harness."
         "ExperimentProviderBudgetBoundaryTests."
         "test_denied_prelaunch_creates_no_runner_start_or_process",
         "tests.test_experiment_harness."
@@ -109,8 +119,17 @@ _CAPABILITY_TEST_IDS = {
         "tests.test_experiment_harness."
         "TwoPhaseSchedulerExperimentBoundaryTests."
         "test_scheduler_denies_worker_dispatch_after_budget_exhaustion",
+        "tests.test_experiment_harness."
+        "TwoPhaseSchedulerExperimentBoundaryTests."
+        "test_preintegration_exhaustion_preserves_patch_and_baseline",
     ),
     "operator_action_ledger": (
+        "tests.test_experiment_harness."
+        "ExperimentOperatorActionLedgerTests."
+        "test_supported_inputs_map_to_closed_vocabulary_without_raw_content",
+        "tests.test_experiment_harness."
+        "ExperimentOperatorActionLedgerTests."
+        "test_replay_is_idempotent_and_conflicting_response_fails_closed",
         "tests.test_experiment_harness."
         "ExperimentOperatorActionLedgerTests."
         "test_experiment_gateways_account_before_applying_runtime_input",
@@ -122,6 +141,9 @@ _CAPABILITY_TEST_IDS = {
         "tests.test_experiment_harness."
         "ExperimentResultBundleTests."
         "test_terminal_bundle_is_atomic_idempotent_and_conflict_safe",
+        "tests.test_experiment_harness."
+        "ExperimentResultBundleTests."
+        "test_recovery_snapshots_are_versioned_and_separate",
         "tests.test_experiment_harness."
         "ExperimentResultBundleTests."
         "test_projection_rebuild_preserves_all_outcomes_and_digests",
@@ -478,6 +500,10 @@ def execute_readiness_promotion_action(
             "deterministic_calibration",
         ),
         authority_roots=context.get("authority_roots"),
+    )
+    _validated_deterministic_calibration(
+        authority["deterministic_calibration"]["path"],
+        expected_source_commit=validated_code,
     )
     readiness_path = worktree / _READINESS_PATH
     readiness_before = _safe_file(
@@ -1402,6 +1428,10 @@ def _validate_readiness_relation(artifact, repository_root, context):
         context["deterministic_calibration_path"],
         artifact["deterministic_calibration_sha256"],
         "deterministic calibration",
+    )
+    _validated_deterministic_calibration(
+        context["deterministic_calibration_path"],
+        expected_source_commit=artifact["validated_code_sha"],
     )
     _require_canonical_json_digest(
         context["pilot_manifest_path"],
@@ -2849,6 +2879,20 @@ def _safe_file(path, label):
 def _require_file_digest(path, expected, label):
     if _sha256_file(_safe_file(path, label)) != expected:
         raise Phase2GateError(f"{label} digest mismatch")
+
+
+def _validated_deterministic_calibration(path, *, expected_source_commit):
+    try:
+        loaded = load_deterministic_calibration_report(path)
+    except (ExperimentCalibrationError, OSError) as exc:
+        raise Phase2GateError(
+            "deterministic calibration authority is invalid"
+        ) from exc
+    if loaded["report"].get("source_commit") != expected_source_commit:
+        raise Phase2GateError(
+            "deterministic calibration source commit mismatch"
+        )
+    return loaded
 
 
 def _require_canonical_json_digest(path, expected, label):

@@ -10472,7 +10472,8 @@ class ExperimentCalibrationTests(unittest.TestCase):
         protocol["direct_taskpack"]["sha256"] = frozen["manifest"][
             "digest_sha256"
         ]
-        protocol["budgets"]["max_total_tokens"] = 18
+        protocol["repetition_policy"]["count"] = 3
+        protocol["budgets"]["max_total_tokens"] = 28
         controller = create_experiment_controller(
             projection_root / "protocol-controller",
             protocol_id=protocol["experiment_id"],
@@ -10767,7 +10768,8 @@ class ExperimentCalibrationTests(unittest.TestCase):
                 }
 
         def run_runtime_command(command, **_kwargs):
-            if execution["forced_runtime_status"]:
+            requested_status = execution["forced_runtime_status"]
+            if requested_status == "infrastructure_failed":
                 raise OSError("controlled calibration runtime failure")
             output = io.StringIO()
             with patch.object(
@@ -10776,12 +10778,96 @@ class ExperimentCalibrationTests(unittest.TestCase):
                 CalibrationWorkerPool,
             ), redirect_stdout(output):
                 cli_module.main(command[3:])
+            scheduler_status = {
+                "completed": "completed",
+                "failed": "completed",
+                "interrupted": "interrupted",
+                "budget_stopped": "budget_stopped",
+            }[requested_status]
+            stdout = output.getvalue() + json.dumps(
+                {"scheduler_status": scheduler_status},
+                sort_keys=True,
+            ) + "\n"
             return subprocess.CompletedProcess(
                 command,
-                0,
-                output.getvalue(),
+                1 if requested_status == "failed" else 0,
+                stdout,
                 "",
             )
+
+        def run_bounded_argv_without_systemd(
+            argv,
+            *,
+            cwd,
+            environment,
+            timeout_seconds,
+            max_output_bytes,
+            cpu_limit,
+            memory_limit_bytes,
+            input_bytes=None,
+        ):
+            del cpu_limit, memory_limit_bytes
+            try:
+                completed = subprocess.run(
+                    argv,
+                    cwd=cwd,
+                    env=environment,
+                    input=input_bytes,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+                timed_out = False
+            except subprocess.TimeoutExpired as exc:
+                completed = subprocess.CompletedProcess(
+                    argv,
+                    -9,
+                    exc.stdout or b"",
+                    exc.stderr or b"",
+                )
+                timed_out = True
+            if execution["forced_runtime_status"] in {
+                "failed",
+                "infrastructure_failed",
+                "interrupted",
+            }:
+                completed = subprocess.CompletedProcess(
+                    argv,
+                    1,
+                    completed.stdout,
+                    completed.stderr,
+                )
+            stdout_bytes = bytes(completed.stdout or b"")[
+                :max_output_bytes
+            ]
+            stderr_bytes = bytes(completed.stderr or b"")[
+                :max_output_bytes
+            ]
+            return {
+                "returncode": completed.returncode,
+                "timed_out": timed_out,
+                "stdout": stdout_bytes.decode(
+                    "utf-8",
+                    errors="replace",
+                ),
+                "stderr": stderr_bytes.decode(
+                    "utf-8",
+                    errors="replace",
+                ),
+                "stdout_bytes": stdout_bytes,
+                "stderr_bytes": stderr_bytes,
+                "stdout_truncated": len(completed.stdout or b"")
+                > max_output_bytes,
+                "stderr_truncated": len(completed.stderr or b"")
+                > max_output_bytes,
+                "execution_boundary": (
+                    "systemd_user_transient_service"
+                ),
+                "systemd_unit": (
+                    "agentteam-eval-000000000000000000000000.service"
+                ),
+            }
 
         results = []
         base_order = protocol["mode_order"]
@@ -10794,7 +10880,15 @@ class ExperimentCalibrationTests(unittest.TestCase):
             [
                 (1, rotated[0], "infrastructure_failed"),
                 (1, rotated[1], "completed"),
-                (1, rotated[2], "budget_stopped"),
+                (1, rotated[2], "failed"),
+            ]
+        )
+        twice_rotated = base_order[2:] + base_order[:2]
+        sequence.extend(
+            [
+                (2, twice_rotated[0], "failed"),
+                (2, twice_rotated[1], "interrupted"),
+                (2, twice_rotated[2], "budget_stopped"),
             ]
         )
         with patch(
@@ -10805,6 +10899,10 @@ class ExperimentCalibrationTests(unittest.TestCase):
             "agentteam_runtime.agentteam."
             "_run_runtime_command_with_progress",
             side_effect=run_runtime_command,
+        ), patch(
+            "agentteam_runtime.experiment_sandbox."
+            "_run_bounded_argv",
+            side_effect=run_bounded_argv_without_systemd,
         ):
             for repetition, mode, status in sequence:
                 key = (
@@ -10844,13 +10942,9 @@ class ExperimentCalibrationTests(unittest.TestCase):
                         request_source="run_stop",
                     )
                 execution["single_returncode"] = (
-                    0
+                    1 if status == "failed" else 0
                 )
-                execution["forced_runtime_status"] = (
-                    status
-                    if status == "infrastructure_failed"
-                    else None
-                )
+                execution["forced_runtime_status"] = status
                 if mode == "single_codex":
                     adapter = SingleCodexModeAdapter()
                 elif mode == "agentteam_direct":
@@ -10903,7 +10997,7 @@ class ExperimentCalibrationTests(unittest.TestCase):
         controlled = [
             item
             for item in results
-            if item["manifest"]["repetition_index"] == 1
+            if item["manifest"]["repetition_index"] > 0
             and item["status"] != "completed"
         ]
         duplicate_source = primary[0]
@@ -10970,11 +11064,24 @@ class ExperimentCalibrationTests(unittest.TestCase):
             )
             self.assertEqual(
                 report["projection_rebuild"]["result_count"],
-                6,
+                9,
             )
             self.assertEqual(
                 report["controlled_outcomes"]["retention_status"],
                 "passed",
+            )
+            self.assertEqual(
+                set(
+                    report["controlled_outcomes"][
+                        "terminal_statuses"
+                    ]
+                ),
+                {
+                    "budget_stopped",
+                    "failed",
+                    "infrastructure_failed",
+                    "interrupted",
+                },
             )
             self.assertFalse(
                 report["readiness_promotion_candidate"][
@@ -11049,6 +11156,9 @@ class Phase2GateTests(unittest.TestCase):
             "tests.test_experiment_harness."
             "ExperimentModeAdapterTests."
             "test_counterbalanced_mode_order_is_enforced_and_immutable",
+            "tests.test_experiment_harness."
+            "ExperimentCalibrationTests."
+            "test_deterministic_l1_l2_calibration_rebuilds_all_evidence",
         ),
         "immutable_experiment_manifest": (
             "tests.test_experiment_harness."
@@ -11071,6 +11181,12 @@ class Phase2GateTests(unittest.TestCase):
         ),
         "actual_budget_enforcement": (
             "tests.test_experiment_harness."
+            "ExperimentBudgetTests."
+            "test_token_warning_and_exhaustion_include_exact_boundaries",
+            "tests.test_experiment_harness."
+            "ExperimentBudgetTests."
+            "test_one_lane_terminal_completion_exposes_overshoot",
+            "tests.test_experiment_harness."
             "ExperimentProviderBudgetBoundaryTests."
             "test_denied_prelaunch_creates_no_runner_start_or_process",
             "tests.test_experiment_harness."
@@ -11079,8 +11195,17 @@ class Phase2GateTests(unittest.TestCase):
             "tests.test_experiment_harness."
             "TwoPhaseSchedulerExperimentBoundaryTests."
             "test_scheduler_denies_worker_dispatch_after_budget_exhaustion",
+            "tests.test_experiment_harness."
+            "TwoPhaseSchedulerExperimentBoundaryTests."
+            "test_preintegration_exhaustion_preserves_patch_and_baseline",
         ),
         "operator_action_ledger": (
+            "tests.test_experiment_harness."
+            "ExperimentOperatorActionLedgerTests."
+            "test_supported_inputs_map_to_closed_vocabulary_without_raw_content",
+            "tests.test_experiment_harness."
+            "ExperimentOperatorActionLedgerTests."
+            "test_replay_is_idempotent_and_conflicting_response_fails_closed",
             "tests.test_experiment_harness."
             "ExperimentOperatorActionLedgerTests."
             "test_experiment_gateways_account_before_applying_runtime_input",
@@ -11092,6 +11217,9 @@ class Phase2GateTests(unittest.TestCase):
             "tests.test_experiment_harness."
             "ExperimentResultBundleTests."
             "test_terminal_bundle_is_atomic_idempotent_and_conflict_safe",
+            "tests.test_experiment_harness."
+            "ExperimentResultBundleTests."
+            "test_recovery_snapshots_are_versioned_and_separate",
             "tests.test_experiment_harness."
             "ExperimentResultBundleTests."
             "test_projection_rebuild_preserves_all_outcomes_and_digests",
@@ -11171,6 +11299,103 @@ class Phase2GateTests(unittest.TestCase):
             "phase2-gate@example.invalid",
         )
         return repository
+
+    @staticmethod
+    def _write_calibration_report(path, source_commit):
+        report = {
+            "schema_version": "phase2_deterministic_calibration.v1",
+            "calibration_status": "passed",
+            "claim_scope": (
+                "experiment_harness_readiness_only_not_benchmark_evidence"
+            ),
+            "protocol_sha256": "1" * 64,
+            "source_commit": source_commit,
+            "fixture_evidence": {
+                name: {
+                    "fixture_sha256": digest * 64,
+                    "file_count": 1,
+                }
+                for name, digest in (
+                    ("deterministic_l1", "2"),
+                    ("bounded_l2", "3"),
+                )
+            },
+            "mode_results": [
+                {"mode": mode}
+                for mode in (
+                    "single_codex",
+                    "agentteam_direct",
+                    "agentteam_full",
+                )
+            ],
+            "repeat_result": {"mode": "single_codex"},
+            "repeat_drift": {
+                "status": "complete",
+                "mode": "single_codex",
+                "acceptance_status_equal": True,
+                "changed_files_equal": True,
+                "superiority_interpretation": False,
+            },
+            "controlled_outcomes": {
+                "controlled_failure_run_ids": [
+                    "failed",
+                    "infrastructure-failed",
+                    "interrupted",
+                ],
+                "budget_stopped_run_ids": ["budget-stopped"],
+                "terminal_statuses": [
+                    "budget_stopped",
+                    "failed",
+                    "infrastructure_failed",
+                    "interrupted",
+                ],
+                "retention_status": "passed",
+            },
+            "duplicate_request": {
+                "status": "passed",
+                "allocation_status": "existing",
+                "provider_calls_during_duplicate_allocation": 0,
+                "result_bundle_sha256": "4" * 64,
+            },
+            "usage_coverage": {
+                "lifecycle_percent": 100,
+                "token_percent": 100,
+                "cached_input_distinct": True,
+            },
+            "isolation": {
+                "clean_snapshot_status": "passed",
+                "canary_denial_status": "passed",
+                "retained_leak_scan_status": "passed",
+            },
+            "operator_ledger": {
+                "status": "passed",
+                "operator_action_counts": {
+                    "expected_operator_action": 1,
+                    "corrective_intervention": 1,
+                    "decision_escalation": 1,
+                },
+            },
+            "projection_rebuild": {"status": "passed"},
+            "comparison": {
+                "status": "complete",
+                "result_count": 7,
+                "sha256": "5" * 64,
+                "retained_terminal_statuses": [
+                    "budget_stopped",
+                    "completed",
+                    "failed",
+                    "infrastructure_failed",
+                    "interrupted",
+                ],
+            },
+            "readiness_promotion_candidate": {
+                "status": "eligible",
+                "live_provider_calls_required": 0,
+                "benchmark_superiority_claim": False,
+            },
+        }
+        path.write_bytes(canonical_json_bytes(report) + b"\n")
+        return report
 
     def test_gate_registry_rejects_incomplete_action_contract(self):
         declaration = {
@@ -11304,6 +11529,41 @@ class Phase2GateTests(unittest.TestCase):
             "user.email",
             "phase2-gate@example.invalid",
         )
+        overlay = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.REPOSITORY_ROOT),
+                "diff",
+                "--binary",
+                "HEAD",
+                "--",
+                "experiments/native_agentteam_runtime",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        ).stdout
+        if overlay:
+            applied = subprocess.run(
+                ["git", "-C", str(repository), "apply", "--binary", "-"],
+                input=overlay,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if applied.returncode != 0:
+                raise AssertionError(
+                    applied.stderr.decode("utf-8", errors="replace")
+                )
+            _git(repository, "add", "experiments/native_agentteam_runtime")
+            _git(
+                repository,
+                "commit",
+                "--quiet",
+                "-m",
+                "overlay Phase 2 test worktree",
+            )
         return repository
 
     def test_live_authorization_is_epoch_bound_and_precedes_provider(self):
@@ -11857,10 +12117,7 @@ class Phase2GateTests(unittest.TestCase):
                     )
                 )
             )
-            calibration.write_text(
-                '{"calibration_status":"passed"}\n',
-                encoding="utf-8",
-            )
+            self._write_calibration_report(calibration, parent)
             pilot_manifest.write_text(
                 json.dumps(
                     {
@@ -12013,6 +12270,39 @@ class Phase2GateTests(unittest.TestCase):
             )
             self.assertEqual(relation["relation_status"], "passed")
             self.assertEqual(relation["capability_count"], 7)
+            calibration.write_text(
+                '{"calibration_status":"passed"}\n',
+                encoding="utf-8",
+            )
+            artifact["deterministic_calibration_sha256"] = hashlib.sha256(
+                calibration.read_bytes()
+            ).hexdigest()
+            artifact_path.write_text(
+                json.dumps(artifact, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                Phase2GateError,
+                "calibration authority is invalid",
+            ):
+                validate_gate_relation(
+                    spec,
+                    artifact_path,
+                    {
+                        "repository_root": str(repository),
+                        "integration_head": head,
+                        "protocol_path": str(protocol),
+                        "run_manifest_path": str(run_manifest),
+                        "deterministic_calibration_path": str(calibration),
+                        "pilot_manifest_path": str(pilot_manifest),
+                        "pilot_guard_path": str(pilot_guard),
+                        "runtime_release": candidate_release,
+                    },
+                )
+            self._write_calibration_report(calibration, parent)
+            artifact["deterministic_calibration_sha256"] = hashlib.sha256(
+                calibration.read_bytes()
+            ).hexdigest()
             capability_id = "machine_readable_result_bundle"
             artifact["capability_evidence"][capability_id][0][
                 "test_id"
@@ -12058,13 +12348,18 @@ class Phase2GateTests(unittest.TestCase):
                 "experiments/native_agentteam_runtime/schemas/"
                 "phase2_readiness_promotion.schema.json",
             )
-            _git(
+            if _git(
                 repository,
-                "commit",
-                "--quiet",
-                "-m",
-                "update readiness evidence schema",
-            )
+                "status",
+                "--porcelain=v1",
+            ).stdout.strip():
+                _git(
+                    repository,
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "update readiness evidence schema",
+                )
             readiness_path = (
                 repository
                 / "experiments"
@@ -12136,15 +12431,12 @@ class Phase2GateTests(unittest.TestCase):
             )
             protocol = root / "protocol-template.json"
             calibration = root / "calibration.json"
-            calibration.write_text(
-                '{"calibration_status":"passed"}\n',
-                encoding="utf-8",
-            )
             parent = _git(
                 repository,
                 "rev-parse",
                 "HEAD",
             ).stdout.strip()
+            self._write_calibration_report(calibration, parent)
             protocol_template = _protocol()
             protocol_template["repository"] = {
                 "source": str(repository),

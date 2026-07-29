@@ -3814,6 +3814,7 @@ class TaskpackTests(unittest.TestCase):
                 )
             },
         )
+
         tasks_by_id = {
             item["task_id"]: item
             for item in blueprint["tasks"]
@@ -3858,6 +3859,44 @@ class TaskpackTests(unittest.TestCase):
                     "model_invocation_live_smoke.schema.json"
                 ),
             }.issubset(set(tasks_by_id["P1-02A"]["read_scope"]))
+        )
+
+    def test_tracked_phase2_blueprint_dry_run_has_exact_task_and_edge_counts(self):
+        project_root = Path(__file__).resolve().parents[4]
+        blueprint_path = (
+            "experiments/native_agentteam_runtime/implementation_artifacts/plans/"
+            "2026-07-27-phase2-experiment-harness-and-calibration.blueprint.json"
+        )
+
+        result = taskpack_module.materialize_taskpack_blueprint(
+            project_root,
+            blueprint_path,
+            Path(tempfile.gettempdir()) / "unused-phase2-blueprint-output",
+            dry_run=True,
+        )
+
+        self.assertEqual(
+            result["task_ids"],
+            [
+                "P2-MAP",
+                "P2-01",
+                "P2-02A",
+                "P2-02B",
+                "P2-03A",
+                "P2-03B",
+                "P2-04",
+                "P2-05",
+                "P2-06",
+                "P2-07A",
+                "P2-07B",
+            ],
+        )
+        self.assertEqual(result["task_count"], 11)
+        self.assertEqual(result["dependency_edge_count"], 11)
+        self.assertEqual(result["validation_status"], "accepted")
+        self.assertEqual(
+            result["freeze_eligible"],
+            not bool(result["approval_diagnostics"]),
         )
 
     def _run_agentteam_json(self, *args):
