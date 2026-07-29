@@ -35,6 +35,19 @@ from agentteam_runtime.experiment_ledger import (
     load_experiment_operator_action_ledger,
     validate_experiment_operator_action,
 )
+from agentteam_runtime.experiment_results import (
+    ExperimentResultConflict,
+    ExperimentResultIntegrityError,
+    build_experiment_result_bundle,
+    load_experiment_result_bundle,
+    load_latest_experiment_recovery_snapshot,
+    measure_experiment_artifacts,
+    publish_result_scan_scope,
+    render_experiment_comparison,
+    render_experiment_result,
+    seal_experiment_result_bundle,
+    write_experiment_recovery_snapshot,
+)
 from agentteam_runtime.experiment_contract import (
     LEGACY_MANIFEST_SCHEMA_VERSION,
     ExperimentContractError,
@@ -107,6 +120,12 @@ from agentteam_runtime.operator_control import (
     resolve_experiment_permission_request,
     stop_run,
     stop_experiment_run,
+)
+from agentteam_runtime.projection_db import (
+    check_project_projection_db,
+    read_projected_experiment_recovery,
+    read_projected_experiment_results,
+    rebuild_project_projection_db,
 )
 import agentteam_runtime.two_phase_scheduler as two_phase_scheduler_module
 from agentteam_runtime.two_phase_scheduler import (
@@ -4617,6 +4636,797 @@ class ExperimentOperatorActionLedgerTests(unittest.TestCase):
             self.assertEqual(
                 recovered.policy["protocol_id"],
                 "phase2-operator-ledger",
+            )
+
+
+class ExperimentResultBundleTests(unittest.TestCase):
+    @staticmethod
+    def _fixture(root, *, terminal_status="completed", run_parent=None):
+        root = Path(root)
+        release = _release()
+        allocation_root = (
+            Path(run_parent).parent if run_parent is not None else root
+        )
+        allocation = allocate_experiment_run(
+            allocation_root,
+            _protocol(),
+            mode="agentteam_full",
+            repetition_index=0,
+            stable_request_key=f"result-{terminal_status}",
+            runtime_release=release,
+            bound_at="2026-07-27T00:00:00Z",
+        )
+        manifest = allocation["run_manifest"]
+        run_dir = Path(allocation["run_dir"])
+        retained = {}
+        for group in ("prompt", "context", "taskpack", "artifacts"):
+            path = run_dir / group
+            path.mkdir()
+            (path / f"{group}.txt").write_text(
+                f"{group} authority\n",
+                encoding="utf-8",
+            )
+            retained[group] = [str(path)]
+        spool = run_dir / "raw-spool"
+        spool.mkdir()
+        (spool / "provider.jsonl").write_text(
+            "raw provider output\n",
+            encoding="utf-8",
+        )
+        (run_dir / "artifacts" / "agentteam.db").write_bytes(b"db")
+        authority_root = root / f"authority-{run_dir.name}"
+        authority_root.mkdir(mode=0o700)
+        controller = create_experiment_controller(
+            authority_root / "controller",
+            protocol_id=_protocol()["experiment_id"],
+            max_total_tokens=_protocol()["budgets"][
+                "max_total_tokens"
+            ],
+            max_wall_time_seconds=_protocol()["budgets"][
+                "max_wall_time_seconds"
+            ],
+            soft_warning_ratio=_protocol()["budgets"][
+                "soft_warning_ratio"
+            ],
+            scored=_protocol()["scored"],
+            protocol_sha256=canonical_json_sha256(_protocol()),
+            operator_limits=_protocol()["operator_limits"],
+        )
+        controller.interrupt()
+        controller_snapshot = controller.snapshot()
+        snapshot_path = run_dir / "repository"
+        snapshot_path.mkdir()
+        snapshot_common_dir = snapshot_path / ".git-common"
+        snapshot_common_dir.mkdir()
+        source_common_dir = root / f"source-common-{run_dir.name}"
+        source_common_dir.mkdir()
+        clean_snapshot_path = run_dir / "clean-snapshot.json"
+        clean_snapshot = {
+            "schema_version": "experiment_clean_snapshot.v1",
+            "experiment_run_id": run_dir.name,
+            "attested_at": "2026-07-27T00:00:15Z",
+            "repository": copy.deepcopy(_protocol()["repository"]),
+            "snapshot_path": str(snapshot_path),
+            "snapshot_common_dir": str(snapshot_common_dir),
+            "source_common_dir": str(source_common_dir),
+            "path_preexisted": False,
+            "head_commit": _protocol()["repository"]["commit"],
+            "head_tree": _protocol()["repository"]["tree"],
+            "git_object_format": "sha1",
+            "detached_head": True,
+            "worktree_clean": True,
+            "common_dirs_distinct": True,
+            "remotes": [],
+            "alternates": [],
+            "extra_refs": [],
+            "file_inventory": {
+                "entry_count": 0,
+                "sha256": hashlib.sha256(b"").hexdigest(),
+                "inventory_limit": 100,
+                "matches_source": True,
+            },
+            "symlink_escape_count": 0,
+            "tracked_files_only": True,
+            "prior_run_state_detected": False,
+        }
+        clean_snapshot_path.write_bytes(
+            canonical_json_bytes(clean_snapshot) + b"\n"
+        )
+        clean_snapshot_reference = {
+            "schema_version": "clean_snapshot_attestation.v1",
+            "path": str(clean_snapshot_path),
+            "sha256": hashlib.sha256(
+                clean_snapshot_path.read_bytes()
+            ).hexdigest(),
+        }
+        scan_reference = publish_result_scan_scope(
+            authority_root,
+            retained,
+        )
+        from agentteam_runtime.experiment_sandbox import (
+            load_scan_scope_reference,
+        )
+
+        _scope, scan_digest = load_scan_scope_reference(
+            scan_reference,
+            authority_root,
+        )
+        evaluation_path = run_dir / "artifacts" / "evaluation.json"
+        evaluation = {
+            "scan_scope_sha256": scan_digest,
+            "evaluation_status": (
+                "passed" if terminal_status == "completed" else "failed"
+            ),
+        }
+        evaluation_path.write_text(
+            json.dumps(evaluation, sort_keys=True),
+            encoding="utf-8",
+        )
+        metrics = measure_experiment_artifacts(
+            run_dir,
+            artifact_roots=retained["artifacts"],
+            raw_spool_roots=[spool],
+        )
+        evaluation_sha256 = hashlib.sha256(
+            evaluation_path.read_bytes()
+        ).hexdigest()
+        protocol_reference = {
+            "schema_version": "experiment_protocol_reference.v1",
+            "path": str(authority_root / "protocol.json"),
+            "sha256": "8" * 64,
+        }
+        invocation_reference = {
+            "schema_version": "experiment_invocation_set_reference.v1",
+            "path": str(authority_root / "invocations.json"),
+            "sha256": "9" * 64,
+        }
+        sandbox_reference = {
+            "schema_version": "provider_sandbox_reference.v1",
+            "path": str(authority_root / "sandbox.json"),
+            "sha256": "a" * 64,
+        }
+        evidence = {
+            "evaluation_relative_path": "artifacts/evaluation.json",
+            "evaluation_sha256": evaluation_sha256,
+            "taskpack_ids": ["TASKPACK-001"],
+            "protocol_reference_sha256": protocol_reference["sha256"],
+            "invocation_set_reference_sha256": (
+                invocation_reference["sha256"]
+            ),
+            "scan_scope_reference_sha256": scan_reference["sha256"],
+            "scan_scope_sha256": scan_digest,
+            "acceptance_command_sha256": canonical_json_sha256(
+                _protocol()["acceptance"]["command"]
+            ),
+            "acceptance_executable_sha256": "b" * 64,
+            "evaluator_sha256": _protocol()["evaluator"][
+                "artifact_sha256"
+            ],
+            "provider_sandbox_reference_sha256": (
+                sandbox_reference["sha256"]
+            ),
+        }
+        bundle = build_experiment_result_bundle(
+            protocol=_protocol(),
+            run_manifest=manifest,
+            runtime_release_identity=release,
+            started_at="2026-07-27T00:00:00Z",
+            finished_at="2026-07-27T00:01:00Z",
+            terminal_status=terminal_status,
+            acceptance_result={
+                "status": (
+                    "passed"
+                    if terminal_status == "completed"
+                    else "failed"
+                ),
+                "evaluation_sha256": evaluation_sha256,
+            },
+            usage_totals={
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+            },
+            usage_coverage={
+                "status": "complete",
+                "covered_invocations": 1,
+                "total_invocations": 1,
+            },
+            budget_result={"status": "within_budget"},
+            attempt_counts={"total": 1, "accepted": 1},
+            verified_milestones=["fixture"],
+            operator_action_counts={
+                "expected_operator_action": 0,
+                "corrective_intervention": 0,
+                "decision_escalation": 0,
+            },
+            retry_and_repair_counts={"retries": 0, "repairs": 0},
+            changed_files=["src/fixture.py"],
+            regressions=[],
+            artifact_bytes_written=metrics["artifact_bytes_written"],
+            raw_spool_bytes_written=metrics[
+                "raw_spool_bytes_written"
+            ],
+            workspace_diff_sha256="c" * 64,
+            result_evidence=evidence,
+            cleanup_status="pending",
+        )
+        return {
+            "run_dir": run_dir,
+            "retained": retained,
+            "spool": spool,
+            "authority_root": authority_root,
+            "scan_reference": scan_reference,
+            "evaluation_path": evaluation_path,
+            "manifest": manifest,
+            "release": release,
+            "controller": controller,
+            "controller_snapshot": controller_snapshot,
+            "controller_reference": controller.reference,
+            "clean_snapshot_reference": clean_snapshot_reference,
+            "resume_binding_sha256": canonical_json_sha256(
+                allocation["binding"]
+            ),
+            "protocol_reference": protocol_reference,
+            "invocation_reference": invocation_reference,
+            "sandbox_reference": sandbox_reference,
+            "bundle": bundle,
+            "metrics": metrics,
+        }
+
+    def _seal(self, fixture, bundle=None):
+        with patch(
+            "agentteam_runtime.experiment_results."
+            "validate_evaluation_evidence"
+        ) as validate:
+            result = seal_experiment_result_bundle(
+                fixture["run_dir"],
+                bundle or fixture["bundle"],
+                protocol=_protocol(),
+                run_manifest=fixture["manifest"],
+                runtime_release_identity=fixture["release"],
+                authority_root=fixture["authority_root"],
+                evaluation_path=fixture["evaluation_path"],
+                invocation_set_reference=fixture[
+                    "invocation_reference"
+                ],
+                protocol_reference=fixture["protocol_reference"],
+                provider_sandbox_reference=fixture[
+                    "sandbox_reference"
+                ],
+                scan_scope_reference=fixture["scan_reference"],
+                retained_roots=fixture["retained"],
+                canary_path=fixture["evaluation_path"],
+                raw_spool_roots=[fixture["spool"]],
+            )
+        return result, validate
+
+    def test_terminal_bundle_is_atomic_idempotent_and_conflict_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp)
+            first, validate = self._seal(fixture)
+            replayed, _replay_validate = self._seal(fixture)
+
+            self.assertEqual(
+                first["bundle_sha256"],
+                replayed["bundle_sha256"],
+            )
+            self.assertEqual(
+                load_experiment_result_bundle(
+                    fixture["run_dir"]
+                )["bundle"],
+                fixture["bundle"],
+            )
+            validate.assert_called_once()
+            changed = copy.deepcopy(fixture["bundle"])
+            changed["changed_files"].append("src/other.py")
+            with self.assertRaisesRegex(
+                ExperimentResultConflict,
+                "conflicts",
+            ):
+                self._seal(fixture, changed)
+            with self.assertRaisesRegex(
+                ExperimentResultIntegrityError,
+                "terminal experiment",
+            ):
+                write_experiment_recovery_snapshot(
+                    fixture["run_dir"],
+                    protocol=_protocol(),
+                    run_manifest=fixture["manifest"],
+                    runtime_release_identity=fixture["release"],
+                    snapshot_sequence=1,
+                    captured_at="2026-07-27T00:02:00Z",
+                    controller_snapshot={
+                        "controller_status": "interrupted",
+                        "budget_state": {"status": "within_budget"},
+                        "checkpoint_sequence": 1,
+                    },
+                    operator_action_counts={
+                        "expected_operator_action": 0,
+                        "corrective_intervention": 1,
+                        "decision_escalation": 0,
+                    },
+                    resume_binding_sha256="d" * 64,
+                    recovery_context={},
+                )
+
+    def test_bundle_rejects_subset_scope_and_wrong_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp)
+            subset = copy.deepcopy(fixture["retained"])
+            extra = fixture["run_dir"] / "extra-artifacts"
+            extra.mkdir()
+            subset["artifacts"] = [str(extra)]
+            with self.assertRaisesRegex(
+                ExperimentResultIntegrityError,
+                "complete retained root set",
+            ):
+                with patch(
+                    "agentteam_runtime.experiment_results."
+                    "validate_evaluation_evidence"
+                ):
+                    seal_experiment_result_bundle(
+                        fixture["run_dir"],
+                        fixture["bundle"],
+                        protocol=_protocol(),
+                        run_manifest=fixture["manifest"],
+                        runtime_release_identity=fixture["release"],
+                        authority_root=fixture["authority_root"],
+                        evaluation_path=fixture["evaluation_path"],
+                        invocation_set_reference=fixture[
+                            "invocation_reference"
+                        ],
+                        protocol_reference=fixture[
+                            "protocol_reference"
+                        ],
+                        provider_sandbox_reference=fixture[
+                            "sandbox_reference"
+                        ],
+                        scan_scope_reference=fixture["scan_reference"],
+                        retained_roots=subset,
+                        canary_path=fixture["evaluation_path"],
+                        raw_spool_roots=[fixture["spool"]],
+                    )
+
+            wrong = copy.deepcopy(fixture["bundle"])
+            wrong["experiment_run_id"] = "RUN-WRONG"
+            with self.assertRaisesRegex(
+                ExperimentResultIntegrityError,
+                "frozen run authority",
+            ):
+                self._seal(fixture, wrong)
+
+    def test_artifact_bytes_exclude_db_and_raw_spool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp)
+            metrics = fixture["metrics"]
+
+            self.assertGreater(metrics["artifact_bytes_written"], 0)
+            self.assertEqual(
+                metrics["raw_spool_bytes_written"],
+                len(b"raw provider output\n"),
+            )
+            self.assertEqual(metrics["raw_spool_file_count"], 1)
+            nested_spool = (
+                fixture["run_dir"] / "artifacts" / "nested-raw-spool"
+            )
+            nested_spool.mkdir()
+            nested_payload = b"nested raw output\n"
+            (nested_spool / "provider.jsonl").write_bytes(nested_payload)
+            cache = fixture["run_dir"] / "artifacts" / ".cache"
+            cache.mkdir()
+            for index in range(3):
+                (cache / str(index)).write_text("ignored", encoding="utf-8")
+            with patch(
+                "agentteam_runtime.experiment_results."
+                "_MAX_ARTIFACT_FILES",
+                3,
+            ):
+                measured = measure_experiment_artifacts(
+                    fixture["run_dir"],
+                    artifact_roots=fixture["retained"]["artifacts"],
+                    raw_spool_roots=[
+                        fixture["spool"],
+                        nested_spool,
+                    ],
+                )
+            self.assertEqual(
+                measured["raw_spool_bytes_written"],
+                len(b"raw provider output\n") + len(nested_payload),
+            )
+            self.assertEqual(measured["raw_spool_file_count"], 2)
+
+    def test_atomic_publication_does_not_replace_racing_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp)
+            import agentteam_runtime.experiment_results as results_module
+
+            original = results_module._rename_directory_noreplace
+
+            def race(source, destination):
+                Path(destination).mkdir()
+                return original(source, destination)
+
+            with patch.object(
+                results_module,
+                "_rename_directory_noreplace",
+                side_effect=race,
+            ):
+                with self.assertRaisesRegex(
+                    ExperimentResultIntegrityError,
+                    "directory fields are invalid",
+                ):
+                    self._seal(fixture)
+            self.assertEqual(
+                list(
+                    (fixture["run_dir"] / "results" / "terminal").iterdir()
+                ),
+                [],
+            )
+
+    def test_recovery_snapshots_are_versioned_and_separate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp)
+            arguments = {
+                "protocol": _protocol(),
+                "run_manifest": fixture["manifest"],
+                "runtime_release_identity": fixture["release"],
+                "snapshot_sequence": 1,
+                "captured_at": "2026-07-27T00:00:30Z",
+                "controller_snapshot": fixture["controller_snapshot"],
+                "operator_action_counts": {
+                    "expected_operator_action": 0,
+                    "corrective_intervention": 1,
+                    "decision_escalation": 0,
+                },
+                "resume_binding_sha256": fixture[
+                    "resume_binding_sha256"
+                ],
+                "recovery_context": {
+                    "resume_phase": "running",
+                    "reason": "operator pause",
+                    "run_state_version": 4,
+                    "controller_reference": fixture[
+                        "controller_reference"
+                    ],
+                    "clean_snapshot_attestation": fixture[
+                        "clean_snapshot_reference"
+                    ],
+                    "scan_scope_reference": fixture["scan_reference"],
+                    "invocation_set_reference": fixture[
+                        "invocation_reference"
+                    ],
+                    "open_invocation_ids": ["INV-FIXTURE-001"],
+                    "integration_active": False,
+                    "adapter_checkpoint": None,
+                },
+            }
+            first = write_experiment_recovery_snapshot(
+                fixture["run_dir"],
+                **arguments,
+            )
+            replayed = write_experiment_recovery_snapshot(
+                fixture["run_dir"],
+                **arguments,
+            )
+
+            self.assertEqual(
+                first["snapshot_sha256"],
+                replayed["snapshot_sha256"],
+            )
+            latest = load_latest_experiment_recovery_snapshot(
+                fixture["run_dir"]
+            )
+            self.assertTrue(latest["snapshot"]["resumable"])
+            self.assertFalse(
+                (fixture["run_dir"] / "results" / "terminal").exists()
+            )
+            with self.assertRaisesRegex(
+                ExperimentResultIntegrityError,
+                "sequence is not contiguous",
+            ):
+                write_experiment_recovery_snapshot(
+                    fixture["run_dir"],
+                    **{
+                        **arguments,
+                        "snapshot_sequence": 3,
+                    },
+                )
+            with self.assertRaisesRegex(
+                ExperimentResultIntegrityError,
+                "resume binding",
+            ):
+                write_experiment_recovery_snapshot(
+                    fixture["run_dir"],
+                    **{
+                        **arguments,
+                        "snapshot_sequence": 2,
+                        "resume_binding_sha256": "e" * 64,
+                    },
+                )
+            tampered_context = copy.deepcopy(
+                arguments["recovery_context"]
+            )
+            tampered_context["clean_snapshot_attestation"][
+                "sha256"
+            ] = "f" * 64
+            with self.assertRaisesRegex(
+                ExperimentResultIntegrityError,
+                "attestation digest",
+            ):
+                write_experiment_recovery_snapshot(
+                    fixture["run_dir"],
+                    **{
+                        **arguments,
+                        "snapshot_sequence": 2,
+                        "recovery_context": tampered_context,
+                    },
+                )
+            unrelated_protocol = copy.deepcopy(_protocol())
+            unrelated_protocol["experiment_id"] = "unrelated-protocol"
+            unrelated = create_experiment_controller(
+                fixture["authority_root"] / "unrelated-controller",
+                protocol_id=unrelated_protocol["experiment_id"],
+                budget_id="unrelated-budget",
+                max_total_tokens=unrelated_protocol["budgets"][
+                    "max_total_tokens"
+                ],
+                max_wall_time_seconds=unrelated_protocol["budgets"][
+                    "max_wall_time_seconds"
+                ],
+                soft_warning_ratio=unrelated_protocol["budgets"][
+                    "soft_warning_ratio"
+                ],
+                scored=unrelated_protocol["scored"],
+                protocol_sha256=canonical_json_sha256(
+                    unrelated_protocol
+                ),
+                operator_limits=unrelated_protocol[
+                    "operator_limits"
+                ],
+            )
+            unrelated.interrupt()
+            unrelated_context = copy.deepcopy(
+                arguments["recovery_context"]
+            )
+            unrelated_context["controller_reference"] = (
+                unrelated.reference
+            )
+            with self.assertRaisesRegex(
+                ExperimentResultIntegrityError,
+                "run protocol authority",
+            ):
+                write_experiment_recovery_snapshot(
+                    fixture["run_dir"],
+                    **{
+                        **arguments,
+                        "snapshot_sequence": 2,
+                        "controller_snapshot": unrelated.snapshot(),
+                        "recovery_context": unrelated_context,
+                    },
+                )
+            fixture["controller"].resume_interrupted(
+                reference=fixture["controller_reference"]
+            )
+            with self.assertRaisesRegex(
+                ExperimentResultIntegrityError,
+                "live controller authority",
+            ):
+                load_latest_experiment_recovery_snapshot(
+                    fixture["run_dir"]
+                )
+
+    def test_terminal_and_snapshot_publication_share_run_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp)
+            import threading
+
+            import agentteam_runtime.experiment_results as results_module
+
+            snapshot_inside_publication = threading.Event()
+            release_snapshot = threading.Event()
+            terminal_finished = threading.Event()
+            failures = []
+            original_publish = results_module._publish_sealed_directory
+
+            def delayed_publish(*args, **kwargs):
+                final_dir = Path(args[0])
+                if final_dir.parent.name == "recovery":
+                    snapshot_inside_publication.set()
+                    if not release_snapshot.wait(5):
+                        raise AssertionError(
+                            "snapshot publication was not released"
+                        )
+                return original_publish(*args, **kwargs)
+
+            recovery_context = {
+                "resume_phase": "running",
+                "reason": "publication race regression",
+                "run_state_version": 4,
+                "controller_reference": fixture["controller_reference"],
+                "clean_snapshot_attestation": fixture[
+                    "clean_snapshot_reference"
+                ],
+                "scan_scope_reference": fixture["scan_reference"],
+                "invocation_set_reference": fixture[
+                    "invocation_reference"
+                ],
+                "open_invocation_ids": ["INV-FIXTURE-001"],
+                "integration_active": False,
+                "adapter_checkpoint": None,
+            }
+
+            def publish_snapshot():
+                try:
+                    write_experiment_recovery_snapshot(
+                        fixture["run_dir"],
+                        protocol=_protocol(),
+                        run_manifest=fixture["manifest"],
+                        runtime_release_identity=fixture["release"],
+                        snapshot_sequence=1,
+                        captured_at="2026-07-27T00:00:30Z",
+                        controller_snapshot=fixture[
+                            "controller_snapshot"
+                        ],
+                        operator_action_counts={
+                            "expected_operator_action": 0,
+                            "corrective_intervention": 1,
+                            "decision_escalation": 0,
+                        },
+                        resume_binding_sha256=fixture[
+                            "resume_binding_sha256"
+                        ],
+                        recovery_context=recovery_context,
+                    )
+                except Exception as exc:  # pragma: no cover - assertion aid
+                    failures.append(exc)
+
+            def publish_terminal():
+                try:
+                    self._seal(fixture)
+                except Exception as exc:  # pragma: no cover - assertion aid
+                    failures.append(exc)
+                finally:
+                    terminal_finished.set()
+
+            with patch.object(
+                results_module,
+                "_publish_sealed_directory",
+                side_effect=delayed_publish,
+            ):
+                snapshot_thread = threading.Thread(
+                    target=publish_snapshot,
+                    daemon=True,
+                )
+                snapshot_thread.start()
+                self.assertTrue(snapshot_inside_publication.wait(5))
+                terminal_thread = threading.Thread(
+                    target=publish_terminal,
+                    daemon=True,
+                )
+                terminal_thread.start()
+                self.assertFalse(terminal_finished.wait(0.2))
+                release_snapshot.set()
+                snapshot_thread.join(5)
+                terminal_thread.join(5)
+
+            self.assertFalse(snapshot_thread.is_alive())
+            self.assertFalse(terminal_thread.is_alive())
+            self.assertEqual(failures, [])
+            latest = load_latest_experiment_recovery_snapshot(
+                fixture["run_dir"]
+            )
+            self.assertFalse(latest["resumable"])
+            self.assertTrue(latest["superseded_by_terminal"])
+
+    def test_projection_rebuild_preserves_all_outcomes_and_digests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp) / "work"
+            (work_root / "runs").mkdir(parents=True)
+            sealed = []
+            for status in ("completed", "failed", "interrupted"):
+                fixture = self._fixture(
+                    work_root,
+                    terminal_status=status,
+                    run_parent=work_root / "runs",
+                )
+                if status == "interrupted":
+                    write_experiment_recovery_snapshot(
+                        fixture["run_dir"],
+                        protocol=_protocol(),
+                        run_manifest=fixture["manifest"],
+                        runtime_release_identity=fixture["release"],
+                        snapshot_sequence=1,
+                        captured_at="2026-07-27T00:00:30Z",
+                        controller_snapshot=fixture[
+                            "controller_snapshot"
+                        ],
+                        operator_action_counts={
+                            "expected_operator_action": 0,
+                            "corrective_intervention": 1,
+                            "decision_escalation": 0,
+                        },
+                        resume_binding_sha256=fixture[
+                            "resume_binding_sha256"
+                        ],
+                        recovery_context={
+                            "resume_phase": "running",
+                            "reason": "projection fixture",
+                            "run_state_version": 2,
+                            "controller_reference": fixture[
+                                "controller_reference"
+                            ],
+                            "clean_snapshot_attestation": fixture[
+                                "clean_snapshot_reference"
+                            ],
+                            "scan_scope_reference": fixture[
+                                "scan_reference"
+                            ],
+                            "invocation_set_reference": fixture[
+                                "invocation_reference"
+                            ],
+                            "open_invocation_ids": [],
+                            "integration_active": False,
+                            "adapter_checkpoint": None,
+                        },
+                    )
+                result, _validate = self._seal(fixture)
+                sealed.append(result)
+
+            rebuilt = rebuild_project_projection_db(work_root)
+            checked = check_project_projection_db(work_root)
+            projected = read_projected_experiment_results(work_root)
+
+            self.assertEqual(rebuilt["experiment_results"], 3)
+            self.assertEqual(rebuilt["experiment_recovery"], 1)
+            self.assertEqual(checked["check_status"], "passed")
+            self.assertEqual(
+                {item["bundle"]["terminal_status"] for item in projected},
+                {"completed", "failed", "interrupted"},
+            )
+            self.assertEqual(
+                {item["bundle_sha256"] for item in projected},
+                {item["bundle_sha256"] for item in sealed},
+            )
+            recovery = read_projected_experiment_recovery(work_root)
+            self.assertEqual(len(recovery), 1)
+            self.assertFalse(recovery[0]["resumable"])
+            (work_root / "agentteam.db").unlink()
+            fallback = read_projected_experiment_results(work_root)
+            self.assertEqual(
+                {item["bundle"]["terminal_status"] for item in fallback},
+                {"completed", "failed", "interrupted"},
+            )
+            self.assertTrue(
+                all(item["projection_source"] == "files" for item in fallback)
+            )
+
+    def test_comparison_retains_unsuccessful_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = self._fixture(
+                Path(tmp) / "completed"
+            )["bundle"]
+            failed = self._fixture(
+                Path(tmp) / "failed",
+                terminal_status="failed",
+            )["bundle"]
+            interrupted = self._fixture(
+                Path(tmp) / "interrupted",
+                terminal_status="interrupted",
+            )["bundle"]
+
+            comparison = render_experiment_comparison(
+                [
+                    {"bundle": completed, "bundle_sha256": "1" * 64},
+                    {"bundle": failed, "bundle_sha256": "2" * 64},
+                    {"bundle": interrupted, "bundle_sha256": "3" * 64},
+                ]
+            )
+            self.assertIn("completed", comparison)
+            self.assertIn("failed", comparison)
+            self.assertIn("interrupted", comparison)
+            self.assertIn(
+                "tokens: 120",
+                render_experiment_result(completed),
             )
 
 

@@ -5,9 +5,16 @@ import re
 import sqlite3
 from pathlib import Path
 
+from .experiment_results import (
+    ExperimentResultError,
+    load_experiment_result_bundle,
+    load_latest_experiment_recovery_snapshot,
+    validate_experiment_recovery_snapshot,
+    validate_experiment_result_bundle,
+)
 from .token_usage import normalize_token_usage, token_usage_from_state
 
-PROJECTION_SCHEMA_VERSION = "agentteam_projection.v5"
+PROJECTION_SCHEMA_VERSION = "agentteam_projection.v6"
 PROJECTION_WARNING_UNAVAILABLE = "projection_db_unavailable"
 PROJECTION_REBUILD_NEXT_ACTION = "run agentteam db rebuild"
 PROJECTION_REBUILD_HINT = "agentteam db rebuild"
@@ -239,6 +246,10 @@ def check_project_projection_db(work_root):
         "worker_verification_additions",
         "invocations",
         "invocation_digest",
+        "experiment_results",
+        "experiment_result_digest",
+        "experiment_recovery",
+        "experiment_recovery_digest",
     ]
     mismatches = [
         key
@@ -643,6 +654,80 @@ def read_projected_run_metadata(work_root, run_id):
     }
 
 
+def read_projected_experiment_results(work_root):
+    """Read sealed experiment bundles from a fresh DB or authoritative files."""
+    work_root = Path(work_root).resolve()
+    check = check_project_projection_db(work_root)
+    if check["check_status"] == "passed":
+        try:
+            with sqlite3.connect(
+                project_projection_db_path(work_root)
+            ) as connection:
+                rows = connection.execute(
+                    """
+                    select bundle_sha256, bundle_json
+                    from experiment_results
+                    order by experiment_run_id
+                    """
+                ).fetchall()
+            return [
+                {
+                    "bundle_sha256": digest,
+                    "bundle": json.loads(bundle_json),
+                    "projection_source": "db",
+                }
+                for digest, bundle_json in rows
+            ]
+        except (sqlite3.DatabaseError, json.JSONDecodeError):
+            pass
+    return [
+        {
+            "bundle_sha256": item["bundle_sha256"],
+            "bundle": item["bundle"],
+            "projection_source": "files",
+        }
+        for item in _scan_work_root(work_root)["experiment_results"]
+    ]
+
+
+def read_projected_experiment_recovery(work_root):
+    """Read latest recovery snapshots without making SQLite authority."""
+    work_root = Path(work_root).resolve()
+    check = check_project_projection_db(work_root)
+    if check["check_status"] == "passed":
+        try:
+            with sqlite3.connect(
+                project_projection_db_path(work_root)
+            ) as connection:
+                rows = connection.execute(
+                    """
+                    select snapshot_sha256, snapshot_json, resumable
+                    from experiment_recovery
+                    order by experiment_run_id
+                    """
+                ).fetchall()
+            return [
+                {
+                    "snapshot_sha256": digest,
+                    "snapshot": json.loads(snapshot_json),
+                    "resumable": bool(resumable),
+                    "projection_source": "db",
+                }
+                for digest, snapshot_json, resumable in rows
+            ]
+        except (sqlite3.DatabaseError, json.JSONDecodeError):
+            pass
+    return [
+        {
+            "snapshot_sha256": item["snapshot_sha256"],
+            "snapshot": item["snapshot"],
+            "resumable": item["resumable"],
+            "projection_source": "files",
+        }
+        for item in _scan_work_root(work_root)["experiment_recovery"]
+    ]
+
+
 def read_projected_artifact_summary(work_root):
     check = check_project_projection_db(work_root)
     if check["check_status"] != "passed":
@@ -891,7 +976,89 @@ def _scan_work_root(work_root, *, explicit_acceptance_artifacts=None):
             runs,
             explicit_acceptance_artifacts=explicit_acceptance_artifacts,
         ),
+        "experiment_results": _scan_experiment_results(runs),
+        "experiment_recovery": _scan_experiment_recovery(runs),
     }
+
+
+def _scan_experiment_results(runs):
+    results = []
+    for run in runs:
+        run_dir = Path(run["run_dir"])
+        result_dir = run_dir / "results" / "terminal"
+        if not result_dir.exists():
+            continue
+        try:
+            sealed = load_experiment_result_bundle(run_dir)
+        except ExperimentResultError as exc:
+            raise ProjectionIntegrityError(
+                f"sealed experiment result is invalid: {run_dir}"
+            ) from exc
+        bundle = sealed["bundle"]
+        results.append(
+            {
+                "experiment_run_id": bundle["experiment_run_id"],
+                "run_dir": str(run_dir),
+                "protocol_sha256": bundle["protocol_sha256"],
+                "run_manifest_sha256": bundle["run_manifest_sha256"],
+                "mode": bundle["mode"],
+                "repetition_index": bundle["repetition_index"],
+                "terminal_status": bundle["terminal_status"],
+                "acceptance_status": bundle["acceptance_result"]["status"],
+                "usage_totals": bundle["usage_totals"],
+                "usage_coverage": bundle["usage_coverage"],
+                "budget_result": bundle["budget_result"],
+                "operator_action_counts": bundle[
+                    "operator_action_counts"
+                ],
+                "artifact_bytes_written": bundle[
+                    "artifact_bytes_written"
+                ],
+                "raw_spool_bytes_written": bundle[
+                    "raw_spool_bytes_written"
+                ],
+                "projection_identity_sha256": bundle[
+                    "projection_reconciliation"
+                ]["identity_sha256"],
+                "bundle_sha256": sealed["bundle_sha256"],
+                "bundle": bundle,
+            }
+        )
+    return sorted(
+        results,
+        key=lambda item: item["experiment_run_id"],
+    )
+
+
+def _scan_experiment_recovery(runs):
+    snapshots = []
+    for run in runs:
+        run_dir = Path(run["run_dir"])
+        try:
+            latest = load_latest_experiment_recovery_snapshot(run_dir)
+        except ExperimentResultError as exc:
+            raise ProjectionIntegrityError(
+                f"experiment recovery authority is invalid: {run_dir}"
+            ) from exc
+        if latest is None:
+            continue
+        snapshot = latest["snapshot"]
+        snapshots.append(
+            {
+                "experiment_run_id": snapshot["experiment_run_id"],
+                "run_dir": str(run_dir),
+                "snapshot_sequence": snapshot["snapshot_sequence"],
+                "snapshot_sha256": latest["snapshot_sha256"],
+                "controller_status": snapshot["controller_status"],
+                "resume_phase": snapshot["resume_phase"],
+                "resumable": latest["resumable"],
+                "snapshot": snapshot,
+            }
+        )
+    return sorted(
+        snapshots,
+        key=lambda item: item["experiment_run_id"],
+    )
 
 
 def _scan_runs(runs_root):
@@ -2029,6 +2196,49 @@ def _create_projection_schema(connection):
     )
     connection.execute(
         """
+        create table if not exists experiment_results(
+            experiment_run_id text primary key,
+            run_dir text not null,
+            protocol_sha256 text not null,
+            run_manifest_sha256 text not null,
+            mode text not null,
+            repetition_index integer not null,
+            terminal_status text not null,
+            acceptance_status text not null,
+            input_tokens integer,
+            output_tokens integer,
+            total_tokens integer,
+            covered_invocations integer,
+            total_invocations integer,
+            usage_coverage_status text,
+            budget_result_json text not null,
+            expected_operator_actions integer not null,
+            corrective_interventions integer not null,
+            decision_escalations integer not null,
+            artifact_bytes_written integer not null,
+            raw_spool_bytes_written integer not null,
+            projection_identity_sha256 text not null,
+            bundle_sha256 text not null,
+            bundle_json text not null
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table if not exists experiment_recovery(
+            experiment_run_id text primary key,
+            run_dir text not null,
+            snapshot_sequence integer not null,
+            snapshot_sha256 text not null,
+            controller_status text not null,
+            resume_phase text not null,
+            resumable integer not null,
+            snapshot_json text not null
+        )
+        """
+    )
+    connection.execute(
+        """
         create table if not exists invocations(
             invocation_id text primary key,
             usage_event_id text unique,
@@ -2447,6 +2657,77 @@ def _write_projection_rows(connection, projection):
         ],
     )
     connection.executemany(
+        """
+        insert into experiment_results(
+            experiment_run_id, run_dir, protocol_sha256,
+            run_manifest_sha256, mode, repetition_index,
+            terminal_status, acceptance_status, input_tokens,
+            output_tokens, total_tokens, covered_invocations,
+            total_invocations, usage_coverage_status, budget_result_json,
+            expected_operator_actions, corrective_interventions,
+            decision_escalations, artifact_bytes_written,
+            raw_spool_bytes_written, projection_identity_sha256,
+            bundle_sha256, bundle_json
+        ) values(
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?
+        )
+        """,
+        [
+            (
+                item["experiment_run_id"],
+                item["run_dir"],
+                item["protocol_sha256"],
+                item["run_manifest_sha256"],
+                item["mode"],
+                item["repetition_index"],
+                item["terminal_status"],
+                item["acceptance_status"],
+                item["usage_totals"].get("input_tokens"),
+                item["usage_totals"].get("output_tokens"),
+                item["usage_totals"].get("total_tokens"),
+                item["usage_coverage"].get("covered_invocations"),
+                item["usage_coverage"].get("total_invocations"),
+                item["usage_coverage"].get("status"),
+                _json_dumps(item["budget_result"]),
+                item["operator_action_counts"][
+                    "expected_operator_action"
+                ],
+                item["operator_action_counts"][
+                    "corrective_intervention"
+                ],
+                item["operator_action_counts"]["decision_escalation"],
+                item["artifact_bytes_written"],
+                item["raw_spool_bytes_written"],
+                item["projection_identity_sha256"],
+                item["bundle_sha256"],
+                _json_dumps(item["bundle"]),
+            )
+            for item in projection["experiment_results"]
+        ],
+    )
+    connection.executemany(
+        """
+        insert into experiment_recovery(
+            experiment_run_id, run_dir, snapshot_sequence, snapshot_sha256,
+            controller_status, resume_phase, resumable, snapshot_json
+        ) values(?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                item["experiment_run_id"],
+                item["run_dir"],
+                item["snapshot_sequence"],
+                item["snapshot_sha256"],
+                item["controller_status"],
+                item["resume_phase"],
+                1 if item["resumable"] else 0,
+                _json_dumps(item["snapshot"]),
+            )
+            for item in projection["experiment_recovery"]
+        ],
+    )
+    connection.executemany(
         f"""
         insert into invocations({", ".join(_INVOCATION_COLUMNS)})
         values({", ".join("?" for _ in _INVOCATION_COLUMNS)})
@@ -2486,6 +2767,14 @@ def _projection_counts(projection):
         ),
         "invocations": len(projection["invocations"]),
         "invocation_digest": _invocation_digest(projection["invocations"]),
+        "experiment_results": len(projection["experiment_results"]),
+        "experiment_result_digest": _experiment_result_digest(
+            projection["experiment_results"]
+        ),
+        "experiment_recovery": len(projection["experiment_recovery"]),
+        "experiment_recovery_digest": _experiment_recovery_digest(
+            projection["experiment_recovery"]
+        ),
         "evidence": evidence_counts,
     }
 
@@ -2511,6 +2800,20 @@ def _database_counts(db_path):
             ),
             "invocations": _table_count(connection, "invocations"),
             "invocation_digest": _database_invocation_digest(connection),
+            "experiment_results": _table_count(
+                connection,
+                "experiment_results",
+            ),
+            "experiment_result_digest": (
+                _database_experiment_result_digest(connection)
+            ),
+            "experiment_recovery": _table_count(
+                connection,
+                "experiment_recovery",
+            ),
+            "experiment_recovery_digest": (
+                _database_experiment_recovery_digest(connection)
+            ),
             "evidence": _database_evidence_counts(connection),
         }
 
@@ -2572,6 +2875,118 @@ def _database_invocation_digest(connection):
             raise
         rows = []
     return _invocation_digest(rows)
+
+
+def _database_experiment_result_digest(connection):
+    try:
+        rows = connection.execute(
+            """
+            select experiment_run_id, protocol_sha256, run_manifest_sha256,
+                   mode, repetition_index, terminal_status, acceptance_status,
+                   input_tokens, output_tokens, total_tokens,
+                   covered_invocations, total_invocations,
+                   usage_coverage_status, budget_result_json,
+                   expected_operator_actions, corrective_interventions,
+                   decision_escalations, artifact_bytes_written,
+                   raw_spool_bytes_written, projection_identity_sha256,
+                   bundle_sha256, bundle_json
+            from experiment_results
+            order by experiment_run_id
+            """
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        rows = []
+    projected = []
+    for row in rows:
+        try:
+            bundle = json.loads(row[21])
+            validate_experiment_result_bundle(bundle)
+            budget = json.loads(row[13])
+        except (json.JSONDecodeError, ExperimentResultError) as exc:
+            raise ProjectionIntegrityError(
+                "experiment result projection payload is invalid"
+            ) from exc
+        expected = (
+            bundle["experiment_run_id"],
+            bundle["protocol_sha256"],
+            bundle["run_manifest_sha256"],
+            bundle["mode"],
+            bundle["repetition_index"],
+            bundle["terminal_status"],
+            bundle["acceptance_result"]["status"],
+            bundle["usage_totals"].get("input_tokens"),
+            bundle["usage_totals"].get("output_tokens"),
+            bundle["usage_totals"].get("total_tokens"),
+            bundle["usage_coverage"].get("covered_invocations"),
+            bundle["usage_coverage"].get("total_invocations"),
+            bundle["usage_coverage"].get("status"),
+            bundle["budget_result"],
+            bundle["operator_action_counts"][
+                "expected_operator_action"
+            ],
+            bundle["operator_action_counts"]["corrective_intervention"],
+            bundle["operator_action_counts"]["decision_escalation"],
+            bundle["artifact_bytes_written"],
+            bundle["raw_spool_bytes_written"],
+            bundle["projection_reconciliation"]["identity_sha256"],
+        )
+        actual = (*row[:13], budget, *row[14:20])
+        if actual != expected:
+            raise ProjectionIntegrityError(
+                "experiment result projection columns disagree with bundle"
+            )
+        projected.append(
+            {
+                "experiment_run_id": row[0],
+                "bundle_sha256": row[20],
+                "projection_identity_sha256": row[19],
+                "bundle": bundle,
+            }
+        )
+    return _experiment_result_digest(projected)
+
+
+def _database_experiment_recovery_digest(connection):
+    try:
+        rows = connection.execute(
+            """
+            select experiment_run_id, snapshot_sequence, snapshot_sha256,
+                   snapshot_json
+            from experiment_recovery
+            order by experiment_run_id
+            """
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        rows = []
+    projected = []
+    for run_id, sequence, snapshot_sha256, snapshot_json in rows:
+        try:
+            snapshot = json.loads(snapshot_json)
+            validate_experiment_recovery_snapshot(snapshot)
+        except (json.JSONDecodeError, ExperimentResultError) as exc:
+            raise ProjectionIntegrityError(
+                "experiment recovery projection payload is invalid"
+            ) from exc
+        if (
+            snapshot["experiment_run_id"] != run_id
+            or snapshot["snapshot_sequence"] != sequence
+        ):
+            raise ProjectionIntegrityError(
+                "experiment recovery projection columns disagree with snapshot"
+            )
+        projected.append(
+            {
+                "experiment_run_id": run_id,
+                "snapshot_sequence": sequence,
+                "snapshot_sha256": snapshot_sha256,
+                "snapshot": snapshot,
+            }
+        )
+    return _experiment_recovery_digest(projected)
 
 
 def _project_stats_from_database(work_root, check, *, applied_filters):
@@ -3550,6 +3965,48 @@ def _invocation_digest(invocations):
                 sort_keys=True,
                 separators=(",", ":"),
                 ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _experiment_result_digest(results):
+    digest = hashlib.sha256()
+    for item in sorted(
+        results,
+        key=lambda value: value["experiment_run_id"],
+    ):
+        digest.update(
+            _json_dumps(
+                {
+                    "experiment_run_id": item["experiment_run_id"],
+                    "bundle_sha256": item["bundle_sha256"],
+                    "projection_identity_sha256": item[
+                        "projection_identity_sha256"
+                    ],
+                    "bundle": item["bundle"],
+                }
+            ).encode("utf-8")
+        )
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _experiment_recovery_digest(snapshots):
+    digest = hashlib.sha256()
+    for item in sorted(
+        snapshots,
+        key=lambda value: value["experiment_run_id"],
+    ):
+        digest.update(
+            _json_dumps(
+                {
+                    "experiment_run_id": item["experiment_run_id"],
+                    "snapshot_sequence": item["snapshot_sequence"],
+                    "snapshot_sha256": item["snapshot_sha256"],
+                    "snapshot": item["snapshot"],
+                }
             ).encode("utf-8")
         )
         digest.update(b"\n")

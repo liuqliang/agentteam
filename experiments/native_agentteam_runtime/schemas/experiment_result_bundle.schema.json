@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/experiment_result_bundle.schema.json",
+  "title": "AgentTeam immutable experiment result bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_run_id",
+    "protocol_sha256",
+    "run_manifest_sha256",
+    "runtime_release_identity",
+    "mode",
+    "repetition_index",
+    "source_commit",
+    "started_at",
+    "finished_at",
+    "terminal_status",
+    "acceptance_result",
+    "usage_totals",
+    "usage_coverage",
+    "budget_result",
+    "attempt_counts",
+    "verified_milestones",
+    "operator_action_counts",
+    "retry_and_repair_counts",
+    "changed_files",
+    "regressions",
+    "artifact_bytes_written",
+    "raw_spool_bytes_written",
+    "workspace_diff_sha256",
+    "result_evidence",
+    "projection_reconciliation",
+    "cleanup_status"
+  ],
+  "properties": {
+    "schema_version": {"const": "experiment_result_bundle.v1"},
+    "experiment_run_id": {"$ref": "#/$defs/safeId"},
+    "protocol_sha256": {"$ref": "#/$defs/sha256"},
+    "run_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "runtime_release_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "release_id",
+        "release_root",
+        "runtime_root",
+        "release_manifest_sha256",
+        "source_commit",
+        "git_object_format"
+      ],
+      "properties": {
+        "release_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "release_root": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "runtime_root": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "release_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "source_commit": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "git_object_format": {"enum": ["sha1", "sha256"]}
+      }
+    },
+    "mode": {
+      "enum": ["single_codex", "agentteam_direct", "agentteam_full"]
+    },
+    "repetition_index": {"type": "integer", "minimum": 0},
+    "source_commit": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "terminal_status": {
+      "enum": [
+        "completed",
+        "failed",
+        "infrastructure_failed",
+        "interrupted",
+        "budget_stopped"
+      ]
+    },
+    "acceptance_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "evaluation_sha256"],
+      "properties": {
+        "status": {"enum": ["passed", "failed", "blocked", "not_run"]},
+        "evaluation_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "usage_totals": {"$ref": "#/$defs/nonnegativeMap"},
+    "usage_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "covered_invocations",
+        "total_invocations"
+      ],
+      "properties": {
+        "status": {"enum": ["complete", "partial", "unavailable"]},
+        "covered_invocations": {"type": "integer", "minimum": 0},
+        "total_invocations": {"type": "integer", "minimum": 0}
+      }
+    },
+    "budget_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "enum": [
+            "within_budget",
+            "exhausted",
+            "budget_stopped",
+            "unavailable"
+          ]
+        },
+        "max_total_tokens": {"type": "integer", "minimum": 1},
+        "max_wall_time_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "total_tokens": {"type": "integer", "minimum": 0},
+        "elapsed_wall_time_seconds": {"type": "number", "minimum": 0},
+        "overshoot_tokens": {"type": "integer", "minimum": 0},
+        "usage_complete": {"type": "boolean"},
+        "exhausted": {"type": "boolean"}
+      }
+    },
+    "attempt_counts": {"$ref": "#/$defs/nonnegativeMap"},
+    "verified_milestones": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 4096,
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}
+    },
+    "operator_action_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_operator_action",
+        "corrective_intervention",
+        "decision_escalation"
+      ],
+      "properties": {
+        "expected_operator_action": {"type": "integer", "minimum": 0},
+        "corrective_intervention": {"type": "integer", "minimum": 0},
+        "decision_escalation": {"type": "integer", "minimum": 0}
+      }
+    },
+    "retry_and_repair_counts": {"$ref": "#/$defs/nonnegativeMap"},
+    "changed_files": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 10000,
+      "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+    },
+    "regressions": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 4096,
+      "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+    },
+    "artifact_bytes_written": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1099511627776
+    },
+    "raw_spool_bytes_written": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1099511627776
+    },
+    "workspace_diff_sha256": {"$ref": "#/$defs/sha256"},
+    "result_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evaluation_relative_path",
+        "evaluation_sha256",
+        "taskpack_ids",
+        "protocol_reference_sha256",
+        "invocation_set_reference_sha256",
+        "scan_scope_reference_sha256",
+        "scan_scope_sha256",
+        "acceptance_command_sha256",
+        "acceptance_executable_sha256",
+        "evaluator_sha256",
+        "provider_sandbox_reference_sha256"
+      ],
+      "properties": {
+        "evaluation_relative_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "evaluation_sha256": {"$ref": "#/$defs/sha256"},
+        "taskpack_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 1024,
+          "items": {"$ref": "#/$defs/safeId"}
+        },
+        "protocol_reference_sha256": {"$ref": "#/$defs/sha256"},
+        "invocation_set_reference_sha256": {"$ref": "#/$defs/sha256"},
+        "scan_scope_reference_sha256": {"$ref": "#/$defs/sha256"},
+        "scan_scope_sha256": {"$ref": "#/$defs/sha256"},
+        "acceptance_command_sha256": {"$ref": "#/$defs/sha256"},
+        "acceptance_executable_sha256": {"$ref": "#/$defs/sha256"},
+        "evaluator_sha256": {"$ref": "#/$defs/sha256"},
+        "provider_sandbox_reference_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "projection_reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "identity_sha256"],
+      "properties": {
+        "schema_version": {
+          "const": "experiment_projection_expectation.v1"
+        },
+        "identity_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "cleanup_status": {
+      "enum": ["completed", "pending", "failed", "not_required"]
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "nonnegativeMap": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {"pattern": "^[A-Za-z][A-Za-z0-9_]*$"},
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    }
+  }
+}

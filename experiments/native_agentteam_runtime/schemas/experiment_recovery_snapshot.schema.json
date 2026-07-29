@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/experiment_recovery_snapshot.schema.json",
+  "title": "AgentTeam versioned experiment recovery snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_run_id",
+    "protocol_sha256",
+    "run_manifest_sha256",
+    "runtime_release_identity",
+    "mode",
+    "repetition_index",
+    "snapshot_sequence",
+    "captured_at",
+    "resume_phase",
+    "reason",
+    "run_state_version",
+    "controller_status",
+    "controller_reference",
+    "controller_checkpoint_sequence",
+    "controller_state_sha256",
+    "budget_result",
+    "operator_action_counts",
+    "resume_binding_sha256",
+    "clean_snapshot_attestation",
+    "scan_scope_reference",
+    "invocation_set_reference",
+    "open_invocation_ids",
+    "integration_active",
+    "adapter_checkpoint",
+    "resumable"
+  ],
+  "properties": {
+    "schema_version": {"const": "experiment_recovery_snapshot.v1"},
+    "experiment_run_id": {"$ref": "#/$defs/safeId"},
+    "protocol_sha256": {"$ref": "#/$defs/sha256"},
+    "run_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "runtime_release_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "release_id",
+        "release_root",
+        "runtime_root",
+        "release_manifest_sha256",
+        "source_commit",
+        "git_object_format"
+      ],
+      "properties": {
+        "release_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "release_root": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "runtime_root": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "release_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "source_commit": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "git_object_format": {"enum": ["sha1", "sha256"]}
+      }
+    },
+    "mode": {
+      "enum": ["single_codex", "agentteam_direct", "agentteam_full"]
+    },
+    "repetition_index": {"type": "integer", "minimum": 0},
+    "snapshot_sequence": {"type": "integer", "minimum": 1},
+    "captured_at": {"type": "string", "format": "date-time"},
+    "resume_phase": {
+      "enum": [
+        "prepared",
+        "resetting",
+        "ready",
+        "running",
+        "evaluating",
+        "finalizing"
+      ]
+    },
+    "reason": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "run_state_version": {"type": "integer", "minimum": 1},
+    "controller_status": {
+      "enum": [
+        "active",
+        "budget_draining",
+        "budget_stopped",
+        "interrupted"
+      ]
+    },
+    "controller_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "protocol_id",
+        "budget_id",
+        "controller_root",
+        "controller_metadata_sha256",
+        "frozen_budget_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "experiment_budget_controller_reference.v1"
+        },
+        "protocol_id": {"$ref": "#/$defs/safeId"},
+        "budget_id": {"$ref": "#/$defs/safeId"},
+        "controller_root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "controller_metadata_sha256": {"$ref": "#/$defs/sha256"},
+        "frozen_budget_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "controller_checkpoint_sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "controller_state_sha256": {"$ref": "#/$defs/sha256"},
+    "budget_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "enum": ["within_budget", "exhausted", "budget_stopped", "unavailable"]
+        },
+        "max_total_tokens": {"type": "integer", "minimum": 1},
+        "max_wall_time_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "total_tokens": {"type": "integer", "minimum": 0},
+        "elapsed_wall_time_seconds": {"type": "number", "minimum": 0},
+        "overshoot_tokens": {"type": "integer", "minimum": 0},
+        "usage_complete": {"type": "boolean"},
+        "exhausted": {"type": "boolean"}
+      }
+    },
+    "operator_action_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_operator_action",
+        "corrective_intervention",
+        "decision_escalation"
+      ],
+      "properties": {
+        "expected_operator_action": {"type": "integer", "minimum": 0},
+        "corrective_intervention": {"type": "integer", "minimum": 0},
+        "decision_escalation": {"type": "integer", "minimum": 0}
+      }
+    },
+    "resume_binding_sha256": {"$ref": "#/$defs/sha256"},
+    "clean_snapshot_attestation": {"$ref": "#/$defs/authorityRef"},
+    "scan_scope_reference": {
+      "oneOf": [
+        {"$ref": "#/$defs/authorityRef"},
+        {"type": "null"}
+      ]
+    },
+    "invocation_set_reference": {
+      "oneOf": [
+        {"$ref": "#/$defs/authorityRef"},
+        {"type": "null"}
+      ]
+    },
+    "open_invocation_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 4096,
+      "items": {
+        "type": "string",
+        "pattern": "^INV-[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+      }
+    },
+    "integration_active": {"type": "boolean"},
+    "adapter_checkpoint": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "path", "sha256"],
+          "properties": {
+            "schema_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        {"type": "null"}
+      ]
+    },
+    "resumable": {"type": "boolean"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"controller_status": {"const": "interrupted"}},
+        "required": ["controller_status"]
+      },
+      "then": {"properties": {"resumable": {"const": true}}},
+      "else": {"properties": {"resumable": {"const": false}}}
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "authorityRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "path", "sha256"],
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}
