@@ -573,7 +573,7 @@ def _complete_fake_experiment_invocation(
         def prepare(self):
             return (
                 execution_identity
-                or ExecutionGroupIdentity.not_applicable()
+                or _supported_execution_identity()
             )
 
         def permit_and_wait(self, **_kwargs):
@@ -784,7 +784,7 @@ def _start_orphaned_fake_runtime_invocation(
             self.command = list(command)
 
         def prepare(self):
-            return ExecutionGroupIdentity.not_applicable()
+            return _supported_execution_identity()
 
         def permit_and_wait(self, **_kwargs):
             raise OSError("provider interrupted after durable start")
@@ -920,6 +920,9 @@ def _test_evaluator_execution(
     input_bytes=None,
 ):
     del cpu_limit, memory_limit_bytes
+    argv = list(argv)
+    if argv and Path(argv[0]) == Path("/usr/bin/bwrap"):
+        argv.insert(argv.index("--unshare-all") + 1, "--share-net")
     result = _capture_bounded_process(
         argv,
         cwd=cwd,
@@ -1828,7 +1831,7 @@ class ExperimentProviderBudgetBoundaryTests(unittest.TestCase):
 
             def prepare(self):
                 calls.append("prepared")
-                return ExecutionGroupIdentity.not_applicable()
+                return _supported_execution_identity()
 
             def permit_and_wait(self, **_kwargs):
                 calls.append("permitted")
@@ -6313,7 +6316,7 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 self.command = list(command)
 
             def prepare(self):
-                return ExecutionGroupIdentity.not_applicable()
+                return _supported_execution_identity()
 
             def permit_and_wait(self, **_kwargs):
                 return ProviderExecution(
@@ -6399,7 +6402,7 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 type(self).command = list(command)
 
             def prepare(self):
-                return ExecutionGroupIdentity.not_applicable()
+                return _supported_execution_identity()
 
             def permit_and_wait(self, **_kwargs):
                 return ProviderExecution(
@@ -6644,7 +6647,7 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 self.command = list(command)
 
             def prepare(self):
-                return ExecutionGroupIdentity.not_applicable()
+                return _supported_execution_identity()
 
             def permit_and_wait(self, **_kwargs):
                 return ProviderExecution(
@@ -8953,7 +8956,7 @@ class ExperimentSandboxTests(unittest.TestCase):
                     )
 
                 def prepare(self):
-                    return ExecutionGroupIdentity.not_applicable()
+                    return _supported_execution_identity()
 
                 def permit_and_wait(self, **_kwargs):
                     return ProviderExecution([], 0, "", "")
@@ -9205,18 +9208,22 @@ class ExperimentSandboxTests(unittest.TestCase):
             self.assertTrue(
                 Path(invocation_reference["path"]).is_file()
             )
-            experiment_lifecycle_authority_root(
-                authority_root,
-                "unconsumed-call",
-            )
             with self.assertRaisesRegex(
                 ExperimentSandboxError,
-                "launch registration",
+                "lifecycle registry is sealed",
+            ):
+                experiment_lifecycle_authority_root(
+                    authority_root,
+                    "unconsumed-call",
+                )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "manifest is already sealed",
             ):
                 publish_registered_model_invocation_set_reference(
                     authority_root,
                     manifest["experiment_run_id"],
-                    reference_id="model-invocation-set-with-extra",
+                    reference_id="model-invocation-set-replay",
                 )
 
             wrong = dict(context)
@@ -9453,22 +9460,29 @@ class ExperimentSandboxTests(unittest.TestCase):
                 root,
                 scan_groups,
             )
-            invocation_set_reference = (
-                publish_model_invocation_set_reference(
-                    root,
-                    "RUN-EXPERIMENT-FIXTURE",
-                    [
-                        {
-                            "lifecycle_authority_root": (
-                                lifecycle_authority_root
-                            ),
-                            "taskpack_id": "phase2-fixture",
-                            "invocation_ids": ["INV-FIXTURE"],
-                            "sandbox_reference": sandbox_reference,
-                        }
-                    ],
-                )
-            )
+            invocation_sets = [
+                {
+                    "lifecycle_authority_root": (
+                        lifecycle_authority_root
+                    ),
+                    "taskpack_id": "phase2-fixture",
+                    "invocation_ids": ["INV-FIXTURE"],
+                    "sandbox_reference": sandbox_reference,
+                }
+            ]
+            with patch(
+                "agentteam_runtime.experiment_sandbox.subprocess.Popen"
+            ) as popen:
+                with self.assertRaisesRegex(
+                    ExperimentEvaluationBlocked,
+                    "must terminate",
+                ):
+                    publish_model_invocation_set_reference(
+                        root,
+                        "RUN-EXPERIMENT-FIXTURE",
+                        invocation_sets,
+                    )
+            popen.assert_not_called()
             marker = root / "shell-must-not-run"
             command = [
                 str(Path(sys.executable).resolve()),
@@ -9488,31 +9502,17 @@ class ExperimentSandboxTests(unittest.TestCase):
                 reference_id="main-protocol",
             )
 
-            with patch(
-                "agentteam_runtime.experiment_sandbox.subprocess.Popen"
-            ) as popen:
-                with self.assertRaisesRegex(
-                    ExperimentEvaluationBlocked,
-                    "must terminate",
-                ):
-                    run_trusted_argv_evaluator(
-                        authority_root=root,
-                        invocation_set_reference=invocation_set_reference,
-                        provider_sandbox_reference=sandbox_reference,
-                        experiment_protocol_reference=protocol_reference,
-                        scan_scope_reference=scan_scope_reference,
-                        command=command,
-                        cwd=fixture["repository"],
-                        evaluator_reference=evaluator_reference,
-                        canary_path=fixture["canary"],
-                        timeout_seconds=10,
-                    )
-            popen.assert_not_called()
-
             lifecycle.finalize(
                 "completed",
                 stdout="",
                 stderr="",
+            )
+            invocation_set_reference = (
+                publish_model_invocation_set_reference(
+                    root,
+                    "RUN-EXPERIMENT-FIXTURE",
+                    invocation_sets,
+                )
             )
             evidence_path = root / "evaluation.json"
             evidence = run_trusted_argv_evaluator(
@@ -10005,19 +10005,6 @@ class ExperimentSandboxTests(unittest.TestCase):
                 context,
                 invocation_id="INV-LATE",
             )
-            scan_paths = {}
-            for group in ("prompt", "context", "taskpack", "artifacts"):
-                path = root / f"{group}.txt"
-                path.write_text("{}\n", encoding="utf-8")
-                scan_paths[group] = [path]
-            scan_reference = publish_scan_scope_reference(root, scan_paths)
-            evaluator = root / "evaluator.py"
-            evaluator.write_text(
-                "#!/usr/bin/python3\nraise SystemExit(0)\n",
-                encoding="utf-8",
-            )
-            evaluator.chmod(0o700)
-            evaluator_reference = publish_evaluator_reference(root, evaluator)
             shadow_authority = lifecycle_authority_root.parent / "shadow"
             shadow_authority.mkdir()
             shutil.copytree(
@@ -10075,7 +10062,10 @@ class ExperimentSandboxTests(unittest.TestCase):
                     )
             finally:
                 hidden_authority.rename(lifecycle_authority_root)
-            invocation_set_reference = (
+            with self.assertRaisesRegex(
+                ExperimentEvaluationBlocked,
+                "durable start",
+            ):
                 publish_model_invocation_set_reference(
                     root,
                     "RUN-EXPERIMENT-FIXTURE",
@@ -10093,43 +10083,41 @@ class ExperimentSandboxTests(unittest.TestCase):
                         }
                     ],
                 )
-            )
-            protocol = _sandbox_protocol(fixture)
-            protocol["acceptance"]["command"] = [
-                str(Path(sys.executable).resolve()),
-                "-c",
-                "raise SystemExit(0)",
-            ]
-            protocol["acceptance"]["timeout_seconds"] = 10
-            protocol["evaluator"]["artifact_sha256"] = evaluator_reference[
-                "sha256"
-            ]
-            protocol_reference = publish_experiment_protocol_reference(
+            late.invocation_dir.rmdir()
+            invocation_set_reference = publish_model_invocation_set_reference(
                 root,
-                protocol,
+                "RUN-EXPERIMENT-FIXTURE",
+                [
+                    {
+                        "lifecycle_authority_root": (
+                            lifecycle_authority_root
+                        ),
+                        "taskpack_id": "phase2-fixture",
+                        "invocation_ids": ["INV-COMPLETED"],
+                        "sandbox_reference": sandbox_reference,
+                    }
+                ],
             )
-
-            with self.assertRaisesRegex(
-                ExperimentEvaluationBlocked,
-                "durable start",
-            ):
-                run_trusted_argv_evaluator(
-                    authority_root=root,
-                    invocation_set_reference=invocation_set_reference,
-                    provider_sandbox_reference=sandbox_reference,
-                    experiment_protocol_reference=protocol_reference,
-                    scan_scope_reference=scan_reference,
-                    command=protocol["acceptance"]["command"],
-                    cwd=fixture["repository"],
-                    evaluator_reference=evaluator_reference,
-                    canary_path=fixture["canary"],
-                    timeout_seconds=10,
-                )
+            self.assertTrue(
+                Path(invocation_set_reference["path"]).is_file()
+            )
             with self.assertRaisesRegex(
                 ModelInvocationIntegrityError,
                 "invocation set is sealed",
             ):
-                late.publish_start(ExecutionGroupIdentity.not_applicable())
+                InvocationLifecycle(
+                    lifecycle_authority_root,
+                    context,
+                    invocation_id="INV-LATE-AFTER-SEAL",
+                )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "lifecycle registry is sealed",
+            ):
+                experiment_lifecycle_authority_root(
+                    root,
+                    "late-lifecycle",
+                )
 
     def test_evaluation_seals_multiple_taskpack_authority_roots(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -10985,6 +10973,12 @@ class ExperimentCalibrationTests(unittest.TestCase):
             input_bytes=None,
         ):
             del cpu_limit, memory_limit_bytes
+            argv = list(argv)
+            if argv and Path(argv[0]) == Path("/usr/bin/bwrap"):
+                argv.insert(
+                    argv.index("--unshare-all") + 1,
+                    "--share-net",
+                )
             try:
                 completed = subprocess.run(
                     argv,
@@ -11081,6 +11075,10 @@ class ExperimentCalibrationTests(unittest.TestCase):
             "agentteam_runtime.experiment_sandbox."
             "_run_bounded_argv",
             side_effect=run_bounded_argv_without_systemd,
+        ), patch(
+            "agentteam_runtime.experiment_sandbox."
+            "probe_gold_canary_denial",
+            side_effect=_successful_namespace_probe,
         ):
             for repetition, mode, status in sequence:
                 key = (

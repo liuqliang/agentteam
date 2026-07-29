@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import fcntl
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,6 +36,9 @@ SCAN_SCOPE_REFERENCE_SCHEMA_VERSION = "experiment_scan_scope_reference.v1"
 EVALUATOR_REFERENCE_SCHEMA_VERSION = "experiment_evaluator_reference.v1"
 INVOCATION_SET_REFERENCE_SCHEMA_VERSION = (
     "experiment_model_invocation_set_reference.v1"
+)
+LIFECYCLE_REGISTRY_SEAL_SCHEMA_VERSION = (
+    "experiment_lifecycle_registry_seal.v1"
 )
 PROTOCOL_REFERENCE_SCHEMA_VERSION = "experiment_protocol_reference.v1"
 LAUNCH_REGISTRATION_SCHEMA_VERSION = (
@@ -479,25 +483,101 @@ def publish_model_invocation_set_reference(
     *,
     reference_id="model-invocation-set",
 ):
-    record = {
-        "schema_version": "experiment_model_invocation_manifest.v1",
-        "run_id": _nonempty_text(run_id, "model invocation run id"),
-        "invocation_sets": _normalize_invocation_sets(
-            invocation_sets,
-            authority_root=authority_root,
-        ),
-    }
+    authority_root = Path(authority_root).resolve(strict=True)
     authority_dir = _experiment_authority_dir(authority_root)
     path = authority_dir / (
         f"{_safe_reference_id(reference_id)}.invocation-set.json"
     )
-    _publish_immutable_json(path, record)
-    payload = _read_bounded_regular_file(path, max_bytes=4 * 1024 * 1024)
-    return {
-        "schema_version": INVOCATION_SET_REFERENCE_SCHEMA_VERSION,
-        "path": str(path),
-        "sha256": hashlib.sha256(payload).hexdigest(),
-    }
+    with _experiment_lifecycle_registry_lock(authority_root) as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            normalized_sets = _normalize_invocation_sets(
+                invocation_sets,
+                authority_root=authority_root,
+            )
+            run_id = _nonempty_text(run_id, "model invocation run id")
+            for item in normalized_sets:
+                _terminal_invocation_evidence(
+                    Path(item["lifecycle_authority_root"])
+                    / "model_invocations",
+                    expected_invocation_ids=item["invocation_ids"],
+                    expected_run_id=run_id,
+                    expected_taskpack_id=item["taskpack_id"],
+                    expected_sandbox_policy_sha256=item[
+                        "sandbox_policy_sha256"
+                    ],
+                    expected_sandbox_reference_sha256=item[
+                        "sandbox_reference"
+                    ]["sha256"],
+                )
+            record = {
+                "schema_version": (
+                    "experiment_model_invocation_manifest.v1"
+                ),
+                "run_id": run_id,
+                "invocation_sets": normalized_sets,
+            }
+            existing_manifests = sorted(
+                authority_dir.glob("*.invocation-set.json")
+            )
+            if existing_manifests and existing_manifests != [path]:
+                raise ExperimentSandboxError(
+                    "model invocation manifest is already sealed"
+                )
+            if path.exists():
+                existing = _read_json_object(
+                    path,
+                    "model invocation manifest",
+                )
+                if existing != record:
+                    raise ExperimentSandboxError(
+                        "model invocation manifest conflicts with replay"
+                    )
+            else:
+                _publish_immutable_json(path, record)
+            payload = _read_bounded_regular_file(
+                path,
+                max_bytes=4 * 1024 * 1024,
+            )
+            reference = {
+                "schema_version": INVOCATION_SET_REFERENCE_SCHEMA_VERSION,
+                "path": str(path),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            seal = {
+                "schema_version": (
+                    LIFECYCLE_REGISTRY_SEAL_SCHEMA_VERSION
+                ),
+                "run_id": run_id,
+                "invocation_set_reference": reference,
+                "lifecycle_authority_roots": sorted(
+                    item["lifecycle_authority_root"]
+                    for item in normalized_sets
+                ),
+            }
+            seal_path = _experiment_lifecycle_registry_seal_path(
+                authority_root
+            )
+            if seal_path.exists():
+                existing_seal = _read_json_object(
+                    seal_path,
+                    "experiment lifecycle registry seal",
+                )
+                if existing_seal != seal:
+                    raise ExperimentSandboxError(
+                        "experiment lifecycle registry seal conflicts"
+                    )
+            else:
+                _publish_immutable_json(seal_path, seal)
+            _validate_experiment_lifecycle_registry_seal(
+                authority_root,
+                reference,
+                normalized_sets,
+                expected_run_id=run_id,
+            )
+            return reference
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def publish_registered_model_invocation_set_reference(
@@ -654,6 +734,12 @@ def load_model_invocation_set_reference(reference, authority_root):
             "model invocation set authority is not canonical"
         )
     _nonempty_text(record["run_id"], "model invocation run id")
+    _validate_experiment_lifecycle_registry_seal(
+        authority_root,
+        reference,
+        normalized,
+        expected_run_id=record["run_id"],
+    )
     return record
 
 
@@ -974,26 +1060,44 @@ def validate_provider_authority_separation(descriptor, *authority_roots):
 def experiment_lifecycle_authority_root(authority_root, lifecycle_id):
     """Allocate one controller-owned lifecycle root in the fixed registry."""
 
+    authority_root = Path(authority_root).resolve(strict=True)
     lifecycle_id = _safe_reference_id(lifecycle_id)
-    registry = _experiment_lifecycle_registry_dir(authority_root)
-    root = registry / lifecycle_id
-    root.mkdir(mode=0o700, exist_ok=False)
-    registration_path = _experiment_authority_dir(authority_root) / (
-        f"{lifecycle_id}.lifecycle-registration.json"
-    )
-    try:
-        _publish_immutable_json(
-            registration_path,
-            {
-                "schema_version": "experiment_lifecycle_registration.v1",
-                "lifecycle_id": lifecycle_id,
-                "lifecycle_authority_root": str(root),
-            },
-        )
-    except Exception:
-        root.rmdir()
-        raise
-    return root
+    with _experiment_lifecycle_registry_lock(authority_root) as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            authority_dir = _experiment_authority_dir(authority_root)
+            if (
+                _experiment_lifecycle_registry_seal_path(
+                    authority_root
+                ).exists()
+                or any(authority_dir.glob("*.invocation-set.json"))
+            ):
+                raise ExperimentSandboxError(
+                    "experiment lifecycle registry is sealed"
+                )
+            registry = _experiment_lifecycle_registry_dir(authority_root)
+            root = registry / lifecycle_id
+            root.mkdir(mode=0o700, exist_ok=False)
+            registration_path = authority_dir / (
+                f"{lifecycle_id}.lifecycle-registration.json"
+            )
+            try:
+                _publish_immutable_json(
+                    registration_path,
+                    {
+                        "schema_version": (
+                            "experiment_lifecycle_registration.v1"
+                        ),
+                        "lifecycle_id": lifecycle_id,
+                        "lifecycle_authority_root": str(root),
+                    },
+                )
+            except Exception:
+                root.rmdir()
+                raise
+            return root
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def validate_experiment_lifecycle_authority(
@@ -2309,16 +2413,6 @@ def _terminal_invocation_evidence(
         raise ExperimentEvaluationBlocked(
             "trusted evaluation requires run and taskpack identities"
         )
-    seal_sha256 = _seal_model_invocation_set(
-        root,
-        expected_invocation_ids=expected_invocation_ids,
-        expected_run_id=expected_run_id,
-        expected_taskpack_id=expected_taskpack_id,
-        expected_sandbox_policy_sha256=expected_sandbox_policy_sha256,
-        expected_sandbox_reference_sha256=(
-            expected_sandbox_reference_sha256
-        ),
-    )
     invocation_dirs = sorted(root.iterdir())
     actual_ids = [path.name for path in invocation_dirs]
     if set(actual_ids) != set(expected_invocation_ids):
@@ -2459,6 +2553,16 @@ def _terminal_invocation_evidence(
                 ).hexdigest(),
             }
         )
+    seal_sha256 = _seal_model_invocation_set(
+        root,
+        expected_invocation_ids=expected_invocation_ids,
+        expected_run_id=expected_run_id,
+        expected_taskpack_id=expected_taskpack_id,
+        expected_sandbox_policy_sha256=expected_sandbox_policy_sha256,
+        expected_sandbox_reference_sha256=(
+            expected_sandbox_reference_sha256
+        ),
+    )
     return evidence, seal_sha256
 
 
@@ -2486,6 +2590,28 @@ def _seal_model_invocation_set(
     with lock_path.open("r+b") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
+            try:
+                invocation_dirs = sorted(invocation_root.iterdir())
+            except OSError as exc:
+                raise ExperimentEvaluationBlocked(
+                    "model invocation set changed before sealing"
+                ) from exc
+            if (
+                [path.name for path in invocation_dirs]
+                != sorted(expected_invocation_ids)
+                or any(
+                    path.is_symlink()
+                    or not path.is_dir()
+                    or not (path / "started.json").is_file()
+                    or (path / "started.json").is_symlink()
+                    or not (path / "terminal.json").is_file()
+                    or (path / "terminal.json").is_symlink()
+                    for path in invocation_dirs
+                )
+            ):
+                raise ExperimentEvaluationBlocked(
+                    "model invocation set changed before sealing"
+                )
             if seal_path.exists():
                 try:
                     existing = json.loads(
@@ -3038,6 +3164,85 @@ def _experiment_lifecycle_registry_dir(authority_root):
     return path
 
 
+@contextmanager
+def _experiment_lifecycle_registry_lock(authority_root):
+    path = _experiment_authority_dir(authority_root) / (
+        "lifecycle-registry.lock"
+    )
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise ExperimentSandboxError(
+            "experiment lifecycle registry lock is unavailable"
+        ) from exc
+    lock_file = None
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise ExperimentSandboxError(
+                "experiment lifecycle registry lock is unsafe"
+            )
+        lock_file = os.fdopen(descriptor, "r+b")
+        descriptor = -1
+        yield lock_file
+    finally:
+        if lock_file is not None:
+            lock_file.close()
+        elif descriptor >= 0:
+            os.close(descriptor)
+
+
+def _experiment_lifecycle_registry_seal_path(authority_root):
+    return _experiment_authority_dir(authority_root) / (
+        "model-invocation-registry.sealed.json"
+    )
+
+
+def _validate_experiment_lifecycle_registry_seal(
+    authority_root,
+    invocation_set_reference,
+    invocation_sets,
+    *,
+    expected_run_id,
+):
+    seal_path = _experiment_lifecycle_registry_seal_path(authority_root)
+    seal = _read_json_object(
+        seal_path,
+        "experiment lifecycle registry seal",
+    )
+    expected_roots = sorted(
+        item["lifecycle_authority_root"] for item in invocation_sets
+    )
+    expected = {
+        "schema_version": LIFECYCLE_REGISTRY_SEAL_SCHEMA_VERSION,
+        "run_id": expected_run_id,
+        "invocation_set_reference": dict(invocation_set_reference),
+        "lifecycle_authority_roots": expected_roots,
+    }
+    if seal != expected:
+        raise ExperimentSandboxError(
+            "experiment lifecycle registry seal is invalid"
+        )
+    metadata = seal_path.stat()
+    if (
+        metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+        or set(expected_roots) != _registered_lifecycle_roots(
+            authority_root
+        )
+    ):
+        raise ExperimentSandboxError(
+            "experiment lifecycle registry seal is unsafe"
+        )
+    return seal
+
+
 def _registered_lifecycle_roots(authority_root):
     authority_dir = _experiment_authority_dir(authority_root)
     registrations = {}
@@ -3095,6 +3300,27 @@ def _registered_lifecycle_roots(authority_root):
             )
         registrations[str(root)] = record["lifecycle_id"]
     return set(registrations)
+
+
+def _read_json_object(path, label):
+    path = _existing_path(
+        path,
+        label,
+        require_file=True,
+        reject_symlink=True,
+    )
+    try:
+        value = json.loads(
+            _read_bounded_regular_file(
+                path,
+                max_bytes=4 * 1024 * 1024,
+            ).decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExperimentSandboxError(f"{label} is unreadable") from exc
+    if not isinstance(value, dict):
+        raise ExperimentSandboxError(f"{label} must be an object")
+    return value
 
 
 def _safe_reference_id(value):
@@ -4160,6 +4386,10 @@ def _is_privileged_system_tree(path):
         for root in (Path("/bin"), Path("/lib"), Path("/lib64"))
     ):
         return False
+    try:
+        trusted_system_uid = _TRUSTED_BWRAP_PATH.stat().st_uid
+    except OSError:
+        return False
     current = path
     while True:
         try:
@@ -4167,7 +4397,9 @@ def _is_privileged_system_tree(path):
         except OSError:
             return False
         if (
-            metadata.st_uid != 0
+            metadata.st_uid != trusted_system_uid
+            or metadata.st_uid == os.geteuid()
+            or os.access(current, os.W_OK)
             or stat.S_IMODE(metadata.st_mode) & 0o022
         ):
             return False

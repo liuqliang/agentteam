@@ -871,12 +871,23 @@ class InvocationLifecycle:
                 terminal_status=terminal_status,
             )
             lineage = _provider_lineage(stdout, self.context)
+            terminal_context = _terminal_context(self.context)
+            if terminal_writer == "recovery_controller":
+                started = _read_json_if_exists(self.started_path)
+                if not isinstance(started, dict):
+                    raise ModelInvocationIntegrityError(
+                        "recovery terminal requires its durable start"
+                    )
+                terminal_context = {
+                    field: started.get(field)
+                    for field in terminal_context
+                }
             record = {
                 "usage_schema_version": "model_invocation_usage.v1",
                 "usage_event_id": _usage_event_id(self.invocation_id),
                 "invocation_id": self.invocation_id,
                 "start_sha256": _bounded_file_sha256(self.started_path),
-                **_terminal_context(self.context),
+                **terminal_context,
                 "provider_session_id": lineage["provider_session_id"],
                 "provider_predecessor_invocation_id": self.context.get(
                     "provider_predecessor_invocation_id"
