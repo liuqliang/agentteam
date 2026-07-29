@@ -562,6 +562,26 @@ def _run_supervised_two_phase_scheduler(
                 "last_tick": last_tick,
             }
             break
+        if last_tick["tick_status"] in {
+            "budget_stopped",
+            "interrupted",
+        }:
+            scheduler._emit_run_event_once(
+                "run_stopped",
+                scheduler._run_event_payload(
+                    last_tick["tick_status"],
+                    {"tick_count": tick_count},
+                ),
+            )
+            result = {
+                **scheduler.summary(),
+                "scheduler_status": scheduler.state[
+                    "scheduler_status"
+                ],
+                "tick_count": tick_count,
+                "last_tick": last_tick,
+            }
+            break
         supervision.append(worker_pool.supervise_once())
         if last_tick["tick_status"] == "idle":
             completion = scheduler.complete_verified_backlog(tick_count)

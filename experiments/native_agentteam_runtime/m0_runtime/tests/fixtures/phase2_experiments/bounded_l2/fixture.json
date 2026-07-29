@@ -1,0 +1,7 @@
+{
+  "acceptance_command": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+  "expected_change": "normalize and summarize records without mutating input",
+  "fixture_id": "phase2-bounded-l2",
+  "repair_opportunity": "empty labels must be normalized before aggregation",
+  "risk": "L2"
+}

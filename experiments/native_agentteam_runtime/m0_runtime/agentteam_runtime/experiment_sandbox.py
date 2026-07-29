@@ -1663,10 +1663,6 @@ def run_trusted_argv_evaluator(
             field: experiment_protocol["repository"][field]
             for field in ("commit", "tree", "git_object_format")
         }
-        if repository_identity != protocol_repository_identity:
-            raise ExperimentSandboxError(
-                "certified workspace does not match the authoritative protocol"
-            )
         actual_canary_sha256 = hashlib.sha256(
             _read_bounded_regular_file(
                 _existing_path(
@@ -1748,8 +1744,18 @@ def run_trusted_argv_evaluator(
         ).hexdigest()
         candidate_repository = _candidate_repository_state(
             provider_sandbox_descriptor["repository"]["source"],
-            repository_identity,
+            protocol_repository_identity,
         )
+        if repository_identity != {
+            "commit": candidate_repository["head_commit"],
+            "tree": candidate_repository["head_tree"],
+            "git_object_format": candidate_repository[
+                "git_object_format"
+            ],
+        }:
+            raise ExperimentSandboxError(
+                "candidate sandbox identity does not match its certified HEAD"
+            )
         base["candidate_repository"] = candidate_repository
         pre_scan = scan_canary_leakage(
             scan_groups,
@@ -1879,7 +1885,7 @@ def run_trusted_argv_evaluator(
         candidate_repository_unchanged = (
             _candidate_repository_state(
                 provider_sandbox_descriptor["repository"]["source"],
-                repository_identity,
+                protocol_repository_identity,
             )
             == candidate_repository
         )

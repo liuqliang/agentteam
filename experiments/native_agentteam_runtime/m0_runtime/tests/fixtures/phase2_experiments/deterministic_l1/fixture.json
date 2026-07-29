@@ -1,0 +1,6 @@
+{
+  "acceptance_command": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+  "expected_change": "increment returns value plus one",
+  "fixture_id": "phase2-deterministic-l1",
+  "risk": "L1"
+}

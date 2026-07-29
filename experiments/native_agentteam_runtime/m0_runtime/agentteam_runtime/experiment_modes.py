@@ -173,9 +173,13 @@ class ExperimentCommonFinalizer:
             environment=request.sandbox_configuration[
                 "environment"
             ],
-            repository_identity=_repository_identity(
-                request.protocol
-            ),
+            repository_identity={
+                "commit": candidate_state["head_commit"],
+                "tree": candidate_state["head_tree"],
+                "git_object_format": candidate_state[
+                    "git_object_format"
+                ],
+            },
             forbidden_paths=[
                 request.sandbox_configuration["canary_path"]
             ],
@@ -1018,6 +1022,7 @@ class AgentTeamFullModeAdapter:
             project_root=str(author_workspace),
             goal=_goal_text(request.protocol),
             draft_root=str(draft_root),
+            taskpack_id="experiment-full-mode-author",
             author_runtime="codex",
             codex_model=request.model_policy["model"],
             author_invocation_context=_register_provider_launch(
@@ -1025,7 +1030,7 @@ class AgentTeamFullModeAdapter:
                 lifecycle_id="taskpack-author",
                 workspace_root=str(author_workspace),
                 usage_stage="taskpack_author",
-                taskpack_id="FULL-MODE-AUTHOR",
+                taskpack_id="experiment-full-mode-author",
             ),
         )
         if (
@@ -1040,7 +1045,7 @@ class AgentTeamFullModeAdapter:
             Path(request.run_dir) / "frozen",
             expected_authoring_mode=authored.get(
                 "authoring_mode",
-                "codex",
+                "direct_draft",
             ),
         )
         if (

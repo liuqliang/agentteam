@@ -349,7 +349,7 @@ class TwoPhaseFileScheduler:
             )
             if result is not None and self.experiment_controller is not None:
                 reconciliation = reconcile_orphaned_invocation(
-                    self.output_dir,
+                    self._inflight_invocation_authority_root(inflight),
                     inflight,
                     fence_assessor=self.invocation_fence_assessor,
                     service_stopper=self.invocation_service_stopper,
@@ -421,7 +421,9 @@ class TwoPhaseFileScheduler:
                 reconciliation = None
                 if self.experiment_controller is not None or lease_expired:
                     reconciliation = reconcile_orphaned_invocation(
-                        self.output_dir,
+                        self._inflight_invocation_authority_root(
+                            inflight
+                        ),
                         inflight,
                         fence_assessor=self.invocation_fence_assessor,
                         service_stopper=self.invocation_service_stopper,
@@ -962,6 +964,9 @@ class TwoPhaseFileScheduler:
             "worktree_id": worktree_id,
             "worktree_path": str(worktree_path) if worktree_path else None,
             "branch": branch,
+            "model_invocation_authority_root": invocation_context[
+                "model_invocation_authority_root"
+            ],
             "runtime_artifact_baseline": runtime_artifact_baseline,
             **_integration_baseline_inflight_fields(integration_baseline),
             "correlation_id": correlation_id,
@@ -2386,7 +2391,7 @@ class TwoPhaseFileScheduler:
         for inflight in self.state["inflight_attempts"]:
             self._import_worker_lifecycles(inflight)
             reconciliation = reconcile_orphaned_invocation(
-                self.output_dir,
+                self._inflight_invocation_authority_root(inflight),
                 inflight,
                 fence_assessor=self.invocation_fence_assessor,
                 service_stopper=self.invocation_service_stopper,
@@ -2608,9 +2613,12 @@ class TwoPhaseFileScheduler:
         )
 
     def _import_worker_lifecycles(self, inflight):
+        authority_root = self._inflight_invocation_authority_root(
+            inflight
+        )
         imported = []
         for started_path, start in _matching_invocation_starts(
-            self.output_dir,
+            authority_root,
             inflight,
         ):
             imported.extend(
@@ -2620,10 +2628,30 @@ class TwoPhaseFileScheduler:
                     actor="agent-scheduler",
                     run_id=start.get("run_id") or self.run_id,
                     step_id=inflight["step_id"],
-                    source_root=self.output_dir,
+                    source_root=authority_root,
                 )
             )
         return imported
+
+    def _inflight_invocation_authority_root(self, inflight):
+        declared = inflight.get("model_invocation_authority_root")
+        if declared is None:
+            return self.output_dir
+        authority_root = Path(declared).resolve()
+        if self.experiment_runtime_context is None:
+            if authority_root != self.output_dir.resolve():
+                raise ValueError(
+                    "non-experiment invocation authority root changed"
+                )
+            return authority_root
+        experiment_authority = Path(
+            self.experiment_runtime_context["authority_root"]
+        ).resolve()
+        if not authority_root.is_relative_to(experiment_authority):
+            raise ValueError(
+                "experiment invocation authority escapes authority root"
+            )
+        return authority_root
 
     def _notify_canonical_events(self, step_id, events):
         if not self.notification_sink:

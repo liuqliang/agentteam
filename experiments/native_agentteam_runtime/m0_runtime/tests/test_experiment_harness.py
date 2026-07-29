@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -9,7 +10,7 @@ import tempfile
 import time
 import unittest
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -22,6 +23,11 @@ from agentteam_runtime.experiment_budget import (
     advance_experiment_budget,
     create_experiment_budget_state,
     validate_experiment_budget_state,
+)
+from agentteam_runtime.experiment_calibration import (
+    ExperimentCalibrationError,
+    load_deterministic_calibration_report,
+    run_deterministic_experiment_calibration,
 )
 from agentteam_runtime.experiment_controller import (
     ExperimentControllerError,
@@ -76,6 +82,7 @@ from agentteam_runtime.experiment_contract import (
     canonical_json_sha256,
     derive_experiment_run_id,
     ensure_executable_manifest,
+    publish_immutable_json,
     validate_experiment_protocol,
     validate_experiment_run_binding,
     validate_experiment_run_manifest,
@@ -142,7 +149,11 @@ from agentteam_runtime.taskpack import (
 from agentteam_runtime.taskpack_author import (
     _registered_experiment_author_output,
 )
-from agentteam_runtime.mailbox_worker import _model_invocation_context_payload
+from agentteam_runtime.mailbox_worker import (
+    FileMailboxWorker,
+    _model_invocation_context_payload,
+)
+import agentteam_runtime.cli as cli_module
 import agentteam_runtime.experiment_ledger as experiment_ledger_module
 from agentteam_runtime.operator_control import (
     answer_experiment_manual_gate,
@@ -452,11 +463,35 @@ def _successful_namespace_probe(descriptor, canary_path, **_kwargs):
     }
 
 
+def _supported_execution_identity():
+    return ExecutionGroupIdentity(
+        gated_supervisor_pid=os.getpid(),
+        gated_supervisor_pgid=os.getpgrp(),
+        host_boot_id="00000000-0000-0000-0000-000000000001",
+        gated_supervisor_start_ticks=1,
+        launch_nonce_sha256="f" * 64,
+        systemd_linger_enabled=True,
+        systemd_transient_unit="agentteam-fixture.service",
+        systemd_transient_invocation_id="1" * 32,
+        systemd_transient_kill_mode="control-group",
+        systemd_user_manager_identity="fixture-user-manager",
+        systemd_transient_control_group=(
+            "/user.slice/agentteam-fixture.service"
+        ),
+        systemd_user_service_invocation_id="2" * 32,
+        systemd_user_service_control_group=(
+            "/user.slice/agentteam-fixture.service"
+        ),
+        systemd_user_service_kill_mode="control-group",
+    )
+
+
 def _complete_fake_experiment_invocation(
     invocation_context,
     workspace_root,
     *,
     role,
+    execution_identity=None,
 ):
     class FakeGatedRunner:
         def __init__(
@@ -473,7 +508,10 @@ def _complete_fake_experiment_invocation(
             self.command = list(command)
 
         def prepare(self):
-            return ExecutionGroupIdentity.not_applicable()
+            return (
+                execution_identity
+                or ExecutionGroupIdentity.not_applicable()
+            )
 
         def permit_and_wait(self, **_kwargs):
             return ProviderExecution(
@@ -510,10 +548,16 @@ def _complete_fake_experiment_invocation(
         {
             "project": Path(workspace_root).name,
             "runtime_execution_session_id": (
-                f"SESSION-{uuid.uuid4().hex}"
+                context.get("runtime_execution_session_id")
+                or f"SESSION-{uuid.uuid4().hex}"
             ),
-            "lifecycle_owner_token": f"OWNER-{uuid.uuid4().hex}",
-            "agent_id": f"{role}-fixture",
+            "lifecycle_owner_token": (
+                context.get("lifecycle_owner_token")
+                or f"OWNER-{uuid.uuid4().hex}"
+            ),
+            "agent_id": (
+                context.get("agent_id") or f"{role}-fixture"
+            ),
             "role": role,
             "backend": "codex",
             "coverage_class": "supported_model_invocation",
@@ -552,6 +596,7 @@ def _complete_fake_runtime_invocation(
     lifecycle_id,
     taskpack_id,
     usage_stage="implementation_worker",
+    execution_identity=None,
 ):
     configuration = experiment_context["sandbox_configuration"]
     lifecycle_root = experiment_lifecycle_authority_root(
@@ -608,6 +653,7 @@ def _complete_fake_runtime_invocation(
         },
         workspace_root,
         role="implementation_worker",
+        execution_identity=execution_identity,
     )
 
 
@@ -10153,6 +10199,770 @@ class ExperimentSandboxTests(unittest.TestCase):
                     group_paths,
                     canary_path=fixture["canary"],
                     max_files=3,
+                )
+
+
+class ExperimentCalibrationTests(unittest.TestCase):
+    FIXTURES = (
+        Path(__file__).parent
+        / "fixtures"
+        / "phase2_experiments"
+    )
+
+    @staticmethod
+    def _bind_operator_event(
+        controller,
+        protocol,
+        manifest,
+        run_dir,
+        *,
+        request_source,
+    ):
+        run_dir = Path(run_dir)
+        state_path = (
+            run_dir / "state" / "two_phase_scheduler_state.json"
+        )
+        state_path.parent.mkdir()
+        state_path.write_text(
+            json.dumps(
+                {
+                    "experiment_controller_reference": (
+                        controller.reference
+                    ),
+                    "experiment_run_id": manifest[
+                        "experiment_run_id"
+                    ],
+                    "experiment_run_manifest_sha256": (
+                        canonical_json_sha256(manifest)
+                    ),
+                    "experiment_target_path_sha256": hashlib.sha256(
+                        str(run_dir.resolve()).encode("utf-8")
+                    ).hexdigest(),
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        payload = (
+            {"request_id": "PERMISSION-CALIBRATION"}
+            if request_source == "permission_request"
+            else {"reason": "controlled calibration stop"}
+        )
+        event_type = (
+            "permission_request_required"
+            if request_source == "permission_request"
+            else "run_stop_requested"
+        )
+        request = ExperimentOperatorActionLedgerTests._event(
+            event_type,
+            "2026-07-27T00:00:00Z",
+            payload,
+        )
+        (run_dir / "events.jsonl").write_text(
+            json.dumps(request, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        response = None
+        answered_at = None
+        if request_source == "permission_request":
+            response = ExperimentOperatorActionLedgerTests._event(
+                "permission_request_resolved",
+                "2026-07-27T00:00:01Z",
+                {
+                    "request_id": "PERMISSION-CALIBRATION",
+                    "decision": "approved",
+                },
+            )
+            answered_at = "2026-07-27T00:00:01Z"
+        controller.record_operator_action(
+            protocol=protocol,
+            run_manifest=manifest,
+            run_dir=run_dir,
+            request_source=request_source,
+            request=request,
+            response=response,
+            requested_at="2026-07-27T00:00:00Z",
+            answered_at=answered_at,
+        )
+
+    def _real_calibration_fixture(self, root):
+        root = Path(root)
+        projection_root = root / "projection"
+        projection_root.mkdir()
+        repository_root = root / "source"
+        repository_root.mkdir()
+        source = repository_root / "source"
+        source.mkdir()
+        subprocess.run(
+            ["git", "init", "--quiet", str(source)],
+            check=True,
+        )
+        _git(source, "config", "user.name", "Calibration Fixture")
+        _git(
+            source,
+            "config",
+            "user.email",
+            "calibration@example.invalid",
+        )
+        for fixture_name in ("deterministic_l1", "bounded_l2"):
+            shutil.copytree(
+                self.FIXTURES / fixture_name,
+                source / fixture_name,
+            )
+        (source / "verify_fixtures.py").write_text(
+            "import os\n"
+            "from pathlib import Path\n"
+            "import subprocess\n"
+            "import sys\n"
+            "root = Path(__file__).resolve().parent\n"
+            "for name in ('deterministic_l1', 'bounded_l2'):\n"
+            "    fixture = root / name\n"
+            "    env = dict(os.environ, PYTHONPATH=str(fixture))\n"
+            "    result = subprocess.run(\n"
+            "        [sys.executable, '-B', '-m', 'unittest', 'discover', "
+            "'-s', 'tests'],\n"
+            "        cwd=fixture,\n"
+            "        env=env,\n"
+            "        check=False,\n"
+            "    )\n"
+            "    if result.returncode:\n"
+            "        raise SystemExit(result.returncode)\n",
+            encoding="utf-8",
+        )
+        _git(source, "add", ".")
+        _git(source, "commit", "--quiet", "-m", "calibration fixtures")
+        repository = {
+            "repository": {
+                "source": str(source),
+                "commit": _git(
+                    source,
+                    "rev-parse",
+                    "HEAD",
+                ).stdout.strip(),
+                "tree": _git(
+                    source,
+                    "rev-parse",
+                    "HEAD^{tree}",
+                ).stdout.strip(),
+                "git_object_format": _git(
+                    source,
+                    "rev-parse",
+                    "--show-object-format",
+                ).stdout.strip(),
+            },
+            "source": source,
+        }
+        taskpack_draft = draft_taskpack_files(
+            project_root=repository["source"],
+            goal="Repair both deterministic calibration fixtures.",
+            draft_root=root / "taskpack-draft",
+            taskpack_id="phase2-calibration-direct",
+            read_scope=[
+                "deterministic_l1",
+                "bounded_l2",
+                "verify_fixtures.py",
+            ],
+            write_scope=[
+                "deterministic_l1/src/counter.py",
+                "bounded_l2/src/records.py",
+            ],
+            verification_command=[
+                str(Path(sys.executable).resolve()),
+                "-B",
+                "verify_fixtures.py",
+            ],
+            role_routing=False,
+        )
+        frozen = freeze_taskpack(
+            taskpack_draft["taskpack_dir"],
+            root / "taskpack-frozen",
+            expected_authoring_mode="direct_draft",
+        )
+        evaluator = root / "calibration-evaluator.py"
+        evaluator.write_text(
+            "#!/usr/bin/python3\n"
+            "import subprocess\n"
+            "import sys\n"
+            "if len(sys.argv) < 3 or sys.argv[1] != '--':\n"
+            "    raise SystemExit(64)\n"
+            "raise SystemExit(subprocess.run(sys.argv[2:]).returncode)\n",
+            encoding="utf-8",
+        )
+        evaluator.chmod(0o700)
+        protocol = copy.deepcopy(_protocol())
+        protocol["repository"] = repository["repository"]
+        protocol["acceptance"] = {
+            "command": [
+                str(Path(sys.executable).resolve()),
+                "-B",
+                "verify_fixtures.py",
+            ],
+            "timeout_seconds": 30,
+        }
+        protocol["evaluator"]["artifact_sha256"] = hashlib.sha256(
+            evaluator.read_bytes()
+        ).hexdigest()
+        protocol["direct_taskpack"]["sha256"] = frozen["manifest"][
+            "digest_sha256"
+        ]
+        protocol["budgets"]["max_total_tokens"] = 18
+        controller = create_experiment_controller(
+            projection_root / "protocol-controller",
+            protocol_id=protocol["experiment_id"],
+            max_total_tokens=protocol["budgets"][
+                "max_total_tokens"
+            ],
+            max_wall_time_seconds=protocol["budgets"][
+                "max_wall_time_seconds"
+            ],
+            soft_warning_ratio=protocol["budgets"][
+                "soft_warning_ratio"
+            ],
+            scored=protocol["scored"],
+            protocol_sha256=canonical_json_sha256(protocol),
+            operator_limits=protocol["operator_limits"],
+        )
+        credential = projection_root / "credential.json"
+        credential.write_text("{}\n", encoding="utf-8")
+        canary = projection_root / "gold-canary"
+        canary.write_text(
+            "phase2 real calibration canary\n",
+            encoding="utf-8",
+        )
+        sandbox_configuration = {
+            "runtime_views": [
+                {"source": path, "target": path}
+                for path in ("/usr", "/lib", "/lib64", "/bin")
+                if Path(path).exists()
+            ],
+            "library_views": [],
+            "credential_mounts": [
+                {
+                    "source": str(credential),
+                    "target": (
+                        "/run/agentteam-credentials/provider.json"
+                    ),
+                }
+            ],
+            "environment": {
+                "AGENTTEAM_CREDENTIAL_FILE": (
+                    "/run/agentteam-credentials/provider.json"
+                )
+            },
+            "canary_path": str(canary),
+        }
+        execution = {
+            "single_returncode": 0,
+            "forced_runtime_status": None,
+        }
+
+        def apply_fixture_change(workspace):
+            workspace = Path(workspace)
+            (
+                workspace
+                / "deterministic_l1"
+                / "src"
+                / "counter.py"
+            ).write_text(
+                "def increment(value):\n"
+                "    return value + 1\n",
+                encoding="utf-8",
+            )
+            (
+                workspace
+                / "bounded_l2"
+                / "src"
+                / "records.py"
+            ).write_text(
+                "def normalize(record):\n"
+                "    return {\n"
+                "        \"label\": record.get(\"label\") or \"unknown\",\n"
+                "        \"value\": int(record[\"value\"]),\n"
+                "    }\n",
+                encoding="utf-8",
+            )
+
+        class CalibrationSingleRunner:
+            def __init__(
+                self,
+                lifecycle,
+                command,
+                *,
+                cwd,
+                input_text,
+                timeout_seconds,
+                environment=None,
+            ):
+                from agentteam_runtime.experiment_sandbox import (
+                    load_experiment_launch_registration,
+                )
+
+                registration = load_experiment_launch_registration(
+                    lifecycle.authority_root
+                )
+                del input_text, timeout_seconds, environment
+                if lifecycle.context["usage_stage"] == "taskpack_author":
+                    authored = (
+                        Path(registration["workspace_root"])
+                        / ".agentteam-author"
+                        / lifecycle.context["taskpack_id"]
+                    )
+                    if not authored.is_dir():
+                        raise AssertionError(
+                            "calibration author target is missing"
+                        )
+                    for source_file in Path(
+                        taskpack_draft["taskpack_dir"]
+                    ).iterdir():
+                        shutil.copy2(
+                            source_file,
+                            authored / source_file.name,
+                        )
+                    taskpack_path = authored / "taskpack.yaml"
+                    taskpack = json.loads(
+                        taskpack_path.read_text(encoding="utf-8")
+                    )
+                    taskpack.update(
+                        {
+                            "taskpack_id": authored.name,
+                            "project_root": registration[
+                                "workspace_root"
+                            ],
+                        }
+                    )
+                    taskpack_path.write_text(
+                        json.dumps(taskpack, sort_keys=True),
+                        encoding="utf-8",
+                    )
+                else:
+                    apply_fixture_change(
+                        registration["workspace_root"]
+                    )
+                self.command = list(command)
+
+            def prepare(self):
+                return _supported_execution_identity()
+
+            def permit_and_wait(self, **_kwargs):
+                return ProviderExecution(
+                    self.command,
+                    execution["single_returncode"],
+                    json.dumps(
+                        {
+                            "type": "turn.completed",
+                            "usage": {
+                                "input_tokens": 2,
+                                "cached_input_tokens": 1,
+                                "output_tokens": 1,
+                                "reasoning_output_tokens": 0,
+                                "total_tokens": 3,
+                            },
+                        }
+                    ),
+                    "",
+                )
+
+            def abort_before_permit(self):
+                return None
+
+            def cleanup_after_terminal(self):
+                return None
+
+        class CalibrationWorkerRuntime:
+            def run(
+                self,
+                message,
+                worktree_path=None,
+                progress_callback=None,
+            ):
+                del progress_callback
+                apply_fixture_change(worktree_path)
+                invocation_context = invocation_context_from_message(
+                    message,
+                    model=protocol["environment"]["model"],
+                    backend="codex",
+                )
+                invocation_context[
+                    "model_invocation_authority_root"
+                ] = message["payload"][
+                    "model_invocation_authority_root"
+                ]
+                invocation_id = _complete_fake_experiment_invocation(
+                    invocation_context,
+                    worktree_path,
+                    role="implementation_worker",
+                    execution_identity=_supported_execution_identity(),
+                )
+                changed_files = [
+                    "bounded_l2/src/records.py",
+                    "deterministic_l1/src/counter.py",
+                ]
+                return {
+                    "result_status": "completed",
+                    "changed_files": changed_files,
+                    "output": {
+                        "adapter": "calibration_worker",
+                        "operator_summary": {
+                            "what_changed": [
+                                "已修复两个确定性校准样例。"
+                            ],
+                            "verification_summary": [
+                                "冻结任务包中的验证命令已通过。"
+                            ],
+                            "deliverables": [
+                                {
+                                    "deliverable": deliverable,
+                                    "summary": (
+                                        "确定性校准已交付："
+                                        f"{deliverable}。"
+                                    ),
+                                    "evidence": changed_files,
+                                }
+                                for deliverable in (
+                                    "goal_alignment_summary",
+                                    (
+                                        "implemented_changes_or_"
+                                        "no_safe_change_rationale"
+                                    ),
+                                    "verification_summary",
+                                    "next_steps",
+                                )
+                            ],
+                        },
+                        "model_invocation_id": invocation_id,
+                    },
+                }
+
+        class CalibrationWorkerPool:
+            def __init__(
+                self,
+                agent_pool_path,
+                output_dir,
+                **_kwargs,
+            ):
+                self.agent_pool_path = Path(agent_pool_path)
+                self.output_dir = Path(output_dir)
+                self.processed = set()
+
+            def start(self):
+                return {"worker_pool_status": "started"}
+
+            def stop(self):
+                return {"worker_pool_status": "stopped"}
+
+            def health_check(self):
+                return {
+                    "pool_status": "running",
+                    "workers": [
+                        {
+                            "worker_agent_id": (
+                                "calibration-implementation-worker"
+                            ),
+                            "worker_status": "running",
+                        }
+                    ],
+                }
+
+            def supervise_once(self):
+                state_path = (
+                    self.output_dir
+                    / "state"
+                    / "two_phase_scheduler_state.json"
+                )
+                if state_path.is_file():
+                    state = json.loads(
+                        state_path.read_text(encoding="utf-8")
+                    )
+                    for attempt in state.get(
+                        "inflight_attempts",
+                        [],
+                    ):
+                        if attempt["message_id"] in self.processed:
+                            continue
+                        worker = FileMailboxWorker(
+                            self.agent_pool_path,
+                            attempt["step_dir"],
+                            attempt["agent_id"],
+                            runtime_adapter=CalibrationWorkerRuntime(),
+                        )
+                        worker.poll_once(
+                            message_id=attempt["message_id"],
+                            worktree_path=attempt["worktree_path"],
+                        )
+                        self.processed.add(attempt["message_id"])
+                health = self.health_check()
+                return {
+                    "supervision_status": health["pool_status"],
+                    "restarted_count": 0,
+                    "before": health,
+                    "restart": {"restarted_count": 0},
+                    "after": health,
+                }
+
+        def run_runtime_command(command, **_kwargs):
+            if execution["forced_runtime_status"]:
+                raise OSError("controlled calibration runtime failure")
+            output = io.StringIO()
+            with patch.object(
+                cli_module,
+                "FileMailboxWorkerPoolSupervisor",
+                CalibrationWorkerPool,
+            ), redirect_stdout(output):
+                cli_module.main(command[3:])
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                output.getvalue(),
+                "",
+            )
+
+        results = []
+        base_order = protocol["mode_order"]
+        sequence = [
+            (0, mode, "completed")
+            for mode in base_order
+        ]
+        rotated = base_order[1:] + base_order[:1]
+        sequence.extend(
+            [
+                (1, rotated[0], "infrastructure_failed"),
+                (1, rotated[1], "completed"),
+                (1, rotated[2], "budget_stopped"),
+            ]
+        )
+        with patch(
+            "agentteam_runtime.model_invocation."
+            "SystemdGatedExecution",
+            CalibrationSingleRunner,
+        ), patch(
+            "agentteam_runtime.agentteam."
+            "_run_runtime_command_with_progress",
+            side_effect=run_runtime_command,
+        ):
+            for repetition, mode, status in sequence:
+                key = (
+                    f"real-calibration-r{repetition}-{mode}"
+                )
+                allocation = allocate_experiment_run(
+                    projection_root,
+                    protocol,
+                    mode=mode,
+                    repetition_index=repetition,
+                    stable_request_key=key,
+                    runtime_release=_release(),
+                    bound_at="2026-07-27T00:00:00Z",
+                )
+                run_dir = Path(allocation["run_dir"])
+                snapshot = allocate_clean_snapshot(
+                    run_dir,
+                    protocol["repository"],
+                    attested_at="2026-07-27T00:00:00Z",
+                )
+                authority_root = run_dir / "authority"
+                authority_root.mkdir()
+                if repetition == 0 and mode == base_order[0]:
+                    self._bind_operator_event(
+                        controller,
+                        protocol,
+                        allocation["run_manifest"],
+                        run_dir,
+                        request_source="permission_request",
+                    )
+                if status == "infrastructure_failed":
+                    self._bind_operator_event(
+                        controller,
+                        protocol,
+                        allocation["run_manifest"],
+                        run_dir,
+                        request_source="run_stop",
+                    )
+                execution["single_returncode"] = (
+                    0
+                )
+                execution["forced_runtime_status"] = (
+                    status
+                    if status == "infrastructure_failed"
+                    else None
+                )
+                if mode == "single_codex":
+                    adapter = SingleCodexModeAdapter()
+                elif mode == "agentteam_direct":
+                    adapter = AgentTeamDirectModeAdapter(
+                        frozen["frozen_taskpack_dir"]
+                    )
+                else:
+                    adapter = AgentTeamFullModeAdapter()
+                mode_controller = ExperimentModeController(
+                    protocol=protocol,
+                    run_manifest=allocation["run_manifest"],
+                    run_dir=run_dir,
+                    project_root=snapshot["snapshot_path"],
+                    authority_root=authority_root,
+                    controller_reference=controller.reference,
+                    sandbox_configuration=sandbox_configuration,
+                    common_finalizer=ExperimentCommonFinalizer(
+                        evaluator_artifact=evaluator,
+                        runtime_release_identity=_release(),
+                    ),
+                    runtime_release_identity=_release(),
+                )
+                mode_result = mode_controller.execute(adapter)
+                results.append(
+                    {
+                        "run_dir": str(run_dir),
+                        "sandbox_authority_root": str(
+                            authority_root
+                        ),
+                        "canary_path": str(canary),
+                        "manifest": allocation["run_manifest"],
+                        "bundle_sha256": mode_result[
+                            "sealed_result"
+                        ]["bundle_sha256"],
+                        "stable_request_key": key,
+                        "status": status,
+                    }
+                )
+        primary = [
+            item
+            for item in results
+            if item["manifest"]["repetition_index"] == 0
+        ]
+        repeat = next(
+            item
+            for item in results
+            if item["manifest"]["repetition_index"] == 1
+            and item["status"] == "completed"
+        )
+        controlled = [
+            item
+            for item in results
+            if item["manifest"]["repetition_index"] == 1
+            and item["status"] != "completed"
+        ]
+        duplicate_source = primary[0]
+        return {
+            "projection_root": projection_root,
+            "protocol": protocol,
+            "primary": primary,
+            "repeat": repeat,
+            "controlled": controlled,
+            "duplicate": {
+                "stable_request_key": duplicate_source[
+                    "stable_request_key"
+                ],
+                "experiment_run_id": duplicate_source["manifest"][
+                    "experiment_run_id"
+                ],
+                "result_bundle_sha256": duplicate_source[
+                    "bundle_sha256"
+                ],
+            },
+        }
+
+    def test_deterministic_l1_l2_calibration_rebuilds_all_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._real_calibration_fixture(tmp)
+            output_path = (
+                fixture["projection_root"]
+                / "calibration"
+                / "phase2-deterministic.json"
+            )
+            result = run_deterministic_experiment_calibration(
+                protocol=fixture["protocol"],
+                projection_root=fixture["projection_root"],
+                primary_runs=fixture["primary"],
+                repeat_run=fixture["repeat"],
+                controlled_runs=fixture["controlled"],
+                duplicate_request_evidence=fixture["duplicate"],
+                fixture_roots={
+                    "deterministic_l1": (
+                        self.FIXTURES / "deterministic_l1"
+                    ),
+                    "bounded_l2": self.FIXTURES / "bounded_l2",
+                },
+                output_path=output_path,
+            )
+            report = result["report"]
+            self.assertEqual(report["calibration_status"], "passed")
+            self.assertEqual(
+                [item["mode"] for item in report["mode_results"]],
+                [
+                    "single_codex",
+                    "agentteam_direct",
+                    "agentteam_full",
+                ],
+            )
+            self.assertEqual(
+                report["usage_coverage"]["lifecycle_percent"],
+                100,
+            )
+            self.assertEqual(
+                report["usage_coverage"]["token_percent"],
+                100,
+            )
+            self.assertEqual(
+                report["projection_rebuild"]["result_count"],
+                6,
+            )
+            self.assertEqual(
+                report["controlled_outcomes"]["retention_status"],
+                "passed",
+            )
+            self.assertFalse(
+                report["readiness_promotion_candidate"][
+                    "benchmark_superiority_claim"
+                ]
+            )
+            loaded = load_deterministic_calibration_report(
+                output_path
+            )
+            self.assertEqual(
+                loaded["report_sha256"],
+                result["report_sha256"],
+            )
+            replay = run_deterministic_experiment_calibration(
+                protocol=fixture["protocol"],
+                projection_root=fixture["projection_root"],
+                primary_runs=fixture["primary"],
+                repeat_run=fixture["repeat"],
+                controlled_runs=fixture["controlled"],
+                duplicate_request_evidence=fixture["duplicate"],
+                fixture_roots={
+                    "deterministic_l1": (
+                        self.FIXTURES / "deterministic_l1"
+                    ),
+                    "bounded_l2": self.FIXTURES / "bounded_l2",
+                },
+                output_path=output_path,
+            )
+            self.assertFalse(replay["publication"]["created"])
+
+    def test_calibration_rejects_duplicate_request_cost_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._real_calibration_fixture(tmp)
+            fixture["duplicate"]["stable_request_key"] = (
+                "forged-request-key"
+            )
+            with self.assertRaisesRegex(
+                ExperimentCalibrationError,
+                "duplicate request",
+            ):
+                run_deterministic_experiment_calibration(
+                    protocol=fixture["protocol"],
+                    projection_root=fixture["projection_root"],
+                    primary_runs=fixture["primary"],
+                    repeat_run=fixture["repeat"],
+                    controlled_runs=fixture["controlled"],
+                    duplicate_request_evidence=fixture["duplicate"],
+                    fixture_roots={
+                        "deterministic_l1": (
+                            self.FIXTURES / "deterministic_l1"
+                        ),
+                        "bounded_l2": (
+                            self.FIXTURES / "bounded_l2"
+                        ),
+                    },
                 )
 
 

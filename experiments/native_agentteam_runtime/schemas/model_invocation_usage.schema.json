@@ -589,6 +589,7 @@
     },
     "usageStage": {
       "enum": [
+        "single_codex",
         "taskpack_author",
         "planner_or_task_slicer",
         "repo_map",

@@ -10784,6 +10784,7 @@ def _run_frozen_taskpack(
             author_lifecycle,
         )
     if experiment_runtime_context is not None:
+        run_paths["run_dir"].mkdir(parents=True, exist_ok=True)
         _publish_experiment_runtime_context(
             run_paths["run_dir"],
             experiment_runtime_context,
@@ -10816,7 +10817,7 @@ def _run_frozen_taskpack(
         runtime_args.extend(["--feishu-signing-secret-env", feishu_signing_secret_env])
     command = [sys.executable, "-m", "agentteam_runtime.cli", *runtime_args]
     env = _runtime_subprocess_env()
-    return _run_runtime_command_with_progress(
+    completed = _run_runtime_command_with_progress(
         command,
         env=env,
         run_dir=run_paths["run_dir"],
@@ -10824,6 +10825,52 @@ def _run_frozen_taskpack(
         progress_interval_seconds=progress_interval_seconds,
         progress_stream=sys.stderr,
     )
+    if experiment_runtime_context is None:
+        return completed
+    return _experiment_runtime_launcher_result(
+        completed,
+        run_dir=run_paths["run_dir"],
+    )
+
+
+def _experiment_runtime_launcher_result(completed, *, run_dir):
+    returncode = getattr(completed, "returncode", None)
+    stdout = str(getattr(completed, "stdout", "") or "")
+    stderr = str(getattr(completed, "stderr", "") or "")
+    summary = None
+    for line in reversed(stdout.splitlines()):
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            summary = candidate
+            break
+    scheduler_status = (
+        summary.get("scheduler_status")
+        if isinstance(summary, dict)
+        else None
+    )
+    if returncode != 0:
+        terminal_status = "failed"
+    elif scheduler_status == "budget_stopped":
+        terminal_status = "budget_stopped"
+    elif scheduler_status in {"stopped", "stop_requested", "interrupted"}:
+        terminal_status = "interrupted"
+    elif scheduler_status in {"idle", "completed"}:
+        terminal_status = "completed"
+    else:
+        terminal_status = "infrastructure_failed"
+    return {
+        "terminal_status": terminal_status,
+        "adapter_output": {
+            "returncode": returncode,
+            "scheduler_status": scheduler_status,
+            "stdout": stdout[-4000:],
+            "stderr": stderr[-4000:],
+        },
+        "runtime_run_dir": str(Path(run_dir).resolve()),
+    }
 
 
 def _publish_experiment_runtime_context(run_dir, context):
