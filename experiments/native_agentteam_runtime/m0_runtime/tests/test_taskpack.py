@@ -3894,10 +3894,8 @@ class TaskpackTests(unittest.TestCase):
         self.assertEqual(result["task_count"], 11)
         self.assertEqual(result["dependency_edge_count"], 11)
         self.assertEqual(result["validation_status"], "accepted")
-        self.assertEqual(
-            result["freeze_eligible"],
-            not bool(result["approval_diagnostics"]),
-        )
+        self.assertFalse(result["freeze_eligible"])
+        self.assertEqual(result["approval_diagnostics"], [])
 
     def _run_agentteam_json(self, *args):
         completed = subprocess.run(

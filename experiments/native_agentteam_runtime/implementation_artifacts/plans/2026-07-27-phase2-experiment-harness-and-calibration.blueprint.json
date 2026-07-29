@@ -76,7 +76,7 @@
     }
   },
   "approval": {
-    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase2-experiment-harness-contract-review.v2.json",
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase2-experiment-harness-contract-review.v3.json",
     "schema_path": "experiments/native_agentteam_runtime/schemas/phase2_contract_review.schema.json",
     "required_decision": "approved",
     "git_object_format_required": true,

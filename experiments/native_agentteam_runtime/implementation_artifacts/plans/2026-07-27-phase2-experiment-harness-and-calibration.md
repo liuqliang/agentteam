@@ -1,8 +1,9 @@
 # Phase 2 Experiment Harness And Short Calibration Taskpack Set
 
-Status: P2-01 through P2-07B implementation and contract repair are complete;
-P2-08 remains blocked until a new P2-00 review approves the repaired plan and
-deterministic blueprint digests.
+Status: P2-01 through P2-07B implementation and contract repair are complete.
+The approved v2 review retained a stale preflight-release identity and failed
+executable materialization; P2-08 remains blocked until review v3 approves the
+repaired plan and blueprint against the active compatible runtime release.
 
 ## Purpose
 
