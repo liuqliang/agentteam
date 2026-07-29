@@ -940,8 +940,15 @@ class ModelInvocationCall:
         supported,
         systemd_runner_factory=None,
     ):
+        context, launch_registration = (
+            _bind_registered_experiment_launch(
+                authority_root,
+                context,
+            )
+        )
         _validate_call_context(context, supported=bool(supported))
         self.lifecycle = InvocationLifecycle(authority_root, context)
+        self.experiment_launch_registration = launch_registration
         self.supported = bool(supported)
         self.systemd_runner_factory = (
             systemd_runner_factory or SystemdGatedExecution
@@ -961,6 +968,27 @@ class ModelInvocationCall:
         progress_interval_seconds=30.0,
     ):
         command = list(command)
+        if self.experiment_launch_registration is not None:
+            if self.supported:
+                _validate_registered_codex_command(
+                    command,
+                    self.experiment_launch_registration[
+                        "model_policy"
+                    ],
+                )
+            registered_workspace = Path(
+                self.experiment_launch_registration["workspace_root"]
+            )
+            resolved_cwd = Path(cwd).resolve(strict=True)
+            if (
+                resolved_cwd != registered_workspace
+                and not resolved_cwd.is_relative_to(
+                    registered_workspace
+                )
+            ):
+                raise ModelInvocationIntegrityError(
+                    "provider cwd differs from experiment launch registration"
+                )
         environment = None
         sandbox_reference = self.lifecycle.context.get(
             "experiment_sandbox_reference"
@@ -1125,7 +1153,12 @@ class ModelInvocationCall:
             if reference is not None:
                 validate_experiment_controller_reference(
                     reference,
-                    expected_authority_root=authority_root,
+                    expected_authority_root=(
+                        None
+                        if self.experiment_launch_registration
+                        is not None
+                        else authority_root
+                    ),
                 )
             elif authority_root is not None:
                 reference = discover_experiment_controller_reference(
@@ -1722,6 +1755,9 @@ def invocation_context_from_message(message, *, model=None, backend="codex"):
         ),
         "backend": backend,
         "model": _nullable_text(payload.get("model") or model),
+        "reasoning_profile": _nullable_text(
+            payload.get("reasoning_profile")
+        ),
         "coverage_class": payload.get("coverage_class"),
         "provider_usage_scope": payload.get("provider_usage_scope"),
         "provider_session_lock_held": payload.get(
@@ -2176,6 +2212,15 @@ def _start_context(context):
         "coverage_class",
     )
     result = {field: context.get(field) for field in fields}
+    for field in (
+        "experiment_run_id",
+        "experiment_mode",
+        "experiment_protocol_sha256",
+        "experiment_run_manifest_sha256",
+        "reasoning_profile",
+    ):
+        if context.get(field) is not None:
+            result[field] = context[field]
     policy_digest = context.get("experiment_sandbox_policy_sha256")
     if policy_digest is not None:
         result["experiment_sandbox_policy_sha256"] = policy_digest
@@ -2208,6 +2253,15 @@ def _terminal_context(context):
         "coverage_class",
     )
     result = {field: context.get(field) for field in fields}
+    for field in (
+        "experiment_run_id",
+        "experiment_mode",
+        "experiment_protocol_sha256",
+        "experiment_run_manifest_sha256",
+        "reasoning_profile",
+    ):
+        if context.get(field) is not None:
+            result[field] = context[field]
     policy_digest = context.get("experiment_sandbox_policy_sha256")
     if policy_digest is not None:
         result["experiment_sandbox_policy_sha256"] = policy_digest
@@ -2754,6 +2808,7 @@ def _bounded_file_sha256(path, *, max_bytes=4 * 1024 * 1024):
 
 
 _USAGE_STAGES = {
+    "single_codex",
     "taskpack_author",
     "planner_or_task_slicer",
     "repo_map",
@@ -2783,6 +2838,99 @@ def _usage_stage_for_role(role, task_kind):
         "semantic_architecture": "semantic_architecture",
     }
     return role_map.get(role, "implementation_worker")
+
+
+def _bind_registered_experiment_launch(authority_root, context):
+    try:
+        from .experiment_sandbox import (
+            ExperimentSandboxError,
+            load_experiment_launch_registration,
+        )
+
+        registration = load_experiment_launch_registration(
+            authority_root
+        )
+    except ExperimentSandboxError as exc:
+        raise ModelInvocationIntegrityError(
+            f"invalid experiment launch registration: {exc}"
+        ) from exc
+    if registration is None:
+        return dict(context), None
+    context = dict(context)
+    model_policy = registration["model_policy"]
+    expected = {
+        "run_id": registration["experiment_run_id"],
+        "taskpack_id": registration["taskpack_id"],
+        "usage_stage": registration["usage_stage"],
+        "backend": model_policy["backend"],
+        "model": model_policy["model"],
+        "reasoning_profile": model_policy["reasoning_profile"],
+        "experiment_run_id": registration["experiment_run_id"],
+        "experiment_mode": registration["mode"],
+        "experiment_protocol_sha256": registration[
+            "protocol_sha256"
+        ],
+        "experiment_run_manifest_sha256": registration[
+            "run_manifest_sha256"
+        ],
+        "experiment_sandbox_reference": registration[
+            "sandbox_reference"
+        ],
+        "experiment_sandbox_required": True,
+        "experiment_authority_root": registration["authority_root"],
+        "experiment_controller_reference": registration[
+            "controller_reference"
+        ],
+        "experiment_controller_required": True,
+        "model_invocation_authority_root": registration[
+            "lifecycle_authority_root"
+        ],
+        "provider_project_identity": registration["workspace_root"],
+    }
+    for field, value in expected.items():
+        if field in context and context[field] != value:
+            raise ModelInvocationIntegrityError(
+                "caller context differs from experiment launch "
+                f"registration: {field}"
+            )
+        context[field] = value
+    if (
+        registration["mode"] == "single_codex"
+        and context.get("provider_resume_mode", "new") != "new"
+    ):
+        raise ModelInvocationIntegrityError(
+            "single Codex experiment invocation must be fresh"
+        )
+    return context, registration
+
+
+def _validate_registered_codex_command(command, model_policy):
+    if not is_supported_codex_command(command):
+        raise ModelInvocationIntegrityError(
+            "registered live experiment launch is not a Codex command"
+        )
+    models = []
+    reasoning_profiles = []
+    for index, value in enumerate(command):
+        if value in {"-m", "--model"} and index + 1 < len(command):
+            models.append(command[index + 1])
+        elif isinstance(value, str) and value.startswith("--model="):
+            models.append(value.partition("=")[2])
+        if value == "-c" and index + 1 < len(command):
+            configuration = command[index + 1]
+            prefix = "model_reasoning_effort="
+            if configuration.startswith(prefix):
+                reasoning_profiles.append(
+                    configuration[len(prefix):]
+                )
+    if models != [model_policy["model"]]:
+        raise ModelInvocationIntegrityError(
+            "Codex command model differs from experiment launch policy"
+        )
+    if reasoning_profiles != [model_policy["reasoning_profile"]]:
+        raise ModelInvocationIntegrityError(
+            "Codex command reasoning differs from experiment launch policy"
+        )
 
 
 def _validate_call_context(context, *, supported):

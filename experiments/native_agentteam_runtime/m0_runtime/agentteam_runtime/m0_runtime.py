@@ -258,6 +258,29 @@ def _run_subprocess_with_progress(
                 raise
 
 
+def _with_codex_reasoning_profile(command, reasoning_profile):
+    command = list(command)
+    if not reasoning_profile or not is_supported_codex_command(command):
+        return command
+    for index, value in enumerate(command):
+        if (
+            value == "-c"
+            and index + 1 < len(command)
+            and command[index + 1].startswith(
+                "model_reasoning_effort="
+            )
+        ):
+            return command
+    insertion = len(command)
+    if command and command[-1] == "-":
+        insertion -= 1
+    command[insertion:insertion] = [
+        "-c",
+        f"model_reasoning_effort={reasoning_profile}",
+    ]
+    return command
+
+
 class CodexRuntimeAdapter:
     def __init__(
         self,
@@ -334,8 +357,19 @@ class CodexRuntimeAdapter:
         try:
             result_path.parent.mkdir(parents=True, exist_ok=True)
 
-            command = self._build_command(runtime_worktree_path, result_path)
             prompt = self._build_prompt(message)
+            context = invocation_context_from_message(
+                message,
+                model=self.model,
+                backend="codex",
+            )
+            command = _with_codex_reasoning_profile(
+                self._build_command(
+                    runtime_worktree_path,
+                    result_path,
+                ),
+                context.get("reasoning_profile"),
+            )
             supported = is_supported_codex_command(command)
             if supported and self.output_dir is None:
                 return {
@@ -346,11 +380,6 @@ class CodexRuntimeAdapter:
                         "error": "missing_model_invocation_output_root",
                     },
                 }
-            context = invocation_context_from_message(
-                message,
-                model=self.model,
-                backend="codex",
-            )
             if self.resume_last:
                 context.update(
                     {
@@ -383,8 +412,13 @@ class CodexRuntimeAdapter:
                 if supported
                 else "not_applicable_adapter"
             )
+            invocation_authority_root = message["payload"].get(
+                "model_invocation_authority_root"
+            )
             invocation = ModelInvocationCall(
-                self.output_dir or result_path.parent,
+                invocation_authority_root
+                or self.output_dir
+                or result_path.parent,
                 context,
                 supported=supported,
                 systemd_runner_factory=self.systemd_runner_factory,
@@ -3474,7 +3508,13 @@ def write_patch_artifact(worktree_path, artifact_dir, actual_changed_files):
     return patch_path
 
 
-def ensure_integration_baseline_worktree(project_root, output_dir, base_ref=None):
+def ensure_integration_baseline_worktree(
+    project_root,
+    output_dir,
+    base_ref=None,
+    *,
+    independent=False,
+):
     integration_branch = _integration_baseline_branch_name(output_dir)
     integration_worktree = Path(output_dir) / "integration-baseline"
     integration_worktree.parent.mkdir(parents=True, exist_ok=True)
@@ -3482,6 +3522,13 @@ def ensure_integration_baseline_worktree(project_root, output_dir, base_ref=None
     recovery_status = "created"
     if integration_worktree.exists():
         recovery_status = "reused_existing"
+    elif independent:
+        _create_independent_git_workspace(
+            project_root,
+            integration_worktree,
+            branch=integration_branch,
+            base_ref=base_ref,
+        )
     elif _git_ref_exists(project_root, integration_branch):
         recovery_status = "reused_branch"
         subprocess.run(
@@ -4050,6 +4097,128 @@ def _create_git_worktree(project_root, output_dir, attempt_id, worktree_id, base
     return worktree_path, branch
 
 
+def create_independent_attempt_workspace(
+    project_root,
+    output_dir,
+    attempt_id,
+    worktree_id,
+    *,
+    base_repository=None,
+    base_ref=None,
+):
+    """Create a standalone attempt repository with no shared Git common dir."""
+    worktree_path = Path(output_dir) / "worktrees" / worktree_id
+    branch = _worktree_branch_name(output_dir, attempt_id)
+    _create_independent_git_workspace(
+        base_repository or project_root,
+        worktree_path,
+        branch=branch,
+        base_ref=base_ref,
+    )
+    return worktree_path, branch
+
+
+def _create_independent_git_workspace(
+    source_repository,
+    destination,
+    *,
+    branch,
+    base_ref,
+):
+    source_repository = Path(source_repository).resolve(strict=True)
+    destination = Path(destination)
+    if destination.exists() or destination.is_symlink():
+        raise ValueError(
+            f"independent workspace already exists: {destination}"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source_commit = _git_rev_parse(
+        source_repository,
+        base_ref or "HEAD",
+    )
+    subprocess.run(
+        [
+            "git",
+            "clone",
+            "--no-local",
+            "--no-hardlinks",
+            "--no-checkout",
+            str(source_repository),
+            str(destination),
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(destination),
+                "checkout",
+                "--detach",
+                source_commit,
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(destination), "remote", "remove", "origin"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if branch:
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(destination),
+                    "switch",
+                    "-c",
+                    branch,
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        source_common = Path(
+            _git_output(source_repository, "rev-parse", "--git-common-dir")
+        )
+        if not source_common.is_absolute():
+            source_common = source_repository / source_common
+        target_common = Path(
+            _git_output(destination, "rev-parse", "--git-common-dir")
+        )
+        if not target_common.is_absolute():
+            target_common = destination / target_common
+        if source_common.resolve() == target_common.resolve():
+            raise ValueError(
+                "independent workspace shares the source Git common dir"
+            )
+        if _git_output(destination, "remote"):
+            raise ValueError("independent workspace retains a Git remote")
+        alternates = (
+            target_common.resolve() / "objects" / "info" / "alternates"
+        )
+        if alternates.exists():
+            raise ValueError(
+                "independent workspace retains object alternates"
+            )
+        if _git_output(destination, "status", "--porcelain"):
+            raise ValueError("independent workspace is not clean")
+    except Exception:
+        if destination.exists() and not destination.is_symlink():
+            shutil.rmtree(destination)
+        raise
+
+
 def _worktree_branch_name(output_dir, attempt_id):
     output_dir = Path(output_dir)
     if output_dir.parent.name == "steps" and output_dir.parent.parent.name:
@@ -4103,6 +4272,17 @@ def _git_ref_exists(repo, ref):
 def _git_rev_parse(repo, ref):
     completed = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", ref],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _git_output(repo, *arguments):
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *arguments],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

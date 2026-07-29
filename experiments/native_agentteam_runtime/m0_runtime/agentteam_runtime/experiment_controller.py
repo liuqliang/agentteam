@@ -365,6 +365,33 @@ class ExperimentController:
         with self._state_lock():
             return copy.deepcopy(self._load_document())
 
+    def reconcile_provider_lane(self):
+        """Account one terminal orphan or fail closed while it remains open."""
+
+        fd = self._acquire_provider_lane()
+        try:
+            record = _read_json_fd(
+                fd,
+                "provider lane",
+                allow_empty=True,
+            )
+            self._reconcile_prior_lane(
+                fd,
+                record,
+                now_monotonic=None,
+            )
+            reconciled = _read_json_fd(
+                fd,
+                "provider lane",
+                allow_empty=True,
+            )
+            return copy.deepcopy(reconciled)
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
     def record_operator_action(
         self,
         *,
@@ -493,17 +520,18 @@ class ExperimentController:
             run_id=run_id,
         )
         invocation_id = binding["invocation_id"]
-        lifecycle_root = _contained_directory(
-            self.root,
-            binding["lifecycle_root"],
-            "lifecycle_root",
+        lifecycle_root, external_lifecycle = (
+            self._admission_lifecycle_root(
+                binding["lifecycle_root"],
+                run_id=binding["run_id"],
+            )
         )
         invocation_dir = (
             lifecycle_root / "model_invocations" / invocation_id
         ).resolve()
-        if not _is_relative_to(invocation_dir, self.root):
+        if not _is_relative_to(invocation_dir, lifecycle_root):
             raise ExperimentControllerIntegrityError(
-                "invocation authority escapes the protocol controller root"
+                "invocation authority escapes its lifecycle root"
             )
         started_path = invocation_dir / "started.json"
         terminal_path = invocation_dir / "terminal.json"
@@ -546,15 +574,27 @@ class ExperimentController:
                 ],
                 "invocation_id": invocation_id,
                 "run_id": binding["run_id"],
-                "lifecycle_root": lifecycle_root.relative_to(
-                    self.root
-                ).as_posix(),
-                "started_path": started_path.relative_to(
-                    self.root
-                ).as_posix(),
-                "terminal_path": terminal_path.relative_to(
-                    self.root
-                ).as_posix(),
+                "lifecycle_root": (
+                    str(lifecycle_root)
+                    if external_lifecycle
+                    else lifecycle_root.relative_to(
+                        self.root
+                    ).as_posix()
+                ),
+                "started_path": (
+                    str(started_path)
+                    if external_lifecycle
+                    else started_path.relative_to(
+                        self.root
+                    ).as_posix()
+                ),
+                "terminal_path": (
+                    str(terminal_path)
+                    if external_lifecycle
+                    else terminal_path.relative_to(
+                        self.root
+                    ).as_posix()
+                ),
                 "owner_pid": os.getpid(),
             }
             _write_json_fd(fd, record, self.root)
@@ -576,15 +616,12 @@ class ExperimentController:
     ):
         """Import immutable terminal authority, project it once, then release."""
         fd, record = self._validated_admission(admission)
-        recorded_started = _contained_file(
-            self.root,
-            record["started_path"],
-            "started_path",
-        )
-        recorded_terminal = _contained_file(
-            self.root,
-            record["terminal_path"],
-            "terminal_path",
+        _lifecycle_root, recorded_started, recorded_terminal = (
+            self._lane_lifecycle_paths(
+                record,
+                require_started=True,
+                require_terminal=True,
+            )
         )
         if started_path is not None and Path(started_path).resolve() != (
             recorded_started
@@ -1040,17 +1077,12 @@ class ExperimentController:
         if record is None or record.get("lane_status") != "admitted":
             return
         self._validate_lane_record(record)
-        started_path = _contained_file(
-            self.root,
-            record["started_path"],
-            "started_path",
-            require_exists=False,
-        )
-        terminal_path = _contained_file(
-            self.root,
-            record["terminal_path"],
-            "terminal_path",
-            require_exists=False,
+        _root, started_path, terminal_path = (
+            self._lane_lifecycle_paths(
+                record,
+                require_started=False,
+                require_terminal=False,
+            )
         )
         if terminal_path.is_file():
             with self._state_lock():
@@ -1085,15 +1117,19 @@ class ExperimentController:
 
     def _account_terminal_locked(self, record, *, now_monotonic):
         self._validate_lane_record(record)
-        started_path = _contained_file(
-            self.root,
-            record["started_path"],
-            "started_path",
+        lifecycle_root, started_path, terminal_path = (
+            self._lane_lifecycle_paths(
+                record,
+                require_started=True,
+                require_terminal=True,
+            )
         )
-        terminal_path = _contained_file(
-            self.root,
-            record["terminal_path"],
-            "terminal_path",
+        started_path, terminal_path = self._mirror_lifecycle_authority(
+            lifecycle_root,
+            started_path,
+            terminal_path,
+            run_id=record["run_id"],
+            invocation_id=record["invocation_id"],
         )
         import_model_invocation_lifecycle(
             self.root / _AUTHORITY_EVENTS,
@@ -1125,6 +1161,38 @@ class ExperimentController:
         self._persist(status, budget_state)
         return budget_state, emitted
 
+    def _mirror_lifecycle_authority(
+        self,
+        lifecycle_root,
+        started_path,
+        terminal_path,
+        *,
+        run_id,
+        invocation_id,
+    ):
+        if _is_relative_to(lifecycle_root, self.root):
+            return started_path, terminal_path
+        run_id = _safe_id(run_id, "run_id")
+        invocation_id = _safe_id(invocation_id, "invocation_id")
+        target = (
+            self.root
+            / "imported_lifecycles"
+            / run_id
+            / invocation_id
+        )
+        target.mkdir(parents=True, mode=0o700, exist_ok=True)
+        target_started = target / "started.json"
+        target_terminal = target / "terminal.json"
+        _exclusive_or_idempotent_json(
+            target_started,
+            _read_json_file(started_path, "invocation start"),
+        )
+        _exclusive_or_idempotent_json(
+            target_terminal,
+            _read_json_file(terminal_path, "terminal usage"),
+        )
+        return target_started, target_terminal
+
     def _validated_admission(self, admission):
         if (
             not isinstance(admission, ProviderAdmission)
@@ -1145,6 +1213,104 @@ class ExperimentController:
                 "provider lane record changed after admission"
             )
         return admission._fd, admission.record
+
+    def _admission_lifecycle_root(self, value, *, run_id):
+        candidate = Path(value)
+        try:
+            return (
+                _contained_directory(
+                    self.root,
+                    candidate,
+                    "lifecycle_root",
+                ),
+                False,
+            )
+        except ExperimentControllerIntegrityError:
+            pass
+        try:
+            from .experiment_sandbox import (
+                load_experiment_launch_registration,
+            )
+
+            registration = load_experiment_launch_registration(
+                candidate
+            )
+        except Exception as exc:
+            raise ExperimentControllerIntegrityError(
+                "external lifecycle launch registration is invalid"
+            ) from exc
+        if (
+            registration is None
+            or registration["controller_reference"] != self.reference
+            or registration["experiment_run_id"] != run_id
+        ):
+            raise ExperimentControllerIntegrityError(
+                "external lifecycle is not bound to this controller"
+            )
+        return Path(registration["lifecycle_authority_root"]), True
+
+    def _lane_lifecycle_paths(
+        self,
+        record,
+        *,
+        require_started,
+        require_terminal,
+    ):
+        lifecycle_value = Path(record["lifecycle_root"])
+        if lifecycle_value.is_absolute():
+            lifecycle_root, external = (
+                self._admission_lifecycle_root(
+                    lifecycle_value,
+                    run_id=record["run_id"],
+                )
+            )
+            if not external:
+                raise ExperimentControllerIntegrityError(
+                    "absolute lifecycle unexpectedly resolved as local"
+                )
+            invocation_dir = (
+                lifecycle_root
+                / "model_invocations"
+                / record["invocation_id"]
+            )
+            expected_started = invocation_dir / "started.json"
+            expected_terminal = invocation_dir / "terminal.json"
+            if (
+                Path(record["started_path"]) != expected_started
+                or Path(record["terminal_path"]) != expected_terminal
+            ):
+                raise ExperimentControllerIntegrityError(
+                    "external lifecycle paths changed after admission"
+                )
+            started = _safe_external_file(
+                expected_started,
+                "started_path",
+                require_exists=require_started,
+            )
+            terminal = _safe_external_file(
+                expected_terminal,
+                "terminal_path",
+                require_exists=require_terminal,
+            )
+            return lifecycle_root, started, terminal
+        lifecycle_root = _contained_directory(
+            self.root,
+            self.root / lifecycle_value,
+            "lifecycle_root",
+        )
+        started = _contained_file(
+            self.root,
+            record["started_path"],
+            "started_path",
+            require_exists=require_started,
+        )
+        terminal = _contained_file(
+            self.root,
+            record["terminal_path"],
+            "terminal_path",
+            require_exists=require_terminal,
+        )
+        return lifecycle_root, started, terminal
 
     def _validate_lane_record(self, record):
         required = {
@@ -1177,17 +1343,12 @@ class ExperimentController:
 
     def _abandon_before_start(self, admission):
         fd, record = self._validated_admission(admission)
-        started_path = _contained_file(
-            self.root,
-            record["started_path"],
-            "started_path",
-            require_exists=False,
-        )
-        terminal_path = _contained_file(
-            self.root,
-            record["terminal_path"],
-            "terminal_path",
-            require_exists=False,
+        _root, started_path, terminal_path = (
+            self._lane_lifecycle_paths(
+                record,
+                require_started=False,
+                require_terminal=False,
+            )
         )
         if started_path.exists() or terminal_path.exists():
             raise ExperimentControllerIntegrityError(
@@ -1254,6 +1415,11 @@ def validate_experiment_controller_reference(
     reference,
     *,
     expected_authority_root=None,
+    expected_protocol_id=None,
+    expected_protocol_sha256=None,
+    expected_scored=None,
+    expected_operator_limits=None,
+    expected_budgets=None,
 ):
     """Validate an immutable controller reference against its source metadata."""
     required = {
@@ -1304,6 +1470,34 @@ def validate_experiment_controller_reference(
         raise ExperimentControllerIntegrityError(
             "experiment controller reference conflicts with metadata"
         )
+    expected = {
+        "protocol_id": expected_protocol_id,
+        "protocol_sha256": expected_protocol_sha256,
+        "scored": expected_scored,
+        "operator_limits": expected_operator_limits,
+    }
+    for field, value in expected.items():
+        if value is not None and metadata.get(field) != value:
+            raise ExperimentControllerIntegrityError(
+                f"experiment controller {field} differs from protocol"
+            )
+    if expected_budgets is not None:
+        required_budget_fields = {
+            "max_total_tokens",
+            "max_wall_time_seconds",
+            "soft_warning_ratio",
+        }
+        if (
+            not isinstance(expected_budgets, dict)
+            or not required_budget_fields.issubset(expected_budgets)
+            or any(
+                metadata.get(field) != expected_budgets[field]
+                for field in required_budget_fields
+            )
+        ):
+            raise ExperimentControllerIntegrityError(
+                "experiment controller budget differs from protocol"
+            )
     return copy.deepcopy(reference)
 
 
@@ -1375,6 +1569,26 @@ def _contained_file(root, value, label, *, require_exists=True):
             f"{label} is not a regular authority file"
         )
     return path
+
+
+def _safe_external_file(path, label, *, require_exists):
+    path = Path(path)
+    if path.is_symlink():
+        raise ExperimentControllerIntegrityError(
+            f"{label} is a symlink"
+        )
+    if require_exists:
+        if not path.is_file():
+            raise ExperimentControllerIntegrityError(
+                f"{label} is unavailable"
+            )
+        return path.resolve(strict=True)
+    if path.exists() and not path.is_file():
+        raise ExperimentControllerIntegrityError(
+            f"{label} is not a regular file"
+        )
+    parent = path.parent.resolve(strict=True)
+    return parent / path.name
 
 
 def _load_metadata(root):

@@ -25,6 +25,7 @@ from .m0_runtime import (
     audit_worktree_diff,
     classify_attempt_outcome,
     commit_integration_baseline_worktree,
+    create_independent_attempt_workspace,
     evaluate_integration_commit,
     ensure_integration_baseline_worktree,
     rebuild_sqlite_state_index,
@@ -40,6 +41,14 @@ from .experiment_controller import (
     ExperimentControllerIntegrityError,
     load_experiment_controller,
     validate_experiment_controller_reference,
+)
+from .experiment_contract import canonical_json_sha256
+from .experiment_sandbox import (
+    build_provider_sandbox_descriptor,
+    experiment_lifecycle_authority_root,
+    load_experiment_mode_authority,
+    publish_experiment_launch_registration,
+    publish_provider_sandbox_reference,
 )
 from .notifications import DEFAULT_NOTIFICATION_EVENT_TYPES
 from .operator_control import read_run_stop_request
@@ -133,6 +142,7 @@ class TwoPhaseFileScheduler:
         experiment_controller_required=False,
         resume_interrupted_experiment=False,
         experiment_controller_monotonic=None,
+        independent_attempt_workspaces=False,
     ):
         if max_inflight < 1:
             raise ValueError("max_inflight must be at least 1")
@@ -146,10 +156,36 @@ class TwoPhaseFileScheduler:
             raise ValueError("experiment_controller_required must be a boolean")
         if not isinstance(resume_interrupted_experiment, bool):
             raise ValueError("resume_interrupted_experiment must be a boolean")
+        if not isinstance(independent_attempt_workspaces, bool):
+            raise ValueError(
+                "independent_attempt_workspaces must be a boolean"
+            )
         self.agent_pool_path = Path(agent_pool_path)
         self.backlog_path = Path(backlog_path)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.experiment_runtime_context = (
+            _load_experiment_runtime_context(self.output_dir)
+        )
+        if self.experiment_runtime_context is not None:
+            context_reference = self.experiment_runtime_context[
+                "controller_reference"
+            ]
+            if (
+                experiment_controller_reference is not None
+                and experiment_controller_reference
+                != context_reference
+            ):
+                raise ValueError(
+                    "experiment runtime controller reference differs"
+                )
+            experiment_controller_reference = context_reference
+            experiment_controller_required = True
+            independent_attempt_workspaces = True
+            if max_inflight != 1:
+                raise ValueError(
+                    "experiment runtime requires max_inflight=1"
+                )
         self.clock = clock or SystemClock()
         self.project_root = Path(project_root) if project_root else None
         self.runtime_adapter = runtime_adapter
@@ -192,6 +228,9 @@ class TwoPhaseFileScheduler:
         )
         self.resume_interrupted_experiment = resume_interrupted_experiment
         self.experiment_controller_monotonic = experiment_controller_monotonic
+        self.independent_attempt_workspaces = (
+            independent_attempt_workspaces
+        )
         self.experiment_controller = None
         self.state_path = Path(
             state_path or self.output_dir / "state" / "two_phase_scheduler_state.json"
@@ -631,7 +670,14 @@ class TwoPhaseFileScheduler:
         attempt_id = f"{task['task_id']}-ATTEMPT-{attempt_number:03d}"
         lease_id = f"{task['task_id']}-LEASE-{attempt_number:03d}"
         message_id = _scoped_id("MSG", attempt_number, task["task_id"], width=4)
-        worktree_id = f"WT-{attempt_id}" if task.get("write_scope") else None
+        worktree_id = (
+            f"WT-{attempt_id}"
+            if (
+                task.get("write_scope")
+                or self.experiment_runtime_context is not None
+            )
+            else None
+        )
         runtime_session_id = f"SESSION-{attempt_id}"
         worktree_path = None
         branch = None
@@ -684,21 +730,48 @@ class TwoPhaseFileScheduler:
 
         if self.project_root and worktree_id:
             integration_baseline = self._ensure_integration_baseline() if self.integrate_accepted_patch else None
-            worktree_path, branch = _create_git_worktree(
-                self.project_root,
-                step_dir,
-                attempt_id,
-                worktree_id,
-                base_ref=(
-                    integration_baseline["integration_baseline_branch"]
-                    if integration_baseline
-                    else None
-                ),
-            )
+            if self.independent_attempt_workspaces:
+                worktree_path, branch = (
+                    create_independent_attempt_workspace(
+                        self.project_root,
+                        step_dir,
+                        attempt_id,
+                        worktree_id,
+                        base_repository=(
+                            integration_baseline[
+                                "integration_baseline_worktree_path"
+                            ]
+                            if integration_baseline
+                            else self.project_root
+                        ),
+                        base_ref="HEAD",
+                    )
+                )
+            else:
+                worktree_path, branch = _create_git_worktree(
+                    self.project_root,
+                    step_dir,
+                    attempt_id,
+                    worktree_id,
+                    base_ref=(
+                        integration_baseline[
+                            "integration_baseline_branch"
+                        ]
+                        if integration_baseline
+                        else None
+                    ),
+                )
         materialized_input_artifacts = self._materialize_input_artifacts(
             runtime_input_artifact_producers,
             worktree_path,
         )
+        if self.experiment_runtime_context is not None:
+            invocation_context = self._register_experiment_attempt_launch(
+                invocation_context,
+                worktree_path=worktree_path,
+                attempt_id=attempt_id,
+                taskpack_id=invocation_context["taskpack_id"],
+            )
         runtime_artifact_baseline = snapshot_runtime_artifacts(
             worktree_path,
             task.get("expected_output_artifacts", []),
@@ -1495,9 +1568,102 @@ class TwoPhaseFileScheduler:
             self.project_root,
             self.output_dir,
             base_ref=self.initial_integration_base_ref,
+            independent=self.independent_attempt_workspaces,
         )
         self.state["integration_baseline"] = baseline
         return baseline
+
+    def _register_experiment_attempt_launch(
+        self,
+        invocation_context,
+        *,
+        worktree_path,
+        attempt_id,
+        taskpack_id,
+    ):
+        if worktree_path is None:
+            raise ValueError(
+                "experiment provider attempt requires a workspace"
+            )
+        context = self.experiment_runtime_context
+        configuration = context.get("sandbox_configuration")
+        if not isinstance(configuration, dict):
+            raise ValueError(
+                "experiment sandbox configuration is unavailable"
+            )
+        required = {
+            "runtime_views",
+            "library_views",
+            "credential_mounts",
+            "environment",
+            "canary_path",
+        }
+        if set(configuration) != required:
+            raise ValueError(
+                "experiment sandbox configuration fields are invalid"
+            )
+        lifecycle_id = _experiment_reference_id(
+            f"worker-{attempt_id}"
+        )
+        lifecycle_root = experiment_lifecycle_authority_root(
+            context["authority_root"],
+            lifecycle_id,
+        )
+        descriptor = build_provider_sandbox_descriptor(
+            worktree_path,
+            runtime_views=configuration["runtime_views"],
+            library_views=configuration["library_views"],
+            credential_mounts=configuration["credential_mounts"],
+            environment=configuration["environment"],
+            repository_identity={
+                field: context["repository_identity"][field]
+                for field in (
+                    "commit",
+                    "tree",
+                    "git_object_format",
+                )
+            },
+            forbidden_paths=[configuration["canary_path"]],
+        )
+        sandbox_reference = publish_provider_sandbox_reference(
+            context["authority_root"],
+            descriptor,
+            configuration["canary_path"],
+            reference_id=f"{lifecycle_id}-sandbox",
+        )
+        publish_experiment_launch_registration(
+            context["authority_root"],
+            lifecycle_root,
+            experiment_run_id=context["experiment_run_id"],
+            protocol_sha256=context["protocol_sha256"],
+            run_manifest_sha256=context["run_manifest_sha256"],
+            mode=context["mode"],
+            usage_stage=invocation_context["usage_stage"],
+            taskpack_id=taskpack_id,
+            workspace_root=worktree_path,
+            sandbox_reference=sandbox_reference,
+            controller_reference=context["controller_reference"],
+            model_policy=context["model_policy"],
+        )
+        updated = deepcopy(invocation_context)
+        updated.update(
+            {
+                "run_id": context["experiment_run_id"],
+                "experiment_sandbox_reference": sandbox_reference,
+                "experiment_sandbox_required": True,
+                "experiment_authority_root": context["authority_root"],
+                "experiment_controller_reference": deepcopy(
+                    context["controller_reference"]
+                ),
+                "experiment_controller_required": True,
+                "model_invocation_authority_root": str(lifecycle_root),
+                "model": context["model_policy"]["model"],
+                "reasoning_profile": context["model_policy"][
+                    "reasoning_profile"
+                ],
+            }
+        )
+        return updated
 
     def _record_integration_baseline_result(self, integration, head_sha):
         self.state["integration_baseline"] = {
@@ -2847,6 +3013,77 @@ def _worker_usage_stage(role, task_kind):
     if task_kind == "decompose_backlog":
         return "planner_or_task_slicer"
     return WORKER_USAGE_STAGE_BY_ROLE.get(role, "implementation_worker")
+
+
+def _load_experiment_runtime_context(output_dir):
+    path = Path(output_dir) / "experiment-runtime-context.json"
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("experiment runtime context is unsafe")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("experiment runtime context is unreadable") from exc
+    required = {
+        "schema_version",
+        "experiment_run_id",
+        "protocol_sha256",
+        "run_manifest_sha256",
+        "authority_root",
+        "mode",
+        "repository_identity",
+        "controller_reference",
+        "controller_required",
+        "independent_attempt_workspaces",
+        "model_policy",
+        "sandbox_configuration",
+        "sandbox_configuration_sha256",
+    }
+    optional = {"usage_stage"}
+    if (
+        not isinstance(value, dict)
+        or not required.issubset(value)
+        or set(value) - required - optional
+        or value["schema_version"] != "experiment_runtime_context.v1"
+        or value["controller_required"] is not True
+        or value["independent_attempt_workspaces"] is not True
+    ):
+        raise ValueError("experiment runtime context fields are invalid")
+    controller_reference = validate_experiment_controller_reference(
+        value["controller_reference"],
+    )
+    mode_authority = load_experiment_mode_authority(
+        value["authority_root"]
+    )
+    if (
+        mode_authority["controller_reference"]
+        != controller_reference
+        or value["sandbox_configuration_sha256"]
+        != canonical_json_sha256(
+            value["sandbox_configuration"]
+        )
+        or mode_authority["sandbox_configuration_sha256"]
+        != value["sandbox_configuration_sha256"]
+    ):
+        raise ValueError(
+            "experiment runtime controller differs from mode authority"
+        )
+    return value
+
+
+def _experiment_reference_id(value):
+    normalized = "".join(
+        character
+        if character.islower()
+        and (character.isalnum() or character in "-_")
+        else character.lower()
+        if character.isalnum()
+        else "-"
+        for character in str(value)
+    )
+    normalized = normalized.strip("-_")
+    return normalized[:128] or "provider-launch"
 
 
 def _agent_runtime_profile(agent_pool, agent):

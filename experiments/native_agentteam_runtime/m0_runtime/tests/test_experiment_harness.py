@@ -8,6 +8,8 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -48,6 +50,21 @@ from agentteam_runtime.experiment_results import (
     seal_experiment_result_bundle,
     write_experiment_recovery_snapshot,
 )
+from agentteam_runtime.experiment_modes import (
+    _begin_mode_execution,
+    _complete_mode_execution,
+    _publish_mode_order_authority,
+    _register_provider_launch,
+    AgentTeamDirectModeAdapter,
+    AgentTeamFullModeAdapter,
+    ExperimentCommonFinalizer,
+    ExperimentModeController,
+    ExperimentModeError,
+    NativeSingleCodexProvider,
+    SingleCodexModeAdapter,
+    execute_bound_experiment_mode,
+)
+from agentteam_runtime.experiment_results import _publish_sealed_directory
 from agentteam_runtime.experiment_contract import (
     LEGACY_MANIFEST_SCHEMA_VERSION,
     ExperimentContractError,
@@ -91,8 +108,11 @@ from agentteam_runtime.experiment_sandbox import (
     prepare_provider_launch,
     probe_gold_canary_denial,
     publish_evaluator_reference,
+    publish_experiment_launch_registration,
+    publish_experiment_mode_authority,
     publish_experiment_protocol_reference,
     publish_model_invocation_set_reference,
+    publish_registered_model_invocation_set_reference,
     publish_provider_sandbox_reference,
     publish_scan_scope_reference,
     run_trusted_argv_evaluator,
@@ -102,6 +122,7 @@ from agentteam_runtime.experiment_sandbox import (
     validate_provider_sandbox_descriptor,
 )
 from agentteam_runtime.model_invocation import (
+    _validate_registered_codex_command,
     ExecutionGroupIdentity,
     InvocationLifecycle,
     ModelInvocationCall,
@@ -109,6 +130,17 @@ from agentteam_runtime.model_invocation import (
     ModelInvocationUnavailable,
     ProviderExecution,
     invocation_context_from_message,
+)
+from agentteam_runtime.m0_runtime import (
+    _with_codex_reasoning_profile,
+    create_independent_attempt_workspace,
+)
+from agentteam_runtime.taskpack import (
+    draft_taskpack_files,
+    freeze_taskpack,
+)
+from agentteam_runtime.taskpack_author import (
+    _registered_experiment_author_output,
 )
 from agentteam_runtime.mailbox_worker import _model_invocation_context_payload
 import agentteam_runtime.experiment_ledger as experiment_ledger_module
@@ -403,6 +435,313 @@ def _publish_test_sandbox_reference(authority_root, fixture):
             fixture["uncertified_descriptor"],
             fixture["canary"],
         )
+
+
+def _successful_namespace_probe(descriptor, canary_path, **_kwargs):
+    return {
+        "schema_version": "experiment_namespace_probe.v1",
+        "evidence_status": "complete",
+        "denial_status": "denied",
+        "policy_sha256": descriptor["policy_sha256"],
+        "canary_sha256": hashlib.sha256(
+            Path(canary_path).read_bytes()
+        ).hexdigest(),
+        "path_visible": False,
+        "content_readable": False,
+        "probe_returncode": 0,
+    }
+
+
+def _complete_fake_experiment_invocation(
+    invocation_context,
+    workspace_root,
+    *,
+    role,
+):
+    class FakeGatedRunner:
+        def __init__(
+            self,
+            lifecycle,
+            command,
+            *,
+            cwd,
+            input_text,
+            timeout_seconds,
+            environment=None,
+        ):
+            del lifecycle, cwd, input_text, timeout_seconds, environment
+            self.command = list(command)
+
+        def prepare(self):
+            return ExecutionGroupIdentity.not_applicable()
+
+        def permit_and_wait(self, **_kwargs):
+            return ProviderExecution(
+                self.command,
+                0,
+                json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {
+                            "input_tokens": 1,
+                            "cached_input_tokens": 0,
+                            "output_tokens": 1,
+                            "reasoning_output_tokens": 0,
+                            "total_tokens": 2,
+                        },
+                    }
+                ),
+                "",
+            )
+
+        def abort_before_permit(self):
+            return None
+
+        def cleanup_after_terminal(self):
+            return None
+
+    context = _model_context(
+        supported=True,
+        sandbox_reference=None,
+    )
+    context.pop("experiment_sandbox_reference", None)
+    context.update(invocation_context)
+    context.update(
+        {
+            "project": Path(workspace_root).name,
+            "runtime_execution_session_id": (
+                f"SESSION-{uuid.uuid4().hex}"
+            ),
+            "lifecycle_owner_token": f"OWNER-{uuid.uuid4().hex}",
+            "agent_id": f"{role}-fixture",
+            "role": role,
+            "backend": "codex",
+            "coverage_class": "supported_model_invocation",
+        }
+    )
+    invocation = ModelInvocationCall(
+        context["model_invocation_authority_root"],
+        context,
+        supported=True,
+        systemd_runner_factory=FakeGatedRunner,
+    )
+    execution = invocation.execute(
+        [
+            "codex",
+            "exec",
+            "-m",
+            context["model"],
+            "-c",
+            (
+                "model_reasoning_effort="
+                f"{context['reasoning_profile']}"
+            ),
+        ],
+        cwd=workspace_root,
+        input_text="deterministic experiment fixture",
+        timeout_seconds=10,
+    )
+    invocation.finalize("completed", execution)
+    return invocation.lifecycle.invocation_id
+
+
+def _complete_fake_runtime_invocation(
+    experiment_context,
+    workspace_root,
+    *,
+    lifecycle_id,
+    taskpack_id,
+    usage_stage="implementation_worker",
+):
+    configuration = experiment_context["sandbox_configuration"]
+    lifecycle_root = experiment_lifecycle_authority_root(
+        experiment_context["authority_root"],
+        lifecycle_id,
+    )
+    descriptor = build_provider_sandbox_descriptor(
+        workspace_root,
+        runtime_views=configuration["runtime_views"],
+        library_views=configuration["library_views"],
+        credential_mounts=configuration["credential_mounts"],
+        environment=configuration["environment"],
+        repository_identity={
+            field: experiment_context["repository_identity"][field]
+            for field in ("commit", "tree", "git_object_format")
+        },
+        forbidden_paths=[configuration["canary_path"]],
+    )
+    sandbox_reference = publish_provider_sandbox_reference(
+        experiment_context["authority_root"],
+        descriptor,
+        configuration["canary_path"],
+        reference_id=f"{lifecycle_id}-sandbox",
+    )
+    publish_experiment_launch_registration(
+        experiment_context["authority_root"],
+        lifecycle_root,
+        experiment_run_id=experiment_context["experiment_run_id"],
+        protocol_sha256=experiment_context["protocol_sha256"],
+        run_manifest_sha256=experiment_context[
+            "run_manifest_sha256"
+        ],
+        mode=experiment_context["mode"],
+        usage_stage=usage_stage,
+        taskpack_id=taskpack_id,
+        workspace_root=workspace_root,
+        sandbox_reference=sandbox_reference,
+        controller_reference=experiment_context[
+            "controller_reference"
+        ],
+        model_policy=experiment_context["model_policy"],
+    )
+    return _complete_fake_experiment_invocation(
+        {
+            "model_invocation_authority_root": str(lifecycle_root),
+            "run_id": experiment_context["experiment_run_id"],
+            "taskpack_id": taskpack_id,
+            "usage_stage": usage_stage,
+            "model": experiment_context["model_policy"]["model"],
+            "reasoning_profile": experiment_context["model_policy"][
+                "reasoning_profile"
+            ],
+            "provider_resume_mode": "new",
+        },
+        workspace_root,
+        role="implementation_worker",
+    )
+
+
+def _start_orphaned_fake_runtime_invocation(
+    experiment_context,
+    workspace_root,
+    *,
+    lifecycle_id,
+    taskpack_id,
+):
+    configuration = experiment_context["sandbox_configuration"]
+    lifecycle_root = experiment_lifecycle_authority_root(
+        experiment_context["authority_root"],
+        lifecycle_id,
+    )
+    descriptor = build_provider_sandbox_descriptor(
+        workspace_root,
+        runtime_views=configuration["runtime_views"],
+        library_views=configuration["library_views"],
+        credential_mounts=configuration["credential_mounts"],
+        environment=configuration["environment"],
+        repository_identity={
+            field: experiment_context["repository_identity"][field]
+            for field in ("commit", "tree", "git_object_format")
+        },
+        forbidden_paths=[configuration["canary_path"]],
+    )
+    sandbox_reference = publish_provider_sandbox_reference(
+        experiment_context["authority_root"],
+        descriptor,
+        configuration["canary_path"],
+        reference_id=f"{lifecycle_id}-sandbox",
+    )
+    publish_experiment_launch_registration(
+        experiment_context["authority_root"],
+        lifecycle_root,
+        experiment_run_id=experiment_context["experiment_run_id"],
+        protocol_sha256=experiment_context["protocol_sha256"],
+        run_manifest_sha256=experiment_context[
+            "run_manifest_sha256"
+        ],
+        mode=experiment_context["mode"],
+        usage_stage="implementation_worker",
+        taskpack_id=taskpack_id,
+        workspace_root=workspace_root,
+        sandbox_reference=sandbox_reference,
+        controller_reference=experiment_context[
+            "controller_reference"
+        ],
+        model_policy=experiment_context["model_policy"],
+    )
+
+    class InterruptedRunner:
+        def __init__(
+            self,
+            lifecycle,
+            command,
+            *,
+            cwd,
+            input_text,
+            timeout_seconds,
+            environment=None,
+        ):
+            del lifecycle, cwd, input_text, timeout_seconds, environment
+            self.command = list(command)
+
+        def prepare(self):
+            return ExecutionGroupIdentity.not_applicable()
+
+        def permit_and_wait(self, **_kwargs):
+            raise OSError("provider interrupted after durable start")
+
+        def abort_before_permit(self):
+            return None
+
+        def cleanup_after_terminal(self):
+            return None
+
+    context = _model_context(
+        supported=True,
+        sandbox_reference=None,
+    )
+    context.pop("experiment_sandbox_reference", None)
+    context.update(
+        {
+            "model_invocation_authority_root": str(lifecycle_root),
+            "run_id": experiment_context["experiment_run_id"],
+            "taskpack_id": taskpack_id,
+            "usage_stage": "implementation_worker",
+            "model": experiment_context["model_policy"]["model"],
+            "reasoning_profile": experiment_context["model_policy"][
+                "reasoning_profile"
+            ],
+            "provider_resume_mode": "new",
+            "project": Path(workspace_root).name,
+            "runtime_execution_session_id": (
+                f"SESSION-{uuid.uuid4().hex}"
+            ),
+            "lifecycle_owner_token": f"OWNER-{uuid.uuid4().hex}",
+            "agent_id": "orphaned-worker-fixture",
+            "role": "implementation_worker",
+            "backend": "codex",
+            "coverage_class": "supported_model_invocation",
+        }
+    )
+    invocation = ModelInvocationCall(
+        lifecycle_root,
+        context,
+        supported=True,
+        systemd_runner_factory=InterruptedRunner,
+    )
+    try:
+        invocation.execute(
+            [
+                "codex",
+                "exec",
+                "-m",
+                context["model"],
+                "-c",
+                (
+                    "model_reasoning_effort="
+                    f"{context['reasoning_profile']}"
+                ),
+            ],
+            cwd=workspace_root,
+            input_text="interrupted fixture",
+            timeout_seconds=10,
+        )
+    except OSError:
+        import gc
+
+        invocation = None
+        gc.collect()
+        return
 
 
 def _sandbox_protocol(fixture):
@@ -2031,8 +2370,10 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
         task_overrides=None,
         max_inflight=1,
         task_count=1,
+        output_dir=None,
     ):
-        output_dir = controller.root
+        output_dir = Path(output_dir or controller.root)
+        output_dir.mkdir(parents=True, exist_ok=True)
         task = {
             "task_id": "P2-03B-SCHEDULER",
             "milestone_id": "M0",
@@ -2376,6 +2717,209 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
                     "backlog_status"
                 ],
                 "ready",
+            )
+
+    def test_mode_scheduler_allocates_registered_independent_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repository"
+            self._init_repo(repository)
+            commit = self._head(repository)
+            tree = self._head(repository, "HEAD^{tree}")
+            object_format = _git(
+                repository,
+                "rev-parse",
+                "--show-object-format",
+            ).stdout.strip()
+            monotonic = _SchedulerMonotonic()
+            authority_root = root / "run-authority"
+            authority_root.mkdir(mode=0o700)
+            controller = create_experiment_controller(
+                root / "protocol-controller",
+                protocol_id="phase2-mode-scheduler",
+                max_total_tokens=100,
+                max_wall_time_seconds=60,
+                soft_warning_ratio=0.8,
+                scored=False,
+                protocol_sha256="1" * 64,
+                operator_limits={
+                    "expected_operator_action": 2,
+                    "corrective_intervention": 1,
+                    "decision_escalation": 1,
+                },
+                initial_monotonic=monotonic.value,
+                monotonic=monotonic,
+            )
+            model_policy = {
+                "backend": "codex",
+                "codex_cli_version": "codex-test-v1",
+                "model": "codex-test-model",
+                "reasoning_profile": "high",
+                "service_configuration_sha256": "2" * 64,
+                "sandbox_policy": "workspace-write",
+                "permission_policy": "never",
+                "network_policy": "disabled",
+                "tool_allowlist": ["exec_command", "apply_patch"],
+                "max_inflight_model_invocations": 1,
+            }
+            credential = root / "credential.json"
+            credential.write_text("{}\n", encoding="utf-8")
+            canary = root / "canary"
+            canary.write_text("scheduler canary\n", encoding="utf-8")
+            configuration = {
+                "runtime_views": [
+                    {"source": path, "target": path}
+                    for path in ("/usr", "/lib", "/lib64", "/bin")
+                    if Path(path).exists()
+                ],
+                "library_views": [],
+                "credential_mounts": [
+                    {
+                        "source": str(credential),
+                        "target": (
+                            "/run/agentteam-credentials/provider.json"
+                        ),
+                    }
+                ],
+                "environment": {},
+                "canary_path": str(canary),
+            }
+            publish_experiment_mode_authority(
+                authority_root,
+                experiment_run_id="RUN-MODE-SCHEDULER",
+                protocol_sha256="1" * 64,
+                run_manifest_sha256="3" * 64,
+                mode="agentteam_direct",
+                model_policy=model_policy,
+                controller_reference=controller.reference,
+                sandbox_configuration_sha256=canonical_json_sha256(
+                    configuration
+                ),
+            )
+            (authority_root / "experiment-runtime-context.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "experiment_runtime_context.v1",
+                        "experiment_run_id": "RUN-MODE-SCHEDULER",
+                        "protocol_sha256": "1" * 64,
+                        "run_manifest_sha256": "3" * 64,
+                        "authority_root": str(authority_root),
+                        "mode": "agentteam_direct",
+                        "repository_identity": {
+                            "source": str(repository),
+                            "commit": commit,
+                            "tree": tree,
+                            "git_object_format": object_format,
+                        },
+                        "controller_reference": controller.reference,
+                        "controller_required": True,
+                        "independent_attempt_workspaces": True,
+                        "model_policy": model_policy,
+                        "sandbox_configuration": configuration,
+                        "sandbox_configuration_sha256": (
+                            canonical_json_sha256(configuration)
+                        ),
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            with patch(
+                "agentteam_runtime.experiment_sandbox."
+                "probe_gold_canary_denial",
+                side_effect=_successful_namespace_probe,
+            ):
+                scheduler = self._scheduler(
+                    root,
+                    controller,
+                    monotonic,
+                    project_root=repository,
+                    max_inflight=1,
+                    output_dir=authority_root,
+                )
+                dispatch = scheduler.dispatch_ready()
+
+            self.assertEqual(dispatch["dispatch_count"], 1)
+            inflight = scheduler.state["inflight_attempts"][0]
+            workspace = Path(inflight["worktree_path"])
+            integration_workspace = Path(
+                scheduler.state["integration_baseline"][
+                    "integration_baseline_worktree_path"
+                ]
+            )
+            common_dirs = {
+                Path(
+                    _git(
+                        path,
+                        "rev-parse",
+                        "--path-format=absolute",
+                        "--git-common-dir",
+                    ).stdout.strip()
+                ).resolve()
+                for path in (
+                    repository,
+                    workspace,
+                    integration_workspace,
+                )
+            }
+            self.assertEqual(len(common_dirs), 3)
+            self.assertNotEqual(
+                Path(
+                    _git(
+                        repository,
+                        "rev-parse",
+                        "--path-format=absolute",
+                        "--git-common-dir",
+                    ).stdout.strip()
+                ).resolve(),
+                Path(
+                    _git(
+                        workspace,
+                        "rev-parse",
+                        "--path-format=absolute",
+                        "--git-common-dir",
+                    ).stdout.strip()
+                ).resolve(),
+            )
+            inbox = next(
+                Path(inflight["step_dir"]).glob(
+                    "mailboxes/*/inbox.jsonl"
+                )
+            )
+            payload = json.loads(
+                inbox.read_text(encoding="utf-8").splitlines()[0]
+            )["payload"]
+            self.assertTrue(payload["experiment_sandbox_required"])
+            self.assertEqual(
+                payload["model"],
+                model_policy["model"],
+            )
+            self.assertEqual(
+                payload["reasoning_profile"],
+                model_policy["reasoning_profile"],
+            )
+            invocation_context = invocation_context_from_message(
+                {"payload": payload},
+                model=model_policy["model"],
+            )
+            command = _with_codex_reasoning_profile(
+                [
+                    "codex",
+                    "exec",
+                    "-m",
+                    model_policy["model"],
+                    "-",
+                ],
+                invocation_context["reasoning_profile"],
+            )
+            _validate_registered_codex_command(
+                command,
+                model_policy,
+            )
+            self.assertTrue(
+                Path(
+                    payload["model_invocation_authority_root"]
+                ).is_dir()
             )
 
     def test_outbox_result_waits_for_provider_terminal(self):
@@ -5430,6 +5974,1390 @@ class ExperimentResultBundleTests(unittest.TestCase):
             )
 
 
+class ExperimentModeAdapterTests(unittest.TestCase):
+    @staticmethod
+    def _fixture(root, mode, *, direct_taskpack_sha256=None):
+        root = Path(root)
+        root.mkdir(parents=True, exist_ok=True)
+        repository = _fixture_repository(root)
+        protocol = copy.deepcopy(_protocol())
+        protocol["repository"] = repository["repository"]
+        for seed in range(100):
+            seeded_order = sorted(
+                protocol["modes"],
+                key=lambda candidate: canonical_json_sha256(
+                    {"seed": seed, "mode": candidate}
+                ),
+            )
+            if seeded_order[0] == mode:
+                protocol["seed"] = seed
+                protocol["mode_order"] = seeded_order
+                break
+        else:
+            raise AssertionError("no deterministic fixture mode seed")
+        evaluator = root / "trusted-mode-evaluator.py"
+        evaluator.write_text(
+            "#!/usr/bin/python3\nraise SystemExit(0)\n",
+            encoding="utf-8",
+        )
+        evaluator.chmod(0o700)
+        protocol["evaluator"]["artifact_sha256"] = hashlib.sha256(
+            evaluator.read_bytes()
+        ).hexdigest()
+        if direct_taskpack_sha256 is not None:
+            protocol["direct_taskpack"][
+                "sha256"
+            ] = direct_taskpack_sha256
+        manifest = build_experiment_run_manifest(
+            protocol,
+            mode=mode,
+            repetition_index=0,
+            stable_request_key=f"mode-{mode}",
+        )
+        run_dir = root / manifest["experiment_run_id"]
+        run_dir.mkdir()
+        snapshot = allocate_clean_snapshot(
+            run_dir,
+            repository["repository"],
+            attested_at="2026-07-27T00:00:00Z",
+        )
+        authority_root = run_dir / "authority"
+        authority_root.mkdir(mode=0o700)
+        controller = create_experiment_controller(
+            root / "protocol-controller",
+            protocol_id=protocol["experiment_id"],
+            max_total_tokens=protocol["budgets"][
+                "max_total_tokens"
+            ],
+            max_wall_time_seconds=protocol["budgets"][
+                "max_wall_time_seconds"
+            ],
+            soft_warning_ratio=protocol["budgets"][
+                "soft_warning_ratio"
+            ],
+            scored=protocol["scored"],
+            protocol_sha256=canonical_json_sha256(protocol),
+            operator_limits=protocol["operator_limits"],
+        )
+        credential = root / "provider-credential.json"
+        credential.write_text("{}\n", encoding="utf-8")
+        canary = root / "gold-canary"
+        canary.write_text("mode-only-canary\n", encoding="utf-8")
+        sandbox_configuration = {
+            "runtime_views": [
+                {"source": path, "target": path}
+                for path in ("/usr", "/lib", "/lib64", "/bin")
+                if Path(path).exists()
+            ],
+            "library_views": [],
+            "credential_mounts": [
+                {
+                    "source": str(credential),
+                    "target": (
+                        "/run/agentteam-credentials/provider.json"
+                    ),
+                }
+            ],
+            "environment": {
+                "AGENTTEAM_CREDENTIAL_FILE": (
+                    "/run/agentteam-credentials/provider.json"
+                )
+            },
+            "canary_path": str(canary),
+        }
+        return {
+            "protocol": protocol,
+            "manifest": manifest,
+            "run_dir": run_dir,
+            "snapshot": Path(snapshot["snapshot_path"]),
+            "authority_root": authority_root,
+            "controller": controller,
+            "sandbox_configuration": sandbox_configuration,
+            "evaluator": evaluator,
+        }
+
+    @staticmethod
+    def _controller(fixture):
+        return ExperimentModeController(
+            protocol=fixture["protocol"],
+            run_manifest=fixture["manifest"],
+            run_dir=fixture["run_dir"],
+            project_root=fixture["snapshot"],
+            authority_root=fixture["authority_root"],
+            controller_reference=fixture["controller"].reference,
+            sandbox_configuration=fixture["sandbox_configuration"],
+            common_finalizer=ExperimentCommonFinalizer(
+                evaluator_artifact=fixture["evaluator"],
+                runtime_release_identity=_release(),
+            ),
+            runtime_release_identity=_release(),
+        )
+
+    @staticmethod
+    @contextmanager
+    def _mode_execution_boundary():
+        def fake_evaluator(**kwargs):
+            from agentteam_runtime.experiment_sandbox import (
+                load_experiment_protocol_reference,
+                load_model_invocation_set_reference,
+                load_scan_scope_reference,
+            )
+
+            protocol = load_experiment_protocol_reference(
+                kwargs["experiment_protocol_reference"],
+                kwargs["authority_root"],
+            )
+            manifest = load_model_invocation_set_reference(
+                kwargs["invocation_set_reference"],
+                kwargs["authority_root"],
+            )
+            _scan_scope, scan_digest = load_scan_scope_reference(
+                kwargs["scan_scope_reference"],
+                kwargs["authority_root"],
+            )
+            evidence = {
+                "evaluation_status": "passed",
+                "evaluator_sha256": kwargs[
+                    "evaluator_reference"
+                ]["sha256"],
+                "started_at": "2026-07-27T00:00:00Z",
+                "finished_at": "2026-07-27T00:01:00Z",
+                "taskpack_ids": sorted(
+                    {
+                        item["taskpack_id"]
+                        for item in manifest["invocation_sets"]
+                    }
+                ),
+                "experiment_protocol_reference_sha256": kwargs[
+                    "experiment_protocol_reference"
+                ]["sha256"],
+                "scan_scope_sha256": scan_digest,
+                "acceptance_command_sha256": (
+                    canonical_json_sha256(
+                        protocol["acceptance"]["command"]
+                    )
+                ),
+                "acceptance_executable_sha256": "a" * 64,
+                "provider_sandbox_reference_sha256": kwargs[
+                    "provider_sandbox_reference"
+                ]["sha256"],
+                "failure_reason": None,
+            }
+            Path(kwargs["evidence_path"]).write_bytes(
+                canonical_json_bytes(evidence) + b"\n"
+            )
+            return evidence
+
+        def fake_seal(run_dir, bundle, **_kwargs):
+            result_dir = Path(run_dir) / "results" / "terminal"
+            digest = _publish_sealed_directory(
+                result_dir,
+                bundle,
+                payload_name="result.json",
+                digest_name="result.sha256",
+                staging_prefix=".result-staging-",
+            )
+            return {
+                "result_status": "sealed",
+                "result_dir": str(result_dir),
+                "bundle_sha256": digest,
+                "bundle": bundle,
+            }
+
+        with patch(
+            "agentteam_runtime.experiment_sandbox."
+            "probe_gold_canary_denial",
+            side_effect=_successful_namespace_probe,
+        ), patch(
+            "agentteam_runtime.experiment_modes."
+            "run_trusted_argv_evaluator",
+            side_effect=fake_evaluator,
+        ), patch(
+            "agentteam_runtime.experiment_modes."
+            "seal_experiment_result_bundle",
+            side_effect=fake_seal,
+        ):
+            yield
+
+    def test_single_mode_receives_no_agentteam_task_context(self):
+        class FakeGatedRunner:
+            calls = []
+
+            def __init__(
+                self,
+                lifecycle,
+                command,
+                *,
+                cwd,
+                input_text,
+                timeout_seconds,
+                environment=None,
+            ):
+                del lifecycle, timeout_seconds, environment
+                type(self).calls.append(
+                    {
+                        "command": list(command),
+                        "cwd": cwd,
+                        "input_text": input_text,
+                    }
+                )
+                self.command = list(command)
+
+            def prepare(self):
+                return ExecutionGroupIdentity.not_applicable()
+
+            def permit_and_wait(self, **_kwargs):
+                return ProviderExecution(
+                    self.command,
+                    0,
+                    json.dumps(
+                        {
+                            "type": "turn.completed",
+                            "usage": {
+                                "input_tokens": 2,
+                                "cached_input_tokens": 0,
+                                "output_tokens": 1,
+                                "reasoning_output_tokens": 0,
+                                "total_tokens": 3,
+                            },
+                        }
+                    ),
+                    "",
+                )
+
+            def abort_before_permit(self):
+                return None
+
+            def cleanup_after_terminal(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp, "single_codex")
+            with self._mode_execution_boundary(), patch(
+                "agentteam_runtime.model_invocation."
+                "SystemdGatedExecution",
+                FakeGatedRunner,
+            ):
+                result = self._controller(fixture).execute(
+                    SingleCodexModeAdapter()
+                )
+
+            self.assertEqual(result["provider_invocation_count"], 1)
+            self.assertEqual(
+                result["sealed_result"]["acceptance_status"],
+                "passed",
+            )
+            self.assertIsNone(result["taskpack"])
+            self.assertEqual(len(FakeGatedRunner.calls), 1)
+            prompt = FakeGatedRunner.calls[0]["input_text"]
+            self.assertNotIn("taskpack", prompt.lower())
+            self.assertNotIn("repo map", prompt.lower())
+            self.assertIn(
+                str(fixture["snapshot"]),
+                FakeGatedRunner.calls[0]["command"],
+            )
+            self.assertEqual(
+                result["invocation_set_reference"]["schema_version"],
+                "experiment_model_invocation_set_reference.v1",
+            )
+
+    def test_native_single_provider_uses_registered_live_contract(self):
+        with self.assertRaises(TypeError):
+            NativeSingleCodexProvider(
+                codex_command=[
+                    "codex",
+                    "exec",
+                    "--oss",
+                    "--local-provider",
+                    "ollama",
+                ]
+            )
+
+        class FakeGatedRunner:
+            command = None
+
+            def __init__(
+                self,
+                lifecycle,
+                command,
+                *,
+                cwd,
+                input_text,
+                timeout_seconds,
+                environment=None,
+            ):
+                del lifecycle, cwd, input_text, timeout_seconds, environment
+                type(self).command = list(command)
+
+            def prepare(self):
+                return ExecutionGroupIdentity.not_applicable()
+
+            def permit_and_wait(self, **_kwargs):
+                return ProviderExecution(
+                    self.command,
+                    0,
+                    json.dumps(
+                        {
+                            "type": "turn.completed",
+                            "usage": {
+                                "input_tokens": 2,
+                                "cached_input_tokens": 0,
+                                "output_tokens": 1,
+                                "reasoning_output_tokens": 0,
+                                "total_tokens": 3,
+                            },
+                        }
+                    ),
+                    "",
+                )
+
+            def abort_before_permit(self):
+                return None
+
+            def cleanup_after_terminal(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp, "single_codex")
+            provider = NativeSingleCodexProvider()
+            with self._mode_execution_boundary(), patch(
+                "agentteam_runtime.model_invocation."
+                "SystemdGatedExecution",
+                FakeGatedRunner,
+            ):
+                result = self._controller(fixture).execute(
+                    SingleCodexModeAdapter(provider)
+                )
+
+            self.assertEqual(result["terminal_status"], "completed")
+            self.assertIn(
+                fixture["protocol"]["environment"]["model"],
+                FakeGatedRunner.command,
+            )
+            self.assertIn(
+                "model_reasoning_effort=high",
+                FakeGatedRunner.command,
+            )
+
+    def test_single_mode_rejects_adapter_substitution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp, "single_codex")
+
+            class MisreportingAdapter:
+                mode = "single_codex"
+
+                def execute(self, _request):
+                    raise AssertionError("substitute adapter must not run")
+
+            with self.assertRaisesRegex(
+                ExperimentModeError,
+                "concrete protocol adapter",
+            ):
+                self._controller(fixture).execute(
+                    MisreportingAdapter()
+                )
+
+    def test_controller_rejects_missing_sandbox_and_wrong_adapter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp, "single_codex")
+            with self.assertRaisesRegex(
+                ExperimentModeError,
+                "sandbox configuration",
+            ):
+                ExperimentModeController(
+                    protocol=fixture["protocol"],
+                    run_manifest=fixture["manifest"],
+                    run_dir=fixture["run_dir"],
+                    project_root=fixture["snapshot"],
+                    authority_root=fixture["authority_root"],
+                    controller_reference=fixture["controller"].reference,
+                    sandbox_configuration=None,
+                    common_finalizer=lambda **kwargs: kwargs,
+                    runtime_release_identity=_release(),
+                )
+            with self.assertRaisesRegex(
+                ExperimentModeError,
+                "finalizer authority",
+            ):
+                ExperimentModeController(
+                    protocol=fixture["protocol"],
+                    run_manifest=fixture["manifest"],
+                    run_dir=fixture["run_dir"],
+                    project_root=fixture["snapshot"],
+                    authority_root=fixture["authority_root"],
+                    controller_reference=fixture["controller"].reference,
+                    sandbox_configuration=fixture[
+                        "sandbox_configuration"
+                    ],
+                    common_finalizer=lambda **kwargs: kwargs,
+                    runtime_release_identity=_release(),
+                )
+
+            class WrongAdapter:
+                mode = "agentteam_direct"
+
+                def execute(self, _request):
+                    raise AssertionError("must not execute")
+
+            with self.assertRaisesRegex(
+                ExperimentModeError,
+                "adapter mode",
+            ):
+                self._controller(fixture).execute(WrongAdapter())
+
+            first = self._controller(fixture)
+            self.assertIsNotNone(first.sandbox_configuration_sha256)
+            changed_configuration = copy.deepcopy(
+                fixture["sandbox_configuration"]
+            )
+            changed_configuration["environment"]["DIFFERENT"] = "1"
+            with self.assertRaisesRegex(
+                ExperimentContractError,
+                "already exists with different",
+            ):
+                ExperimentModeController(
+                    protocol=fixture["protocol"],
+                    run_manifest=fixture["manifest"],
+                    run_dir=fixture["run_dir"],
+                    project_root=fixture["snapshot"],
+                    authority_root=fixture["authority_root"],
+                    controller_reference=fixture["controller"].reference,
+                    sandbox_configuration=changed_configuration,
+                    common_finalizer=lambda **kwargs: kwargs,
+                    runtime_release_identity=_release(),
+                )
+
+    def test_controller_rejects_different_protocol_budget_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp, "single_codex")
+            changed = copy.deepcopy(fixture["protocol"])
+            changed["budgets"]["max_total_tokens"] += 1
+            wrong = create_experiment_controller(
+                Path(tmp) / "wrong-protocol-controller",
+                protocol_id=changed["experiment_id"],
+                max_total_tokens=changed["budgets"][
+                    "max_total_tokens"
+                ],
+                max_wall_time_seconds=changed["budgets"][
+                    "max_wall_time_seconds"
+                ],
+                soft_warning_ratio=changed["budgets"][
+                    "soft_warning_ratio"
+                ],
+                scored=changed["scored"],
+                protocol_sha256=canonical_json_sha256(changed),
+                operator_limits=changed["operator_limits"],
+            )
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "differs from protocol",
+            ):
+                ExperimentModeController(
+                    protocol=fixture["protocol"],
+                    run_manifest=fixture["manifest"],
+                    run_dir=fixture["run_dir"],
+                    project_root=fixture["snapshot"],
+                    authority_root=fixture["authority_root"],
+                    controller_reference=wrong.reference,
+                    sandbox_configuration=fixture[
+                        "sandbox_configuration"
+                    ],
+                    common_finalizer=ExperimentCommonFinalizer(
+                        evaluator_artifact=fixture["evaluator"],
+                        runtime_release_identity=_release(),
+                    ),
+                    runtime_release_identity=_release(),
+                )
+
+    def test_execute_bound_rejects_unallocated_run_dictionary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "source").mkdir()
+            repository = _fixture_repository(root / "source")
+            protocol = copy.deepcopy(_protocol())
+            protocol["repository"] = repository["repository"]
+            manifest = build_experiment_run_manifest(
+                protocol,
+                mode=protocol["mode_order"][0],
+                repetition_index=0,
+                stable_request_key="forged-bound-run",
+            )
+            run_dir = (
+                root / "other-root" / "runs"
+                / manifest["experiment_run_id"]
+            )
+            run_dir.mkdir(parents=True)
+            protocol_path = root / "forged-protocol.json"
+            protocol_path.write_bytes(
+                canonical_json_bytes(protocol) + b"\n"
+            )
+            forged = {
+                "run_dir": str(run_dir),
+                "protocol_path": str(protocol_path),
+                "run_manifest": manifest,
+                "binding": {
+                    "protocol_sha256": canonical_json_sha256(
+                        protocol
+                    ),
+                    "runtime_release": _release(),
+                },
+            }
+            evaluator = root / "evaluator.py"
+            evaluator.write_text(
+                "#!/usr/bin/python3\nraise SystemExit(0)\n",
+                encoding="utf-8",
+            )
+            evaluator.chmod(0o700)
+            with self.assertRaises(ExperimentContractError):
+                execute_bound_experiment_mode(
+                    forged,
+                    sandbox_configuration={},
+                    adapter=AgentTeamDirectModeAdapter(root),
+                    common_finalizer=ExperimentCommonFinalizer(
+                        evaluator_artifact=evaluator,
+                        runtime_release_identity=_release(),
+                    ),
+                )
+
+    def test_execute_bound_accepts_allocation_authority(self):
+        class FakeGatedRunner:
+            def __init__(
+                self,
+                lifecycle,
+                command,
+                *,
+                cwd,
+                input_text,
+                timeout_seconds,
+                environment=None,
+            ):
+                del lifecycle, cwd, input_text, timeout_seconds, environment
+                self.command = list(command)
+
+            def prepare(self):
+                return ExecutionGroupIdentity.not_applicable()
+
+            def permit_and_wait(self, **_kwargs):
+                return ProviderExecution(
+                    self.command,
+                    0,
+                    json.dumps(
+                        {
+                            "type": "turn.completed",
+                            "usage": {
+                                "input_tokens": 2,
+                                "cached_input_tokens": 0,
+                                "output_tokens": 1,
+                                "reasoning_output_tokens": 0,
+                                "total_tokens": 3,
+                            },
+                        }
+                    ),
+                    "",
+                )
+
+            def abort_before_permit(self):
+                return None
+
+            def cleanup_after_terminal(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "source").mkdir()
+            repository = _fixture_repository(root / "source")
+            evaluator = root / "evaluator.py"
+            evaluator.write_text(
+                "#!/usr/bin/python3\nraise SystemExit(0)\n",
+                encoding="utf-8",
+            )
+            evaluator.chmod(0o700)
+            protocol = copy.deepcopy(_protocol())
+            protocol["repository"] = repository["repository"]
+            protocol["seed"] = 0
+            protocol["mode_order"] = [
+                "single_codex",
+                "agentteam_direct",
+                "agentteam_full",
+            ]
+            protocol["evaluator"]["artifact_sha256"] = (
+                hashlib.sha256(evaluator.read_bytes()).hexdigest()
+            )
+            allocation = allocate_experiment_run(
+                root / "experiment",
+                protocol,
+                mode="single_codex",
+                repetition_index=0,
+                stable_request_key="bound-production-path",
+                runtime_release=_release(),
+                bound_at="2026-07-27T00:00:00Z",
+            )
+            credential = root / "credential.json"
+            credential.write_text("{}\n", encoding="utf-8")
+            canary = root / "gold-canary"
+            canary.write_text("bound-canary\n", encoding="utf-8")
+            sandbox_configuration = {
+                "runtime_views": [
+                    {"source": path, "target": path}
+                    for path in ("/usr", "/lib", "/lib64", "/bin")
+                    if Path(path).exists()
+                ],
+                "library_views": [],
+                "credential_mounts": [
+                    {
+                        "source": str(credential),
+                        "target": (
+                            "/run/agentteam-credentials/provider.json"
+                        ),
+                    }
+                ],
+                "environment": {
+                    "AGENTTEAM_CREDENTIAL_FILE": (
+                        "/run/agentteam-credentials/provider.json"
+                    )
+                },
+                "canary_path": str(canary),
+            }
+            with acquire_controller_lease(
+                allocation["run_dir"],
+                controller_id="competing-controller",
+            ), self.assertRaises(ExperimentLeaseError):
+                execute_bound_experiment_mode(
+                    allocation,
+                    sandbox_configuration=sandbox_configuration,
+                    adapter=SingleCodexModeAdapter(),
+                    common_finalizer=ExperimentCommonFinalizer(
+                        evaluator_artifact=evaluator,
+                        runtime_release_identity=_release(),
+                    ),
+                )
+            with self._mode_execution_boundary(), patch(
+                "agentteam_runtime.model_invocation."
+                "SystemdGatedExecution",
+                FakeGatedRunner,
+            ):
+                result = execute_bound_experiment_mode(
+                    allocation,
+                    sandbox_configuration=sandbox_configuration,
+                    adapter=SingleCodexModeAdapter(),
+                    common_finalizer=ExperimentCommonFinalizer(
+                        evaluator_artifact=evaluator,
+                        runtime_release_identity=_release(),
+                    ),
+                )
+            self.assertEqual(
+                result["sealed_result"]["acceptance_status"],
+                "passed",
+            )
+
+    def test_counterbalanced_mode_order_is_enforced_and_immutable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp, "agentteam_direct")
+            protocol = fixture["protocol"]
+            root = Path(fixture["controller"].reference["controller_root"])
+            first = build_experiment_run_manifest(
+                protocol,
+                mode=protocol["mode_order"][0],
+                repetition_index=0,
+                stable_request_key="order-first",
+            )
+            second = build_experiment_run_manifest(
+                protocol,
+                mode=protocol["mode_order"][1],
+                repetition_index=0,
+                stable_request_key="order-second",
+            )
+            _publish_mode_order_authority(root, protocol)
+            with self.assertRaisesRegex(
+                ExperimentModeError,
+                "counterbalanced order",
+            ):
+                _begin_mode_execution(root, protocol, second)
+            started = _begin_mode_execution(root, protocol, first)
+            self.assertEqual(started["sequence_index"], 0)
+            _complete_mode_execution(
+                root,
+                protocol,
+                first,
+                sealed_result={
+                    "bundle_sha256": "d" * 64,
+                    "terminal_status": "completed",
+                    "acceptance_status": "passed",
+                },
+            )
+            next_started = _begin_mode_execution(
+                root,
+                protocol,
+                second,
+            )
+            self.assertEqual(next_started["sequence_index"], 1)
+            changed = copy.deepcopy(protocol)
+            changed["seed"] += 1
+            with self.assertRaises(ExperimentContractError):
+                _publish_mode_order_authority(root, changed)
+
+    def test_direct_mode_verifies_digest_and_overrides_project_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "taskpack-repository").mkdir()
+            taskpack_repository = _fixture_repository(
+                root / "taskpack-repository"
+            )
+            draft = draft_taskpack_files(
+                project_root=taskpack_repository["source"],
+                goal="Update tracked.txt.",
+                draft_root=root / "drafts",
+                taskpack_id="direct-fixture",
+                read_scope=["tracked.txt"],
+                write_scope=["tracked.txt"],
+                verification_command=["python3", "-m", "unittest"],
+                role_routing=False,
+            )
+            frozen = freeze_taskpack(
+                draft["taskpack_dir"],
+                root / "frozen",
+                expected_authoring_mode="direct_draft",
+            )
+            fixture = self._fixture(
+                root / "mode",
+                "agentteam_direct",
+                direct_taskpack_sha256=frozen["manifest"][
+                    "digest_sha256"
+                ],
+            )
+            launches = []
+
+            def launch(**kwargs):
+                import inspect
+                from agentteam_runtime.agentteam import (
+                    _run_frozen_taskpack,
+                )
+
+                inspect.signature(_run_frozen_taskpack).bind_partial(
+                    **kwargs
+                )
+                launches.append(kwargs)
+                _complete_fake_runtime_invocation(
+                    kwargs["experiment_runtime_context"],
+                    kwargs["trusted_project_root"],
+                    lifecycle_id="direct-worker",
+                    taskpack_id="direct-fixture",
+                )
+                return {
+                    "terminal_status": "completed",
+                    "provider_invocation_count": 1,
+                }
+
+            with self._mode_execution_boundary(), patch(
+                "agentteam_runtime.agentteam._run_frozen_taskpack",
+                side_effect=launch,
+            ), patch(
+                "agentteam_runtime.experiment_controller."
+                "ExperimentController.operator_action_projection",
+                return_value={
+                    "operator_action_counts": {
+                        "expected_operator_action": 1,
+                        "corrective_intervention": 1,
+                        "decision_escalation": 0,
+                    },
+                },
+            ):
+                result = self._controller(fixture).execute(
+                    AgentTeamDirectModeAdapter(
+                        frozen["frozen_taskpack_dir"],
+                    )
+                )
+
+            self.assertEqual(
+                result["taskpack"]["digest_sha256"],
+                fixture["protocol"]["direct_taskpack"]["sha256"],
+            )
+            self.assertEqual(
+                load_experiment_result_bundle(fixture["run_dir"])[
+                    "bundle"
+                ]["operator_action_counts"],
+                {
+                    "expected_operator_action": 1,
+                    "corrective_intervention": 1,
+                    "decision_escalation": 0,
+                },
+            )
+            self.assertEqual(
+                launches[0]["trusted_project_root"],
+                str(fixture["snapshot"]),
+            )
+            self.assertEqual(
+                launches[0]["run_root"],
+                str(fixture["run_dir"] / "agentteam-runtime"),
+            )
+            invalid_fixture = self._fixture(
+                root / "invalid-candidate-mode",
+                "agentteam_direct",
+                direct_taskpack_sha256=fixture["protocol"][
+                    "direct_taskpack"
+                ]["sha256"],
+            )
+            invalid_candidate = (
+                invalid_fixture["run_dir"] / "not-a-repository"
+            )
+            invalid_candidate.mkdir()
+
+            def invalid_launch(**kwargs):
+                _complete_fake_runtime_invocation(
+                    kwargs["experiment_runtime_context"],
+                    kwargs["trusted_project_root"],
+                    lifecycle_id="invalid-candidate-worker",
+                    taskpack_id="direct-fixture",
+                )
+                return {
+                    "terminal_status": "completed",
+                    "provider_invocation_count": 1,
+                    "candidate_workspace": str(invalid_candidate),
+                }
+
+            with self._mode_execution_boundary(), patch(
+                "agentteam_runtime.agentteam._run_frozen_taskpack",
+                side_effect=invalid_launch,
+            ):
+                invalid_result = self._controller(
+                    invalid_fixture
+                ).execute(
+                    AgentTeamDirectModeAdapter(
+                        frozen["frozen_taskpack_dir"],
+                    )
+                )
+            self.assertEqual(
+                invalid_result["terminal_status"],
+                "infrastructure_failed",
+            )
+            self.assertTrue(
+                (
+                    invalid_fixture["run_dir"]
+                    / "results"
+                    / "terminal"
+                    / "result.json"
+                ).is_file()
+            )
+            failed_terminals = list(
+                (
+                    Path(
+                        invalid_fixture["controller"].reference[
+                            "controller_root"
+                        ]
+                    )
+                    / "mode-executions"
+                ).glob("*.terminal.json")
+            )
+            self.assertEqual(len(failed_terminals), 1)
+            self.assertEqual(
+                json.loads(
+                    failed_terminals[0].read_text(encoding="utf-8")
+                )["outcome"],
+                "sealed",
+            )
+            next_manifest = build_experiment_run_manifest(
+                invalid_fixture["protocol"],
+                mode=invalid_fixture["protocol"]["mode_order"][1],
+                repetition_index=0,
+                stable_request_key="after-failed-mode",
+            )
+            self.assertEqual(
+                _begin_mode_execution(
+                    invalid_fixture["controller"].reference[
+                        "controller_root"
+                    ],
+                    invalid_fixture["protocol"],
+                    next_manifest,
+                )["sequence_index"],
+                1,
+            )
+            retryable_fixture = self._fixture(
+                root / "retryable-infrastructure-mode",
+                "agentteam_direct",
+                direct_taskpack_sha256=fixture["protocol"][
+                    "direct_taskpack"
+                ]["sha256"],
+            )
+            with patch(
+                "agentteam_runtime.agentteam._run_frozen_taskpack",
+                side_effect=OSError("runtime unavailable"),
+            ), self.assertRaises(OSError):
+                self._controller(retryable_fixture).execute(
+                    AgentTeamDirectModeAdapter(
+                        frozen["frozen_taskpack_dir"],
+                    )
+                )
+            retryable_terminal = next(
+                (
+                    Path(
+                        retryable_fixture["controller"].reference[
+                            "controller_root"
+                        ]
+                    )
+                    / "mode-executions"
+                ).glob("*.terminal.json")
+            )
+            self.assertEqual(
+                json.loads(
+                    retryable_terminal.read_text(encoding="utf-8")
+                )["outcome"],
+                "retryable_infrastructure_failure",
+            )
+            retry = _begin_mode_execution(
+                retryable_fixture["controller"].reference[
+                    "controller_root"
+                ],
+                retryable_fixture["protocol"],
+                retryable_fixture["manifest"],
+            )
+            self.assertEqual(retry["attempt_index"], 2)
+            interrupted_fixture = self._fixture(
+                root / "interrupted-candidate-mode",
+                "agentteam_direct",
+                direct_taskpack_sha256=fixture["protocol"][
+                    "direct_taskpack"
+                ]["sha256"],
+            )
+            interrupted_candidate, _branch = (
+                create_independent_attempt_workspace(
+                    interrupted_fixture["snapshot"],
+                    interrupted_fixture["run_dir"]
+                    / "candidate-workspaces",
+                    "CANDIDATE-INTERRUPTED",
+                    "WT-CANDIDATE-INTERRUPTED",
+                )
+            )
+            (interrupted_candidate / "tracked.txt").write_text(
+                "interrupted candidate change\n",
+                encoding="utf-8",
+            )
+
+            def interrupted_launch(**kwargs):
+                _complete_fake_runtime_invocation(
+                    kwargs["experiment_runtime_context"],
+                    kwargs["trusted_project_root"],
+                    lifecycle_id="interrupted-worker",
+                    taskpack_id="direct-fixture",
+                )
+                state_dir = (
+                    Path(kwargs["run_root"])
+                    / "direct-fixture"
+                    / "state"
+                )
+                state_dir.mkdir(parents=True)
+                (state_dir / "two_phase_scheduler_state.json").write_text(
+                    json.dumps(
+                        {
+                            "integration_baseline": {
+                                "integration_baseline_worktree_path": str(
+                                    interrupted_candidate
+                                ),
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                raise OSError("runtime failed after candidate creation")
+
+            with self._mode_execution_boundary(), patch(
+                "agentteam_runtime.agentteam._run_frozen_taskpack",
+                side_effect=interrupted_launch,
+            ):
+                interrupted_result = self._controller(
+                    interrupted_fixture
+                ).execute(
+                    AgentTeamDirectModeAdapter(
+                        frozen["frozen_taskpack_dir"],
+                    )
+                )
+            interrupted_bundle = load_experiment_result_bundle(
+                interrupted_fixture["run_dir"]
+            )["bundle"]
+            self.assertEqual(
+                interrupted_result["candidate_workspace"],
+                str(interrupted_candidate),
+            )
+            self.assertEqual(
+                interrupted_result["taskpack"]["taskpack_id"],
+                "direct-fixture",
+            )
+            self.assertIn(
+                "tracked.txt",
+                interrupted_bundle["changed_files"],
+            )
+            self.assertIn(
+                "infrastructure_failure:OSError:"
+                + hashlib.sha256(
+                    b"runtime failed after candidate creation"
+                ).hexdigest(),
+                interrupted_bundle["regressions"],
+            )
+            orphan_fixture = self._fixture(
+                root / "orphaned-provider-mode",
+                "agentteam_direct",
+                direct_taskpack_sha256=fixture["protocol"][
+                    "direct_taskpack"
+                ]["sha256"],
+            )
+
+            def orphan_launch(**kwargs):
+                _start_orphaned_fake_runtime_invocation(
+                    kwargs["experiment_runtime_context"],
+                    kwargs["trusted_project_root"],
+                    lifecycle_id="orphaned-worker",
+                    taskpack_id="direct-fixture",
+                )
+                raise OSError("provider process died after durable start")
+
+            with self._mode_execution_boundary(), patch(
+                "agentteam_runtime.agentteam._run_frozen_taskpack",
+                side_effect=orphan_launch,
+            ), patch(
+                "agentteam_runtime.two_phase_scheduler."
+                "_assess_persisted_execution_group",
+                return_value={
+                    "fence_status": "death_proven",
+                    "proof": "deterministic_test_death_proof",
+                },
+            ):
+                orphan_result = self._controller(
+                    orphan_fixture
+                ).execute(
+                    AgentTeamDirectModeAdapter(
+                        frozen["frozen_taskpack_dir"],
+                    )
+                )
+            self.assertEqual(
+                orphan_result["terminal_status"],
+                "infrastructure_failed",
+            )
+            orphan_terminal = next(
+                (
+                    orphan_fixture["authority_root"]
+                    / "experiment_lifecycles"
+                ).glob(
+                    "*/model_invocations/*/terminal.json"
+                )
+            )
+            self.assertEqual(
+                json.loads(
+                    orphan_terminal.read_text(encoding="utf-8")
+                )["terminal_status"],
+                "recovered_orphan",
+            )
+            self.assertFalse(
+                orphan_fixture["controller"].snapshot()[
+                    "budget_state"
+                ]["usage_complete"]
+            )
+            preserved_fixture = self._fixture(
+                root / "preserved-candidate-mode",
+                "agentteam_direct",
+                direct_taskpack_sha256=fixture["protocol"][
+                    "direct_taskpack"
+                ]["sha256"],
+            )
+            preserved_candidate, _branch = (
+                create_independent_attempt_workspace(
+                    preserved_fixture["snapshot"],
+                    preserved_fixture["run_dir"]
+                    / "candidate-workspaces",
+                    "CANDIDATE-001",
+                    "WT-CANDIDATE-001",
+                )
+            )
+            (preserved_candidate / "tracked.txt").write_text(
+                "candidate change\n",
+                encoding="utf-8",
+            )
+
+            def preserved_launch(**kwargs):
+                _complete_fake_runtime_invocation(
+                    kwargs["experiment_runtime_context"],
+                    kwargs["trusted_project_root"],
+                    lifecycle_id="preserved-worker",
+                    taskpack_id="direct-fixture",
+                )
+                return {
+                    "terminal_status": "completed",
+                    "provider_invocation_count": 1,
+                    "candidate_workspace": str(preserved_candidate),
+                }
+
+            original_finalize = ExperimentCommonFinalizer.__call__
+            finalizer_calls = {"count": 0}
+
+            def flaky_finalize(finalizer, **kwargs):
+                finalizer_calls["count"] += 1
+                if finalizer_calls["count"] == 1:
+                    raise OSError("first finalization failed")
+                return original_finalize(finalizer, **kwargs)
+
+            with self._mode_execution_boundary(), patch(
+                "agentteam_runtime.agentteam._run_frozen_taskpack",
+                side_effect=preserved_launch,
+            ), patch.object(
+                ExperimentCommonFinalizer,
+                "__call__",
+                new=flaky_finalize,
+            ):
+                preserved_result = self._controller(
+                    preserved_fixture
+                ).execute(
+                    AgentTeamDirectModeAdapter(
+                        frozen["frozen_taskpack_dir"],
+                    )
+                )
+            preserved_bundle = load_experiment_result_bundle(
+                preserved_fixture["run_dir"]
+            )["bundle"]
+            self.assertEqual(
+                preserved_result["candidate_workspace"],
+                str(preserved_candidate),
+            )
+            self.assertEqual(
+                preserved_bundle["terminal_status"],
+                "infrastructure_failed",
+            )
+            self.assertIn(
+                "tracked.txt",
+                preserved_bundle["changed_files"],
+            )
+            self.assertIn(
+                "infrastructure_failure:OSError:"
+                + hashlib.sha256(
+                    b"first finalization failed"
+                ).hexdigest(),
+                preserved_bundle["regressions"],
+            )
+            (Path(frozen["frozen_taskpack_dir"]) / "README.md").write_text(
+                "tampered\n",
+                encoding="utf-8",
+            )
+            tampered_fixture = self._fixture(
+                root / "tampered-mode",
+                "agentteam_direct",
+                direct_taskpack_sha256=fixture["protocol"][
+                    "direct_taskpack"
+                ]["sha256"],
+            )
+            with self.assertRaisesRegex(
+                ExperimentModeError,
+                "digest",
+            ):
+                self._controller(tampered_fixture).execute(
+                    AgentTeamDirectModeAdapter(
+                        frozen["frozen_taskpack_dir"],
+                    )
+                )
+            execution_root = (
+                Path(
+                    tampered_fixture["controller"].reference[
+                        "controller_root"
+                    ]
+                )
+                / "mode-executions"
+            )
+            self.assertFalse(
+                execution_root.exists()
+                and any(execution_root.glob("*.started.json"))
+            )
+
+    def test_full_mode_authors_without_direct_taskpack_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp, "agentteam_full")
+            calls = {"author": [], "freeze": [], "launch": []}
+            authored_dir = Path(tmp) / "authored"
+            authored_dir.mkdir()
+            frozen_dir = Path(tmp) / "authored-frozen"
+            frozen_dir.mkdir()
+
+            def author(project_root, goal, draft_root, **kwargs):
+                kwargs = {
+                    **kwargs,
+                    "project_root": project_root,
+                    "goal": goal,
+                    "draft_root": draft_root,
+                }
+                calls["author"].append(kwargs)
+                self.assertEqual(
+                    _registered_experiment_author_output(
+                        Path(kwargs["project_root"]),
+                        Path(kwargs["draft_root"]),
+                        kwargs["author_invocation_context"],
+                    ),
+                    ".agentteam-author",
+                )
+                _complete_fake_experiment_invocation(
+                    kwargs["author_invocation_context"],
+                    kwargs["project_root"],
+                    role="taskpack_author",
+                )
+                return {
+                    "taskpack_dir": str(authored_dir),
+                    "authoring_mode": "codex",
+                }
+
+            def freezer(taskpack_dir, frozen_root, **kwargs):
+                kwargs = {
+                    **kwargs,
+                    "taskpack_dir": taskpack_dir,
+                    "frozen_root": str(frozen_root),
+                }
+                calls["freeze"].append(kwargs)
+                return {
+                    "frozen_taskpack_dir": str(frozen_dir),
+                    "manifest": {
+                        "taskpack_id": "authored-fixture",
+                        "digest_sha256": "6" * 64,
+                    },
+                }
+
+            def launch(**kwargs):
+                calls["launch"].append(kwargs)
+                _complete_fake_runtime_invocation(
+                    kwargs["experiment_runtime_context"],
+                    kwargs["trusted_project_root"],
+                    lifecycle_id="full-worker",
+                    taskpack_id="authored-fixture",
+                )
+                return {
+                    "terminal_status": "completed",
+                    "provider_invocation_count": 2,
+                }
+
+            with self._mode_execution_boundary(), patch(
+                "agentteam_runtime.taskpack_author."
+                "draft_taskpack_from_goal",
+                side_effect=author,
+            ), patch(
+                "agentteam_runtime.taskpack.freeze_taskpack",
+                side_effect=freezer,
+            ), patch(
+                "agentteam_runtime.agentteam._run_frozen_taskpack",
+                side_effect=launch,
+            ):
+                result = self._controller(fixture).execute(
+                    AgentTeamFullModeAdapter()
+                )
+
+            self.assertEqual(result["taskpack"]["source"], "authored")
+            self.assertEqual(
+                calls["launch"][0]["run_root"],
+                str(fixture["run_dir"] / "agentteam-runtime"),
+            )
+            self.assertNotEqual(
+                calls["author"][0]["project_root"],
+                str(fixture["snapshot"]),
+            )
+            self.assertEqual(
+                _git(
+                    calls["author"][0]["project_root"],
+                    "rev-parse",
+                    "HEAD",
+                ).stdout.strip(),
+                fixture["protocol"]["repository"]["commit"],
+            )
+            self.assertEqual(
+                calls["author"][0]["author_runtime"],
+                "codex",
+            )
+            self.assertEqual(
+                calls["author"][0]["codex_model"],
+                fixture["protocol"]["environment"]["model"],
+            )
+            serialized = json.dumps(calls["author"], sort_keys=True)
+            self.assertNotIn(
+                fixture["protocol"]["direct_taskpack"]["sha256"],
+                serialized,
+            )
+
+    def test_independent_attempt_workspace_has_distinct_object_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp)
+            output = Path(tmp) / "run"
+            workspace, _branch = create_independent_attempt_workspace(
+                fixture["source"],
+                output,
+                "ATTEMPT-001",
+                "WT-ATTEMPT-001",
+            )
+
+            source_common = Path(
+                _git(
+                    fixture["source"],
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir",
+                ).stdout.strip()
+            )
+            workspace_common = Path(
+                _git(
+                    workspace,
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir",
+                ).stdout.strip()
+            )
+            self.assertNotEqual(
+                source_common.resolve(),
+                workspace_common.resolve(),
+            )
+            self.assertEqual(_git(workspace, "remote").stdout, "")
+            self.assertFalse(
+                (workspace_common / "objects" / "info" / "alternates").exists()
+            )
+            self.assertEqual(
+                _git(workspace, "status", "--porcelain").stdout,
+                "",
+            )
+
+    def test_registered_codex_command_binds_model_and_reasoning(self):
+        policy = {
+            "model": "codex-test-model",
+            "reasoning_profile": "high",
+        }
+        _validate_registered_codex_command(
+            [
+                "codex",
+                "exec",
+                "-m",
+                "codex-test-model",
+                "-c",
+                "model_reasoning_effort=high",
+            ],
+            policy,
+        )
+        with self.assertRaisesRegex(
+            ModelInvocationIntegrityError,
+            "model differs",
+        ):
+            _validate_registered_codex_command(
+                [
+                    "codex",
+                    "exec",
+                    "-m",
+                    "wrong-model",
+                    "-c",
+                    "model_reasoning_effort=high",
+                ],
+                policy,
+            )
+        with self.assertRaisesRegex(
+            ModelInvocationIntegrityError,
+            "reasoning differs",
+        ):
+            _validate_registered_codex_command(
+                [
+                    "codex",
+                    "exec",
+                    "-m",
+                    "codex-test-model",
+                ],
+                policy,
+            )
+
+
 class ExperimentContractSchemaTests(unittest.TestCase):
     def test_protocol_run_binding_and_state_schemas_are_executable(self):
         protocol = _protocol()
@@ -6839,6 +8767,183 @@ class ExperimentSandboxTests(unittest.TestCase):
                 bounded.call_args.kwargs["environment"],
                 fixture["descriptor"]["environment"],
             )
+
+    def test_mode_authority_requires_registered_launch_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _sandbox_fixture(root)
+            authority_root = root / "mode-authority"
+            protocol = _sandbox_protocol(fixture)
+            manifest = build_experiment_run_manifest(
+                protocol,
+                mode="single_codex",
+                repetition_index=0,
+                stable_request_key="registered-launch",
+            )
+            controller = create_experiment_controller(
+                authority_root,
+                protocol_id=protocol["experiment_id"],
+                max_total_tokens=protocol["budgets"][
+                    "max_total_tokens"
+                ],
+                max_wall_time_seconds=protocol["budgets"][
+                    "max_wall_time_seconds"
+                ],
+                soft_warning_ratio=protocol["budgets"][
+                    "soft_warning_ratio"
+                ],
+                scored=protocol["scored"],
+                protocol_sha256=canonical_json_sha256(protocol),
+                operator_limits=protocol["operator_limits"],
+            )
+            model_policy = {
+                "backend": "codex",
+                "codex_cli_version": protocol["environment"][
+                    "codex_cli_version"
+                ],
+                "model": protocol["environment"]["model"],
+                "reasoning_profile": protocol["environment"][
+                    "reasoning_profile"
+                ],
+                "service_configuration_sha256": protocol[
+                    "environment"
+                ]["service_configuration_sha256"],
+                "sandbox_policy": protocol["environment"][
+                    "sandbox_policy"
+                ],
+                "permission_policy": protocol["environment"][
+                    "permission_policy"
+                ],
+                "network_policy": protocol["environment"][
+                    "network_policy"
+                ],
+                "tool_allowlist": protocol["environment"][
+                    "tool_allowlist"
+                ],
+                "max_inflight_model_invocations": 1,
+            }
+            publish_experiment_mode_authority(
+                authority_root,
+                experiment_run_id=manifest["experiment_run_id"],
+                protocol_sha256=manifest["protocol_sha256"],
+                run_manifest_sha256=canonical_json_sha256(manifest),
+                mode=manifest["mode"],
+                model_policy=model_policy,
+                controller_reference=controller.reference,
+                sandbox_configuration_sha256="8" * 64,
+            )
+            lifecycle_root = experiment_lifecycle_authority_root(
+                authority_root,
+                "single-call",
+            )
+            context = _model_context(
+                supported=False,
+                sandbox_reference=None,
+            )
+            with self.assertRaisesRegex(
+                ModelInvocationIntegrityError,
+                "registration is unavailable",
+            ):
+                ModelInvocationCall(
+                    lifecycle_root,
+                    context,
+                    supported=False,
+                )
+
+            sandbox_reference = _publish_test_sandbox_reference(
+                authority_root,
+                fixture,
+            )
+            publish_experiment_launch_registration(
+                authority_root,
+                lifecycle_root,
+                experiment_run_id=manifest["experiment_run_id"],
+                protocol_sha256=manifest["protocol_sha256"],
+                run_manifest_sha256=canonical_json_sha256(manifest),
+                mode="single_codex",
+                usage_stage="single_codex",
+                taskpack_id="SINGLE-CODEX-NONE",
+                workspace_root=fixture["repository"],
+                sandbox_reference=sandbox_reference,
+                controller_reference=controller.reference,
+                model_policy=model_policy,
+            )
+            context.update(
+                {
+                    "run_id": manifest["experiment_run_id"],
+                    "taskpack_id": "SINGLE-CODEX-NONE",
+                    "usage_stage": "single_codex",
+                    "model": model_policy["model"],
+                    "reasoning_profile": model_policy[
+                        "reasoning_profile"
+                    ],
+                }
+            )
+            context.pop("experiment_sandbox_reference", None)
+            invocation = ModelInvocationCall(
+                lifecycle_root,
+                context,
+                supported=False,
+            )
+            with patch(
+                "agentteam_runtime.model_invocation._run_bounded_process",
+                return_value=ProviderExecution([], 0, "", ""),
+            ):
+                execution = invocation.execute(
+                    [str(Path(sys.executable).resolve()), "-c", "pass"],
+                    cwd=fixture["repository"],
+                    input_text="prompt",
+                    timeout_seconds=10,
+                )
+            invocation.finalize("completed", execution)
+            started = json.loads(
+                invocation.lifecycle.started_path.read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                started["experiment_run_id"],
+                manifest["experiment_run_id"],
+            )
+            self.assertEqual(started["experiment_mode"], "single_codex")
+            self.assertEqual(
+                started["reasoning_profile"],
+                model_policy["reasoning_profile"],
+            )
+            invocation_reference = (
+                publish_registered_model_invocation_set_reference(
+                    authority_root,
+                    manifest["experiment_run_id"],
+                )
+            )
+            self.assertTrue(
+                Path(invocation_reference["path"]).is_file()
+            )
+            experiment_lifecycle_authority_root(
+                authority_root,
+                "unconsumed-call",
+            )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "launch registration",
+            ):
+                publish_registered_model_invocation_set_reference(
+                    authority_root,
+                    manifest["experiment_run_id"],
+                    reference_id="model-invocation-set-with-extra",
+                )
+
+            wrong = dict(context)
+            wrong["model"] = "another-model"
+            with self.assertRaisesRegex(
+                ModelInvocationIntegrityError,
+                "caller context differs",
+            ):
+                ModelInvocationCall(
+                    lifecycle_root,
+                    wrong,
+                    supported=False,
+                )
 
     def test_sandbox_publication_requires_fresh_probe_and_valid_policy(self):
         with tempfile.TemporaryDirectory() as tmp:

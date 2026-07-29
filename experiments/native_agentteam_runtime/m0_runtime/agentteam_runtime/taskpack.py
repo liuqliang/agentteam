@@ -2838,6 +2838,48 @@ def freeze_taskpack(
     return {"frozen_taskpack_dir": str(frozen_dir), "manifest": manifest}
 
 
+def verify_frozen_taskpack_digest(
+    frozen_taskpack_dir,
+    expected_sha256,
+):
+    """Verify one frozen taskpack against its immutable preregistered digest."""
+    taskpack_dir = Path(frozen_taskpack_dir).resolve()
+    loaded = load_taskpack(taskpack_dir)
+    if loaded["taskpack"].get("status") != "frozen":
+        raise TaskpackValidationError(
+            "direct experiment taskpack must be frozen"
+        )
+    validate_taskpack(taskpack_dir)
+    manifest = _read_json(taskpack_dir / "manifest.json")
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("status") != "frozen"
+        or manifest.get("taskpack_id")
+        != loaded["taskpack"].get("taskpack_id")
+    ):
+        raise TaskpackValidationError(
+            "frozen taskpack manifest is invalid"
+        )
+    inventory = _build_taskpack_artifact_inventory(taskpack_dir)
+    _validate_frozen_taskpack_inventory(taskpack_dir, inventory)
+    digest = _digest_taskpack_files(
+        taskpack_dir,
+        [relative_path for relative_path, _source in inventory],
+    )
+    if (
+        manifest.get("digest_sha256") != digest
+        or expected_sha256 != digest
+    ):
+        raise TaskpackValidationError(
+            "frozen taskpack digest differs from preregistered authority"
+        )
+    return {
+        "taskpack_id": manifest["taskpack_id"],
+        "digest_sha256": digest,
+        "frozen_taskpack_dir": str(taskpack_dir),
+    }
+
+
 def _blueprint_taskpack_freeze_source(
     taskpack_dir,
     loaded,
@@ -2956,6 +2998,8 @@ def build_taskpack_runtime_args(
     max_steps=DEFAULT_DAEMON_MAX_STEPS,
     commit_verified_integration=False,
     initial_integration_base_ref=None,
+    trusted_project_root=None,
+    trusted_model=None,
 ):
     taskpack_dir = Path(frozen_taskpack_dir).resolve()
     loaded = load_taskpack(taskpack_dir)
@@ -2990,10 +3034,31 @@ def build_taskpack_runtime_args(
         if runtime_backend == "codex"
         else None
     )
-    project_root = taskpack.get("project_root")
-    if not isinstance(project_root, str) or not project_root:
+    if trusted_model is not None:
+        if (
+            runtime_backend != "codex"
+            or not isinstance(trusted_model, str)
+            or not trusted_model.strip()
+        ):
+            raise TaskpackValidationError(
+                "trusted model requires a Codex taskpack"
+            )
+        codex_model = trusted_model.strip()
+    declared_project_root = taskpack.get("project_root")
+    if not isinstance(declared_project_root, str) or not declared_project_root:
         raise TaskpackValidationError("project_root must be a non-empty string")
+    project_root = (
+        str(_validated_trusted_project_root(trusted_project_root))
+        if trusted_project_root is not None
+        else declared_project_root
+    )
     verification_command = _validate_taskpack_verification_command(loaded.get("verification"))
+    if trusted_project_root is not None:
+        verification_command = _rebase_taskpack_command(
+            verification_command,
+            declared_project_root,
+            project_root,
+        )
     command_json = json.dumps(verification_command)
 
     run_root = Path(run_root).resolve()
@@ -3802,6 +3867,54 @@ def _validate_taskpack_artifact_inventory(taskpack_dir, inventory):
             raise TaskpackValidationError(f"taskpack directory must not contain symlinks: {relative_path.as_posix()}")
         if path.is_file() and relative_path not in inventory_paths:
             raise TaskpackValidationError(f"unexpected taskpack artifact: {relative_path.as_posix()}")
+
+
+def _validate_frozen_taskpack_inventory(taskpack_dir, inventory):
+    taskpack_dir = Path(taskpack_dir).resolve()
+    expected = {
+        relative_path for relative_path, _source_path in inventory
+    } | {Path("manifest.json")}
+    for path in taskpack_dir.rglob("*"):
+        relative_path = path.relative_to(taskpack_dir)
+        if path.is_symlink():
+            raise TaskpackValidationError(
+                "frozen taskpack directory must not contain symlinks: "
+                f"{relative_path.as_posix()}"
+            )
+        if path.is_file() and relative_path not in expected:
+            raise TaskpackValidationError(
+                "unexpected frozen taskpack artifact: "
+                f"{relative_path.as_posix()}"
+            )
+
+
+def _validated_trusted_project_root(project_root):
+    root = Path(project_root).resolve(strict=True)
+    if not root.is_dir() or not _is_git_repo(root):
+        raise TaskpackValidationError(
+            "trusted project root must be a git repository"
+        )
+    return root
+
+
+def _rebase_taskpack_command(command, source_root, target_root):
+    source_root = Path(source_root).resolve()
+    target_root = Path(target_root).resolve()
+    rebased = []
+    for argument in command:
+        candidate = Path(argument)
+        if not candidate.is_absolute():
+            rebased.append(argument)
+            continue
+        try:
+            relative = candidate.resolve(strict=False).relative_to(
+                source_root
+            )
+        except ValueError:
+            rebased.append(argument)
+        else:
+            rebased.append(str(target_root / relative))
+    return rebased
 
 
 def _write_scope_is_repository_root(scope_path):

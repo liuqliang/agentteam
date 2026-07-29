@@ -144,6 +144,25 @@
     "model": {
       "$ref": "#/$defs/nullableIdentifier"
     },
+    "reasoning_profile": {
+      "$ref": "#/$defs/nullableIdentifier"
+    },
+    "experiment_run_id": {
+      "$ref": "#/$defs/nullableIdentifier"
+    },
+    "experiment_mode": {
+      "enum": [
+        "single_codex",
+        "agentteam_direct",
+        "agentteam_full"
+      ]
+    },
+    "experiment_protocol_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "experiment_run_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
     "coverage_class": {
       "enum": [
         "supported_model_invocation",

@@ -61,6 +61,12 @@ from .experiment_readiness import (
     check_pilot_authorization,
     validate_experiment_manifest,
 )
+from .experiment_results import (
+    ExperimentResultError,
+    load_experiment_result_bundle,
+    render_experiment_comparison,
+    render_experiment_result,
+)
 from .repo_grounding import build_repo_grounding, render_repo_grounding_text
 from .semantic_feedback import (
     list_semantic_feedback_proposals,
@@ -1336,6 +1342,46 @@ def _add_experiment_parser(subcommands):
     check.add_argument("--manifest", required=True, help="Experiment manifest JSON path.")
     check.add_argument("--json", action="store_true", help="Print authorization details as JSON.")
     check.set_defaults(handler=_handle_experiment)
+
+    show = experiment_subcommands.add_parser(
+        "show",
+        help="Show one sealed Phase 2 experiment result.",
+    )
+    show.add_argument(
+        "--run",
+        required=True,
+        help="Experiment run id or run directory.",
+    )
+    show.add_argument(
+        "--experiment-root",
+        help="Experiment authority root when --run is an id.",
+    )
+    show.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the complete sealed result bundle.",
+    )
+    show.set_defaults(handler=_handle_experiment)
+
+    compare = experiment_subcommands.add_parser(
+        "compare",
+        help="Compare all sealed runs for one experiment id.",
+    )
+    compare.add_argument(
+        "--experiment",
+        required=True,
+        help="Immutable experiment_id to compare.",
+    )
+    compare.add_argument(
+        "--experiment-root",
+        help="Experiment authority root. Defaults to .agentteam/experiments.",
+    )
+    compare.add_argument(
+        "--json",
+        action="store_true",
+        help="Print complete result records as JSON.",
+    )
+    compare.set_defaults(handler=_handle_experiment)
 
 
 def _add_doctor_parser(subcommands):
@@ -5769,12 +5815,115 @@ def _handle_experiment(args):
                 return summary
             _write_experiment_pilot_text(summary)
             return 0
-    except ExperimentReadinessError as exc:
+        if args.experiment_command == "show":
+            result = load_experiment_result_bundle(
+                _resolve_experiment_run_dir(
+                    args.run,
+                    args.experiment_root,
+                )
+            )
+            if args.json:
+                return result
+            sys.stdout.write(
+                render_experiment_result(
+                    result["bundle"],
+                    bundle_sha256=result["bundle_sha256"],
+                )
+                + "\n"
+            )
+            return 0
+        if args.experiment_command == "compare":
+            results = _load_experiment_comparison_results(
+                args.experiment,
+                args.experiment_root,
+            )
+            if args.json:
+                return {
+                    "experiment_id": args.experiment,
+                    "result_count": len(results),
+                    "results": results,
+                }
+            sys.stdout.write(
+                render_experiment_comparison(results) + "\n"
+            )
+            return 0
+    except (ExperimentReadinessError, ExperimentResultError) as exc:
         raise AgentTeamCliError(str(exc)) from exc
     raise AgentTeamCliError(
         "unsupported experiment command",
         experiment_command=args.experiment_command,
     )
+
+
+def _resolve_experiment_run_dir(run, experiment_root=None):
+    candidate = Path(run).expanduser()
+    if candidate.is_dir() and not candidate.is_symlink():
+        return candidate.resolve()
+    root = Path(
+        experiment_root
+        or Path.cwd() / ".agentteam" / "experiments"
+    ).expanduser()
+    resolved = root / "runs" / str(run)
+    if resolved.is_symlink() or not resolved.is_dir():
+        raise AgentTeamCliError(
+            "experiment run is unavailable",
+            run=str(run),
+            experiment_root=str(root),
+        )
+    return resolved.resolve()
+
+
+def _load_experiment_comparison_results(
+    experiment_id,
+    experiment_root=None,
+):
+    root = Path(
+        experiment_root
+        or Path.cwd() / ".agentteam" / "experiments"
+    ).expanduser()
+    runs_root = root / "runs"
+    if runs_root.is_symlink() or not runs_root.is_dir():
+        raise AgentTeamCliError(
+            "experiment runs root is unavailable",
+            experiment_root=str(root),
+        )
+    results = []
+    for run_dir in sorted(runs_root.iterdir()):
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            continue
+        binding_path = run_dir / "binding.json"
+        try:
+            binding = json.loads(
+                binding_path.read_text(encoding="utf-8")
+            )
+            protocol_path = (
+                root
+                / "protocols"
+                / f"{binding['protocol_sha256']}.json"
+            )
+            protocol = json.loads(
+                protocol_path.read_text(encoding="utf-8")
+            )
+        except (
+            OSError,
+            KeyError,
+            TypeError,
+            json.JSONDecodeError,
+        ):
+            continue
+        if protocol.get("experiment_id") != experiment_id:
+            continue
+        try:
+            results.append(load_experiment_result_bundle(run_dir))
+        except ExperimentResultError:
+            continue
+    if not results:
+        raise AgentTeamCliError(
+            "no sealed experiment results were found",
+            experiment_id=experiment_id,
+            experiment_root=str(root),
+        )
+    return results
 
 
 def _handle_stats(args):
@@ -10601,6 +10750,8 @@ def _run_frozen_taskpack(
     progress_interval_seconds=2.0,
     initial_integration_base_ref=None,
     author_lifecycle=None,
+    trusted_project_root=None,
+    experiment_runtime_context=None,
 ):
     loaded_taskpack = load_taskpack(frozen_taskpack_dir)["taskpack"]
     post_backlog_gates = loaded_taskpack.get("post_backlog_gates")
@@ -10632,6 +10783,12 @@ def _run_frozen_taskpack(
             inferred_work_root,
             author_lifecycle,
         )
+    if experiment_runtime_context is not None:
+        _publish_experiment_runtime_context(
+            run_paths["run_dir"],
+            experiment_runtime_context,
+        )
+        max_inflight = 1
     runtime_args = build_taskpack_runtime_args(
         frozen_taskpack_dir,
         run_root=run_paths["run_root"],
@@ -10640,6 +10797,12 @@ def _run_frozen_taskpack(
         max_attempts=max_attempts,
         commit_verified_integration=commit_verified_integration,
         initial_integration_base_ref=initial_integration_base_ref,
+        trusted_project_root=trusted_project_root,
+        trusted_model=(
+            experiment_runtime_context["model_policy"]["model"]
+            if experiment_runtime_context is not None
+            else None
+        ),
     )
     _initialize_post_backlog_gate_state(
         {"work_root": str(inferred_work_root)},
@@ -10661,6 +10824,34 @@ def _run_frozen_taskpack(
         progress_interval_seconds=progress_interval_seconds,
         progress_stream=sys.stderr,
     )
+
+
+def _publish_experiment_runtime_context(run_dir, context):
+    path = Path(run_dir) / "experiment-runtime-context.json"
+    if (
+        not isinstance(context, dict)
+        or context.get("schema_version")
+        != "experiment_runtime_context.v1"
+    ):
+        raise AgentTeamCliError(
+            "experiment runtime context is invalid"
+        )
+    payload = (
+        json.dumps(context, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    )
+    if path.exists():
+        if path.is_symlink() or path.read_text(encoding="utf-8") != payload:
+            raise AgentTeamCliError(
+                "experiment runtime context conflicts with existing run"
+            )
+        return
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _publish_author_lifecycle_bootstrap(

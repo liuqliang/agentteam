@@ -37,6 +37,10 @@ INVOCATION_SET_REFERENCE_SCHEMA_VERSION = (
     "experiment_model_invocation_set_reference.v1"
 )
 PROTOCOL_REFERENCE_SCHEMA_VERSION = "experiment_protocol_reference.v1"
+LAUNCH_REGISTRATION_SCHEMA_VERSION = (
+    "experiment_launch_registration.v1"
+)
+MODE_AUTHORITY_SCHEMA_VERSION = "experiment_mode_authority.v1"
 DEFAULT_MAX_CREDENTIAL_BYTES = 1024 * 1024
 DEFAULT_MAX_CREDENTIAL_FILES = 32
 DEFAULT_MAX_SCAN_BYTES = 64 * 1024 * 1024
@@ -378,10 +382,25 @@ def publish_evaluator_reference(
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags, 0o500)
-    except FileExistsError as exc:
-        raise ExperimentSandboxError(
-            f"trusted evaluator reference already exists: {path}"
-        ) from exc
+    except FileExistsError:
+        existing = _read_bounded_regular_file(
+            _existing_path(
+                path,
+                "trusted evaluator reference",
+                require_file=True,
+                reject_symlink=True,
+            ),
+            max_bytes=4 * 1024 * 1024,
+        )
+        if existing != content or not os.access(path, os.X_OK):
+            raise ExperimentSandboxError(
+                f"trusted evaluator reference conflicts: {path}"
+            )
+        return {
+            "schema_version": EVALUATOR_REFERENCE_SCHEMA_VERSION,
+            "path": str(path),
+            "sha256": hashlib.sha256(existing).hexdigest(),
+        }
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(content)
@@ -479,6 +498,129 @@ def publish_model_invocation_set_reference(
         "path": str(path),
         "sha256": hashlib.sha256(payload).hexdigest(),
     }
+
+
+def publish_registered_model_invocation_set_reference(
+    authority_root,
+    run_id,
+    *,
+    reference_id="model-invocation-set",
+):
+    """Publish the complete terminal invocation set from controller authority."""
+
+    authority_root = Path(authority_root).resolve(strict=True)
+    mode_authority = load_experiment_mode_authority(authority_root)
+    if mode_authority["experiment_run_id"] != run_id:
+        raise ExperimentSandboxError(
+            "model invocation run differs from mode authority"
+        )
+    registry = _experiment_lifecycle_registry_dir(authority_root)
+    registered_roots = _registered_lifecycle_roots(authority_root)
+    physical_roots = set()
+    with os.scandir(registry) as entries:
+        for entry in entries:
+            path = Path(entry.path)
+            if (
+                entry.is_symlink()
+                or not entry.is_dir(follow_symlinks=False)
+            ):
+                raise ExperimentSandboxError(
+                    "experiment lifecycle registry contains an unsafe entry"
+                )
+            physical_roots.add(str(path))
+    if physical_roots != registered_roots:
+        raise ExperimentSandboxError(
+            "experiment lifecycle registry differs from its ledger"
+        )
+    if not registered_roots:
+        raise ExperimentSandboxError(
+            "experiment lifecycle registry is empty"
+        )
+
+    invocation_sets = []
+    seen_invocation_ids = set()
+    for lifecycle_root_text in sorted(registered_roots):
+        lifecycle_root = Path(lifecycle_root_text)
+        registration = load_experiment_launch_registration(
+            lifecycle_root
+        )
+        if registration is None:
+            raise ExperimentSandboxError(
+                "registered lifecycle has no launch policy"
+            )
+        if (
+            registration["experiment_run_id"] != run_id
+            or registration["mode"] != mode_authority["mode"]
+            or registration["protocol_sha256"]
+            != mode_authority["protocol_sha256"]
+            or registration["run_manifest_sha256"]
+            != mode_authority["run_manifest_sha256"]
+            or registration["model_policy"]
+            != mode_authority["model_policy"]
+        ):
+            raise ExperimentSandboxError(
+                "registered lifecycle differs from mode authority"
+            )
+        invocation_root = lifecycle_root / "model_invocations"
+        if (
+            not invocation_root.is_dir()
+            or invocation_root.is_symlink()
+        ):
+            raise ExperimentSandboxError(
+                "registered lifecycle was not consumed"
+            )
+        invocation_ids = []
+        with os.scandir(invocation_root) as entries:
+            for entry in entries:
+                invocation_dir = Path(entry.path)
+                if (
+                    entry.is_symlink()
+                    or not entry.is_dir(follow_symlinks=False)
+                    or not entry.name.startswith("INV-")
+                ):
+                    raise ExperimentSandboxError(
+                        "model invocation registry contains an unsafe entry"
+                    )
+                started = invocation_dir / "started.json"
+                terminal = invocation_dir / "terminal.json"
+                if (
+                    not started.is_file()
+                    or started.is_symlink()
+                    or not terminal.is_file()
+                    or terminal.is_symlink()
+                ):
+                    raise ExperimentSandboxError(
+                        "registered model invocation is non-terminal"
+                    )
+                if entry.name in seen_invocation_ids:
+                    raise ExperimentSandboxError(
+                        "model invocation id is duplicated across lifecycles"
+                    )
+                seen_invocation_ids.add(entry.name)
+                invocation_ids.append(entry.name)
+        if not invocation_ids:
+            raise ExperimentSandboxError(
+                "registered lifecycle contains no model invocation"
+            )
+        invocation_sets.append(
+            {
+                "lifecycle_authority_root": str(lifecycle_root),
+                "taskpack_id": registration["taskpack_id"],
+                "invocation_ids": sorted(invocation_ids),
+                "sandbox_reference": registration[
+                    "sandbox_reference"
+                ],
+                "sandbox_policy_sha256": registration[
+                    "sandbox_policy_sha256"
+                ],
+            }
+        )
+    return publish_model_invocation_set_reference(
+        authority_root,
+        run_id,
+        invocation_sets,
+        reference_id=reference_id,
+    )
 
 
 def load_model_invocation_set_reference(reference, authority_root):
@@ -873,6 +1015,388 @@ def validate_experiment_lifecycle_authority(
             "model invocation lifecycle authority is not registered"
         )
     return root
+
+
+def publish_experiment_launch_registration(
+    authority_root,
+    lifecycle_authority_root,
+    *,
+    experiment_run_id,
+    protocol_sha256,
+    run_manifest_sha256,
+    mode,
+    usage_stage,
+    taskpack_id,
+    workspace_root,
+    sandbox_reference,
+    controller_reference,
+    model_policy,
+):
+    """Bind one registered lifecycle to its non-optional launch policy."""
+    authority_root = Path(authority_root).resolve(strict=True)
+    mode_authority = load_experiment_mode_authority(authority_root)
+    expected_mode_binding = {
+        "experiment_run_id": experiment_run_id,
+        "protocol_sha256": protocol_sha256,
+        "run_manifest_sha256": run_manifest_sha256,
+        "mode": mode,
+        "model_policy": _normalize_experiment_model_policy(model_policy),
+    }
+    if any(
+        mode_authority.get(field) != value
+        for field, value in expected_mode_binding.items()
+    ):
+        raise ExperimentSandboxError(
+            "launch registration differs from mode authority"
+        )
+    lifecycle_root = validate_experiment_lifecycle_authority(
+        authority_root,
+        lifecycle_authority_root,
+    )
+    workspace_root = _existing_path(
+        workspace_root,
+        "experiment launch workspace",
+        require_directory=True,
+        reject_symlink=True,
+    )
+    descriptor = load_provider_sandbox_reference(
+        sandbox_reference,
+        authority_root,
+    )
+    validate_provider_authority_separation(
+        descriptor,
+        authority_root,
+        lifecycle_root,
+    )
+    if Path(descriptor["repository"]["source"]) != workspace_root:
+        raise ExperimentSandboxError(
+            "launch workspace differs from sandbox repository"
+        )
+    from .experiment_controller import (
+        validate_experiment_controller_reference,
+    )
+
+    controller_reference = validate_experiment_controller_reference(
+        controller_reference,
+    )
+    if (
+        mode_authority["controller_reference"]
+        != controller_reference
+    ):
+        raise ExperimentSandboxError(
+            "launch controller differs from mode authority"
+        )
+    validate_provider_authority_separation(
+        descriptor,
+        controller_reference["controller_root"],
+    )
+    record = {
+        "schema_version": LAUNCH_REGISTRATION_SCHEMA_VERSION,
+        "experiment_run_id": _nonempty_text(
+            experiment_run_id,
+            "experiment launch run id",
+        ),
+        "protocol_sha256": _require_sha256(
+            protocol_sha256,
+            "experiment launch protocol digest",
+        ),
+        "run_manifest_sha256": _require_sha256(
+            run_manifest_sha256,
+            "experiment launch manifest digest",
+        ),
+        "mode": _experiment_mode(mode),
+        "usage_stage": _nonempty_text(
+            usage_stage,
+            "experiment launch usage stage",
+        ),
+        "taskpack_id": _nonempty_text(
+            taskpack_id,
+            "experiment launch taskpack id",
+        ),
+        "lifecycle_authority_root": str(lifecycle_root),
+        "workspace_root": str(workspace_root),
+        "sandbox_reference": dict(sandbox_reference),
+        "sandbox_policy_sha256": descriptor["policy_sha256"],
+        "controller_reference": controller_reference,
+        "model_policy": _normalize_experiment_model_policy(
+            model_policy
+        ),
+    }
+    path = _experiment_authority_dir(authority_root) / (
+        f"{lifecycle_root.name}.launch-registration.json"
+    )
+    _publish_immutable_json(path, record)
+    payload = _read_bounded_regular_file(path, max_bytes=256 * 1024)
+    return {
+        "schema_version": (
+            "experiment_launch_registration_reference.v1"
+        ),
+        "path": str(path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "registration": record,
+    }
+
+
+def publish_experiment_mode_authority(
+    authority_root,
+    *,
+    experiment_run_id,
+    protocol_sha256,
+    run_manifest_sha256,
+    mode,
+    model_policy,
+    controller_reference,
+    sandbox_configuration_sha256,
+):
+    """Mark an authority root as requiring registered launch descriptors."""
+    from .experiment_controller import (
+        validate_experiment_controller_reference,
+    )
+
+    controller_reference = validate_experiment_controller_reference(
+        controller_reference
+    )
+    record = {
+        "schema_version": MODE_AUTHORITY_SCHEMA_VERSION,
+        "experiment_run_id": _nonempty_text(
+            experiment_run_id,
+            "experiment mode run id",
+        ),
+        "protocol_sha256": _require_sha256(
+            protocol_sha256,
+            "experiment mode protocol digest",
+        ),
+        "run_manifest_sha256": _require_sha256(
+            run_manifest_sha256,
+            "experiment mode manifest digest",
+        ),
+        "mode": _experiment_mode(mode),
+        "model_policy": _normalize_experiment_model_policy(
+            model_policy
+        ),
+        "controller_reference": controller_reference,
+        "sandbox_configuration_sha256": _require_sha256(
+            sandbox_configuration_sha256,
+            "experiment sandbox configuration digest",
+        ),
+    }
+    path = _experiment_authority_dir(authority_root) / (
+        "experiment-mode-controller.json"
+    )
+    if path.exists():
+        existing = load_experiment_mode_authority(authority_root)
+        if existing != record:
+            raise ExperimentSandboxError(
+                "experiment mode authority conflicts with replay"
+            )
+        return existing
+    try:
+        _publish_immutable_json(path, record)
+    except ExperimentSandboxError:
+        if not path.exists():
+            raise
+        existing = load_experiment_mode_authority(authority_root)
+        if existing != record:
+            raise
+        return existing
+    return record
+
+
+def load_experiment_mode_authority(authority_root):
+    path = _experiment_authority_dir(authority_root) / (
+        "experiment-mode-controller.json"
+    )
+    if not path.is_file() or path.is_symlink():
+        raise ExperimentSandboxError(
+            "experiment mode authority is unavailable"
+        )
+    try:
+        record = json.loads(
+            _read_bounded_regular_file(
+                path,
+                max_bytes=64 * 1024,
+            ).decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExperimentSandboxError(
+            "experiment mode authority is unreadable"
+        ) from exc
+    if (
+        not isinstance(record, dict)
+        or set(record)
+        != {
+            "schema_version",
+            "experiment_run_id",
+            "protocol_sha256",
+            "run_manifest_sha256",
+            "mode",
+            "model_policy",
+            "controller_reference",
+            "sandbox_configuration_sha256",
+        }
+        or record["schema_version"] != MODE_AUTHORITY_SCHEMA_VERSION
+    ):
+        raise ExperimentSandboxError(
+            "experiment mode authority fields are invalid"
+        )
+    _nonempty_text(record["experiment_run_id"], "experiment mode run id")
+    _require_sha256(
+        record["protocol_sha256"],
+        "experiment mode protocol digest",
+    )
+    _require_sha256(
+        record["run_manifest_sha256"],
+        "experiment mode manifest digest",
+    )
+    _experiment_mode(record["mode"])
+    record["model_policy"] = _normalize_experiment_model_policy(
+        record["model_policy"]
+    )
+    from .experiment_controller import (
+        validate_experiment_controller_reference,
+    )
+
+    record["controller_reference"] = (
+        validate_experiment_controller_reference(
+            record["controller_reference"]
+        )
+    )
+    _require_sha256(
+        record["sandbox_configuration_sha256"],
+        "experiment sandbox configuration digest",
+    )
+    return record
+
+
+def load_experiment_launch_registration(lifecycle_authority_root):
+    """Resolve and validate the controller-owned launch policy for a lifecycle."""
+    candidate = Path(lifecycle_authority_root)
+    if not candidate.exists() and not candidate.is_symlink():
+        return None
+    lifecycle_root = _existing_path(
+        candidate,
+        "experiment launch lifecycle",
+        require_directory=True,
+        reject_symlink=True,
+    )
+    if lifecycle_root.parent.name != "experiment_lifecycles":
+        return None
+    authority_root = lifecycle_root.parent.parent
+    validate_experiment_lifecycle_authority(
+        authority_root,
+        lifecycle_root,
+    )
+    authority_dir = _experiment_authority_dir(authority_root)
+    path = authority_dir / (
+        f"{lifecycle_root.name}.launch-registration.json"
+    )
+    if not path.exists():
+        if (authority_dir / "experiment-mode-controller.json").is_file():
+            raise ExperimentSandboxError(
+                "experiment launch registration is unavailable"
+            )
+        return None
+    path = _existing_path(
+        path,
+        "experiment launch registration",
+        require_file=True,
+        reject_symlink=True,
+    )
+    try:
+        record = json.loads(
+            _read_bounded_regular_file(
+                path,
+                max_bytes=256 * 1024,
+            ).decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExperimentSandboxError(
+            "experiment launch registration is unreadable"
+        ) from exc
+    required = {
+        "schema_version",
+        "experiment_run_id",
+        "protocol_sha256",
+        "run_manifest_sha256",
+        "mode",
+        "usage_stage",
+        "taskpack_id",
+        "lifecycle_authority_root",
+        "workspace_root",
+        "sandbox_reference",
+        "sandbox_policy_sha256",
+        "controller_reference",
+        "model_policy",
+    }
+    if (
+        not isinstance(record, dict)
+        or set(record) != required
+        or record["schema_version"]
+        != LAUNCH_REGISTRATION_SCHEMA_VERSION
+        or record["lifecycle_authority_root"] != str(lifecycle_root)
+    ):
+        raise ExperimentSandboxError(
+            "experiment launch registration fields are invalid"
+        )
+    _nonempty_text(record["experiment_run_id"], "experiment launch run id")
+    _require_sha256(
+        record["protocol_sha256"],
+        "experiment launch protocol digest",
+    )
+    _require_sha256(
+        record["run_manifest_sha256"],
+        "experiment launch manifest digest",
+    )
+    _experiment_mode(record["mode"])
+    _nonempty_text(record["usage_stage"], "experiment launch usage stage")
+    _nonempty_text(record["taskpack_id"], "experiment launch taskpack id")
+    model_policy = _normalize_experiment_model_policy(
+        record["model_policy"]
+    )
+    workspace_root = _existing_path(
+        record["workspace_root"],
+        "experiment launch workspace",
+        require_directory=True,
+        reject_symlink=True,
+    )
+    descriptor = load_provider_sandbox_reference(
+        record["sandbox_reference"],
+        authority_root,
+    )
+    if (
+        Path(descriptor["repository"]["source"]) != workspace_root
+        or descriptor["policy_sha256"]
+        != record["sandbox_policy_sha256"]
+    ):
+        raise ExperimentSandboxError(
+            "experiment launch sandbox binding changed"
+        )
+    from .experiment_controller import (
+        validate_experiment_controller_reference,
+    )
+
+    controller_reference = validate_experiment_controller_reference(
+        record["controller_reference"],
+    )
+    mode_authority = load_experiment_mode_authority(authority_root)
+    if mode_authority["controller_reference"] != controller_reference:
+        raise ExperimentSandboxError(
+            "experiment launch controller binding changed"
+        )
+    validate_provider_authority_separation(
+        descriptor,
+        authority_root,
+        lifecycle_root,
+        controller_reference["controller_root"],
+    )
+    return {
+        **record,
+        "workspace_root": str(workspace_root),
+        "controller_reference": controller_reference,
+        "model_policy": model_policy,
+        "authority_root": str(authority_root),
+        "registration_path": str(path),
+    }
 
 
 def scan_canary_leakage(
@@ -2581,6 +3105,81 @@ def _safe_reference_id(value):
     return value
 
 
+def _require_sha256(value, label):
+    if not _is_sha256(value):
+        raise ExperimentSandboxError(f"{label} is invalid")
+    return value
+
+
+def _experiment_mode(value):
+    if value not in {
+        "single_codex",
+        "agentteam_direct",
+        "agentteam_full",
+    }:
+        raise ExperimentSandboxError(
+            "experiment launch mode is invalid"
+        )
+    return value
+
+
+def _normalize_experiment_model_policy(value):
+    required = {
+        "backend",
+        "codex_cli_version",
+        "model",
+        "reasoning_profile",
+        "service_configuration_sha256",
+        "sandbox_policy",
+        "permission_policy",
+        "network_policy",
+        "tool_allowlist",
+        "max_inflight_model_invocations",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ExperimentSandboxError(
+            "experiment model policy fields are invalid"
+        )
+    if value["backend"] != "codex":
+        raise ExperimentSandboxError(
+            "experiment model policy backend is invalid"
+        )
+    normalized = dict(value)
+    for field in (
+        "codex_cli_version",
+        "model",
+        "reasoning_profile",
+        "sandbox_policy",
+        "permission_policy",
+        "network_policy",
+    ):
+        normalized[field] = _nonempty_text(
+            value[field],
+            f"experiment model policy {field}",
+        )
+    normalized["service_configuration_sha256"] = _require_sha256(
+        value["service_configuration_sha256"],
+        "experiment model policy service configuration digest",
+    )
+    tools = value["tool_allowlist"]
+    if (
+        not isinstance(tools, list)
+        or not tools
+        or len(tools) > 128
+        or not all(isinstance(item, str) and item for item in tools)
+        or len(set(tools)) != len(tools)
+    ):
+        raise ExperimentSandboxError(
+            "experiment model policy tool allowlist is invalid"
+        )
+    normalized["tool_allowlist"] = list(tools)
+    if value["max_inflight_model_invocations"] != 1:
+        raise ExperimentSandboxError(
+            "experiment model policy must use one provider lane"
+        )
+    return normalized
+
+
 def _load_authority_reference(
     reference,
     authority_root,
@@ -3032,6 +3631,18 @@ def _candidate_repository_state(repository, baseline_identity):
         "git_control_directories": git_control_inventory["directories"],
         "git_control_bytes": git_control_inventory["bytes"],
     }
+
+
+def certify_candidate_repository(repository, baseline_identity):
+    """Return bounded identity proof for one standalone candidate repository."""
+
+    if not isinstance(baseline_identity, dict) or set(
+        baseline_identity
+    ) != {"commit", "tree", "git_object_format"}:
+        raise ExperimentSandboxError(
+            "candidate baseline identity is invalid"
+        )
+    return _candidate_repository_state(repository, baseline_identity)
 
 
 def _validate_standalone_git_control(repository):

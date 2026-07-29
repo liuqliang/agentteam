@@ -559,13 +559,26 @@ def _draft_with_codex(
     author_context_dir = (draft_root / f".{taskpack_id}-author").resolve()
     _require_contained_path(taskpack_dir, draft_root, "taskpack_dir")
     _require_contained_path(author_context_dir, draft_root, "author_context_dir")
+    experiment_output_relative = (
+        _registered_experiment_author_output(
+            project_root,
+            draft_root,
+            author_invocation_context,
+        )
+    )
     if _path_is_relative_to(draft_root, project_root) or _path_is_relative_to(
         project_root,
         draft_root,
     ):
-        raise TaskpackValidationError("codex taskpack draft_root must not overlap the target repository")
+        if experiment_output_relative is None:
+            raise TaskpackValidationError(
+                "codex taskpack draft_root must not overlap the target repository"
+            )
 
-    repo_status_before = _git_status_signature(project_root)
+    repo_status_before = _git_status_signature(
+        project_root,
+        allowed_untracked_root=experiment_output_relative,
+    )
     if repo_status_before["status"]:
         raise TaskpackValidationError("codex taskpack author requires a clean target repository")
 
@@ -601,6 +614,11 @@ def _draft_with_codex(
     command = _codex_author_jsonl_command(
         _command_list(codex_command),
         model=codex_model,
+        reasoning_profile=(
+            author_invocation_context.get("reasoning_profile")
+            if isinstance(author_invocation_context, dict)
+            else None
+        ),
     )
     result_path = author_context_dir / "author_result.json"
     state_path = author_context_dir / "author_state.json"
@@ -634,7 +652,11 @@ def _draft_with_codex(
             },
         )
 
-    _raise_if_target_repo_modified(project_root, repo_status_before)
+    _raise_if_target_repo_modified(
+        project_root,
+        repo_status_before,
+        allowed_untracked_root=experiment_output_relative,
+    )
     if completed.returncode == -9:
         salvage = _salvage_timed_out_codex_taskpack(
             taskpack_dir=taskpack_dir,
@@ -713,7 +735,8 @@ def _run_codex_author_command(
         supplied=author_invocation_context,
     )
     invocation = ModelInvocationCall(
-        author_context_dir,
+        context.get("model_invocation_authority_root")
+        or author_context_dir,
         context,
         supported=supported,
         systemd_runner_factory=systemd_runner_factory,
@@ -865,7 +888,12 @@ def _run_codex_author_command(
     return completed
 
 
-def _codex_author_jsonl_command(command, *, model=None):
+def _codex_author_jsonl_command(
+    command,
+    *,
+    model=None,
+    reasoning_profile=None,
+):
     command = list(command)
     if not is_supported_codex_command(command):
         return command
@@ -873,7 +901,25 @@ def _codex_author_jsonl_command(command, *, model=None):
         command.append("--json")
     if model and "-m" not in command and "--model" not in command:
         command.extend(["-m", str(model)])
+    if reasoning_profile and not _has_reasoning_profile(command):
+        command.extend(
+            [
+                "-c",
+                f"model_reasoning_effort={reasoning_profile}",
+            ]
+        )
     return command
+
+
+def _has_reasoning_profile(command):
+    return any(
+        command[index] == "-c"
+        and index + 1 < len(command)
+        and command[index + 1].startswith(
+            "model_reasoning_effort="
+        )
+        for index in range(len(command))
+    )
 
 
 def _codex_command_model(command):
@@ -936,6 +982,7 @@ def _author_model_invocation_context(
         "usage_stage": stage,
         "backend": "codex",
         "model": model,
+        "reasoning_profile": supplied.get("reasoning_profile"),
         "coverage_class": (
             "supported_model_invocation"
             if supported
@@ -956,6 +1003,9 @@ def _author_model_invocation_context(
         ),
         "experiment_controller_required": (
             supplied.get("experiment_controller_required") is True
+        ),
+        "model_invocation_authority_root": supplied.get(
+            "model_invocation_authority_root"
         ),
     }
 
@@ -2263,13 +2313,65 @@ def _path_is_relative_to(path, root):
     return True
 
 
-def _raise_if_target_repo_modified(project_root, repo_status_before):
-    repo_status_after = _git_status_signature(project_root)
+def _registered_experiment_author_output(
+    project_root,
+    draft_root,
+    invocation_context,
+):
+    if (
+        not isinstance(invocation_context, dict)
+        or invocation_context.get("experiment_sandbox_required") is not True
+    ):
+        return None
+    lifecycle_root = invocation_context.get(
+        "model_invocation_authority_root"
+    )
+    if not lifecycle_root:
+        return None
+    try:
+        from .experiment_sandbox import (
+            load_experiment_launch_registration,
+        )
+
+        registration = load_experiment_launch_registration(
+            lifecycle_root
+        )
+    except Exception as exc:
+        raise TaskpackValidationError(
+            "experiment author launch registration is invalid"
+        ) from exc
+    expected_draft_root = Path(project_root) / ".agentteam-author"
+    if (
+        registration is None
+        or registration["usage_stage"] != "taskpack_author"
+        or Path(registration["workspace_root"]) != Path(project_root)
+        or Path(draft_root) != expected_draft_root
+    ):
+        raise TaskpackValidationError(
+            "experiment author output is outside its registered workspace"
+        )
+    return ".agentteam-author"
+
+
+def _raise_if_target_repo_modified(
+    project_root,
+    repo_status_before,
+    *,
+    allowed_untracked_root=None,
+):
+    repo_status_after = _git_status_signature(
+        project_root,
+        allowed_untracked_root=allowed_untracked_root,
+    )
     if repo_status_after != repo_status_before:
         raise TaskpackValidationError("codex taskpack author modified the target repository")
 
 
-def _git_status_signature(project_root):
+def _git_status_signature(
+    project_root,
+    *,
+    allowed_untracked_root=None,
+):
     status = subprocess.run(
         [
             "git",
@@ -2286,10 +2388,24 @@ def _git_status_signature(project_root):
     )
     if status.returncode != 0:
         raise TaskpackValidationError(f"failed to inspect target repository status: {status.stderr.strip()}")
+    status_lines = tuple(status.stdout.splitlines())
+    if allowed_untracked_root is not None:
+        prefix = str(allowed_untracked_root).rstrip("/")
+        status_lines = tuple(
+            line
+            for line in status_lines
+            if not (
+                line.startswith("?? ")
+                and (
+                    line[3:] == prefix
+                    or line[3:].startswith(f"{prefix}/")
+                )
+            )
+        )
     return {
         "head": _git_optional_output(project_root, ["rev-parse", "--verify", "HEAD"]),
         "branch": _git_optional_output(project_root, ["rev-parse", "--abbrev-ref", "HEAD"]),
-        "status": tuple(status.stdout.splitlines()),
+        "status": status_lines,
     }
 
 
