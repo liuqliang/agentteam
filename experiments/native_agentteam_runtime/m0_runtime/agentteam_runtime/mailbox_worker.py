@@ -274,6 +274,10 @@ class FileMailboxWorker:
                         "reason": str(exc),
                     },
                 }
+        runtime_result = _reconcile_runtime_changed_files(
+            runtime_result,
+            worktree_path,
+        )
         result_message = self._result_message(runtime_message, runtime_result)
         _append_jsonl(self.outbox_path, [result_message])
         self._write_heartbeat(
@@ -1294,8 +1298,13 @@ def _with_worktree_salvage(result, worktree_path, reason):
 
 
 def _worktree_changed_files(worktree_path):
+    changed_files = _authoritative_worktree_changed_files(worktree_path)
+    return changed_files if changed_files is not None else []
+
+
+def _authoritative_worktree_changed_files(worktree_path):
     if not worktree_path:
-        return []
+        return None
     try:
         completed = subprocess.run(
             [
@@ -1312,7 +1321,7 @@ def _worktree_changed_files(worktree_path):
             text=True,
         )
     except (OSError, subprocess.CalledProcessError):
-        return []
+        return None
 
     changed_files = []
     for line in completed.stdout.splitlines():
@@ -1325,6 +1334,36 @@ def _worktree_changed_files(worktree_path):
             continue
         changed_files.append(path)
     return sorted(set(changed_files))
+
+
+def _reconcile_runtime_changed_files(result, worktree_path):
+    actual_changed_files = _authoritative_worktree_changed_files(
+        worktree_path
+    )
+    if actual_changed_files is None:
+        return result
+    reported_changed_files = result.get("changed_files")
+    if reported_changed_files == actual_changed_files:
+        return result
+    output = (
+        dict(result.get("output"))
+        if isinstance(result.get("output"), dict)
+        else {}
+    )
+    output["changed_files_reconciliation"] = {
+        "status": "reconciled_to_worktree",
+        "reported_changed_files": (
+            list(reported_changed_files)
+            if isinstance(reported_changed_files, list)
+            else []
+        ),
+        "actual_changed_files": actual_changed_files,
+    }
+    return {
+        **result,
+        "changed_files": actual_changed_files,
+        "output": output,
+    }
 
 
 def _process_text(value):

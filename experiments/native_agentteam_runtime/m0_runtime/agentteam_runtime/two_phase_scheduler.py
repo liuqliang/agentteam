@@ -1384,6 +1384,37 @@ class TwoPhaseFileScheduler:
                 *(
                     [
                         self._event(
+                            "backlog_updated",
+                            "agent-scheduler",
+                            None,
+                            (
+                                f"backlog-validation-"
+                                f"{result['task_status']}:{inflight['attempt_id']}"
+                            ),
+                            inflight["correlation_id"],
+                            {
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "task_status": result["task_status"],
+                                "lease_id": inflight["lease_id"],
+                                "update_type": "validation_outcome",
+                                "failure_category": result[
+                                    "failure_category"
+                                ],
+                                "retryable": result["retryable"],
+                            },
+                        )
+                    ]
+                    if (
+                        outcome["validation_status"] != "accepted"
+                        and not manual_gate
+                        and not permission_request
+                    )
+                    else []
+                ),
+                *(
+                    [
+                        self._event(
                             "recovery_routed",
                             "agent-scheduler",
                             inflight["agent_id"],

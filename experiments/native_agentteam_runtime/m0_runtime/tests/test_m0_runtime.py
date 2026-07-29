@@ -3226,6 +3226,60 @@ class M0RuntimeTests(unittest.TestCase):
                 ["generated/m0_generated_repo_index.json"],
             )
 
+    def test_file_mailbox_worker_uses_worktree_diff_for_changed_files(self):
+        class StaleChangedFilesRuntimeAdapter:
+            def run(self, message, worktree_path=None):
+                return {
+                    "result_status": "completed",
+                    "changed_files": ["historical/change.py"],
+                    "output": {"summary": "existing implementation is complete"},
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            inbox = (
+                output_dir
+                / "mailboxes"
+                / "agent-repo-map"
+                / "inbox.jsonl"
+            )
+            outbox = (
+                output_dir
+                / "mailboxes"
+                / "agent-repo-map"
+                / "outbox.jsonl"
+            )
+            _init_git_repo(repo)
+            message = _mailbox_dispatch_message(
+                message_id="MSG-MAILBOX-DIFF-001",
+                agent_id="agent-repo-map",
+                write_scope=["historical/"],
+            )
+            _append_test_jsonl(inbox, [message])
+
+            worker = FileMailboxWorker(
+                FIXTURES / "sample_agent_pool.json",
+                output_dir,
+                "agent-repo-map",
+                runtime_adapter=StaleChangedFilesRuntimeAdapter(),
+                clock=FixedClock(),
+            )
+            summary = worker.poll_once(worktree_path=repo)
+            payload = _read_first_jsonl(outbox)["payload"]
+
+            self.assertEqual(summary["changed_files"], [])
+            self.assertEqual(payload["changed_files"], [])
+            self.assertEqual(
+                payload["output"]["changed_files_reconciliation"],
+                {
+                    "status": "reconciled_to_worktree",
+                    "reported_changed_files": ["historical/change.py"],
+                    "actual_changed_files": [],
+                },
+            )
+
     def test_file_mailbox_worker_poll_once_writes_token_usage_to_outbox(self):
         class TokenRuntimeAdapter:
             def run(self, message, worktree_path=None):
@@ -6683,6 +6737,12 @@ class M0RuntimeTests(unittest.TestCase):
                 for event in events
                 if event["event_type"] == "validation_rejected"
             )
+            backlog_event = next(
+                event
+                for event in events
+                if event["event_type"] == "backlog_updated"
+            )
+            indexed_state = read_scheduler_state_index(output_dir)
 
             self.assertEqual(
                 collected["results"][0]["decomposition_status"],
@@ -6695,6 +6755,19 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertIn(
                 "self dependency",
                 validation_event["payload"]["decomposition_error"],
+            )
+            self.assertEqual(
+                backlog_event["payload"]["task_status"],
+                "blocked",
+            )
+            self.assertEqual(
+                indexed_state["tasks"],
+                [
+                    {
+                        "task_id": "DECOMPOSE-M25-001",
+                        "task_status": "blocked",
+                    }
+                ],
             )
 
     def test_two_phase_scheduler_collects_expired_inflight_as_timeout(self):
