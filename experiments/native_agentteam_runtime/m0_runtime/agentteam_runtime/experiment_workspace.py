@@ -36,6 +36,17 @@ ATTESTATION_FILE_NAME = "clean-snapshot.json"
 
 _OBJECT_ID_LENGTHS = {"sha1": 40, "sha256": 64}
 _HEX = re.compile(r"^[0-9a-f]+$")
+_PRIOR_RUN_ROOTS = (b".agentteam",)
+_FORBIDDEN_PSEUDOREFS = (
+    "AUTO_MERGE",
+    "BISECT_HEAD",
+    "CHERRY_PICK_HEAD",
+    "FETCH_HEAD",
+    "MERGE_HEAD",
+    "ORIG_HEAD",
+    "REBASE_HEAD",
+    "REVERT_HEAD",
+)
 
 
 class ExperimentWorkspaceError(ExperimentContractError):
@@ -105,6 +116,8 @@ def allocate_clean_snapshot(
         )
         _git(stage_path, "reset", "--quiet", "--hard", repository["commit"])
         _git(stage_path, "clean", "--quiet", "-ffdx")
+        for pseudoref in _FORBIDDEN_PSEUDOREFS:
+            _git(stage_path, "update-ref", "-d", pseudoref)
 
         verification = _verify_clean_snapshot(
             stage_path,
@@ -199,6 +212,13 @@ def _verify_clean_snapshot(
             f"snapshot is missing or is not a real directory: {snapshot_path}"
         )
     snapshot_path = snapshot_path.resolve()
+    in_workspace_git_dir = snapshot_path / ".git"
+    if in_workspace_git_dir.is_symlink() or not in_workspace_git_dir.is_dir():
+        raise ExperimentWorkspaceError(
+            "snapshot must be a standalone repository with an in-workspace "
+            ".git directory"
+        )
+    in_workspace_git_dir = in_workspace_git_dir.resolve()
 
     head_commit = _git(snapshot_path, "rev-parse", "--verify", "HEAD").stdout.strip()
     head_tree = _git(snapshot_path, "rev-parse", "HEAD^{tree}").stdout.strip()
@@ -207,6 +227,16 @@ def _verify_clean_snapshot(
         "rev-parse",
         "--show-object-format",
     ).stdout.strip()
+    git_dir = _resolve_git_path(
+        snapshot_path,
+        _git(
+            snapshot_path,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+        ).stdout.strip(),
+        "snapshot Git directory",
+    )
     common_dir = _resolve_git_path(
         snapshot_path,
         _git(
@@ -217,6 +247,11 @@ def _verify_clean_snapshot(
         ).stdout.strip(),
         "snapshot common directory",
     )
+    if git_dir != in_workspace_git_dir or common_dir != in_workspace_git_dir:
+        raise ExperimentWorkspaceError(
+            "snapshot must not use a linked worktree or external Git common "
+            "directory"
+        )
     objects_dir = common_dir / "objects"
     if common_dir.is_symlink() or objects_dir.is_symlink() or not objects_dir.is_dir():
         raise ExperimentWorkspaceError("snapshot object store is missing or unsafe")
@@ -251,12 +286,19 @@ def _verify_clean_snapshot(
         raise ExperimentWorkspaceError(
             "snapshot file inventory does not match the protocol source tree"
         )
+    prior_run_paths = _prior_run_state_paths(inventory_bytes)
+    if prior_run_paths:
+        raise ExperimentWorkspaceError(
+            "snapshot source tree contains prior AgentTeam run state: "
+            + ", ".join(prior_run_paths)
+        )
 
     status = _git(
         snapshot_path,
         "status",
         "--porcelain=v1",
         "--untracked-files=all",
+        "--ignored",
     ).stdout
     symbolic_head = _git(
         snapshot_path,
@@ -277,6 +319,7 @@ def _verify_clean_snapshot(
     extra_refs = _nonempty_lines(
         _git(snapshot_path, "for-each-ref", "--format=%(refname)").stdout
     )
+    extra_refs.extend(_present_pseudorefs(git_dir))
     alternates = _alternate_paths(common_dir)
     symlink_escapes = _symlink_escapes(snapshot_path)
 
@@ -390,6 +433,11 @@ def validate_clean_snapshot_attestation(attestation):
     ):
         raise ExperimentWorkspaceError(
             "clean snapshot attestation does not bind the run layout"
+        )
+    if snapshot_common_dir != snapshot_path / ".git":
+        raise ExperimentWorkspaceError(
+            "clean snapshot attestation does not bind an in-workspace .git "
+            "directory"
         )
     if snapshot_common_dir.resolve(strict=False) == source_common_dir.resolve(
         strict=False
@@ -724,6 +772,30 @@ def _alternate_paths(common_dir):
             else:
                 paths.extend(_nonempty_lines(content))
     return paths
+
+
+def _present_pseudorefs(git_dir):
+    return [
+        name
+        for name in _FORBIDDEN_PSEUDOREFS
+        if (git_dir / name).exists() or (git_dir / name).is_symlink()
+    ]
+
+
+def _prior_run_state_paths(inventory):
+    paths = []
+    for entry in inventory.split(b"\0"):
+        if not entry:
+            continue
+        _, separator, path = entry.partition(b"\t")
+        if not separator:
+            raise ExperimentWorkspaceError("snapshot Git inventory is malformed")
+        if any(
+            path == root or path.startswith(root + b"/")
+            for root in _PRIOR_RUN_ROOTS
+        ):
+            paths.append(os.fsdecode(path))
+    return sorted(paths)
 
 
 def _symlink_escapes(root):

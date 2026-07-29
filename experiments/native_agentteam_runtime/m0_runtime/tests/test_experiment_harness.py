@@ -5349,7 +5349,7 @@ class ExperimentResultBundleTests(unittest.TestCase):
         controller_snapshot = controller.snapshot()
         snapshot_path = run_dir / "repository"
         snapshot_path.mkdir()
-        snapshot_common_dir = snapshot_path / ".git-common"
+        snapshot_common_dir = snapshot_path / ".git"
         snapshot_common_dir.mkdir()
         source_common_dir = root / f"source-common-{run_dir.name}"
         source_common_dir.mkdir()
@@ -8099,7 +8099,10 @@ class ExperimentWorkspaceTests(unittest.TestCase):
                 "refs/heads/forbidden",
                 fixture["repository"]["commit"],
             )
-            with self.assertRaisesRegex(ExperimentWorkspaceError, "extra Git refs"):
+            with self.assertRaisesRegex(
+                ExperimentWorkspaceError,
+                "extra Git refs",
+            ):
                 verify_clean_snapshot(snapshot, fixture["repository"])
             _git(snapshot, "update-ref", "-d", "refs/heads/forbidden")
 
@@ -8111,6 +8114,14 @@ class ExperimentWorkspaceTests(unittest.TestCase):
                     "--git-common-dir",
                 ).stdout.strip()
             )
+            (common_dir / "FETCH_HEAD").write_text(
+                fixture["repository"]["commit"] + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ExperimentWorkspaceError, "extra Git refs"):
+                verify_clean_snapshot(snapshot, fixture["repository"])
+            (common_dir / "FETCH_HEAD").unlink()
+
             alternates = common_dir / "objects" / "info" / "alternates"
             alternates.write_text(
                 str(fixture["source"] / ".git" / "objects") + "\n",
@@ -8131,6 +8142,84 @@ class ExperimentWorkspaceTests(unittest.TestCase):
             self.assertFalse((run_dir / "repository").exists())
             self.assertFalse((run_dir / "clean-snapshot.json").exists())
             self.assertEqual(list(run_dir.glob(".repository-staging-*")), [])
+
+    def test_linked_worktree_and_ignored_residue_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp)
+            run_dir = Path(tmp) / "experiment-run-standalone"
+            run_dir.mkdir()
+            allocation = allocate_clean_snapshot(
+                run_dir,
+                fixture["repository"],
+            )
+            snapshot = Path(allocation["snapshot_path"])
+            linked_worktree = run_dir / "linked-worktree"
+            _git(
+                snapshot,
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                str(linked_worktree),
+                fixture["repository"]["commit"],
+            )
+
+            self.assertTrue((linked_worktree / ".git").is_file())
+            with self.assertRaisesRegex(
+                ExperimentWorkspaceError,
+                "standalone repository",
+            ):
+                verify_clean_snapshot(
+                    linked_worktree,
+                    fixture["repository"],
+                )
+
+            exclude = snapshot / ".git" / "info" / "exclude"
+            exclude.write_text("ignored.cache\n", encoding="utf-8")
+            (snapshot / "ignored.cache").write_text(
+                "prior mode residue\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ExperimentWorkspaceError,
+                "worktree is not clean",
+            ):
+                verify_clean_snapshot(snapshot, fixture["repository"])
+
+    def test_tracked_prior_agentteam_state_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp)
+            prior_state = fixture["source"] / ".agentteam"
+            _git(fixture["source"], "add", ".agentteam/prior-run.json")
+            _git(
+                fixture["source"],
+                "commit",
+                "--quiet",
+                "-m",
+                "track forbidden prior run state",
+            )
+            fixture["repository"]["commit"] = _git(
+                fixture["source"],
+                "rev-parse",
+                "HEAD",
+            ).stdout.strip()
+            fixture["repository"]["tree"] = _git(
+                fixture["source"],
+                "rev-parse",
+                "HEAD^{tree}",
+            ).stdout.strip()
+            run_dir = Path(tmp) / "experiment-run-prior-state"
+            run_dir.mkdir()
+
+            with self.assertRaisesRegex(
+                ExperimentWorkspaceError,
+                "prior AgentTeam run state",
+            ):
+                allocate_clean_snapshot(run_dir, fixture["repository"])
+
+            self.assertTrue(prior_state.is_dir())
+            self.assertFalse((run_dir / "repository").exists())
+            self.assertFalse((run_dir / "clean-snapshot.json").exists())
 
     def test_cleanup_preserves_sealed_result_and_records_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
