@@ -271,7 +271,9 @@ def publish_immutable_json(path, value, *, label="immutable JSON artifact"):
     path = Path(path)
     parent = path.parent
     _require_safe_directory(parent, f"{label} parent", create=True)
-    payload = canonical_json_bytes(value) + b"\n"
+    canonical_payload = canonical_json_bytes(value)
+    payload = canonical_payload + b"\n"
+    payload_sha256 = hashlib.sha256(canonical_payload).hexdigest()
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
     flags |= getattr(os, "O_NOFOLLOW", 0)
     created = False
@@ -286,7 +288,7 @@ def publish_immutable_json(path, value, *, label="immutable JSON artifact"):
             )
         return {
             "path": str(path),
-            "sha256": canonical_json_sha256(value),
+            "sha256": payload_sha256,
             "created": False,
         }
     except OSError as exc:
@@ -309,7 +311,7 @@ def publish_immutable_json(path, value, *, label="immutable JSON artifact"):
     _fsync_directory(parent)
     return {
         "path": str(path),
-        "sha256": canonical_json_sha256(value),
+        "sha256": payload_sha256,
         "created": True,
     }
 
@@ -331,6 +333,10 @@ def publish_experiment_protocol(experiment_root, protocol):
 
 
 def publish_experiment_run_manifest(experiment_root, manifest, protocol=None):
+    if protocol is None:
+        raise ExperimentContractError(
+            "experiment protocol is required to publish a run manifest"
+        )
     manifest = _snapshot_json_object(manifest, "experiment run manifest")
     validate_experiment_run_manifest(manifest, protocol)
     digest = canonical_json_sha256(manifest)

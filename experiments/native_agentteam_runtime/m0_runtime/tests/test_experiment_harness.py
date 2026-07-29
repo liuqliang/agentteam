@@ -98,6 +98,7 @@ from agentteam_runtime.experiment_contract import (
     derive_experiment_run_id,
     ensure_executable_manifest,
     publish_immutable_json,
+    publish_experiment_run_manifest,
     validate_experiment_protocol,
     validate_experiment_run_binding,
     validate_experiment_run_manifest,
@@ -7565,6 +7566,58 @@ class ExperimentContractSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(ExperimentContractError, "validation-only"):
             ensure_executable_manifest(legacy)
 
+    def test_run_manifest_publication_requires_protocol_binding(self):
+        manifest = build_experiment_run_manifest(
+            _protocol(),
+            mode="single_codex",
+            repetition_index=0,
+            stable_request_key="stable-001",
+        )
+        provider = Mock(name="provider")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                ExperimentContractError,
+                "protocol is required",
+            ):
+                publish_experiment_run_manifest(tmp, manifest)
+
+            provider.assert_not_called()
+            self.assertFalse((Path(tmp) / "run-manifests").exists())
+
+    def test_immutable_publication_digest_uses_serialized_snapshot(self):
+        value = {"identity": "before-open"}
+        snapshot = copy.deepcopy(value)
+        real_open = os.open
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_path = Path(tmp) / "authority.json"
+            mutation_done = False
+
+            def mutate_after_artifact_open(path, flags, mode=0o777):
+                nonlocal mutation_done
+                fd = real_open(path, flags, mode)
+                if Path(path) == artifact_path and not mutation_done:
+                    value["identity"] = "after-open"
+                    mutation_done = True
+                return fd
+
+            with patch(
+                "agentteam_runtime.experiment_contract.os.open",
+                side_effect=mutate_after_artifact_open,
+            ):
+                publication = publish_immutable_json(artifact_path, value)
+
+            self.assertTrue(mutation_done)
+            self.assertEqual(
+                artifact_path.read_bytes(),
+                canonical_json_bytes(snapshot) + b"\n",
+            )
+            self.assertEqual(
+                publication["sha256"],
+                canonical_json_sha256(snapshot),
+            )
+
 
 class ExperimentAllocationTests(unittest.TestCase):
     def test_allocation_publishes_canonical_authority_before_execution(self):
@@ -7713,6 +7766,42 @@ class ExperimentAllocationTests(unittest.TestCase):
                     provider()
 
             provider.assert_not_called()
+
+    def test_canonical_digest_tampering_fails_without_provider_or_target_mutation(
+        self,
+    ):
+        for artifact in ("protocol", "run-manifest"):
+            with self.subTest(artifact=artifact), tempfile.TemporaryDirectory() as tmp:
+                allocation = _allocate(tmp)
+                target_marker = Path(tmp) / "target-marker.txt"
+                target_marker.write_text("unchanged\n", encoding="utf-8")
+                if artifact == "protocol":
+                    tampered = _protocol()
+                    tampered["seed"] += 1
+                    artifact_path = Path(allocation["protocol_path"])
+                else:
+                    tampered = dict(allocation["run_manifest"])
+                    tampered["stable_request_key"] = "tampered-request"
+                    tampered["experiment_run_id"] = derive_experiment_run_id(
+                        tampered["protocol_sha256"],
+                        tampered["mode"],
+                        tampered["repetition_index"],
+                        tampered["stable_request_key"],
+                    )
+                    artifact_path = Path(allocation["run_manifest_path"])
+                artifact_path.write_bytes(canonical_json_bytes(tampered) + b"\n")
+                provider = Mock(name=f"provider-{artifact}")
+
+                with self.assertRaises(ExperimentContractError):
+                    repeated = _allocate(tmp)
+                    if repeated["created"]:
+                        provider()
+
+                provider.assert_not_called()
+                self.assertEqual(
+                    target_marker.read_text(encoding="utf-8"),
+                    "unchanged\n",
+                )
 
 
 class ExperimentLeaseAndResumeTests(unittest.TestCase):
