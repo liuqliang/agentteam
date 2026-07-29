@@ -1,9 +1,46 @@
 # Phase 2 Experiment Harness And Short Calibration Taskpack Set
 
-Status: P2-01 through P2-07B implementation and contract repair are complete.
-The approved v2 review retained a stale preflight-release identity and failed
-executable materialization; P2-08 remains blocked until review v3 approves the
-repaired plan and blueprint against the active compatible runtime release.
+Status: the baseline P2-01 through P2-07B implementation exists. The formal
+v6 review-and-repair execution accepted P2-MAP through P2-03B, then stopped at
+P2-04 after a scheduler recovery defect. P2-04 through P2-07B remain subject
+to the recovery taskpack and operator review v4. P2-08 remains blocked until
+that recovery taskpack completes and its integration commit is installed as
+the candidate runtime release.
+
+## Execution Recovery On 2026-07-29
+
+The frozen v6 taskpack and its event log remain immutable execution history.
+The accepted prefix produced reviewed commits for P2-MAP, P2-01, P2-02A,
+P2-02B, and P2-03B. The P2-04 worker correctly reported no current diff, but
+its stale historical `changed_files` declaration caused `diff_mismatch`.
+The scheduler then projected the event-log task as blocked while retaining a
+running task in SQLite, so the original frozen run could not safely redispatch.
+
+Recovery does not edit the frozen v6 taskpack or its database. The source
+branch integrates the accepted prefix and separately records these repairs:
+
+- `0cdd355` derives worker `changed_files` from the attempt worktree and emits
+  a canonical backlog event for validation rejection;
+- `8e6d9fb` atomically publishes immutable JSON authority, restores root-owned
+  privileged-system-tree enforcement, and rejects nested prior `.agentteam`
+  state;
+- `0a3f29f` preserves only taskpack-declared runtime artifacts during worktree
+  reconciliation and keeps scheduler projection consistent with terminal
+  retry availability.
+
+The recovery blueprint
+`2026-07-29-phase2-experiment-harness-recovery.blueprint.json` starts at P2-04
+against this committed prefix. It adds P2-05C as an explicit production
+cleanup task. P2-05C must seal and validate the terminal result before removing
+the disposable snapshot, publish an immutable cleanup receipt bound to the
+sealed result, retain cleanup failure as evidence, and make projection/show
+report the receipt-derived status. A permanently pending bundle without a
+durable receipt is not accepted.
+
+Review v4 binds the recovery blueprint and this amended plan to runtime release
+`phase2-recovery-0a3f29f`. Approval of v4 authorizes only P2-04R through
+P2-07B-R. It does not authorize P2-08, live provider calibration, branch
+promotion, merge to the source branch, or push.
 
 ## Purpose
 

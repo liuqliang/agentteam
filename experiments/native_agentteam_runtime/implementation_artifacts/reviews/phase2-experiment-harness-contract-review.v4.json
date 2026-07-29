@@ -1,0 +1,36 @@
+{
+  "schema_version": "phase2_contract_review.v1",
+  "decision": "pending",
+  "reviewer": "operator-pending",
+  "reviewed_at": "2026-07-29T22:18:00+08:00",
+  "git_object_format": "sha1",
+  "preflight_release_id": "phase2-recovery-0a3f29f",
+  "preflight_release_source_commit": "0a3f29f597034565ad7257b7eb9327cfde531876",
+  "plan_sha256": "02b702022533b2be2c0b49cd46774bfa6e3f6538af13e9c873ed49386a911895",
+  "blueprint_sha256": "96182eb72014f1b8170ee2f3a47cb1acbbb9727b7cac64277aba9a99a0c59945",
+  "research_authority_sha256": "8dca1748a211b9eaf9df5d392d7d39d755cbe3946a358c11cff2f51c5323d91d",
+  "review_schema_sha256": "cbf009b320d583772a62ba569718d1f61e24c0173a8d6f7e1b9c55314629ed9f",
+  "contract_decisions_sha256": "f2d427d8d1a5b022a47a927905a57b1a30545b2b8deab82e14f1c100f1d61223",
+  "schema_inventory_sha256": "1a1fbd1c7de6de918d28be4ca21161b6723a801ddc001b0c5f6dfcfd5330ef64",
+  "approved_architecture_decisions": [
+    "Preserve frozen v6 and its event log as immutable execution history rather than repairing its SQLite state manually.",
+    "Resume only the unaccepted P2-04 through P2-07B scope from the committed and fully verified recovery prefix.",
+    "Treat current-attempt Git worktree state as changed-file authority while preserving only taskpack-declared runtime artifacts.",
+    "Publish immutable JSON authority only after a complete fsynced temporary inode is ready for atomic no-replace visibility.",
+    "Require privileged system trees to remain root-owned and reject prior .agentteam state at any tracked path depth.",
+    "Connect clean-snapshot cleanup through a separate P2-05C task after terminal result sealing and validation.",
+    "Publish a schema-valid immutable cleanup receipt bound to the sealed result and derive effective cleanup status from that receipt.",
+    "Keep P2-08, live calibration, candidate release promotion, source merge, and push outside the recovery taskpack.",
+    "Bind recovery materialization to active runtime release phase2-recovery-0a3f29f at source commit 0a3f29f597034565ad7257b7eb9327cfde531876."
+  ],
+  "resolved_contradictions": [
+    "Replaced the unrecoverable v6 scheduler projection with a new reviewed taskpack instead of mutating frozen run authority.",
+    "Separated production snapshot cleanup from the broader P2-06 adapter audit so its ordering, receipt, failure evidence, and projection semantics are explicit.",
+    "Retained existing baseline implementation as source context while requiring the recovery workers to verify current code and report no-change only with focused evidence.",
+    "Bound the recovery review to a release that includes the v6 accepted prefix, independent security review repairs, and full-suite scheduler recovery fixes."
+  ],
+  "remaining_escalations": [
+    "Operator must approve review v4 before the recovery blueprint may be materialized or frozen."
+  ],
+  "notes": "Pending operator approval. This review authorizes only the recovery implementation scope and does not authorize P2-08 or any live calibration."
+}

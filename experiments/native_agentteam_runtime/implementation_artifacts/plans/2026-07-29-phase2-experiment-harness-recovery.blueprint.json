@@ -1,0 +1,409 @@
+{
+  "schema_version": "agentteam_taskpack_blueprint.v1",
+  "blueprint_id": "phase2-experiment-harness-recovery",
+  "source_plan": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-27-phase2-experiment-harness-and-calibration.md",
+  "research_authority": "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md",
+  "schema_inventory": [
+    "experiments/native_agentteam_runtime/schemas/phase1_completion_promotion.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_calibration.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_contract_review.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_finalization.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_live_authorization.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_readiness_promotion.schema.json",
+    "experiments/native_agentteam_runtime/schemas/taskpack_blueprint.schema.json"
+  ],
+  "taskpack": {
+    "taskpack_id": "phase2-experiment-harness-recovery",
+    "goal_kind": "implementation",
+    "milestone": "research-phase-2-recovery",
+    "goal": "Complete the interrupted Phase 2 contract review from P2-04 through P2-07B, wire durable clean-snapshot cleanup evidence, and leave a fully verified candidate integration baseline for operator review.",
+    "overall_risk": "L2",
+    "integration_policy": "verified recovery integration baseline followed by operator review; never merge, push, activate a candidate release, or execute P2-08"
+  },
+  "contract": {
+    "authority_model": "frozen_v6_history_plus_committed_recovery_prefix_plus_reviewed_recovery_blueprint",
+    "recovery_source_commit": "0a3f29f597034565ad7257b7eb9327cfde531876",
+    "accepted_v6_tasks": [
+      "P2-MAP",
+      "P2-01",
+      "P2-02A",
+      "P2-02B",
+      "P2-03A",
+      "P2-03B"
+    ],
+    "remaining_task_sequence": [
+      "P2-04R",
+      "P2-05R",
+      "P2-05C",
+      "P2-06R",
+      "P2-07A-R",
+      "P2-07B-R"
+    ],
+    "changed_files_policy": "current attempt Git worktree state is authoritative; only declared expected_output_artifacts may survive outside Git status",
+    "cleanup_policy": "seal and validate the terminal result first, remove only the disposable snapshot, then atomically publish a schema-valid cleanup receipt bound to the sealed result; projection derives effective cleanup status from the receipt",
+    "promotion_policy": "P2-08 remains forbidden until operator review, source integration, candidate release installation, and separate promotion-taskpack approval",
+    "write_scope_cardinality_policy": {
+      "default_max_entries": 5,
+      "exact_path_exceptions": {
+        "P2-05C": 6,
+        "P2-06R": 14,
+        "P2-07B-R": 6
+      },
+      "exception_scope_rule": "production and schema paths exact; test and fixture directory scopes allowed",
+      "exception_verification": "full_taskpack_verification_required"
+    }
+  },
+  "approval": {
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase2-experiment-harness-contract-review.v4.json",
+    "schema_path": "experiments/native_agentteam_runtime/schemas/phase2_contract_review.schema.json",
+    "required_decision": "approved",
+    "git_object_format_required": true,
+    "runtime_release_binding_required": true,
+    "digest_bindings": [
+      "source_plan",
+      "blueprint",
+      "research_authority",
+      "review_schema",
+      "contract",
+      "schema_inventory"
+    ]
+  },
+  "agents": [
+    {
+      "agent_id": "agent-implementation-worker-1",
+      "role": "implementation_worker",
+      "runtime_profile": {
+        "adapter": "codex"
+      }
+    }
+  ],
+  "verification": {
+    "command": [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "experiments/native_agentteam_runtime/m0_runtime/tests",
+      "-p",
+      "test*.py"
+    ],
+    "success_criteria": [
+      "Every accepted task has a Git-grounded current-attempt diff or an explicit no-change result.",
+      "The complete runtime suite passes after each integrated change.",
+      "Snapshot cleanup has durable receipt evidence and never deletes a sealed result.",
+      "P2-08 is not executed and no source branch is merged or pushed."
+    ]
+  },
+  "policy": {
+    "semantic_authority": "source plan plus approved review v4",
+    "task_generation": "disabled",
+    "repo_map_policy": "consume the committed Phase 2 handoff as bounded context; inspect current source for changed symbols",
+    "trace_policy": "task-level compact evidence plus milestone integration report",
+    "merge_policy": "integration baseline only; operator controls source merge",
+    "network_policy": "no live provider calibration outside ordinary Codex worker calls"
+  },
+  "tasks": [
+    {
+      "task_id": "P2-04R",
+      "objective": "Audit and repair the operator action ledger so every supported operator input maps to the closed research vocabulary with append-only, replay-idempotent, secret-safe evidence.",
+      "goal_alignment": "Completes the interrupted P2-04 review without trusting historical changed-file declarations.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/operator_control.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/semantic_feedback.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_ledger.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/operator_control.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/schemas/experiment_operator_action.schema.json"
+      ],
+      "required_deliverables": [
+        "closed_action_classification",
+        "append_only_ledger",
+        "source_event_correlation",
+        "equal_action_limits",
+        "idempotent_replay"
+      ],
+      "acceptance_criteria": [
+        "Manual gates, permission answers, guidance, and decisions map to the closed vocabulary.",
+        "Status inspection and deterministic controller actions do not count as interventions.",
+        "Replay is idempotent by action ID and retained reasons are bounded and secret-safe.",
+        "An existing complete implementation may return no code change only with focused verification evidence."
+      ],
+      "stop_condition": "Stop if a mode receives unregistered task information or operator secrets must be duplicated.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-29-phase2-experiment-harness-recovery.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/handoffs/phase2-repo-map-handoff.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ]
+    },
+    {
+      "task_id": "P2-05R",
+      "objective": "Audit and repair versioned recovery snapshots, immutable all-outcome result bundles, projection rebuild, scan-scope binding, and concise comparison output.",
+      "goal_alignment": "Completes P2-05 result authority before production cleanup is connected.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "P2-04R"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/projection_db.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/projection_db.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/schemas/experiment_result_bundle.schema.json",
+        "experiments/native_agentteam_runtime/schemas/experiment_recovery_snapshot.schema.json"
+      ],
+      "required_deliverables": [
+        "versioned_recovery_snapshots",
+        "all_outcome_terminal_bundles",
+        "atomic_bundle_sealing",
+        "complete_scan_scope_binding",
+        "projection_reconciliation",
+        "concise_comparison_renderer"
+      ],
+      "acceptance_criteria": [
+        "All terminal outcomes remain visible and recovery snapshots cannot be mistaken for terminal bundles.",
+        "Result and sidecar publish through one fsynced staging directory and atomic no-replace publication.",
+        "Bundling validates run, protocol, taskpack, acceptance, evaluator, sandbox, scan-scope, and invocation-set bindings.",
+        "Projection rebuild preserves totals and bundle digests and comparison retains unsuccessful runs."
+      ],
+      "stop_condition": "Stop if a sealed bundle can mutate or SQLite becomes authority.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-29-phase2-experiment-harness-recovery.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ]
+    },
+    {
+      "task_id": "P2-05C",
+      "objective": "Connect clean-snapshot cleanup to the production finalizer and publish durable cleanup evidence bound to the sealed terminal result.",
+      "goal_alignment": "Closes the review finding that disposable repositories were retained and cleanup status stayed permanently pending.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "P2-05R"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_workspace.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/projection_db.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_workspace.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/projection_db.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/schemas/experiment_clean_snapshot_cleanup.schema.json"
+      ],
+      "required_deliverables": [
+        "production_cleanup_call",
+        "immutable_cleanup_receipt",
+        "sealed_result_binding",
+        "cleanup_failure_evidence",
+        "receipt_derived_projection_status"
+      ],
+      "acceptance_criteria": [
+        "The finalizer seals and validates the terminal result before cleanup starts.",
+        "Cleanup removes only the disposable snapshot and revalidates the sealed result digest afterwards.",
+        "A schema-valid immutable receipt binds run identity, sealed result digest, pre/post digest, and removed, already_absent, or failed status.",
+        "Cleanup failure preserves the terminal result and is visible in projection, show, and comparison.",
+        "A missing receipt leaves cleanup incomplete rather than silently completed.",
+        "Fault-injection tests prove result preservation and idempotent recovery."
+      ],
+      "stop_condition": "Stop if cleanup must mutate the sealed result or can remove authority outside the disposable snapshot.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-29-phase2-experiment-harness-recovery.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ]
+    },
+    {
+      "task_id": "P2-06R",
+      "objective": "Audit and repair the three execution-mode adapters under one immutable protocol, one provider lane, standalone sanitized workspaces, and complete lifecycle registry authority.",
+      "goal_alignment": "Completes P2-06 with the cleanup-finalization dependency made explicit.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L2",
+      "depends_on": [
+        "P2-05C"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/handoffs/phase2-repo-map-handoff.json",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/mailbox_worker.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/m0_runtime.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/schemas/experiment_evaluation.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_started.schema.json",
+        "experiments/native_agentteam_runtime/schemas/model_invocation_usage.schema.json"
+      ],
+      "required_deliverables": [
+        "common_mode_protocol",
+        "three_mode_adapters",
+        "standalone_sanitized_workspaces",
+        "complete_lifecycle_registry",
+        "sandbox_reference_injection",
+        "common_evaluator_and_finalizer"
+      ],
+      "acceptance_criteria": [
+        "All modes consume equal protocol facts, environment, model policy, budgets, and operator limits.",
+        "Author, attempt, and candidate workspaces use independent standalone Git object stores.",
+        "Every provider lifecycle is registered, sandbox-bound, terminal, and included exactly once in the sealed invocation manifest.",
+        "Missing, stale, extra, unconsumed, or non-terminal registrations fail before evaluation.",
+        "Every mode reaches the common evaluator, result finalizer, and P2-05C cleanup receipt path.",
+        "Ordinary tests never launch a live provider."
+      ],
+      "stop_condition": "Stop if modes receive unequal inputs or provider-visible state can modify controller authority.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-29-phase2-experiment-harness-recovery.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/handoffs/phase2-repo-map-handoff.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ]
+    },
+    {
+      "task_id": "P2-07A-R",
+      "objective": "Re-run deterministic L1 and bounded L2 calibration across all modes and retain equal-input, usage, isolation, cleanup, bundle, replay, and projection evidence.",
+      "goal_alignment": "Proves the repaired harness before candidate promotion.",
+      "work_type": "verification_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "P2-06R"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/projection_db.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_calibration.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/fixtures/phase2_experiments"
+      ],
+      "required_deliverables": [
+        "three_mode_equal_input_evidence",
+        "repeat_drift_evidence",
+        "complete_usage_coverage",
+        "isolation_and_cleanup_evidence",
+        "all_terminal_status_evidence",
+        "projection_rebuild_equality"
+      ],
+      "acceptance_criteria": [
+        "All three modes execute the same deterministic protocol family and environment contract.",
+        "Counted lifecycle and token usage coverage are 100 percent without duplicate stable-request cost.",
+        "Canary denial, sealed result preservation, and cleanup receipt completion are proven.",
+        "Every required terminal outcome remains visible after projection rebuild.",
+        "Calibration output makes no benchmark superiority claim."
+      ],
+      "stop_condition": "Stop if deterministic evidence requires a live provider or is presented as scored evidence.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-29-phase2-experiment-harness-recovery.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/fixtures/phase2_experiments"
+      ]
+    },
+    {
+      "task_id": "P2-07B-R",
+      "objective": "Audit and repair deterministic Phase 2 gate controllers and relation validators without executing promotion or any live provider call.",
+      "goal_alignment": "Leaves an executable candidate for the separately approved P2-08 promotion taskpack.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L2",
+      "depends_on": [
+        "P2-07A-R"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/handoffs/phase2-repo-map-handoff.json",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_gates.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_calibration.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_gates.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+        "experiments/native_agentteam_runtime/schemas/taskpack_blueprint.schema.json"
+      ],
+      "required_deliverables": [
+        "readiness_relation_validator",
+        "live_relation_validator",
+        "finalization_relation_validator",
+        "epoch_bound_authorization",
+        "controller_only_taskpack_contract",
+        "deterministic_pause_and_resume"
+      ],
+      "acceptance_criteria": [
+        "Gate validators recompute Git and evidence relations rather than trusting schema-valid strings.",
+        "P2-09 cannot call a provider without current epoch-bound operator authorization.",
+        "The candidate runtime can materialize the separately governed controller-only promotion blueprint.",
+        "This recovery run does not execute P2-08, install a candidate release, merge the source branch, or push.",
+        "The complete runtime suite passes on the final integration baseline."
+      ],
+      "stop_condition": "Stop if a gate can pass without recomputation or a live call can bypass current authorization.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-29-phase2-experiment-harness-recovery.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/handoffs/phase2-repo-map-handoff.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
+      ]
+    }
+  ]
+}
