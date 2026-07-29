@@ -684,38 +684,38 @@ class ExperimentController:
             raise ExperimentControllerError(
                 "integration_active must be a boolean"
             )
-        lane_open = self._provider_lane_is_open()
-        with self._state_lock():
-            document = self._load_document()
-            budget_state, _events = advance_experiment_budget(
-                document["budget_state"],
-                now_monotonic=now_monotonic,
-                monotonic=self._monotonic,
-            )
-            status = document["controller_status"]
-            status = _status_after_budget_observation(
-                status,
-                budget_state,
-            )
-            if (
-                boundary == "post_integration"
-                and status == "budget_draining"
-                and not lane_open
-                and scheduler_inflight == 0
-                and not integration_active
-                and not tuple(open_invocation_ids)
-            ):
-                status = "budget_stopped"
-            self._persist(status, budget_state)
-            return {
-                "boundary": boundary,
-                "controller_status": status,
-                "allow_provider_launch": status == "active",
-                "allow_integration": (
-                    status == "active" or integration_active
-                ),
-                "provider_lane_open": lane_open,
-            }
+        with self._provider_lane_observation() as lane_open:
+            with self._state_lock():
+                document = self._load_document()
+                budget_state, _events = advance_experiment_budget(
+                    document["budget_state"],
+                    now_monotonic=now_monotonic,
+                    monotonic=self._monotonic,
+                )
+                status = document["controller_status"]
+                status = _status_after_budget_observation(
+                    status,
+                    budget_state,
+                )
+                if (
+                    boundary == "post_integration"
+                    and status == "budget_draining"
+                    and not lane_open
+                    and scheduler_inflight == 0
+                    and not integration_active
+                    and not tuple(open_invocation_ids)
+                ):
+                    status = "budget_stopped"
+                self._persist(status, budget_state)
+                return {
+                    "boundary": boundary,
+                    "controller_status": status,
+                    "allow_provider_launch": status == "active",
+                    "allow_integration": (
+                        status == "active" or integration_active
+                    ),
+                    "provider_lane_open": lane_open,
+                }
 
     def interrupt(self):
         """Persist an interruption without changing the frozen projection."""
@@ -791,6 +791,17 @@ class ExperimentController:
                 raise ExperimentControllerIntegrityError(
                     "scored budget extension or reduction is forbidden"
                 )
+            state, _events = advance_experiment_budget(
+                state,
+                monotonic=self._monotonic,
+            )
+            status = _status_after_budget_observation(
+                "interrupted",
+                state,
+            )
+            if status != "interrupted":
+                self._persist(status, state)
+                return copy.deepcopy(self._load_document())
             self._persist("active", state)
             return copy.deepcopy(self._load_document())
 
@@ -1359,17 +1370,21 @@ class ExperimentController:
         admission.record = abandoned
         admission._release()
 
-    def _provider_lane_is_open(self):
+    @contextmanager
+    def _provider_lane_observation(self):
+        """Fence admission while one safe-boundary decision is committed."""
         try:
             fd = self._acquire_provider_lane()
         except ExperimentProviderLaneBusy:
-            return True
+            yield True
+            return
         try:
             record = _read_json_fd(fd, "provider lane", allow_empty=True)
             if record is None or record.get("lane_status") != "admitted":
-                return False
-            self._validate_lane_record(record)
-            return True
+                yield False
+            else:
+                self._validate_lane_record(record)
+                yield True
         finally:
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)

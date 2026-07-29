@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -34,6 +35,7 @@ from agentteam_runtime.experiment_controller import (
     ExperimentControllerError,
     ExperimentControllerIntegrityError,
     ExperimentProviderAdmissionDenied,
+    ExperimentProviderLaneBusy,
     create_experiment_controller,
 )
 from agentteam_runtime.experiment_gates import (
@@ -2324,6 +2326,93 @@ class ExperimentProviderBudgetBoundaryTests(unittest.TestCase):
             ):
                 controller.resume_interrupted()
 
+    def test_stop_boundary_fences_new_provider_admission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = create_experiment_controller(
+                root,
+                protocol_id="phase2-provider-boundary-race",
+                max_total_tokens=100,
+                max_wall_time_seconds=1,
+                soft_warning_ratio=0.8,
+                scored=True,
+                initial_monotonic=0,
+                monotonic=lambda: 0,
+            )
+            lifecycle_root = root / "runs" / "RACE"
+            lifecycle_root.mkdir(parents=True)
+            boundary_waiting = threading.Event()
+            admission_attempted = threading.Event()
+            observation = {}
+            boundary_error = []
+            original_state_lock = controller._state_lock
+
+            @contextmanager
+            def coordinated_state_lock():
+                if threading.current_thread().name == "budget-boundary":
+                    boundary_waiting.set()
+                    if not admission_attempted.wait(timeout=5):
+                        raise AssertionError(
+                            "provider admission attempt did not run"
+                        )
+                with original_state_lock() as locked:
+                    yield locked
+
+            def observe_stop_boundary():
+                try:
+                    observation.update(
+                        controller.observe_boundary(
+                            "post_integration",
+                            scheduler_inflight=0,
+                            integration_active=False,
+                            now_monotonic=2,
+                        )
+                    )
+                except Exception as exc:
+                    boundary_error.append(exc)
+
+            admission = None
+            admission_error = None
+            with patch.object(
+                controller,
+                "_state_lock",
+                coordinated_state_lock,
+            ):
+                boundary_thread = threading.Thread(
+                    target=observe_stop_boundary,
+                    name="budget-boundary",
+                )
+                boundary_thread.start()
+                self.assertTrue(boundary_waiting.wait(timeout=5))
+                try:
+                    admission = controller.prelaunch_admission(
+                        {
+                            "invocation_id": "INV-RACE",
+                            "lifecycle_root": str(lifecycle_root),
+                            "run_id": "RUN-RACE",
+                        },
+                        now_monotonic=0,
+                    )
+                except ExperimentProviderLaneBusy as exc:
+                    admission_error = exc
+                finally:
+                    admission_attempted.set()
+                boundary_thread.join(timeout=5)
+
+            if admission is not None:
+                admission.abandon_before_start()
+            self.assertFalse(boundary_thread.is_alive())
+            self.assertEqual(boundary_error, [])
+            self.assertIsNone(admission)
+            self.assertIsInstance(
+                admission_error,
+                ExperimentProviderLaneBusy,
+            )
+            self.assertEqual(
+                observation["controller_status"],
+                "budget_stopped",
+            )
+
     def test_valid_state_snapshot_rollback_restores_latest_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2427,6 +2516,43 @@ class ExperimentProviderBudgetBoundaryTests(unittest.TestCase):
             self.assertEqual(
                 resumed["budget_state"]["total_tokens"],
                 15,
+            )
+
+    def test_interruption_cannot_resume_after_original_wall_budget_expires(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            observed_monotonic = [0]
+            controller = create_experiment_controller(
+                root,
+                protocol_id="phase2-interruption-wall-budget",
+                max_total_tokens=100,
+                max_wall_time_seconds=10,
+                soft_warning_ratio=0.8,
+                scored=True,
+                initial_monotonic=0,
+                monotonic=lambda: observed_monotonic[0],
+            )
+            controller.interrupt()
+            observed_monotonic[0] = 11
+
+            resumed = controller.resume_interrupted(
+                reference=controller.reference,
+            )
+
+            self.assertEqual(
+                resumed["controller_status"],
+                "budget_draining",
+            )
+            self.assertTrue(resumed["budget_state"]["exhausted"])
+            stopped = controller.observe_boundary(
+                "post_integration",
+                scheduler_inflight=0,
+                integration_active=False,
+                now_monotonic=11,
+            )
+            self.assertEqual(
+                stopped["controller_status"],
+                "budget_stopped",
             )
 
 
