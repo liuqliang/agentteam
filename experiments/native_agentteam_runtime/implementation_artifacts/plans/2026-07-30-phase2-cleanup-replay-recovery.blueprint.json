@@ -42,7 +42,7 @@
     "write_scope_cardinality_policy": {
       "default_max_entries": 9,
       "exact_path_exceptions": {
-        "P2-05C-R": 9
+        "P2-05C-R": 8
       },
       "exception_scope_rule": "all production, schema, and test paths are exact",
       "exception_verification": "focused cleanup, calibration, and readiness tests plus full runtime suite"
