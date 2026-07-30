@@ -335,9 +335,16 @@ def run_gate_controller(
                 "provider_calls": 0,
                 "target_mutations": 0,
             }
-        permit = require_live_provider_authorization(
-            authorization_path,
-            context,
+        permit = (
+            _require_current_live_provider_authorization(
+                authorization_path,
+                context,
+            )
+            if provider_launcher is not None
+            else require_live_provider_authorization(
+                authorization_path,
+                context,
+            )
         )
         if provider_launcher is not None:
             if spec.gate_id != "P2-09" or not callable(
@@ -430,6 +437,22 @@ def require_live_provider_authorization(path, context):
         "epoch_number": authorization["epoch_number"],
         "epoch_sha256": authorization["epoch_sha256"],
     }
+
+
+def _require_current_live_provider_authorization(path, context):
+    permit = require_live_provider_authorization(path, context)
+    if (
+        permit["epoch_number"] != _positive_int(context, "epoch_number")
+        or permit["epoch_sha256"] != _sha256_value(
+            context,
+            "epoch_sha256",
+        )
+    ):
+        raise Phase2GateError(
+            "live provider authorization is not bound to the current "
+            "gate epoch"
+        )
+    return permit
 
 
 def execute_readiness_promotion_action(
@@ -798,7 +821,7 @@ def execute_live_calibration_action(
             "live calibration repository must be clean"
         )
     authorization_path = context.get("authorization_path")
-    permit = require_live_provider_authorization(
+    permit = _require_current_live_provider_authorization(
         authorization_path,
         context,
     )

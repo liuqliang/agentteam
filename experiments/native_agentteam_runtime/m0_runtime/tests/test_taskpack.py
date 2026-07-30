@@ -1976,6 +1976,54 @@ class TaskpackTests(unittest.TestCase):
                 "readiness-at-f",
             )
 
+    def test_controller_only_relation_context_rejects_legacy_unscoped_fallback(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp)
+            run_dir = work_root / "runs" / "promotion"
+            legacy_context = (
+                run_dir
+                / "state"
+                / "P2-08.relation-context.v1.json"
+            )
+            _write_json(
+                legacy_context,
+                {
+                    "epoch_number": 2,
+                    "epoch_sha256": "2" * 64,
+                    "integration_head": "a" * 40,
+                },
+            )
+            declaration = _phase2_controller_gate_declarations()[0]
+            with self.assertRaisesRegex(
+                agentteam_module.Phase2GateError,
+                "relation context is missing or unsafe",
+            ):
+                agentteam_module._phase2_gate_relation_context(
+                    {
+                        "work_root": work_root,
+                        "run_dir": run_dir,
+                        "epochs_root": (
+                            run_dir
+                            / "state"
+                            / "post_backlog_gates"
+                            / "epochs"
+                        ),
+                        "taskpack": {
+                            "execution_mode": "controller_only",
+                        },
+                    },
+                    {
+                        "record": {"epoch_number": 2},
+                        "digest": "2" * 64,
+                    },
+                    declaration,
+                    {},
+                    run_dir,
+                    "a" * 40,
+                )
+
     def test_phase2_controller_restarts_dependency_chain_after_epoch_refresh(
         self,
     ):
@@ -8553,6 +8601,32 @@ class TaskpackTests(unittest.TestCase):
                 / "epoch.v1.json"
             )
             self.assertTrue(epoch_path.is_file())
+            original_execution_mode = taskpack.get("execution_mode")
+            tampered_taskpack = json.loads(
+                frozen_taskpack_path.read_text(encoding="utf-8")
+            )
+            tampered_taskpack["execution_mode"] = "controller_only"
+            _write_json(frozen_taskpack_path, tampered_taskpack)
+            tampered_context = (
+                agentteam_module._post_backlog_gate_context(
+                    profile,
+                    run_dir,
+                )
+            )
+            with self.assertRaisesRegex(
+                agentteam_module.AgentTeamCliError,
+                "gate epoch declaration digest is stale",
+            ):
+                agentteam_module._read_current_gate_epoch(
+                    tampered_context
+                )
+            if original_execution_mode is None:
+                tampered_taskpack.pop("execution_mode", None)
+            else:
+                tampered_taskpack["execution_mode"] = (
+                    original_execution_mode
+                )
+            _write_json(frozen_taskpack_path, tampered_taskpack)
 
             evidence_run = work_root / "runs" / "live-evidence-run"
             _write_json(

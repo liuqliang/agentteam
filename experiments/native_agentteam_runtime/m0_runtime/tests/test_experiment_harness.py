@@ -13492,6 +13492,26 @@ class Phase2GateTests(unittest.TestCase):
                 context,
             )
             self.assertTrue(permitted["provider_launch_authorized"])
+            stale_launcher = Mock()
+            with self.assertRaisesRegex(
+                Phase2GateError,
+                "current gate epoch",
+            ):
+                run_gate_controller(
+                    spec,
+                    root / "stale-calibration.json",
+                    {
+                        **context,
+                        "authorization_path": str(authorization_path),
+                        "authorization_epoch_number": 2,
+                        "authorization_epoch_sha256": "1" * 64,
+                        "epoch_number": 3,
+                        "epoch_sha256": "4" * 64,
+                    },
+                    result_path=root / "stale-controller-result.json",
+                    provider_launcher=stale_launcher,
+                )
+            stale_launcher.assert_not_called()
             with self.assertRaisesRegex(
                 Phase2GateError,
                 "model",

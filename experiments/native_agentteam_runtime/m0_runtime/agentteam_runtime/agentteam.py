@@ -3728,6 +3728,17 @@ def _post_backlog_gate_context(profile, run_dir):
     }
 
 
+def _gate_declaration_authority_sha256(context):
+    return _sha256_json(
+        {
+            "execution_mode": context["taskpack"].get(
+                "execution_mode"
+            ),
+            "post_backlog_gates": context["declarations"],
+        }
+    )
+
+
 def _initialize_post_backlog_gate_state(profile, run_dir):
     context = _post_backlog_gate_context(profile, run_dir)
     if context is None:
@@ -3739,7 +3750,9 @@ def _initialize_post_backlog_gate_state(profile, run_dir):
         "schema_version": "post_backlog_gate_state.v1",
         "implementation_run_id": context["run_dir"].name,
         "state": "awaiting_validated_baseline",
-        "gate_declaration_sha256": _sha256_json(context["declarations"]),
+        "gate_declaration_sha256": (
+            _gate_declaration_authority_sha256(context)
+        ),
         "created_at": _format_utc_timestamp(datetime.now(UTC)),
     }
     _atomic_write_json(state_path, value, replace=False)
@@ -3869,7 +3882,9 @@ def _gate_seal_baseline(project_root, profile, run_dir, *, expected_integration_
             "implementation_run_id": context["run_dir"].name,
             "epoch_number": 1,
             "prior_epoch_sha256": None,
-            "gate_declaration_sha256": _sha256_json(context["declarations"]),
+            "gate_declaration_sha256": (
+                _gate_declaration_authority_sha256(context)
+            ),
             "git_object_format": object_format,
             "target_branch": target_branch,
             "target_head_sha": target_head,
@@ -8387,7 +8402,10 @@ def _read_current_gate_epoch(context):
             raise AgentTeamCliError("gate epoch number does not match directory", path=str(record_path))
         if record.get("prior_epoch_sha256") != prior_digest:
             raise AgentTeamCliError("gate epoch digest chain is invalid", path=str(record_path))
-        if record.get("gate_declaration_sha256") != _sha256_json(context["declarations"]):
+        if (
+            record.get("gate_declaration_sha256")
+            != _gate_declaration_authority_sha256(context)
+        ):
             raise AgentTeamCliError("gate epoch declaration digest is stale", path=str(record_path))
         digest = _sha256_json(record)
         prior_digest = digest
@@ -8507,7 +8525,16 @@ def _phase2_gate_relation_context(
         / "state"
         / f"{declaration['gate_id']}.relation-context.v1.json"
     )
-    if not context_path.exists() and legacy_context_path.exists():
+    controller_only = (
+        isinstance(context.get("taskpack"), dict)
+        and context["taskpack"].get("execution_mode")
+        == "controller_only"
+    )
+    if (
+        not context_path.exists()
+        and not controller_only
+        and legacy_context_path.exists()
+    ):
         context_path = legacy_context_path
     if context_path.is_symlink() or not context_path.is_file():
         raise Phase2GateError(
@@ -9125,8 +9152,8 @@ def _publish_phase2_action_epoch(
         "implementation_run_id": context["run_dir"].name,
         "epoch_number": record["epoch_number"] + 1,
         "prior_epoch_sha256": current["digest"],
-        "gate_declaration_sha256": _sha256_json(
-            context["declarations"]
+        "gate_declaration_sha256": (
+            _gate_declaration_authority_sha256(context)
         ),
         "git_object_format": record["git_object_format"],
         "target_branch": record["target_branch"],
