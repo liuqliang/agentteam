@@ -31,6 +31,7 @@ from agentteam_runtime.experiment_calibration import (
     ExperimentCalibrationError,
     load_deterministic_calibration_report,
     run_deterministic_experiment_calibration,
+    validate_deterministic_calibration_report,
 )
 from agentteam_runtime.experiment_controller import (
     ExperimentControllerError,
@@ -12685,6 +12686,26 @@ class ExperimentCalibrationTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(
+                report["equal_input_evidence"]["modes"],
+                [
+                    "single_codex",
+                    "agentteam_direct",
+                    "agentteam_full",
+                ],
+            )
+            self.assertEqual(
+                report["equal_input_evidence"]["protocol_sha256"],
+                report["protocol_sha256"],
+            )
+            self.assertEqual(
+                report["equal_input_evidence"]["repetition_count"],
+                4,
+            )
+            self.assertNotEqual(
+                report["repeat_drift"]["baseline_bundle_sha256"],
+                report["repeat_drift"]["repeat_bundle_sha256"],
+            )
+            self.assertEqual(
                 report["usage_coverage"]["lifecycle_percent"],
                 100,
             )
@@ -12696,6 +12717,27 @@ class ExperimentCalibrationTests(unittest.TestCase):
                 report["projection_rebuild"]["result_count"],
                 9,
             )
+            self.assertTrue(
+                report["projection_rebuild"][
+                    "identity_fields_equal"
+                ]
+            )
+            self.assertEqual(
+                report["projection_rebuild"]["projection_source"],
+                "db",
+            )
+            self.assertEqual(
+                report["projection_rebuild"]["first_identity"],
+                report["projection_rebuild"]["second_identity"],
+            )
+            self.assertEqual(
+                len(
+                    report["projection_rebuild"][
+                        "retained_result_bundles"
+                    ]
+                ),
+                9,
+            )
             self.assertEqual(
                 report["controlled_outcomes"]["retention_status"],
                 "passed",
@@ -12703,6 +12745,20 @@ class ExperimentCalibrationTests(unittest.TestCase):
             self.assertEqual(
                 report["isolation"]["cleanup_receipt_count"],
                 9,
+            )
+            self.assertEqual(
+                report["isolation"]["sealed_result_count"],
+                9,
+            )
+            self.assertEqual(
+                report["isolation"][
+                    "sealed_result_preservation_status"
+                ],
+                "passed",
+            )
+            self.assertEqual(
+                report["duplicate_request"]["replay_status"],
+                "passed",
             )
             self.assertEqual(
                 set(
@@ -12722,6 +12778,17 @@ class ExperimentCalibrationTests(unittest.TestCase):
                     "benchmark_superiority_claim"
                 ]
             )
+            incomplete_projection = copy.deepcopy(report)
+            incomplete_projection["projection_rebuild"][
+                "terminal_statuses"
+            ].remove("interrupted")
+            with self.assertRaisesRegex(
+                ExperimentCalibrationError,
+                "projection rebuild",
+            ):
+                validate_deterministic_calibration_report(
+                    incomplete_projection
+                )
             loaded = load_deterministic_calibration_report(
                 output_path
             )
@@ -12944,6 +13011,27 @@ class Phase2GateTests(unittest.TestCase):
 
     @staticmethod
     def _write_calibration_report(path, source_commit):
+        projection_identity = {
+            "runs": 8,
+            "invocations": 8,
+            "invocation_digest": "6" * 64,
+            "experiment_results": 8,
+            "experiment_result_digest": "7" * 64,
+            "experiment_recovery": 0,
+            "experiment_recovery_digest": hashlib.sha256(
+                b""
+            ).hexdigest(),
+        }
+        projected_statuses = [
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+            "failed",
+            "infrastructure_failed",
+            "interrupted",
+            "budget_stopped",
+        ]
         report = {
             "schema_version": "phase2_deterministic_calibration.v1",
             "calibration_status": "passed",
@@ -12962,20 +13050,46 @@ class Phase2GateTests(unittest.TestCase):
                     ("bounded_l2", "3"),
                 )
             },
-            "mode_results": [
-                {"mode": mode}
-                for mode in (
+            "equal_input_evidence": {
+                "status": "passed",
+                "protocol_family": "phase2_three_mode_equal_input",
+                "modes": [
                     "single_codex",
                     "agentteam_direct",
                     "agentteam_full",
+                ],
+                "repetition_count": 4,
+                "protocol_sha256": "1" * 64,
+                "source_commit": source_commit,
+                "environment_contract_sha256": "8" * 64,
+                "runtime_release_identity_sha256": "9" * 64,
+                "common_evaluation_inputs_sha256": "a" * 64,
+            },
+            "mode_results": [
+                {
+                    "mode": mode,
+                    "bundle_sha256": f"{index:x}" * 64,
+                }
+                for index, mode in enumerate(
+                    (
+                        "single_codex",
+                        "agentteam_direct",
+                        "agentteam_full",
+                    ),
+                    start=1,
                 )
             ],
-            "repeat_result": {"mode": "single_codex"},
+            "repeat_result": {
+                "mode": "single_codex",
+                "bundle_sha256": "4" * 64,
+            },
             "repeat_drift": {
                 "status": "complete",
                 "mode": "single_codex",
                 "acceptance_status_equal": True,
                 "changed_files_equal": True,
+                "baseline_bundle_sha256": "1" * 64,
+                "repeat_bundle_sha256": "4" * 64,
                 "superiority_interpretation": False,
             },
             "controlled_outcomes": {
@@ -12991,10 +13105,31 @@ class Phase2GateTests(unittest.TestCase):
                     "infrastructure_failed",
                     "interrupted",
                 ],
+                "retained_result_bundles": [
+                    {
+                        "experiment_run_id": run_id,
+                        "terminal_status": status,
+                        "bundle_sha256": f"{index:x}" * 64,
+                    }
+                    for index, (run_id, status) in enumerate(
+                        (
+                            ("failed", "failed"),
+                            (
+                                "infrastructure-failed",
+                                "infrastructure_failed",
+                            ),
+                            ("interrupted", "interrupted"),
+                            ("budget-stopped", "budget_stopped"),
+                        ),
+                        start=5,
+                    )
+                ],
                 "retention_status": "passed",
             },
             "duplicate_request": {
                 "status": "passed",
+                "replay_status": "passed",
+                "stable_request_key": "calibration-replay",
                 "allocation_status": "existing",
                 "provider_calls_during_duplicate_allocation": 0,
                 "result_bundle_sha256": "4" * 64,
@@ -13003,9 +13138,32 @@ class Phase2GateTests(unittest.TestCase):
                 "lifecycle_percent": 100,
                 "token_percent": 100,
                 "cached_input_distinct": True,
+                "covered_invocations": 8,
+                "total_invocations": 8,
             },
             "isolation": {
                 "clean_snapshot_status": "passed",
+                "cleanup_receipt_status": "passed",
+                "cleanup_receipt_count": 8,
+                "sealed_result_preservation_status": "passed",
+                "sealed_result_count": 8,
+                "sealed_bundle_sha256s": [
+                    f"{index:x}" * 64
+                    for index in range(1, 9)
+                ],
+                "cleanup_receipt_sha256s": [
+                    value * 64
+                    for value in (
+                        "9",
+                        "a",
+                        "b",
+                        "c",
+                        "d",
+                        "e",
+                        "f",
+                        "0",
+                    )
+                ],
                 "canary_denial_status": "passed",
                 "retained_leak_scan_status": "passed",
             },
@@ -13017,10 +13175,33 @@ class Phase2GateTests(unittest.TestCase):
                     "decision_escalation": 1,
                 },
             },
-            "projection_rebuild": {"status": "passed"},
+            "projection_rebuild": {
+                "status": "passed",
+                "projection_source": "db",
+                "identity_fields_equal": True,
+                "first_identity": projection_identity,
+                "second_identity": dict(projection_identity),
+                "result_count": len(projected_statuses),
+                "terminal_statuses": sorted(
+                    set(projected_statuses)
+                ),
+                "retained_result_bundles": [
+                    {
+                        "experiment_run_id": (
+                            f"projected-{index}"
+                        ),
+                        "terminal_status": status,
+                        "bundle_sha256": f"{index:x}" * 64,
+                    }
+                    for index, status in enumerate(
+                        projected_statuses,
+                        start=1,
+                    )
+                ],
+            },
             "comparison": {
                 "status": "complete",
-                "result_count": 7,
+                "result_count": len(projected_statuses),
                 "sha256": "5" * 64,
                 "retained_terminal_statuses": [
                     "budget_stopped",

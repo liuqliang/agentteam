@@ -32,6 +32,7 @@ from .experiment_workspace import load_clean_snapshot_attestation
 from .projection_db import (
     build_project_stats,
     check_project_projection_db,
+    read_projected_experiment_results,
     rebuild_project_projection_db,
 )
 
@@ -119,7 +120,10 @@ def run_deterministic_experiment_calibration(
 
     all_runs = [*primary, repeat, *controlled]
     _validate_unique_results(all_runs)
-    _validate_equal_contract(primary + [repeat])
+    equal_input = _validate_equal_contract(
+        primary + [repeat],
+        protocol,
+    )
     coverage = _validate_usage_coverage(all_runs)
     isolation = _validate_isolation(all_runs)
     outcomes = _validate_controlled_outcomes(controlled)
@@ -154,6 +158,7 @@ def run_deterministic_experiment_calibration(
         "protocol_sha256": protocol_sha256,
         "source_commit": protocol["repository"]["commit"],
         "fixture_evidence": fixtures,
+        "equal_input_evidence": equal_input,
         "mode_results": [
             _result_summary(item)
             for item in sorted(
@@ -231,6 +236,7 @@ def validate_deterministic_calibration_report(report):
         "protocol_sha256",
         "source_commit",
         "fixture_evidence",
+        "equal_input_evidence",
         "mode_results",
         "repeat_result",
         "repeat_drift",
@@ -266,12 +272,43 @@ def validate_deterministic_calibration_report(report):
         raise ExperimentCalibrationError(
             "deterministic calibration fixture evidence is invalid"
         )
+    equal_input = report.get("equal_input_evidence")
+    if (
+        not isinstance(equal_input, dict)
+        or equal_input.get("status") != "passed"
+        or equal_input.get("protocol_family")
+        != "phase2_three_mode_equal_input"
+        or equal_input.get("modes") != list(_MODES)
+        or equal_input.get("protocol_sha256")
+        != report["protocol_sha256"]
+        or equal_input.get("source_commit")
+        != report["source_commit"]
+        or not _is_sha256(
+            equal_input.get("environment_contract_sha256")
+        )
+        or not _is_sha256(
+            equal_input.get("runtime_release_identity_sha256")
+        )
+        or not _is_sha256(
+            equal_input.get("common_evaluation_inputs_sha256")
+        )
+        or equal_input.get("repetition_count") != 4
+    ):
+        raise ExperimentCalibrationError(
+            "deterministic calibration equal-input evidence is invalid"
+        )
     modes = [
         item.get("mode")
         for item in report.get("mode_results", [])
         if isinstance(item, dict)
     ]
-    if modes != list(_MODES):
+    if (
+        modes != list(_MODES)
+        or any(
+            not _is_sha256(item.get("bundle_sha256"))
+            for item in report["mode_results"]
+        )
+    ):
         raise ExperimentCalibrationError(
             "deterministic calibration mode inventory is invalid"
         )
@@ -280,22 +317,102 @@ def validate_deterministic_calibration_report(report):
     if (
         not isinstance(repeat, dict)
         or repeat.get("mode") not in _MODES
+        or not _is_sha256(repeat.get("bundle_sha256"))
         or not isinstance(drift, dict)
         or drift.get("status") != "complete"
         or drift.get("mode") != repeat["mode"]
         or drift.get("acceptance_status_equal") is not True
         or drift.get("changed_files_equal") is not True
+        or not _is_sha256(drift.get("baseline_bundle_sha256"))
+        or not _is_sha256(drift.get("repeat_bundle_sha256"))
+        or drift["baseline_bundle_sha256"]
+        == drift["repeat_bundle_sha256"]
         or drift.get("superiority_interpretation") is not False
     ):
         raise ExperimentCalibrationError(
             "deterministic calibration repeat evidence is invalid"
         )
+    baseline_mode_result = next(
+        item
+        for item in report["mode_results"]
+        if item["mode"] == repeat["mode"]
+    )
+    if (
+        drift["baseline_bundle_sha256"]
+        != baseline_mode_result["bundle_sha256"]
+        or drift["repeat_bundle_sha256"]
+        != repeat["bundle_sha256"]
+    ):
+        raise ExperimentCalibrationError(
+            "deterministic calibration repeat bundle binding is invalid"
+        )
     controlled = report.get("controlled_outcomes")
+    controlled_failure_run_ids = (
+        controlled.get("controlled_failure_run_ids")
+        if isinstance(controlled, dict)
+        else None
+    )
+    budget_stopped_run_ids = (
+        controlled.get("budget_stopped_run_ids")
+        if isinstance(controlled, dict)
+        else None
+    )
+    controlled_bundles = (
+        controlled.get("retained_result_bundles")
+        if isinstance(controlled, dict)
+        else None
+    )
     if (
         not isinstance(controlled, dict)
         or controlled.get("retention_status") != "passed"
-        or not controlled.get("controlled_failure_run_ids")
-        or not controlled.get("budget_stopped_run_ids")
+        or not isinstance(controlled_failure_run_ids, list)
+        or not controlled_failure_run_ids
+        or any(
+            not isinstance(value, str)
+            for value in controlled_failure_run_ids
+        )
+        or not isinstance(budget_stopped_run_ids, list)
+        or not budget_stopped_run_ids
+        or any(
+            not isinstance(value, str)
+            for value in budget_stopped_run_ids
+        )
+        or not isinstance(controlled_bundles, list)
+        or len(controlled_bundles)
+        != (
+            len(controlled_failure_run_ids)
+            + len(budget_stopped_run_ids)
+        )
+        or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("experiment_run_id"), str)
+            or item.get("terminal_status")
+            not in _CONTROLLED_FAILURE_STATUSES
+            | {"budget_stopped"}
+            or not _is_sha256(item.get("bundle_sha256"))
+            for item in controlled_bundles
+        )
+        or {
+            item.get("experiment_run_id")
+            for item in controlled_bundles
+            if item.get("terminal_status") == "budget_stopped"
+        }
+        != set(budget_stopped_run_ids)
+        or {
+            item.get("experiment_run_id")
+            for item in controlled_bundles
+            if item.get("terminal_status")
+            in _CONTROLLED_FAILURE_STATUSES
+        }
+        != set(controlled_failure_run_ids)
+        or not isinstance(
+            controlled.get("terminal_statuses"),
+            list,
+        )
+        or any(
+            not isinstance(value, str)
+            for value in controlled.get("terminal_statuses", [])
+        )
         or set(controlled.get("terminal_statuses", []))
         != _CONTROLLED_FAILURE_STATUSES | {"budget_stopped"}
     ):
@@ -311,6 +428,16 @@ def validate_deterministic_calibration_report(report):
             "provider_calls_during_duplicate_allocation"
         )
         != 0
+        or duplicate.get("replay_status") != "passed"
+        or not isinstance(
+            duplicate.get("stable_request_key"),
+            str,
+        )
+        or re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.:-]*",
+            duplicate.get("stable_request_key", ""),
+        )
+        is None
         or not _is_sha256(
             duplicate.get("result_bundle_sha256")
         )
@@ -324,16 +451,65 @@ def validate_deterministic_calibration_report(report):
         or coverage.get("lifecycle_percent") != 100
         or coverage.get("token_percent") != 100
         or coverage.get("cached_input_distinct") is not True
+        or not isinstance(coverage.get("covered_invocations"), int)
+        or isinstance(coverage.get("covered_invocations"), bool)
+        or not isinstance(coverage.get("total_invocations"), int)
+        or isinstance(coverage.get("total_invocations"), bool)
+        or coverage.get("covered_invocations", 0) <= 0
+        or coverage.get("covered_invocations")
+        != coverage.get("total_invocations")
     ):
         raise ExperimentCalibrationError(
             "deterministic calibration usage coverage is incomplete"
         )
     isolation = report.get("isolation")
+    sealed_bundle_sha256s = (
+        isolation.get("sealed_bundle_sha256s")
+        if isinstance(isolation, dict)
+        else None
+    )
+    cleanup_receipt_sha256s = (
+        isolation.get("cleanup_receipt_sha256s")
+        if isinstance(isolation, dict)
+        else None
+    )
     if (
         not isinstance(isolation, dict)
         or isolation.get("clean_snapshot_status") != "passed"
         or isolation.get("canary_denial_status") != "passed"
         or isolation.get("retained_leak_scan_status") != "passed"
+        or isolation.get("cleanup_receipt_status") != "passed"
+        or isolation.get("sealed_result_preservation_status")
+        != "passed"
+        or not isinstance(
+            isolation.get("sealed_result_count"),
+            int,
+        )
+        or isinstance(isolation.get("sealed_result_count"), bool)
+        or not isinstance(
+            isolation.get("cleanup_receipt_count"),
+            int,
+        )
+        or isinstance(isolation.get("cleanup_receipt_count"), bool)
+        or isolation.get("sealed_result_count")
+        != isolation.get("cleanup_receipt_count")
+        or isolation.get("sealed_result_count", 0) <= 0
+        or not isinstance(sealed_bundle_sha256s, list)
+        or len(sealed_bundle_sha256s)
+        != isolation.get("sealed_result_count")
+        or not isinstance(cleanup_receipt_sha256s, list)
+        or len(cleanup_receipt_sha256s)
+        != isolation.get("cleanup_receipt_count")
+        or len(set(cleanup_receipt_sha256s))
+        != isolation.get("cleanup_receipt_count")
+        or any(
+            not _is_sha256(value)
+            for value in sealed_bundle_sha256s
+        )
+        or any(
+            not _is_sha256(value)
+            for value in cleanup_receipt_sha256s
+        )
     ):
         raise ExperimentCalibrationError(
             "deterministic calibration isolation is incomplete"
@@ -354,12 +530,92 @@ def validate_deterministic_calibration_report(report):
             "deterministic calibration operator ledger is incomplete"
         )
     projection = report.get("projection_rebuild")
+    first_identity = (
+        projection.get("first_identity")
+        if isinstance(projection, dict)
+        else None
+    )
+    second_identity = (
+        projection.get("second_identity")
+        if isinstance(projection, dict)
+        else None
+    )
+    projected_bundles = (
+        projection.get("retained_result_bundles")
+        if isinstance(projection, dict)
+        else None
+    )
     if (
         not isinstance(projection, dict)
         or projection.get("status") != "passed"
+        or projection.get("projection_source") != "db"
+        or projection.get("identity_fields_equal") is not True
+        or not isinstance(first_identity, dict)
+        or not isinstance(second_identity, dict)
+        or first_identity != second_identity
+        or set(first_identity)
+        != set(_PROJECTION_IDENTITY_FIELDS)
+        or first_identity.get("experiment_results")
+        != projection.get("result_count")
+        or first_identity.get("invocations")
+        != coverage.get("total_invocations")
+        or not isinstance(projection.get("result_count"), int)
+        or isinstance(projection.get("result_count"), bool)
+        or not isinstance(
+            projection.get("terminal_statuses"),
+            list,
+        )
+        or any(
+            not isinstance(value, str)
+            for value in projection.get("terminal_statuses", [])
+        )
+        or set(projection.get("terminal_statuses", []))
+        != (
+            _CONTROLLED_FAILURE_STATUSES
+            | {"budget_stopped", "completed"}
+        )
+        or not isinstance(projected_bundles, list)
+        or len(projected_bundles)
+        != projection.get("result_count")
+        or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("experiment_run_id"), str)
+            or not _is_sha256(item.get("bundle_sha256"))
+            or item.get("terminal_status")
+            not in (
+                _CONTROLLED_FAILURE_STATUSES
+                | {"budget_stopped", "completed"}
+            )
+            for item in projected_bundles
+        )
     ):
         raise ExperimentCalibrationError(
             "deterministic calibration projection rebuild failed"
+        )
+    calibration_bundle_sha256s = [
+        item["bundle_sha256"] for item in report["mode_results"]
+    ]
+    calibration_bundle_sha256s.append(repeat["bundle_sha256"])
+    calibration_bundle_sha256s.extend(
+        item["bundle_sha256"]
+        for item in controlled_bundles
+    )
+    projected_bundle_sha256s = [
+        item["bundle_sha256"]
+        for item in projected_bundles
+    ]
+    if (
+        len(set(calibration_bundle_sha256s))
+        != len(calibration_bundle_sha256s)
+        or sorted(calibration_bundle_sha256s)
+        != sorted(sealed_bundle_sha256s)
+        or sorted(calibration_bundle_sha256s)
+        != sorted(projected_bundle_sha256s)
+        or duplicate["result_bundle_sha256"]
+        not in calibration_bundle_sha256s
+    ):
+        raise ExperimentCalibrationError(
+            "deterministic calibration bundle retention is inconsistent"
         )
     promotion = report.get("readiness_promotion_candidate")
     if (
@@ -716,7 +972,7 @@ def _validate_unique_results(runs):
         )
 
 
-def _validate_equal_contract(runs):
+def _validate_equal_contract(runs, protocol=None):
     first = runs[0]["bundle"]
     fields = (
         "protocol_sha256",
@@ -743,6 +999,29 @@ def _validate_equal_contract(runs):
             raise ExperimentCalibrationError(
                 "calibration modes differ in common evaluation inputs"
             )
+    common_evaluation_inputs = {
+        field: first["result_evidence"][field]
+        for field in evidence_fields
+    }
+    evidence = {
+        "status": "passed",
+        "protocol_family": "phase2_three_mode_equal_input",
+        "modes": list(_MODES),
+        "repetition_count": len(runs),
+        "protocol_sha256": first["protocol_sha256"],
+        "source_commit": first["source_commit"],
+        "runtime_release_identity_sha256": canonical_json_sha256(
+            first["runtime_release_identity"]
+        ),
+        "common_evaluation_inputs_sha256": canonical_json_sha256(
+            common_evaluation_inputs
+        ),
+    }
+    if protocol is not None:
+        evidence["environment_contract_sha256"] = (
+            canonical_json_sha256(protocol["environment"])
+        )
+    return evidence
 
 
 def _validate_usage_coverage(runs):
@@ -811,6 +1090,14 @@ def _validate_isolation(runs):
         "clean_snapshot_count": len(runs),
         "cleanup_receipt_status": "passed",
         "cleanup_receipt_count": len(runs),
+        "cleanup_receipt_sha256s": sorted(
+            item["cleanup_receipt_sha256"] for item in runs
+        ),
+        "sealed_result_preservation_status": "passed",
+        "sealed_result_count": len(runs),
+        "sealed_bundle_sha256s": sorted(
+            item["sealed"]["bundle_sha256"] for item in runs
+        ),
         "canary_denial_status": "passed",
         "sandbox_reference_count": sandbox_reference_count,
         "retained_leak_scan_status": "passed",
@@ -872,6 +1159,23 @@ def _validate_controlled_outcomes(controlled):
                 item["bundle"]["terminal_status"]
                 for item in [*failures, *budget_stops]
             }
+        ),
+        "retained_result_bundles": sorted(
+            (
+                {
+                    "experiment_run_id": item["bundle"][
+                        "experiment_run_id"
+                    ],
+                    "terminal_status": item["bundle"][
+                        "terminal_status"
+                    ],
+                    "bundle_sha256": item["sealed"][
+                        "bundle_sha256"
+                    ],
+                }
+                for item in [*failures, *budget_stops]
+            ),
+            key=lambda item: item["experiment_run_id"],
         ),
         "retention_status": "passed",
     }
@@ -962,6 +1266,8 @@ def _validate_duplicate_request(
         )
     return {
         "status": "passed",
+        "replay_status": "passed",
+        "stable_request_key": stable_request_key,
         "experiment_run_id": experiment_run_id,
         "allocation_status": duplicate["allocation_status"],
         "provider_calls_during_duplicate_allocation": duplicate[
@@ -988,6 +1294,10 @@ def _repeat_drift_evidence(primary, repeat):
             "repetition_index"
         ],
         "repeat_repetition_index": repeat_bundle["repetition_index"],
+        "baseline_bundle_sha256": baseline["sealed"][
+            "bundle_sha256"
+        ],
+        "repeat_bundle_sha256": repeat["sealed"]["bundle_sha256"],
         "total_token_delta": (
             repeat_bundle["usage_totals"]["total_tokens"]
             - baseline_bundle["usage_totals"]["total_tokens"]
@@ -1131,13 +1441,73 @@ def _rebuild_projection(projection_root, runs, coverage):
         raise ExperimentCalibrationError(
             "calibration projection usage differs from sealed results"
         )
+    projected = read_projected_experiment_results(projection_root)
+    expected_results = {
+        item["bundle"]["experiment_run_id"]: {
+            "experiment_run_id": item["bundle"][
+                "experiment_run_id"
+            ],
+            "terminal_status": item["bundle"]["terminal_status"],
+            "bundle_sha256": item["sealed"]["bundle_sha256"],
+            "cleanup_status": item["cleanup_status"],
+            "cleanup_receipt_sha256": item[
+                "cleanup_receipt_sha256"
+            ],
+        }
+        for item in runs
+    }
+    projected_results = {
+        item["bundle"]["experiment_run_id"]: {
+            "experiment_run_id": item["bundle"][
+                "experiment_run_id"
+            ],
+            "terminal_status": item["bundle"]["terminal_status"],
+            "bundle_sha256": item["bundle_sha256"],
+            "cleanup_status": item["cleanup_status"],
+            "cleanup_receipt_sha256": (
+                item["cleanup_receipt"]["sha256"]
+                if isinstance(item.get("cleanup_receipt"), dict)
+                else None
+            ),
+        }
+        for item in projected
+    }
+    if (
+        any(item.get("projection_source") != "db" for item in projected)
+        or projected_results != expected_results
+    ):
+        raise ExperimentCalibrationError(
+            "calibration projection did not retain sealed terminal results"
+        )
+    first_identity = {
+        field: first.get(field)
+        for field in _PROJECTION_IDENTITY_FIELDS
+    }
+    second_identity = {
+        field: second.get(field)
+        for field in _PROJECTION_IDENTITY_FIELDS
+    }
     return {
         "status": "passed",
         "schema_version": first["schema_version"],
+        "projection_source": "db",
+        "identity_fields_equal": True,
+        "first_identity": first_identity,
+        "second_identity": second_identity,
         "result_count": first["experiment_results"],
         "result_digest": first["experiment_result_digest"],
         "invocation_count": first["invocations"],
         "invocation_digest": first["invocation_digest"],
+        "terminal_statuses": sorted(
+            {
+                item["terminal_status"]
+                for item in projected_results.values()
+            }
+        ),
+        "retained_result_bundles": sorted(
+            projected_results.values(),
+            key=lambda item: item["experiment_run_id"],
+        ),
     }
 
 
