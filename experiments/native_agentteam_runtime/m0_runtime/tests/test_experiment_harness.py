@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -121,6 +122,7 @@ from agentteam_runtime.experiment_workspace import (
 from agentteam_runtime.token_usage import usage_event_id_for_invocation
 from agentteam_runtime.experiment_sandbox import (
     _load_historical_provider_sandbox_reference,
+    _revalidate_prepared_source_authority,
     _capture_bounded_process,
     _candidate_repository_state,
     _approved_acceptance_executable,
@@ -134,6 +136,7 @@ from agentteam_runtime.experiment_sandbox import (
     _attach_namespace_evidence,
     build_provider_sandbox_descriptor,
     experiment_lifecycle_authority_root,
+    load_model_invocation_set_reference,
     load_provider_sandbox_reference,
     prepare_candidate_evaluation_launch,
     prepare_provider_launch,
@@ -439,6 +442,8 @@ def _fixture_repository(
 
 
 def _sandbox_fixture(root):
+    import agentteam_runtime.experiment_sandbox as sandbox_module
+
     root = Path(root)
     repository = root / "sandbox-repository"
     repository.mkdir()
@@ -463,11 +468,23 @@ def _sandbox_fixture(root):
     canary.parent.mkdir()
     canary.write_bytes(b"agentteam-evaluator-only-canary")
     bwrap = Path("/usr/bin/bwrap")
-    runtime_views = [
-        {"source": path, "target": path}
-        for path in ("/usr", "/lib", "/lib64", "/bin")
-        if Path(path).exists()
-    ]
+    if (
+        os.environ.get("AGENTTEAM_REQUIRE_REAL_BWRAP") == "1"
+        or sandbox_module._is_privileged_system_tree(Path("/usr"))
+    ):
+        runtime_views = [
+            {"source": path, "target": path}
+            for path in ("/usr", "/lib", "/lib64", "/bin")
+            if Path(path).exists()
+        ]
+    else:
+        python_executable = str(Path(sys.executable).resolve())
+        runtime_views = [
+            {
+                "source": python_executable,
+                "target": python_executable,
+            }
+        ]
     descriptor = build_provider_sandbox_descriptor(
         repository,
         runtime_views=runtime_views,
@@ -532,6 +549,19 @@ def _successful_namespace_probe(descriptor, canary_path, **_kwargs):
         "content_readable": False,
         "probe_returncode": 0,
     }
+
+
+def _test_privileged_system_tree(path):
+    path = Path(path)
+    return any(
+        path == root or path.is_relative_to(root)
+        for root in (
+            Path("/usr"),
+            Path("/bin"),
+            Path("/lib"),
+            Path("/lib64"),
+        )
+    )
 
 
 def _supported_execution_identity():
@@ -926,8 +956,13 @@ def _test_evaluator_execution(
     cpu_limit,
     memory_limit_bytes,
     input_bytes=None,
+    prelaunch_source_authority=None,
 ):
     del cpu_limit, memory_limit_bytes
+    if prelaunch_source_authority is not None:
+        _revalidate_prepared_source_authority(
+            prelaunch_source_authority
+        )
     argv = list(argv)
     if argv and Path(argv[0]) == Path("/usr/bin/bwrap"):
         argv.insert(argv.index("--unshare-all") + 1, "--share-net")
@@ -2963,7 +2998,15 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
                 "ready",
             )
 
-    def test_mode_scheduler_allocates_registered_independent_attempt(self):
+    @patch(
+        "agentteam_runtime.experiment_sandbox."
+        "_is_privileged_system_tree",
+        side_effect=_test_privileged_system_tree,
+    )
+    def test_mode_scheduler_allocates_registered_independent_attempt(
+        self,
+        _privileged_system_tree,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repository = root / "repository"
@@ -7635,6 +7678,172 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 serialized,
             )
 
+    def test_common_controller_finalizes_registered_outputs_for_each_mode(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared_root = root / "shared"
+            first_fixture = self._fixture(
+                shared_root,
+                "single_codex",
+            )
+            protocol = first_fixture["protocol"]
+            fixtures = {"single_codex": first_fixture}
+            for mode in protocol["mode_order"][1:]:
+                manifest = build_experiment_run_manifest(
+                    protocol,
+                    mode=mode,
+                    repetition_index=0,
+                    stable_request_key=f"common-controller-{mode}",
+                )
+                run_dir = shared_root / manifest["experiment_run_id"]
+                run_dir.mkdir()
+                snapshot = allocate_clean_snapshot(
+                    run_dir,
+                    protocol["repository"],
+                    attested_at="2026-07-27T00:00:00Z",
+                )
+                authority_root = run_dir / "authority"
+                authority_root.mkdir(mode=0o700)
+                fixtures[mode] = {
+                    "protocol": protocol,
+                    "manifest": manifest,
+                    "run_dir": run_dir,
+                    "snapshot": Path(snapshot["snapshot_path"]),
+                    "authority_root": authority_root,
+                    "controller": first_fixture["controller"],
+                    "sandbox_configuration": first_fixture[
+                        "sandbox_configuration"
+                    ],
+                    "evaluator": first_fixture["evaluator"],
+                }
+            direct_root = root / "direct-placeholder"
+            direct_root.mkdir()
+            adapters = {
+                "single_codex": SingleCodexModeAdapter(),
+                "agentteam_direct": AgentTeamDirectModeAdapter(
+                    direct_root
+                ),
+                "agentteam_full": AgentTeamFullModeAdapter(),
+            }
+            observed_contracts = {}
+
+            for mode in protocol["mode_order"]:
+                adapter = adapters[mode]
+                with self.subTest(mode=mode):
+                    fixture = fixtures[mode]
+
+                    def execute_shared_path(_adapter, request):
+                        observed_contracts[mode] = {
+                            "repository": {
+                                field: request.protocol["repository"][field]
+                                for field in (
+                                    "commit",
+                                    "tree",
+                                    "git_object_format",
+                                )
+                            },
+                            "environment": request.protocol["environment"],
+                            "budgets": request.protocol["budgets"],
+                            "operator_limits": request.protocol[
+                                "operator_limits"
+                            ],
+                            "model_policy": request.model_policy,
+                        }
+                        invocation_context = _register_provider_launch(
+                            request,
+                            lifecycle_id=f"{mode}-worker",
+                            workspace_root=request.project_root,
+                            usage_stage="implementation_worker",
+                            taskpack_id=f"{mode}-taskpack",
+                        )
+                        _complete_fake_experiment_invocation(
+                            invocation_context,
+                            request.project_root,
+                            role="implementation_worker",
+                        )
+                        return {
+                            "terminal_status": "completed",
+                            "provider_invocation_count": 1,
+                            "candidate_workspace": request.project_root,
+                            "taskpack": (
+                                None
+                                if mode == "single_codex"
+                                else {
+                                    "taskpack_id": f"{mode}-taskpack",
+                                    "digest_sha256": "6" * 64,
+                                    "source": "deterministic-test",
+                                }
+                            ),
+                            "adapter_output": {},
+                        }
+
+                    adapter_type = type(adapter)
+                    with self._mode_execution_boundary(), patch.object(
+                        adapter_type,
+                        "preflight",
+                        return_value=None,
+                    ), patch.object(
+                        adapter_type,
+                        "execute",
+                        new=execute_shared_path,
+                    ):
+                        result = self._controller(fixture).execute(
+                            adapter
+                        )
+
+                    self.assertEqual(
+                        result["provider_invocation_count"],
+                        1,
+                    )
+                    self.assertEqual(
+                        result["evaluation"]["evaluation_status"],
+                        "passed",
+                    )
+                    self.assertEqual(
+                        result["sealed_result"]["acceptance_status"],
+                        "passed",
+                    )
+                    self.assertEqual(
+                        result["sealed_result"]["cleanup_status"],
+                        "removed",
+                    )
+                    self.assertEqual(
+                        result["invocation_set_reference"][
+                            "schema_version"
+                        ],
+                        "experiment_model_invocation_set_reference.v1",
+                    )
+                    registry_seal = (
+                        fixture["authority_root"]
+                        / "experiment_authority"
+                        / "model-invocation-registry.sealed.json"
+                    )
+                    self.assertTrue(registry_seal.is_file())
+                    self.assertFalse(fixture["snapshot"].exists())
+            self.assertEqual(set(observed_contracts), set(adapters))
+            self.assertEqual(
+                len(
+                    {
+                        canonical_json_sha256(contract)
+                        for contract in observed_contracts.values()
+                    }
+                ),
+                1,
+            )
+            for contract in observed_contracts.values():
+                self.assertEqual(
+                    set(contract),
+                    {
+                        "repository",
+                        "environment",
+                        "budgets",
+                        "operator_limits",
+                        "model_policy",
+                    },
+                )
+
     def test_independent_attempt_workspace_has_distinct_object_store(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = _fixture_repository(tmp)
@@ -8991,7 +9200,15 @@ class ExperimentSandboxTests(unittest.TestCase):
             ):
                 validate_provider_sandbox_descriptor(forged)
 
-    def test_provider_namespace_has_only_declared_views_and_bounded_credentials(self):
+    @patch(
+        "agentteam_runtime.experiment_sandbox."
+        "_is_privileged_system_tree",
+        side_effect=_test_privileged_system_tree,
+    )
+    def test_provider_namespace_has_only_declared_views_and_bounded_credentials(
+        self,
+        _privileged_system_tree,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = _sandbox_fixture(tmp)
             descriptor = fixture["descriptor"]
@@ -9121,7 +9338,6 @@ class ExperimentSandboxTests(unittest.TestCase):
             ):
                 validate_provider_sandbox_descriptor(
                     drift_descriptor,
-                    require_namespace_evidence=False,
                 )
             mutable_runtime = Path(tmp) / "mutable-runtime"
             mutable_runtime.mkdir()
@@ -9145,8 +9361,569 @@ class ExperimentSandboxTests(unittest.TestCase):
             ):
                 validate_provider_sandbox_descriptor(
                     mutable_descriptor,
+                )
+
+    def test_public_live_launch_cannot_disable_namespace_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "agentteam_runtime.experiment_sandbox."
+            "_is_privileged_system_tree",
+            return_value=True,
+        ):
+            fixture = _sandbox_fixture(tmp)
+            command = [
+                str(Path(sys.executable).resolve()),
+                "-c",
+                "raise SystemExit(0)",
+            ]
+
+            with self.assertRaises(TypeError):
+                validate_provider_sandbox_descriptor(
+                    fixture["uncertified_descriptor"],
                     require_namespace_evidence=False,
                 )
+            with self.assertRaises(TypeError):
+                prepare_provider_launch(
+                    fixture["uncertified_descriptor"],
+                    command,
+                    cwd=fixture["repository"],
+                    require_namespace_evidence=False,
+                )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "namespace evidence",
+            ):
+                validate_provider_sandbox_descriptor(
+                    fixture["uncertified_descriptor"]
+                )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "namespace evidence",
+            ):
+                prepare_provider_launch(
+                    fixture["uncertified_descriptor"],
+                    command,
+                    cwd=fixture["repository"],
+                )
+
+    def test_probe_only_namespace_bypass_is_private_and_unreachable_from_modes(
+        self,
+    ):
+        import agentteam_runtime.experiment_modes as mode_module
+        import agentteam_runtime.experiment_sandbox as sandbox_module
+
+        self.assertNotIn(
+            "require_namespace_evidence",
+            inspect.signature(
+                sandbox_module.validate_provider_sandbox_descriptor
+            ).parameters,
+        )
+        self.assertNotIn(
+            "require_namespace_evidence",
+            inspect.signature(
+                sandbox_module.prepare_provider_launch
+            ).parameters,
+        )
+        self.assertTrue(
+            callable(sandbox_module._prepare_probe_provider_launch)
+        )
+        mode_source = inspect.getsource(mode_module)
+        invocation_source = inspect.getsource(ModelInvocationCall)
+        self.assertNotIn("_prepare_probe_provider_launch", mode_source)
+        self.assertNotIn("_prepare_provider_launch", mode_source)
+        self.assertNotIn(
+            "_prepare_probe_provider_launch",
+            invocation_source,
+        )
+        self.assertNotIn("_prepare_provider_launch", invocation_source)
+
+    def test_final_live_launch_revalidates_mutable_sources_after_admission(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch(
+                "agentteam_runtime.experiment_sandbox."
+                "_is_privileged_system_tree",
+                return_value=True,
+            ):
+                fixture = _sandbox_fixture(root)
+            mutable_runtime = root / "mutable-runtime"
+            mutable_runtime.mkdir()
+            mutable_tool = mutable_runtime / "tool"
+            mutable_tool.write_text("first\n", encoding="utf-8")
+            descriptor = build_provider_sandbox_descriptor(
+                fixture["repository"],
+                runtime_views=[
+                    {
+                        "source": str(mutable_runtime),
+                        "target": "/mutable-runtime",
+                    }
+                ],
+                bwrap_path="/usr/bin/bwrap",
+                repository_identity=fixture["repository_identity"],
+                forbidden_paths=[fixture["canary"]],
+            )
+            authority_root = root / "mutable-authority"
+            authority_root.mkdir()
+            with patch(
+                "agentteam_runtime.experiment_sandbox."
+                "probe_gold_canary_denial",
+                side_effect=_successful_namespace_probe,
+            ):
+                sandbox_reference = publish_provider_sandbox_reference(
+                    authority_root,
+                    descriptor,
+                    fixture["canary"],
+                )
+            events = []
+
+            class DriftAfterAdmissionRunner:
+                permit_called = False
+                cleanup_called = False
+
+                def __init__(
+                    self,
+                    lifecycle,
+                    command,
+                    *,
+                    cwd,
+                    input_text,
+                    timeout_seconds,
+                    environment,
+                ):
+                    del lifecycle, cwd, input_text, timeout_seconds, environment
+                    self.command = list(command)
+
+                def prepare(self):
+                    events.append("prepared")
+                    mutable_tool.write_text("second\n", encoding="utf-8")
+                    events.append("source-drifted")
+                    return _supported_execution_identity()
+
+                def permit_and_wait(self, **_kwargs):
+                    type(self).permit_called = True
+                    events.append("permitted")
+                    return ProviderExecution(self.command, 0, "", "")
+
+                def abort_before_permit(self):
+                    events.append("aborted")
+
+                def cleanup_after_terminal(self):
+                    type(self).cleanup_called = True
+
+            lifecycle_root = experiment_lifecycle_authority_root(
+                authority_root,
+                "mutable-runtime",
+            )
+            context = _model_context(
+                supported=True,
+                sandbox_reference=sandbox_reference,
+            )
+            context["experiment_authority_root"] = str(authority_root)
+            invocation = ModelInvocationCall(
+                lifecycle_root,
+                context,
+                supported=True,
+                systemd_runner_factory=DriftAfterAdmissionRunner,
+            )
+            with patch.object(
+                ModelInvocationCall,
+                "_acquire_experiment_provider_admission",
+                side_effect=lambda: events.append("admitted"),
+            ):
+                execution = invocation.execute(
+                    [
+                        str(Path(sys.executable).resolve()),
+                        "-c",
+                        "raise SystemExit(0)",
+                    ],
+                    cwd=fixture["repository"],
+                    input_text="prompt",
+                    timeout_seconds=10,
+                )
+
+            self.assertEqual(
+                events,
+                ["admitted", "prepared", "source-drifted", "aborted"],
+            )
+            self.assertTrue(execution.launch_failed)
+            self.assertIn(
+                "launch_identity_revalidation_failed",
+                execution.launch_error,
+            )
+            self.assertFalse(DriftAfterAdmissionRunner.permit_called)
+            invocation.finalize("failed", execution)
+            self.assertTrue(invocation.lifecycle.terminal_path.is_file())
+            self.assertTrue(DriftAfterAdmissionRunner.cleanup_called)
+
+    def test_final_live_launch_rejects_uncommitted_repository_drift_before_permit(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "agentteam_runtime.experiment_sandbox."
+            "_is_privileged_system_tree",
+            return_value=True,
+        ):
+            root = Path(tmp)
+            fixture = _sandbox_fixture(root)
+            authority_root = root / "repository-authority"
+            authority_root.mkdir()
+            sandbox_reference = _publish_test_sandbox_reference(
+                authority_root,
+                fixture,
+            )
+            events = []
+
+            class RepositoryDriftRunner:
+                permit_called = False
+
+                def __init__(
+                    self,
+                    lifecycle,
+                    command,
+                    *,
+                    cwd,
+                    input_text,
+                    timeout_seconds,
+                    environment,
+                ):
+                    del lifecycle, cwd, input_text, timeout_seconds, environment
+                    self.command = list(command)
+                    self.source_authority = None
+
+                def set_prelaunch_source_authority(self, authority):
+                    self.source_authority = authority
+
+                def prepare(self):
+                    (
+                        fixture["repository"] / "tracked.txt"
+                    ).write_text(
+                        "uncommitted launch drift\n",
+                        encoding="utf-8",
+                    )
+                    events.append("repository-drifted")
+                    return _supported_execution_identity()
+
+                def permit_and_wait(self, **_kwargs):
+                    type(self).permit_called = True
+                    try:
+                        _revalidate_prepared_source_authority(
+                            self.source_authority
+                        )
+                    except ExperimentSandboxError as exc:
+                        events.append("supervisor-rejected")
+                        return ProviderExecution(
+                            self.command,
+                            None,
+                            "",
+                            "",
+                            launch_failed=True,
+                            launch_error=(
+                                "launch_identity_revalidation_failed:"
+                                f"{type(exc).__name__}"
+                            ),
+                        )
+                    return ProviderExecution(self.command, 0, "", "")
+
+                def abort_before_permit(self):
+                    events.append("aborted")
+
+                def cleanup_after_terminal(self):
+                    return None
+
+            lifecycle_root = experiment_lifecycle_authority_root(
+                authority_root,
+                "repository-drift",
+            )
+            context = _model_context(
+                supported=True,
+                sandbox_reference=sandbox_reference,
+            )
+            context["experiment_authority_root"] = str(authority_root)
+            invocation = ModelInvocationCall(
+                lifecycle_root,
+                context,
+                supported=True,
+                systemd_runner_factory=RepositoryDriftRunner,
+            )
+            execution = invocation.execute(
+                [
+                    str(Path(sys.executable).resolve()),
+                    "-c",
+                    "raise SystemExit(0)",
+                ],
+                cwd=fixture["repository"],
+                input_text="prompt",
+                timeout_seconds=10,
+            )
+
+            self.assertEqual(
+                events,
+                ["repository-drifted", "supervisor-rejected"],
+            )
+            self.assertTrue(execution.launch_failed)
+            self.assertTrue(RepositoryDriftRunner.permit_called)
+            invocation.finalize("failed", execution)
+
+    def test_real_supervisor_revalidates_release_source_before_exec(self):
+        import agentteam_runtime.model_invocation as invocation_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _sandbox_fixture(root)
+            prepared = prepare_provider_launch(
+                fixture["descriptor"],
+                [str(Path(sys.executable).resolve()), "-c", "pass"],
+                cwd=fixture["repository"],
+            )
+            (
+                fixture["repository"] / "tracked.txt"
+            ).write_text("supervisor drift\n", encoding="utf-8")
+            nonce = "supervisor-source-authority"
+            spec = {
+                "command": [str(Path(sys.executable).resolve()), "-c", "pass"],
+                "cwd": str(fixture["repository"]),
+                "input_text": "",
+                "timeout_seconds": 10,
+                "socket_path": str(root / "supervisor.sock"),
+                "ready_path": str(root / "supervisor-ready.json"),
+                "result_path": str(root / "supervisor-result.json"),
+                "nonce_sha256": hashlib.sha256(
+                    nonce.encode("ascii")
+                ).hexdigest(),
+                "max_stream_bytes": 4096,
+                "prelaunch_source_authority": prepared.source_authority(),
+            }
+            spec_path = root / "supervisor-spec.json"
+            spec_path.write_text(
+                json.dumps(spec, sort_keys=True),
+                encoding="utf-8",
+            )
+            outcomes = []
+
+            def run_supervisor():
+                outcomes.append(invocation_module._supervisor_main(spec_path))
+
+            with patch.object(
+                invocation_module.os,
+                "setpgid",
+                return_value=None,
+            ), patch.object(
+                invocation_module,
+                "_run_bounded_process_with_parent_death_safeguard",
+                side_effect=AssertionError("provider command must not execute"),
+            ):
+                thread = threading.Thread(target=run_supervisor)
+                thread.start()
+                deadline = time.monotonic() + 5
+                while not Path(spec["ready_path"]).is_file():
+                    if time.monotonic() >= deadline:
+                        self.fail("supervisor did not publish readiness")
+                    time.sleep(0.01)
+                import socket as socket_module
+
+                with socket_module.socket(
+                    socket_module.AF_UNIX,
+                    socket_module.SOCK_STREAM,
+                ) as channel:
+                    channel.connect(spec["socket_path"])
+                    channel.sendall(nonce.encode("ascii") + b"\n")
+                thread.join(timeout=5)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(outcomes, [0])
+            result = json.loads(
+                Path(spec["result_path"]).read_text(encoding="utf-8")
+            )
+            self.assertFalse(result["launch_permitted"])
+            self.assertEqual(
+                result["launch_error"],
+                (
+                    "launch_identity_revalidation_failed:"
+                    "ExperimentSandboxError"
+                ),
+            )
+
+    def test_candidate_evaluator_revalidates_exact_workspace_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _sandbox_fixture(root)
+            evaluator = root / "trusted-evaluator.py"
+            evaluator.write_text(
+                "#!/usr/bin/python3\nraise SystemExit(0)\n",
+                encoding="utf-8",
+            )
+            evaluator.chmod(0o700)
+            prepared = prepare_candidate_evaluation_launch(
+                fixture["descriptor"],
+                evaluator,
+                hashlib.sha256(evaluator.read_bytes()).hexdigest(),
+                [
+                    str(Path(sys.executable).resolve()),
+                    "-c",
+                    "raise SystemExit(0)",
+                ],
+                cwd=fixture["repository"],
+            )
+
+            (fixture["repository"] / "tracked.txt").write_text(
+                "candidate drift after preparation\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "workspace content changed",
+            ):
+                prepared.revalidate_mutable_sources()
+
+    def test_bounded_evaluator_places_source_guard_inside_systemd_service(self):
+        authority = {
+            "descriptor_json": "{}",
+            "policy_sha256": "1" * 64,
+            "repository_workspace_sha256": "2" * 64,
+        }
+        captured = {}
+
+        def capture(command, **kwargs):
+            captured["command"] = command
+            captured["timeout_seconds"] = kwargs["timeout_seconds"]
+            guard_index = command.index("_source_guard")
+            guard_path = Path(command[guard_index + 1])
+            captured["authority"] = json.loads(
+                guard_path.read_text(encoding="utf-8")
+            )
+            captured["authority_sha256"] = hashlib.sha256(
+                guard_path.read_bytes()
+            ).hexdigest()
+            return {
+                "returncode": 0,
+                "timed_out": False,
+                "stdout": "",
+                "stderr": "",
+                "stdout_bytes": b"",
+                "stderr_bytes": b"",
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+            }
+
+        with patch(
+            "agentteam_runtime.experiment_sandbox."
+            "_capture_bounded_process",
+            side_effect=capture,
+        ):
+            result = _run_bounded_argv(
+                ["/usr/bin/bwrap", "--version"],
+                cwd="/",
+                environment={"PATH": "/usr/bin:/bin"},
+                timeout_seconds=1.9,
+                max_output_bytes=4096,
+                cpu_limit=1,
+                memory_limit_bytes=128 * 1024 * 1024,
+                prelaunch_source_authority=authority,
+            )
+
+        command = captured["command"]
+        guard_index = command.index("_source_guard")
+        self.assertEqual(
+            Path(command[guard_index - 1]).name,
+            "model_invocation.py",
+        )
+        self.assertEqual(
+            captured["authority"],
+            authority,
+        )
+        self.assertEqual(
+            command[guard_index + 2],
+            captured["authority_sha256"],
+        )
+        self.assertEqual(command[guard_index + 3], "1.9")
+        self.assertEqual(command[guard_index + 4], "--")
+        self.assertEqual(
+            command[guard_index + 5 :],
+            ["/usr/bin/bwrap", "--version"],
+        )
+        self.assertFalse(Path(command[guard_index + 1]).exists())
+        self.assertEqual(captured["timeout_seconds"], 121.9)
+        self.assertEqual(
+            result["execution_boundary"],
+            "systemd_user_transient_service",
+        )
+
+    def test_source_guard_rejects_drift_before_candidate_exec(self):
+        import agentteam_runtime.model_invocation as invocation_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _sandbox_fixture(root)
+            prepared = prepare_provider_launch(
+                fixture["descriptor"],
+                ["/bin/true"],
+                cwd=fixture["repository"],
+            )
+            authority_path = root / "source-authority.json"
+            authority_path.write_bytes(
+                canonical_json_bytes(prepared.source_authority())
+            )
+            authority_sha256 = hashlib.sha256(
+                authority_path.read_bytes()
+            ).hexdigest()
+            with patch.object(
+                invocation_module.os,
+                "execvpe",
+                return_value=None,
+            ) as exec_mock:
+                result = invocation_module._source_guard_main(
+                    authority_path,
+                    authority_sha256,
+                    "10",
+                    ["/bin/true"],
+                )
+            self.assertEqual(result, 126)
+            exec_mock.assert_called_once()
+
+            (
+                fixture["repository"] / "tracked.txt"
+            ).write_text("candidate drift\n", encoding="utf-8")
+            with patch.object(
+                invocation_module.os,
+                "execvpe",
+                return_value=None,
+            ) as exec_mock:
+                result = invocation_module._source_guard_main(
+                    authority_path,
+                    authority_sha256,
+                    "10",
+                    ["/bin/true"],
+                )
+            self.assertEqual(result, 125)
+            exec_mock.assert_not_called()
+
+    def test_git_object_store_size_is_excluded_but_control_drift_is_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _sandbox_fixture(tmp)
+            large_object = (
+                fixture["repository"] / ".git" / "objects" / "large-test"
+            )
+            with large_object.open("wb") as stream:
+                stream.truncate(65 * 1024 * 1024)
+            prepared = prepare_provider_launch(
+                fixture["descriptor"],
+                ["/bin/true"],
+                cwd=fixture["repository"],
+            )
+            prepared.revalidate_mutable_sources()
+
+            git_config = fixture["repository"] / ".git" / "config"
+            git_config.write_text(
+                git_config.read_text(encoding="utf-8") + "# drift\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "workspace content changed",
+            ):
+                prepared.revalidate_mutable_sources()
 
     def test_evaluator_mount_or_inconclusive_probe_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9199,6 +9976,14 @@ class ExperimentSandboxTests(unittest.TestCase):
         bwrap = shutil.which("bwrap")
         if not bwrap or not sys.platform.startswith("linux"):
             self.skipTest("real bubblewrap is unavailable")
+        if not _is_privileged_system_tree(Path("/usr")):
+            if os.environ.get("AGENTTEAM_REQUIRE_REAL_BWRAP") == "1":
+                self.fail(
+                    "real bubblewrap requires a root-owned system tree"
+                )
+            self.skipTest(
+                "system tree is not trusted for a real bubblewrap probe"
+            )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repository = root / "repository"
@@ -9629,6 +10414,14 @@ class ExperimentSandboxTests(unittest.TestCase):
                 authority_root,
                 "single-call",
             )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "experiment launch registration is unavailable",
+            ):
+                publish_registered_model_invocation_set_reference(
+                    authority_root,
+                    manifest["experiment_run_id"],
+                )
             context = _model_context(
                 supported=False,
                 sandbox_reference=None,
@@ -9647,7 +10440,7 @@ class ExperimentSandboxTests(unittest.TestCase):
                 authority_root,
                 fixture,
             )
-            publish_experiment_launch_registration(
+            registration_reference = publish_experiment_launch_registration(
                 authority_root,
                 lifecycle_root,
                 experiment_run_id=manifest["experiment_run_id"],
@@ -9661,6 +10454,23 @@ class ExperimentSandboxTests(unittest.TestCase):
                 controller_reference=controller.reference,
                 model_policy=model_policy,
             )
+            registration_path = Path(registration_reference["path"])
+            registration_bytes = registration_path.read_bytes()
+            stale_registration = json.loads(registration_bytes)
+            stale_registration["model_policy"]["model"] = "stale-model"
+            registration_path.write_text(
+                json.dumps(stale_registration, sort_keys=True),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "registered lifecycle differs from mode authority",
+            ):
+                publish_registered_model_invocation_set_reference(
+                    authority_root,
+                    manifest["experiment_run_id"],
+                )
+            registration_path.write_bytes(registration_bytes)
             context.update(
                 {
                     "run_id": manifest["experiment_run_id"],
@@ -9673,6 +10483,14 @@ class ExperimentSandboxTests(unittest.TestCase):
                 }
             )
             context.pop("experiment_sandbox_reference", None)
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "registered lifecycle was not consumed",
+            ):
+                publish_registered_model_invocation_set_reference(
+                    authority_root,
+                    manifest["experiment_run_id"],
+                )
             invocation = ModelInvocationCall(
                 lifecycle_root,
                 context,
@@ -9687,6 +10505,14 @@ class ExperimentSandboxTests(unittest.TestCase):
                     cwd=fixture["repository"],
                     input_text="prompt",
                     timeout_seconds=10,
+                )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "non-terminal",
+            ):
+                publish_registered_model_invocation_set_reference(
+                    authority_root,
+                    manifest["experiment_run_id"],
                 )
             invocation.finalize("completed", execution)
             started = json.loads(
@@ -9703,6 +10529,56 @@ class ExperimentSandboxTests(unittest.TestCase):
                 started["reasoning_profile"],
                 model_policy["reasoning_profile"],
             )
+            second_lifecycle_root = experiment_lifecycle_authority_root(
+                authority_root,
+                "second-call",
+            )
+            publish_experiment_launch_registration(
+                authority_root,
+                second_lifecycle_root,
+                experiment_run_id=manifest["experiment_run_id"],
+                protocol_sha256=manifest["protocol_sha256"],
+                run_manifest_sha256=canonical_json_sha256(manifest),
+                mode="single_codex",
+                usage_stage="single_codex",
+                taskpack_id="SINGLE-CODEX-NONE",
+                workspace_root=fixture["repository"],
+                sandbox_reference=sandbox_reference,
+                controller_reference=controller.reference,
+                model_policy=model_policy,
+            )
+            second_context = dict(context)
+            second_context[
+                "experiment_sandbox_policy_sha256"
+            ] = fixture["descriptor"]["policy_sha256"]
+            second_context[
+                "experiment_sandbox_reference_sha256"
+            ] = sandbox_reference["sha256"]
+            second_invocation = ModelInvocationCall(
+                second_lifecycle_root,
+                second_context,
+                supported=False,
+            )
+            second_invocation.lifecycle.publish_start(
+                ExecutionGroupIdentity.not_applicable()
+            )
+            second_invocation.finalize(
+                "completed",
+                ProviderExecution([], 0, "", ""),
+            )
+            rogue_root = (
+                authority_root / "experiment_lifecycles" / "rogue"
+            )
+            rogue_root.mkdir()
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "differs from its ledger",
+            ):
+                publish_registered_model_invocation_set_reference(
+                    authority_root,
+                    manifest["experiment_run_id"],
+                )
+            rogue_root.rmdir()
             invocation_reference = (
                 publish_registered_model_invocation_set_reference(
                     authority_root,
@@ -9712,6 +10588,21 @@ class ExperimentSandboxTests(unittest.TestCase):
             self.assertTrue(
                 Path(invocation_reference["path"]).is_file()
             )
+            invocation_manifest = load_model_invocation_set_reference(
+                invocation_reference,
+                authority_root,
+            )
+            self.assertEqual(
+                len(invocation_manifest["invocation_sets"]),
+                2,
+            )
+            invocation_ids = [
+                invocation_id
+                for item in invocation_manifest["invocation_sets"]
+                for invocation_id in item["invocation_ids"]
+            ]
+            self.assertEqual(len(invocation_ids), 2)
+            self.assertEqual(len(set(invocation_ids)), 2)
             with self.assertRaisesRegex(
                 ExperimentSandboxError,
                 "lifecycle registry is sealed",
@@ -9902,7 +10793,15 @@ class ExperimentSandboxTests(unittest.TestCase):
                 },
             )
 
-    def test_trusted_argv_evaluation_waits_for_terminal_and_avoids_shell(self):
+    @patch(
+        "agentteam_runtime.experiment_sandbox."
+        "_is_privileged_system_tree",
+        side_effect=_test_privileged_system_tree,
+    )
+    def test_trusted_argv_evaluation_waits_for_terminal_and_avoids_shell(
+        self,
+        _privileged_system_tree,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             runner_patch = patch(
                 "agentteam_runtime.experiment_sandbox._run_bounded_argv",
@@ -10631,7 +11530,15 @@ class ExperimentSandboxTests(unittest.TestCase):
                     "late-lifecycle",
                 )
 
-    def test_evaluation_seals_multiple_taskpack_authority_roots(self):
+    @patch(
+        "agentteam_runtime.experiment_sandbox."
+        "_is_privileged_system_tree",
+        side_effect=_test_privileged_system_tree,
+    )
+    def test_evaluation_seals_multiple_taskpack_authority_roots(
+        self,
+        _privileged_system_tree,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             with patch(
                 "agentteam_runtime.experiment_sandbox._run_bounded_argv",
@@ -11247,11 +12154,19 @@ class ExperimentCalibrationTests(unittest.TestCase):
                     lifecycle.authority_root
                 )
                 del input_text, timeout_seconds, environment
-                if lifecycle.context["usage_stage"] == "taskpack_author":
+                self.lifecycle = lifecycle
+                self.registration = registration
+                self.command = list(command)
+
+            def _simulate_provider_work(self):
+                if (
+                    self.lifecycle.context["usage_stage"]
+                    == "taskpack_author"
+                ):
                     authored = (
-                        Path(registration["workspace_root"])
+                        Path(self.registration["workspace_root"])
                         / ".agentteam-author"
-                        / lifecycle.context["taskpack_id"]
+                        / self.lifecycle.context["taskpack_id"]
                     )
                     if not authored.is_dir():
                         raise AssertionError(
@@ -11271,7 +12186,7 @@ class ExperimentCalibrationTests(unittest.TestCase):
                     taskpack.update(
                         {
                             "taskpack_id": authored.name,
-                            "project_root": registration[
+                            "project_root": self.registration[
                                 "workspace_root"
                             ],
                         }
@@ -11282,14 +12197,14 @@ class ExperimentCalibrationTests(unittest.TestCase):
                     )
                 else:
                     apply_fixture_change(
-                        registration["workspace_root"]
+                        self.registration["workspace_root"]
                     )
-                self.command = list(command)
 
             def prepare(self):
                 return _supported_execution_identity()
 
             def permit_and_wait(self, **_kwargs):
+                self._simulate_provider_work()
                 return ProviderExecution(
                     self.command,
                     execution["single_returncode"],
@@ -11483,8 +12398,13 @@ class ExperimentCalibrationTests(unittest.TestCase):
             cpu_limit,
             memory_limit_bytes,
             input_bytes=None,
+            prelaunch_source_authority=None,
         ):
             del cpu_limit, memory_limit_bytes
+            if prelaunch_source_authority is not None:
+                _revalidate_prepared_source_authority(
+                    prelaunch_source_authority
+                )
             argv = list(argv)
             if argv and Path(argv[0]) == Path("/usr/bin/bwrap"):
                 argv.insert(

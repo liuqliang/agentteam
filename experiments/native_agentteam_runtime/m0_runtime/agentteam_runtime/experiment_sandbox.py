@@ -18,6 +18,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import fcntl
 from contextlib import contextmanager
@@ -56,6 +57,7 @@ DEFAULT_MAX_SCAN_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_SCAN_FILES = 10_000
 DEFAULT_MAX_EVALUATOR_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_EVALUATION_TIMEOUT_SECONDS = 3600
+PRELAUNCH_SOURCE_REVALIDATION_TIMEOUT_SECONDS = 120
 _CREDENTIAL_ROOT = Path("/run/agentteam-credentials")
 _TRUSTED_BWRAP_PATH = Path("/usr/bin/bwrap")
 _TRUSTED_ENV_PATH = Path("/usr/bin/env")
@@ -110,6 +112,68 @@ class PreparedProviderLaunch:
     cwd: str
     environment: dict[str, str]
     policy_sha256: str
+    _source_descriptor_json: bytes
+    _repository_workspace_sha256: str
+
+    def source_authority(self):
+        """Return bounded authority for supervisor-side pre-exec validation."""
+
+        return {
+            "descriptor_json": self._source_descriptor_json.decode("utf-8"),
+            "policy_sha256": self.policy_sha256,
+            "repository_workspace_sha256": (
+                self._repository_workspace_sha256
+            ),
+        }
+
+    def revalidate_mutable_sources(self):
+        """Recheck every host source immediately before the launch permit."""
+
+        _revalidate_prepared_source_authority(self.source_authority())
+        return None
+
+
+def _revalidate_prepared_source_authority(authority):
+    """Fail closed unless every prepared source still matches at exec time."""
+
+    if (
+        not isinstance(authority, dict)
+        or set(authority)
+        != {
+            "descriptor_json",
+            "policy_sha256",
+            "repository_workspace_sha256",
+        }
+        or not _is_sha256(authority.get("policy_sha256"))
+        or not _is_sha256(
+            authority.get("repository_workspace_sha256")
+        )
+    ):
+        raise ExperimentSandboxError(
+            "prepared provider source authority is invalid"
+        )
+    try:
+        descriptor = json.loads(
+            authority["descriptor_json"]
+        )
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ExperimentSandboxError(
+            "prepared provider source authority is unreadable"
+        ) from exc
+    validate_provider_sandbox_descriptor(descriptor)
+    if descriptor["policy_sha256"] != authority["policy_sha256"]:
+        raise ExperimentSandboxError(
+            "prepared provider policy differs from source authority"
+        )
+    observed_workspace = _repository_workspace_sha256(
+        Path(descriptor["repository"]["source"]),
+        require_git=descriptor.get("repository_identity") is not None,
+    )
+    if observed_workspace != authority["repository_workspace_sha256"]:
+        raise ExperimentSandboxError(
+            "prepared repository workspace content changed"
+        )
+    return None
 
 
 def build_provider_sandbox_descriptor(
@@ -209,7 +273,7 @@ def build_provider_sandbox_descriptor(
         "namespace_evidence": None,
     }
     descriptor["policy_sha256"] = _sandbox_policy_sha256(descriptor)
-    validate_provider_sandbox_descriptor(
+    _validate_provider_sandbox_descriptor(
         descriptor,
         require_namespace_evidence=False,
     )
@@ -226,7 +290,7 @@ def probe_gold_canary_denial(
 ):
     """Prove that the exact provider namespace cannot stat or read a canary."""
 
-    validate_provider_sandbox_descriptor(
+    _validate_provider_sandbox_descriptor(
         descriptor,
         require_namespace_evidence=False,
     )
@@ -255,11 +319,10 @@ def probe_gold_canary_denial(
         "sort_keys=True,separators=(',',':')))\n"
         "raise SystemExit(1 if visible or readable else 0)\n"
     )
-    prepared = prepare_provider_launch(
+    prepared = _prepare_probe_provider_launch(
         descriptor,
         [probe_python, "-c", script, str(canary_path)],
         cwd=descriptor["repository"]["source"],
-        require_namespace_evidence=False,
     )
     run = runner or subprocess.run
     try:
@@ -313,7 +376,7 @@ def _attach_namespace_evidence(descriptor, evidence):
     candidate = json.loads(json.dumps(descriptor))
     _validate_namespace_evidence(candidate, evidence)
     candidate["namespace_evidence"] = dict(evidence)
-    validate_provider_sandbox_descriptor(
+    _validate_provider_sandbox_descriptor(
         candidate,
         require_namespace_evidence=False,
     )
@@ -327,7 +390,7 @@ def publish_provider_sandbox_reference(
     *,
     reference_id="provider-sandbox",
 ):
-    validate_provider_sandbox_descriptor(
+    _validate_provider_sandbox_descriptor(
         descriptor,
         require_namespace_evidence=False,
     )
@@ -337,10 +400,7 @@ def publish_provider_sandbox_reference(
         )
     evidence = probe_gold_canary_denial(descriptor, canary_path)
     descriptor = _attach_namespace_evidence(descriptor, evidence)
-    validate_provider_sandbox_descriptor(
-        descriptor,
-        require_namespace_evidence=True,
-    )
+    validate_provider_sandbox_descriptor(descriptor)
     authority_dir = _experiment_authority_dir(authority_root)
     path = authority_dir / f"{_safe_reference_id(reference_id)}.sandbox.json"
     _publish_immutable_json(path, descriptor)
@@ -398,7 +458,7 @@ def _load_provider_sandbox_reference(
             "provider sandbox authority is unreadable"
         ) from exc
     if historical_context is None:
-        validate_provider_sandbox_descriptor(
+        _validate_provider_sandbox_descriptor(
             descriptor,
             require_namespace_evidence=True,
         )
@@ -942,12 +1002,13 @@ def _validate_historical_cleanup_context(
 
 def validate_provider_sandbox_descriptor(
     descriptor,
-    *,
-    require_namespace_evidence=True,
 ):
+    """Validate a live descriptor with non-downgradable namespace evidence."""
+
     return _validate_provider_sandbox_descriptor(
         descriptor,
-        require_namespace_evidence=require_namespace_evidence,
+        require_namespace_evidence=True,
+        verify_repository_identity=True,
     )
 
 
@@ -955,6 +1016,7 @@ def _validate_provider_sandbox_descriptor(
     descriptor,
     *,
     require_namespace_evidence=True,
+    verify_repository_identity=False,
     historical_context=None,
 ):
     if not isinstance(descriptor, dict):
@@ -1036,7 +1098,7 @@ def _validate_provider_sandbox_descriptor(
         _validated_repository_identity(
             repository_source,
             repository_identity,
-            verify_workspace=False,
+            verify_workspace=verify_repository_identity,
         )
     if not historical_repository:
         _validate_mount_source(
@@ -1088,14 +1150,50 @@ def prepare_provider_launch(
     command,
     *,
     cwd,
-    require_namespace_evidence=True,
     include_credentials=True,
 ):
-    """Apply one validated descriptor without spawning any process."""
+    """Apply one live descriptor with complete namespace evidence."""
 
-    validate_provider_sandbox_descriptor(
+    return _prepare_provider_launch(
+        descriptor,
+        command,
+        cwd=cwd,
+        require_namespace_evidence=True,
+        include_credentials=include_credentials,
+    )
+
+
+def _prepare_probe_provider_launch(
+    descriptor,
+    command,
+    *,
+    cwd,
+):
+    """Private pre-evidence launch used only by the canary probe."""
+
+    return _prepare_provider_launch(
+        descriptor,
+        command,
+        cwd=cwd,
+        require_namespace_evidence=False,
+        include_credentials=True,
+    )
+
+
+def _prepare_provider_launch(
+    descriptor,
+    command,
+    *,
+    cwd,
+    require_namespace_evidence,
+    include_credentials,
+):
+    """Build one launch after the caller selects its private/public policy."""
+
+    _validate_provider_sandbox_descriptor(
         descriptor,
         require_namespace_evidence=require_namespace_evidence,
+        verify_repository_identity=True,
     )
     command = _normalize_argv(command, "provider command")
     repository_source = Path(descriptor["repository"]["source"])
@@ -1165,6 +1263,11 @@ def prepare_provider_launch(
         cwd="/",
         environment=launch_environment,
         policy_sha256=descriptor["policy_sha256"],
+        _source_descriptor_json=_canonical_json_bytes(descriptor),
+        _repository_workspace_sha256=_repository_workspace_sha256(
+            repository_source,
+            require_git=descriptor.get("repository_identity") is not None,
+        ),
     )
 
 
@@ -1239,6 +1342,10 @@ def prepare_candidate_evaluation_launch(
         cwd=prepared.cwd,
         environment=dict(prepared.environment),
         policy_sha256=prepared.policy_sha256,
+        _source_descriptor_json=prepared._source_descriptor_json,
+        _repository_workspace_sha256=(
+            prepared._repository_workspace_sha256
+        ),
     )
 
 
@@ -2143,6 +2250,7 @@ def run_trusted_argv_evaluator(
             acceptance_argv,
             cwd=cwd_path,
         )
+        candidate_launch.revalidate_mutable_sources()
         evaluator_argv = list(candidate_launch.command)
         base["argv"] = evaluator_argv
         base["cwd"] = str(cwd_path)
@@ -2159,6 +2267,9 @@ def run_trusted_argv_evaluator(
                 "memory_limit_bytes"
             ],
             input_bytes=evaluator_content,
+            prelaunch_source_authority=(
+                candidate_launch.source_authority()
+            ),
         )
         base["evaluator_started"] = True
         base.update(
@@ -2895,6 +3006,7 @@ def _run_bounded_argv(
     cpu_limit,
     memory_limit_bytes,
     input_bytes=None,
+    prelaunch_source_authority=None,
 ):
     systemd_run = Path("/usr/bin/systemd-run")
     systemctl = Path("/usr/bin/systemctl")
@@ -2932,6 +3044,57 @@ def _run_bounded_argv(
         ) from exc
     if not 1 <= cpu_limit <= 64 or not 64 * 1024 * 1024 <= memory_limit_bytes:
         raise ExperimentSandboxError("evaluator resource limits are invalid")
+    guarded_argv = list(argv)
+    source_guard_path = None
+    if prelaunch_source_authority is not None:
+        if not isinstance(prelaunch_source_authority, dict):
+            raise ExperimentSandboxError(
+                "evaluator source authority is invalid"
+            )
+        authority_bytes = _canonical_json_bytes(
+            prelaunch_source_authority
+        )
+        if len(authority_bytes) > 1024 * 1024:
+            raise ExperimentSandboxError(
+                "evaluator source authority exceeds its bound"
+            )
+        guard_root = Path(
+            f"/tmp/agentteam-source-guards-{os.getuid()}"
+        )
+        guard_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        guard_metadata = guard_root.lstat()
+        if (
+            not stat.S_ISDIR(guard_metadata.st_mode)
+            or guard_metadata.st_uid != os.getuid()
+            or stat.S_IMODE(guard_metadata.st_mode) != 0o700
+        ):
+            raise ExperimentSandboxError(
+                "evaluator source guard directory is unsafe"
+            )
+        descriptor, source_guard_path = tempfile.mkstemp(
+            prefix="authority-",
+            suffix=".json",
+            dir=guard_root,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(authority_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception:
+            Path(source_guard_path).unlink(missing_ok=True)
+            raise
+        guarded_argv = [
+            sys.executable,
+            str(Path(__file__).with_name("model_invocation.py")),
+            "_source_guard",
+            source_guard_path,
+            hashlib.sha256(authority_bytes).hexdigest(),
+            repr(float(timeout_seconds)),
+            "--",
+            *guarded_argv,
+        ]
     unit = f"agentteam-eval-{os.urandom(12).hex()}.service"
     command = [
         str(systemd_run),
@@ -2958,14 +3121,17 @@ def _run_bounded_argv(
         "--working-directory",
         str(cwd),
     ]
-    if Path(argv[0]).resolve(strict=False) == _TRUSTED_BWRAP_PATH:
+    if (
+        prelaunch_source_authority is None
+        and Path(argv[0]).resolve(strict=False) == _TRUSTED_BWRAP_PATH
+    ):
         command.extend(["--", *argv])
     else:
         clean_environment_argv = [
             str(env_binary),
             "-i",
             *(f"{name}={value}" for name, value in sorted(environment.items())),
-            *argv,
+            *guarded_argv,
         ]
         command.extend(["--", *clean_environment_argv])
 
@@ -2986,15 +3152,24 @@ def _run_bounded_argv(
             timeout=10,
         )
 
-    result = _capture_bounded_process(
-        command,
-        cwd="/",
-        environment=dict(os.environ),
-        timeout_seconds=timeout_seconds,
-        max_output_bytes=max_output_bytes,
-        timeout_callback=terminate_unit,
-        input_bytes=input_bytes,
-    )
+    try:
+        result = _capture_bounded_process(
+            command,
+            cwd="/",
+            environment=dict(os.environ),
+            timeout_seconds=(
+                timeout_seconds
+                + PRELAUNCH_SOURCE_REVALIDATION_TIMEOUT_SECONDS
+                if prelaunch_source_authority is not None
+                else timeout_seconds
+            ),
+            max_output_bytes=max_output_bytes,
+            timeout_callback=terminate_unit,
+            input_bytes=input_bytes,
+        )
+    finally:
+        if source_guard_path is not None:
+            Path(source_guard_path).unlink(missing_ok=True)
     result.update(
         {
             "execution_boundary": "systemd_user_transient_service",
@@ -4271,6 +4446,68 @@ def _bounded_tree_identity(root, *, excluded_roots, max_entries, max_bytes):
         "directories": directory_count,
         "bytes": content_bytes,
     }
+
+
+def _repository_workspace_sha256(repository, *, require_git=True):
+    """Bind provider-visible files and, for live launches, the Git index."""
+
+    repository = _existing_path(
+        repository,
+        "repository workspace",
+        require_directory=True,
+        reject_symlink=True,
+    )
+    git_directory = (
+        _validate_standalone_git_control(repository)
+        if require_git
+        else repository / ".git"
+    )
+    excluded_roots = (
+        {git_directory}
+        if git_directory.exists() or git_directory.is_symlink()
+        else set()
+    )
+    excluded_roots = (
+        {git_directory / "objects"}
+        if require_git
+        else excluded_roots
+    )
+    tree = _bounded_tree_identity(
+        repository,
+        excluded_roots=excluded_roots,
+        max_entries=DEFAULT_MAX_SCAN_FILES,
+        max_bytes=DEFAULT_MAX_SCAN_BYTES,
+    )
+    if not require_git:
+        return hashlib.sha256(_canonical_json_bytes(tree)).hexdigest()
+    try:
+        index = subprocess.run(
+            _sanitized_git_argv(
+                repository,
+                ("ls-files", "--stage", "-z"),
+            ),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30,
+            env=_sanitized_git_environment(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ExperimentSandboxError(
+            "repository workspace index is unavailable"
+        ) from exc
+    if (
+        index.returncode != 0
+        or len(index.stdout) > DEFAULT_MAX_SCAN_BYTES
+    ):
+        raise ExperimentSandboxError(
+            "repository workspace index is unavailable"
+        )
+    digest = hashlib.sha256()
+    digest.update(_canonical_json_bytes(tree))
+    digest.update(hashlib.sha256(index.stdout).digest())
+    return digest.hexdigest()
 
 
 def _sandbox_policy_sha256(descriptor):

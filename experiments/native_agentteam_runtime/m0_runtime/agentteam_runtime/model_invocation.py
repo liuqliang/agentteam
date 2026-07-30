@@ -20,6 +20,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 import secrets
 import signal
@@ -39,6 +40,7 @@ from pathlib import Path
 MAX_PROVIDER_STREAM_BYTES = 4 * 1024 * 1024
 HANDSHAKE_TIMEOUT_SECONDS = 30.0
 SYSTEMD_IDENTITY_TIMEOUT_SECONDS = 10.0
+PRELAUNCH_SOURCE_REVALIDATION_TIMEOUT_SECONDS = 120.0
 PARENT_DEATH_SIGNAL = signal.SIGKILL
 CANONICAL_LIFECYCLE_EVENT_TYPES = frozenset(
     {
@@ -1001,6 +1003,7 @@ class ModelInvocationCall:
                     "provider cwd differs from experiment launch registration"
                 )
         environment = None
+        prepared = None
         sandbox_reference = self.lifecycle.context.get(
             "experiment_sandbox_reference"
         )
@@ -1080,6 +1083,18 @@ class ModelInvocationCall:
                     **runner_arguments,
                 )
                 self.execution_group = runner
+                supervisor_revalidation = False
+                if prepared is not None:
+                    configure_source_authority = getattr(
+                        runner,
+                        "set_prelaunch_source_authority",
+                        None,
+                    )
+                    if callable(configure_source_authority):
+                        configure_source_authority(
+                            prepared.source_authority()
+                        )
+                        supervisor_revalidation = True
                 try:
                     identity = runner.prepare()
                 except Exception:
@@ -1090,6 +1105,25 @@ class ModelInvocationCall:
                 except Exception:
                     runner.abort_before_permit()
                     raise
+                if prepared is not None and not supervisor_revalidation:
+                    try:
+                        prepared.revalidate_mutable_sources()
+                    except (
+                        ExperimentSandboxError,
+                        ExperimentSandboxUnavailable,
+                    ) as exc:
+                        runner.abort_before_permit()
+                        return ProviderExecution(
+                            command,
+                            None,
+                            "",
+                            "",
+                            launch_failed=True,
+                            launch_error=(
+                                "launch_identity_revalidation_failed:"
+                                f"{type(exc).__name__}"
+                            ),
+                        )
                 return runner.permit_and_wait(
                     progress_callback=progress_callback,
                     progress_interval_seconds=progress_interval_seconds,
@@ -1248,6 +1282,20 @@ class SystemdGatedExecution:
         self.nonce = secrets.token_hex(32)
         self._prepared = False
         self.identity = None
+        self.prelaunch_source_authority = None
+
+    def set_prelaunch_source_authority(self, authority):
+        if self._prepared or self.spec_path.exists():
+            raise ModelInvocationIntegrityError(
+                "prelaunch source authority must precede supervisor start"
+            )
+        if not isinstance(authority, dict):
+            raise ModelInvocationIntegrityError(
+                "prelaunch source authority is invalid"
+            )
+        self.prelaunch_source_authority = json.loads(
+            json.dumps(authority, sort_keys=True)
+        )
 
     def prepare(self):
         user_service = self._preflight_user_service()
@@ -1266,6 +1314,10 @@ class SystemdGatedExecution:
         }
         if self.environment is not None:
             spec["environment"] = self.environment
+        if self.prelaunch_source_authority is not None:
+            spec["prelaunch_source_authority"] = (
+                self.prelaunch_source_authority
+            )
         _exclusive_publish_json(self.spec_path, spec)
         module_path = str(Path(__file__).resolve())
         self._checked_command(
@@ -1365,7 +1417,17 @@ class SystemdGatedExecution:
                 launch_error=f"launch_permit_failed:{exc.__class__.__name__}",
             )
 
-        deadline = time.monotonic() + float(self.timeout_seconds) + 10.0
+        revalidation_budget = (
+            PRELAUNCH_SOURCE_REVALIDATION_TIMEOUT_SECONDS
+            if self.prelaunch_source_authority is not None
+            else 0.0
+        )
+        deadline = (
+            time.monotonic()
+            + float(self.timeout_seconds)
+            + revalidation_budget
+            + 10.0
+        )
         interval = max(float(progress_interval_seconds or 0), 0.05)
         next_progress = time.monotonic() + interval
         while time.monotonic() < deadline:
@@ -1972,6 +2034,27 @@ def _supervisor_main(spec_path):
     except FileNotFoundError:
         pass
 
+    if launch_permitted and spec.get("prelaunch_source_authority") is not None:
+        try:
+            revalidate = _load_release_source_revalidator()
+            _call_with_wall_alarm(
+                revalidate,
+                spec["prelaunch_source_authority"],
+                PRELAUNCH_SOURCE_REVALIDATION_TIMEOUT_SECONDS,
+            )
+        except (
+            ImportError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            launch_permitted = False
+            launch_error = (
+                "launch_identity_revalidation_failed:"
+                f"{type(exc).__name__}"
+            )
+
     if launch_permitted:
         execution = _run_bounded_process_with_parent_death_safeguard(spec)
         result = {
@@ -1993,6 +2076,109 @@ def _supervisor_main(spec_path):
         }
     _exclusive_publish_json(Path(spec["result_path"]), result)
     return 0
+
+
+def _load_release_source_revalidator():
+    """Load the source guard from the same runtime release as this helper."""
+
+    package_root = Path(__file__).resolve().parent.parent
+    package_root_text = str(package_root)
+    if package_root_text not in sys.path:
+        sys.path.insert(0, package_root_text)
+    from agentteam_runtime import experiment_sandbox
+
+    expected_package = Path(__file__).resolve().parent
+    loaded_package = Path(experiment_sandbox.__file__).resolve().parent
+    if loaded_package != expected_package:
+        raise ImportError(
+            "experiment sandbox was not loaded from the active runtime release"
+        )
+    return experiment_sandbox._revalidate_prepared_source_authority
+
+
+def _call_with_wall_alarm(callback, argument, timeout_seconds):
+    """Bound a pre-exec check in the real helper's main thread."""
+
+    if threading.current_thread() is not threading.main_thread():
+        return callback(argument)
+
+    def timeout_handler(_signum, _frame):
+        raise TimeoutError("prelaunch source revalidation timed out")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, float(timeout_seconds))
+    try:
+        return callback(argument)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                previous_timer[0],
+                previous_timer[1],
+            )
+
+
+def _source_guard_main(
+    authority_path,
+    authority_sha256,
+    command_timeout_seconds,
+    command,
+):
+    """Revalidate a mutable source and immediately replace this process."""
+
+    try:
+        command_timeout = float(command_timeout_seconds)
+    except (TypeError, ValueError):
+        return 64
+    if (
+        not command
+        or not math.isfinite(command_timeout)
+        or not 0 < command_timeout <= 3600
+        or len(authority_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in authority_sha256
+        )
+        or not all(
+            isinstance(argument, str) and "\x00" not in argument
+            for argument in command
+        )
+    ):
+        return 64
+    try:
+        authority_bytes = Path(authority_path).read_bytes()
+        if (
+            len(authority_bytes) > 1024 * 1024
+            or hashlib.sha256(authority_bytes).hexdigest()
+            != authority_sha256
+        ):
+            return 125
+        authority = json.loads(authority_bytes)
+        _call_with_wall_alarm(
+            _load_release_source_revalidator(),
+            authority,
+            PRELAUNCH_SOURCE_REVALIDATION_TIMEOUT_SECONDS,
+        )
+    except (
+        ImportError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        return 125
+    try:
+        signal.setitimer(signal.ITIMER_REAL, command_timeout)
+        os.execvpe(command[0], command, dict(os.environ))
+    except OSError:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        return 126
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    return 126
 
 
 def _run_bounded_process_with_parent_death_safeguard(spec):
@@ -3032,4 +3218,17 @@ def _validate_call_context(context, *, supported):
 if __name__ == "__main__":  # pragma: no cover - exercised by live systemd path
     if len(sys.argv) == 3 and sys.argv[1] == "_supervisor":
         raise SystemExit(_supervisor_main(sys.argv[2]))
+    if (
+        len(sys.argv) >= 7
+        and sys.argv[1] == "_source_guard"
+        and sys.argv[5] == "--"
+    ):
+        raise SystemExit(
+            _source_guard_main(
+                sys.argv[2],
+                sys.argv[3],
+                sys.argv[4],
+                sys.argv[6:],
+            )
+        )
     raise SystemExit("model_invocation.py is an internal runtime helper")
