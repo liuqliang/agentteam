@@ -1,473 +1,295 @@
 {
-  "schema_version": "phase2_repo_map_handoff.v3",
-  "handoff_id": "phase2-experiment-harness-recovery-repo-map",
-  "task_id": "P2-MAP-R",
+  "schema_version": "phase2_repo_map_handoff.v4",
+  "handoff_id": "phase2-cleanup-replay-recovery",
+  "task_id": "P2-MAP-CLEANUP-R",
   "current_source_binding": {
-    "repository_commit": "a002342636dd1b603e2c598c1a77b3ae665757fa",
-    "recovery_source_commit": "0a3f29f597034565ad7257b7eb9327cfde531876",
-    "recovery_source_is_ancestor": true,
-    "runtime_tree_oid": "e783aa47acfcdad07e7689eba7ef2f78c1bdf64f",
-    "tests_tree_oid": "9a491199ac3195e1bef5967d159462ece34c00c7",
-    "runtime_and_tests_delta_from_recovery_source": "none",
+    "repository_commit": "4f5a9422abfa58582e4239ee26d394fd0f4ca12b",
+    "verified_p2_05r_prefix": "5a06f6c9c2a2e54444a315e54feb1651d4fdd63d",
+    "verified_p2_05r_prefix_is_ancestor": true,
+    "runtime_tree_oid": "44f8bb375dceff0be1ac12afe3651b78b1ebc324",
+    "tests_tree_oid": "b7d59e5a119aa92998ade58ffb9867c8d4710f30",
+    "runtime_tree_oid_at_verified_p2_05r_prefix": "44f8bb375dceff0be1ac12afe3651b78b1ebc324",
+    "tests_tree_oid_at_verified_p2_05r_prefix": "b7d59e5a119aa92998ade58ffb9867c8d4710f30",
+    "runtime_and_tests_delta_from_verified_p2_05r_prefix": "none",
     "blueprint": {
-      "path": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-29-phase2-experiment-harness-recovery.blueprint.json",
-      "blob_oid": "8d887f80cfcab1940ca4ee1baedbd990940adc59"
+      "path": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-30-phase2-cleanup-replay-recovery.blueprint.json",
+      "blob_oid": "4345a260fda4b80ab6c3b4aabcba9b580ed55bd2",
+      "recovery_source_commit": "5a06f6c9c2a2e54444a315e54feb1651d4fdd63d"
     },
-    "plan": {
-      "path": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-27-phase2-experiment-harness-and-calibration.md",
-      "blob_oid": "46e200509642c3eb2eee3686fa41a657b232dedc"
-    },
-    "consumer_tasks": [
-      "P2-06R",
-      "P2-07B-R"
+    "scoped_file_bindings": [
+      {
+        "path": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
+        "blob_oid": "64e7b0aab55f5d0599c4557ba75c2d3fe4d7019f",
+        "sha256": "1c0a8a0aaa72697453d642323a9177242866a533368aaa97e0f385ba3c81232b"
+      },
+      {
+        "path": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_workspace.py",
+        "blob_oid": "e6ae95915abfe273e77235fada2240bb40915b85",
+        "sha256": "d3c5c91211ac2b58fa3f4fa109b21f4485f2014212820066e2600b0235606f17"
+      },
+      {
+        "path": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
+        "blob_oid": "cf69efb10fdb7f853787306c26b3ec692988e1f8",
+        "sha256": "764568467f44692a829ecf41521be442edbdeee2abbe31dc9cf84fd74971f72f"
+      },
+      {
+        "path": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
+        "blob_oid": "fd99c9679e03cc17e2bd988e313551f04cb7ed97",
+        "sha256": "a05ba80def19709872b9062ff9f4a7b69f035b48f0c57aea1fd3f60ec12d0cbb"
+      },
+      {
+        "path": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_calibration.py",
+        "blob_oid": "8286aad9204c3e3615731ccd24927b12107c2b24",
+        "sha256": "e1dee13ae61889faa64e44fa4c1f1fd2a1e1a9756b4ba838219b608db0db1552"
+      },
+      {
+        "path": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/projection_db.py",
+        "blob_oid": "e14910d6b3b74afcdceab81e6f39e2847415091e",
+        "sha256": "2e432651975579eea1e6ec193765e66ee5a8d9dfed3fc6721d093387731739d2"
+      },
+      {
+        "path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "blob_oid": "3c556892902fb7d459cd4c4b93dc9aedc66ff03e",
+        "sha256": "98e7578fe4bfe1966ed85a341c53bd5e3b82510b5cfa6c7411cc9a11f4c69153"
+      }
     ],
-    "supersedes": {
-      "task_id": "P2-MAP",
-      "repository_commit": "645c61e8b618111945a73fe43e7cfb71c3748a12",
-      "reason": "The v6 handoff predates the committed recovery prefix and does not describe the P2-05C cleanup-receipt dependency."
-    },
-    "scope": "Only the current mode, cleanup, lifecycle-registry, deterministic-gate, controller-only taskpack, and focused-test seams required by P2-06R and P2-07B-R.",
+    "consumer_task": "P2-05C-R",
+    "scope": "Only cleanup ordering, immutable cleanup receipt consumption, post-cleanup sandbox replay, deterministic calibration, projection, and the five observed failing readiness-test entries.",
     "exclusions": [
-      "This handoff is implementation guidance, not Phase 2 benchmark or promotion evidence.",
-      "It does not authorize P2-08, candidate-release installation, live provider calibration, source merge, or push.",
-      "It does not replace protocol, run-manifest, runtime-release, controller, sandbox, invocation-set, sealed-result, cleanup-receipt, or gate-epoch authority."
+      "No production behavior is changed by this repository map.",
+      "P2-08, live calibration, candidate release promotion, source merge, and push remain unauthorized.",
+      "Live provider launch must continue to require present mount sources and complete namespace-denial evidence."
     ]
   },
-  "repo_map_handoff": {
-    "status": "ready",
-    "implementation_state": "The three adapters, common lifecycle registry, common evaluator/finalizer, deterministic gate registry, relation validators, and controller-only taskpack path exist in the bound source. P2-05C production cleanup is not connected: cleanup_clean_snapshot is a tested helper, but ExperimentCommonFinalizer does not call it, no cleanup-receipt schema exists, and projection/rendering still observe the sealed bundle's immutable pending value.",
-    "bounded_flows": [
-      {
-        "flow": "mode_execution",
-        "sequence": [
-          "execute_bound_experiment_mode validates the immutable allocation and clean snapshot, then acquires the run controller lease.",
-          "ExperimentModeController.execute accepts only the concrete adapter declared by the run manifest.",
-          "Every provider lifecycle is registered through _register_provider_launch or TwoPhaseFileScheduler._register_experiment_attempt_launch.",
-          "publish_registered_model_invocation_set_reference seals the complete registry before ExperimentCommonFinalizer evaluates and seals the terminal result.",
-          "Both successful and recoverable adapter-failure paths converge on ExperimentCommonFinalizer."
-        ]
-      },
-      {
-        "flow": "cleanup_finalization",
-        "sequence": [
-          "ExperimentCommonFinalizer seals, reloads, and validates results/terminal.",
-          "P2-05C must then remove only run_dir/repository, publish an immutable cleanup receipt outside that snapshot, and reload the sealed result to prove its digest is unchanged.",
-          "Projection, show, and comparison must derive effective cleanup status from the receipt; the immutable bundle remains pending.",
-          "P2-06R must make every normal, failure, and replayed mode outcome return through this same receipt-aware finalization contract."
-        ]
-      },
-      {
-        "flow": "post_backlog_gates",
-        "sequence": [
-          "taskpack validation permits an empty backlog only for a candidate-release-bound controller_only taskpack with the fixed P2-08, P2-09, P2-10 graph.",
-          "_run_controller_only_taskpack seals or reloads the gate epoch and invokes _run_available_phase2_gate_controllers without starting a worker pool.",
-          "run_gate_controller recomputes the registered relation; P2-09 returns awaiting_operator_authorization with zero provider calls until current authorization validates.",
-          "_evaluate_post_backlog_gates requires current epoch-scoped receipts and controller results before milestone completion."
-        ]
-      }
-    ],
-    "verified_current_gaps": [
-      {
-        "gap_id": "cleanup_not_connected",
-        "evidence": "experiment_modes.ExperimentCommonFinalizer.__call__ returns after _validate_sealed_mode_result without calling experiment_workspace.cleanup_clean_snapshot."
-      },
-      {
-        "gap_id": "cleanup_receipt_absent",
-        "evidence": "The bound source has no experiments/native_agentteam_runtime/schemas/experiment_clean_snapshot_cleanup.schema.json."
-      },
-      {
-        "gap_id": "cleanup_projection_pending",
-        "evidence": "experiment_modes._build_common_result_bundle passes cleanup_status=\"pending\" and projection_db._scan_experiment_results reads only the sealed bundle."
-      },
-      {
-        "gap_id": "cleaned_replay_reallocation",
-        "evidence": "execute_bound_experiment_mode allocates run_dir/repository before ExperimentModeController.execute can return _replayed_mode_result, so a cleaned terminal replay can recreate the disposable snapshot."
-      }
-    ]
-  },
-  "mode_and_cleanup_extension_points": {
-    "entry_and_common_finalization": {
+  "cleanup_and_replay_symbols": {
+    "cleanup_finalization": {
       "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
       "symbols": [
-        "execute_bound_experiment_mode",
+        "ExperimentCommonFinalizer.__call__",
         "ExperimentModeController.execute",
         "ExperimentModeController._finalize_adapter_failure",
-        "ExperimentCommonFinalizer.__call__",
+        "execute_bound_experiment_mode",
         "_build_common_result_bundle",
-        "_validate_sealed_mode_result",
-        "_replayed_mode_result"
+        "_replayed_mode_result",
+        "_validate_sealed_mode_result"
       ],
-      "contract": "Keep one concrete-adapter dispatch and one common evaluator/finalizer. Insert receipt-aware cleanup only after the terminal bundle has been sealed, reloaded, and validated. Adapter failures that can be finalized must use the same ordering."
+      "current_behavior": [
+        "ExperimentCommonFinalizer.__call__ seals results/terminal, reloads it with load_experiment_result_bundle, validates it with _validate_sealed_mode_result, and then returns without invoking cleanup_clean_snapshot.",
+        "_build_common_result_bundle stores cleanup_status=\"pending\" in the immutable result bundle.",
+        "execute_bound_experiment_mode recreates run_dir/repository when it is absent before ExperimentModeController.execute can return _replayed_mode_result."
+      ],
+      "repair_boundary": "Keep cleanup in the common terminal path after seal, reload, and validation. A terminal replay must validate the sealed result and cleanup receipt before deciding whether a snapshot is needed."
     },
-    "three_mode_adapters": [
-      {
-        "mode": "single_codex",
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
-        "symbols": [
-          "SingleCodexModeAdapter.execute",
-          "NativeSingleCodexProvider.__call__"
+    "disposable_snapshot_cleanup": {
+      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_workspace.py",
+      "symbols": [
+        "cleanup_clean_snapshot",
+        "load_clean_snapshot_attestation",
+        "_safe_run_directory",
+        "_safe_result_path",
+        "_result_digest",
+        "_fsync_result_tree"
+      ],
+      "current_behavior": "cleanup_clean_snapshot already bounds the target to run_dir/repository, fsyncs and hashes the sealed result before removal, returns removed, already_absent, or failed, and verifies the result digest again afterwards. Its returned record is not durable authority.",
+      "invariants": [
+        "Delete only the attested run_dir/repository path.",
+        "Never delete or rewrite results/terminal.",
+        "Preserve a terminal result when cleanup fails.",
+        "Bind the pre-cleanup and post-cleanup result digests."
+      ]
+    },
+    "sealed_result_and_receipt": {
+      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
+      "symbols": [
+        "build_experiment_result_bundle",
+        "seal_experiment_result_bundle",
+        "load_experiment_result_bundle",
+        "render_experiment_result",
+        "render_experiment_comparison"
+      ],
+      "current_behavior": [
+        "The sealed bundle contains immutable cleanup_status and current mode finalization supplies pending.",
+        "load_experiment_result_bundle validates the sealed bundle digest and projection identity.",
+        "render_experiment_result and render_experiment_comparison do not expose an effective receipt-derived cleanup status."
+      ],
+      "receipt_contract": {
+        "schema_path": "experiments/native_agentteam_runtime/schemas/experiment_clean_snapshot_cleanup.schema.json",
+        "publication": "Separate create-if-absent immutable JSON outside run_dir/repository after cleanup completes or fails.",
+        "required_bindings": [
+          "experiment_run_id",
+          "sealed result path",
+          "sealed bundle/result digest",
+          "clean snapshot attestation and target",
+          "pre-cleanup result digest",
+          "post-cleanup result digest",
+          "cleanup status",
+          "bounded failure evidence when status is failed"
         ],
-        "invariant": "One fresh registered Codex lifecycle receives no AgentTeam task context and uses the protocol model and reasoning profile."
-      },
-      {
-        "mode": "agentteam_direct",
-        "files": [
-          "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
-          "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
-          "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py"
-        ],
-        "symbols": [
-          "AgentTeamDirectModeAdapter.preflight",
-          "AgentTeamDirectModeAdapter.execute",
-          "taskpack.verify_frozen_taskpack_digest",
-          "taskpack.build_taskpack_runtime_args",
-          "agentteam._run_frozen_taskpack"
-        ],
-        "invariant": "Validate the preregistered frozen taskpack digest before applying the controller-trusted standalone snapshot root."
-      },
-      {
-        "mode": "agentteam_full",
-        "files": [
-          "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
-          "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack_author.py",
-          "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py"
-        ],
-        "symbols": [
-          "AgentTeamFullModeAdapter.execute",
-          "taskpack_author.draft_taskpack_from_goal",
-          "taskpack_author._run_codex_author_command",
-          "agentteam._run_frozen_taskpack"
-        ],
-        "invariant": "Author and freeze in an independent standalone repository, reject the preregistered direct-taskpack digest, and pass no direct-taskpack input to authoring."
-      }
-    ],
-    "runtime_context_and_lifecycle_registry": [
-      {
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
-        "symbols": [
-          "_experiment_invocation_context",
-          "_experiment_runtime_context",
-          "_register_provider_launch"
-        ],
-        "purpose": "Build equal protocol/model/controller context and allocate single/author lifecycle and sandbox authority."
-      },
-      {
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
-        "symbols": [
-          "experiment_lifecycle_authority_root",
-          "publish_provider_sandbox_reference",
-          "publish_experiment_launch_registration",
-          "publish_registered_model_invocation_set_reference",
-          "load_model_invocation_set_reference"
-        ],
-        "purpose": "Own append-only lifecycle registration, workspace-specific sandbox binding, complete registry sealing, and manifest reload."
-      },
-      {
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
-        "symbols": [
-          "ModelInvocationCall.__init__",
-          "ModelInvocationCall.execute",
-          "ModelInvocationCall.finalize",
-          "ModelInvocationCall._acquire_experiment_provider_admission",
-          "_bind_registered_experiment_launch",
-          "_validate_registered_codex_command",
-          "invocation_context_from_message"
-        ],
-        "purpose": "Reload immutable launch registration, enforce sandbox and one-lane admission before provider execution, and publish terminal lifecycle authority."
-      },
-      {
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/two_phase_scheduler.py",
-        "symbols": [
-          "TwoPhaseFileScheduler._register_experiment_attempt_launch",
-          "TwoPhaseFileScheduler._prepare_experiment_dispatch",
-          "TwoPhaseFileScheduler._reconcile_experiment_inflight"
-        ],
-        "purpose": "Allocate and reconcile every worker-attempt workspace, sandbox, and lifecycle before dispatch."
-      },
-      {
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/mailbox_worker.py",
-        "symbols": [
-          "_model_invocation_context_payload",
-          "_invocation_authority_root"
-        ],
-        "purpose": "Preserve experiment and lifecycle authority through mailbox projection."
-      },
-      {
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/m0_runtime.py",
-        "symbols": [
-          "CodexRuntimeAdapter.run"
-        ],
-        "purpose": "Keep repo-map, worker, review, and other AgentTeam provider calls on ModelInvocationCall."
-      },
-      {
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py",
-        "symbols": [
-          "ExperimentController.prelaunch_admission",
-          "ExperimentController.post_terminal_accounting",
-          "ExperimentController.observe_boundary",
-          "ExperimentController.resume_interrupted"
-        ],
-        "purpose": "Retain one protocol-global provider lane, terminal-only accounting, safe boundaries, and original-budget resume."
-      }
-    ],
-    "clean_snapshot_and_receipt_dependency": {
-      "current_cleanup_helper": {
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_workspace.py",
-        "symbols": [
-          "allocate_clean_snapshot",
-          "verify_clean_snapshot",
-          "load_clean_snapshot_attestation",
-          "cleanup_clean_snapshot",
-          "_safe_result_path",
-          "_result_digest",
-          "_fsync_result_tree"
-        ],
-        "current_behavior": "cleanup_clean_snapshot accepts only a sealed result inside the run and outside run_dir/repository, fsyncs and hashes it, removes only the attested snapshot, reports removed, already_absent, or failed, and rehashes the result. Its return value is transient and not yet durable authority."
-      },
-      "sealed_result_authority": {
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
-        "symbols": [
-          "build_experiment_result_bundle",
-          "seal_experiment_result_bundle",
-          "load_experiment_result_bundle",
-          "render_experiment_result",
-          "render_experiment_comparison"
-        ],
-        "invariant": "Do not mutate the sealed bundle to update cleanup_status. Bind the receipt to experiment_run_id and the sealed bundle/result digest, then revalidate that result after cleanup."
-      },
-      "receipt_schema": {
-        "path": "experiments/native_agentteam_runtime/schemas/experiment_clean_snapshot_cleanup.schema.json",
-        "current_state": "absent; P2-05C owns creation",
-        "required_statuses": [
+        "statuses": [
           "removed",
           "already_absent",
           "failed"
         ],
-        "required_bindings": [
-          "experiment_run_id",
-          "sealed result path and sealed bundle/result digest",
-          "pre-cleanup result digest",
-          "post-cleanup result digest",
-          "attested disposable snapshot target",
-          "cleanup status and bounded failure evidence"
-        ],
-        "publication_rule": "Publish create-if-absent and atomically only after the result has been sealed and validated and cleanup has completed or failed; conflicting replay must fail closed."
-      },
-      "projection_consumers": {
-        "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/projection_db.py",
-        "symbols": [
-          "read_projected_experiment_results",
-          "_scan_experiment_results",
-          "_create_projection_schema",
-          "_write_projection_rows",
-          "_database_experiment_result_digest"
-        ],
-        "contract": "Derive effective cleanup status from a valid receipt. Missing receipt means incomplete/pending; failed receipt remains failed; DB and file fallback must agree and the receipt must never make SQLite authoritative."
-      },
-      "p2_06r_consumer_contract": [
-        "All three adapters and recoverable adapter failures must return only after the common finalizer has produced a valid cleanup receipt or a durable failed receipt.",
-        "The returned sealed_result summary should carry receipt-derived cleanup state/reference without rewriting result.json.",
-        "A terminal replay must load and validate the sealed result and cleanup receipt before deciding whether a snapshot is needed; it must not recreate a snapshot that a valid removed or already_absent receipt proves disposable.",
-        "Lifecycle registry sealing and common evaluation must finish before cleanup so evaluation never loses its candidate workspace."
-      ]
-    },
-    "integration_risks": [
-      {
-        "risk": "cleanup_before_seal_or_evaluation",
-        "impact": "The evaluator or result binder loses the candidate repository.",
-        "guard": "Keep cleanup after seal_experiment_result_bundle, load_experiment_result_bundle, and _validate_sealed_mode_result."
-      },
-      {
-        "risk": "sealed_bundle_mutation",
-        "impact": "Immutable terminal authority and bundle_sha256 become invalid.",
-        "guard": "Publish a separate receipt and derive effective status outside result.json."
-      },
-      {
-        "risk": "cleaned_terminal_replay_reallocates_snapshot",
-        "impact": "A completed run regains disposable state inconsistent with its receipt.",
-        "guard": "Move or add sealed-result/receipt replay detection before execute_bound_experiment_mode allocates run_dir/repository."
-      },
-      {
-        "risk": "adapter_specific_cleanup",
-        "impact": "Modes or infrastructure-failure outcomes expose unequal lifecycle evidence.",
-        "guard": "Keep cleanup in ExperimentCommonFinalizer and the shared replay path, never inside an adapter."
-      },
-      {
-        "risk": "registry_sealed_too_early_or_incompletely",
-        "impact": "Author, worker-attempt, follow-up, or late invocations escape evaluation.",
-        "guard": "Preserve complete registration equality and terminal checks in publish_registered_model_invocation_set_reference."
-      },
-      {
-        "risk": "ordinary_linked_worktree_reuse",
-        "impact": "Modes share objects, refs, or prior-run state.",
-        "guard": "Preserve allocate_clean_snapshot and create_independent_attempt_workspace standalone object-store checks."
+        "missing_receipt_semantics": "incomplete/pending",
+        "immutability_rule": "Do not rewrite result.json to report receipt-derived state."
       }
-    ]
-  },
-  "gate_extension_points": {
-    "fixed_registry_and_relation_core": {
-      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_gates.py",
+    },
+    "historical_sandbox_replay": {
+      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
       "symbols": [
-        "GATE_SPECS",
-        "validate_controller_gate_graph",
-        "resolve_gate_spec",
-        "validate_gate_relation",
-        "run_gate_controller",
-        "publish_live_authorization",
-        "require_live_provider_authorization",
-        "_validate_readiness_relation",
-        "_validate_live_calibration_relation",
-        "_validate_live_authorization",
-        "_validate_finalization_relation"
+        "load_provider_sandbox_reference",
+        "load_model_invocation_set_reference",
+        "validate_evaluation_evidence",
+        "_load_authority_reference",
+        "_terminal_invocation_evidence",
+        "_validate_namespace_evidence"
       ],
-      "invariants": [
-        "Only the fixed P2-08, P2-09, P2-10 graph and registered controller/validator/schema tuples are executable.",
-        "Each relation validator reloads artifacts and recomputes Git, digest, result, authorization, and evidence relations.",
-        "P2-09 authorization is checked before provider_launcher; absent authorization returns awaiting_operator_authorization with provider_calls=0 and target_mutations=0.",
-        "P2-10 accepts historical P2-09 authorization only through the exact single-child report/roadmap relation defined by the plan."
+      "current_behavior": [
+        "load_provider_sandbox_reference always calls validate_provider_sandbox_descriptor.",
+        "validate_provider_sandbox_descriptor reaches _validate_mount_source, so loading historical sandbox evidence fails once the disposable repository mount source has been deleted.",
+        "validate_evaluation_evidence reloads every invocation sandbox through load_provider_sandbox_reference."
+      ],
+      "historical_contract": [
+        "Historical mode is permitted only for already sealed, digest-bound terminal lifecycle, sandbox, invocation-set, evaluation, clean-snapshot, and cleanup-receipt evidence.",
+        "Historical mode must validate immutable reference digests, canonical payloads, policy digests, namespace-denial evidence, invocation terminal bindings, and receipt/result bindings.",
+        "Historical mode may skip only present-day mount-source existence/identity checks for the attested disposable repository that a valid cleanup receipt proves removed or already_absent.",
+        "Historical mode must not be available to sandbox publication, launch registration, prelaunch admission, provider launch preparation, evaluator launch preparation, or any live provider path."
       ]
     },
-    "calibration_relation_dependencies": {
+    "live_sandbox_validation": {
+      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
+      "symbols": [
+        "publish_provider_sandbox_reference",
+        "load_experiment_launch_registration",
+        "validate_provider_sandbox_descriptor",
+        "prepare_provider_launch",
+        "prepare_candidate_evaluation_launch",
+        "_validate_mount_source"
+      ],
+      "preserved_contract": [
+        "All live and prelaunch callers require canonical existing mount sources.",
+        "Repository source identity, runtime/library/credential views, sandbox policy digest, and fresh complete namespace-denial evidence remain mandatory.",
+        "No public live API accepts a historical replay flag."
+      ]
+    },
+    "deterministic_calibration": {
       "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_calibration.py",
       "symbols": [
-        "load_deterministic_calibration_report",
+        "run_deterministic_experiment_calibration",
         "_load_run_record",
-        "_validate_mode_family",
-        "_validate_unique_results",
-        "_validate_equal_contract",
-        "_validate_usage_coverage"
+        "_discover_authority_reference",
+        "_validate_isolation",
+        "_rebuild_projection"
       ],
-      "invariant": "Gate validation reloads sealed results and invocation authority, proves exactly three primary modes plus one repeat, equal inputs, unique results, and complete usage."
+      "current_behavior": [
+        "_load_run_record reloads invocation and sandbox authorities with live validators and therefore requires deleted repository mount sources to exist.",
+        "_load_run_record calls validate_evaluation_evidence with authority references, which again reloads sandbox descriptors through the live path.",
+        "_validate_isolation reports passed only after those live source checks have succeeded."
+      ],
+      "repair_boundary": "Use the sealed-result and valid-cleanup-receipt context to select a historical, digest-bound validation path. Keep the same usage, terminal lifecycle, canary denial, retained leak scan, evaluation, source commit, and projection recomputation checks."
     },
-    "epoch_and_controller_orchestration": {
-      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+    "projection_and_rendering": {
+      "files": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/projection_db.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py"
+      ],
       "symbols": [
-        "_post_backlog_gate_context",
-        "_gate_seal_baseline",
-        "_phase2_gate_relation_context",
-        "_phase2_live_authorization_contract",
-        "_run_available_phase2_gate_controllers",
-        "_run_one_available_phase2_gate_controller",
-        "_evaluate_post_backlog_gates",
-        "_complete_gated_milestone_if_ready",
-        "_run_controller_only_taskpack"
+        "read_projected_experiment_results",
+        "_scan_experiment_results",
+        "_create_projection_schema",
+        "_write_projection_rows",
+        "_database_experiment_result_digest",
+        "render_experiment_result",
+        "render_experiment_comparison"
       ],
-      "invariant": "Receipts and controller results are epoch-scoped, deterministic progression pauses at P2-09, and controller_only execution starts no worker pool."
-    },
-    "controller_only_taskpack_guard": {
-      "file": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
-      "symbols": [
-        "materialize_taskpack_blueprint",
-        "_validate_taskpack_blueprint",
-        "validate_taskpack",
-        "_validate_controller_action_authority"
-      ],
-      "invariant": "Zero tasks/agents are valid only for blueprint-materialized controller_only authority with non-empty fixed gates, committed schemas and action authority, and candidate-release binding."
-    },
-    "integration_risks": [
-      {
-        "risk": "schema_or_receipt_only_acceptance",
-        "impact": "A syntactically valid claim can pass without Git/evidence truth.",
-        "guard": "Keep validate_gate_relation as the mandatory path and retain all three dedicated relation validators."
-      },
-      {
-        "risk": "provider_launch_before_authorization",
-        "impact": "P2-09 makes an unauthorized live call.",
-        "guard": "Keep require_live_provider_authorization before provider_launcher and test zero allocation/calls when absent."
-      },
-      {
-        "risk": "stale_epoch_context",
-        "impact": "Authorization or receipts from an earlier baseline authorize the current gate.",
-        "guard": "Recompute _phase2_gate_relation_context from the current sealed epoch and enforce the explicit historical-authorization exception only for P2-10."
-      },
-      {
-        "risk": "controller_only_worker_fallthrough",
-        "impact": "An empty backlog can start model workers or falsely complete.",
-        "guard": "Keep _run_frozen_taskpack branching to _run_controller_only_taskpack before build_taskpack_runtime_args."
-      },
-      {
-        "risk": "self_hot_loading_or_recovery_promotion",
-        "impact": "The implementation run executes newly written P2-08 code or changes external release/source state.",
-        "guard": "This recovery task may validate only; do not install a release, execute P2-08, merge, or push."
-      }
-    ]
+      "current_behavior": "_scan_experiment_results and the database projection carry only the sealed bundle, so cleanup remains pending and cleanup failure is invisible.",
+      "repair_boundary": [
+        "Derive effective cleanup status and receipt reference from authoritative files during scanning.",
+        "Make DB and file fallback return the same receipt-derived state.",
+        "Treat a missing receipt as incomplete and a failed receipt as failed.",
+        "Keep SQLite rebuildable and non-authoritative.",
+        "Do not include derived cleanup state in the sealed bundle digest."
+      ]
+    }
   },
-  "focused_test_inventory": {
-    "test_root": "experiments/native_agentteam_runtime/m0_runtime",
-    "p2_05c_dependency": {
-      "present": [
-        "tests.test_experiment_harness.ExperimentWorkspaceTests.test_cleanup_preserves_sealed_result_and_records_failure",
-        "tests.test_experiment_harness.ExperimentResultBundleTests.test_terminal_bundle_is_atomic_idempotent_and_conflict_safe",
-        "tests.test_experiment_harness.ExperimentResultBundleTests.test_projection_rebuild_preserves_all_outcomes_and_digests"
-      ],
-      "add_or_extend": [
-        "A common-finalizer test proving seal and validation precede cleanup and immutable receipt publication.",
-        "A fault-injection test proving failed cleanup preserves the sealed bundle and projects/renders failed from the receipt.",
-        "An idempotent replay test proving a valid removed or already_absent receipt does not recreate run_dir/repository.",
-        "A missing/conflicting receipt test proving cleanup remains incomplete or fails closed rather than becoming completed."
-      ]
+  "five_failure_test_inventory": [
+    {
+      "test_id": "tests.test_experiment_harness.ExperimentCalibrationTests.test_deterministic_l1_l2_calibration_rebuilds_all_evidence",
+      "line": 11442,
+      "failure_family": "post_cleanup_historical_sandbox_replay",
+      "trigger": "_real_calibration_fixture produces terminal runs; after production cleanup, run_deterministic_experiment_calibration reaches _load_run_record and the live sandbox loader rejects the deleted repository mount source.",
+      "required_recovery_assertion": "Deterministic calibration and its idempotent replay pass from sealed digest-bound evidence after run_dir/repository is absent."
     },
-    "p2_06r": {
-      "present": [
-        "tests.test_experiment_harness.ExperimentModeAdapterTests.test_single_mode_receives_no_agentteam_task_context",
-        "tests.test_experiment_harness.ExperimentModeAdapterTests.test_controller_rejects_missing_sandbox_and_wrong_adapter",
-        "tests.test_experiment_harness.ExperimentModeAdapterTests.test_counterbalanced_mode_order_is_enforced_and_immutable",
-        "tests.test_experiment_harness.ExperimentModeAdapterTests.test_direct_mode_verifies_digest_and_overrides_project_root",
-        "tests.test_experiment_harness.ExperimentModeAdapterTests.test_full_mode_authors_without_direct_taskpack_input",
-        "tests.test_experiment_harness.ExperimentModeAdapterTests.test_independent_attempt_workspace_has_distinct_object_store",
-        "tests.test_experiment_harness.ExperimentModeAdapterTests.test_registered_codex_command_binds_model_and_reasoning",
-        "tests.test_experiment_harness.ExperimentSandboxTests.test_mode_authority_requires_registered_launch_policy",
-        "tests.test_experiment_harness.ExperimentSandboxTests.test_precreated_invocation_cannot_publish_after_evaluation_seal",
-        "tests.test_experiment_harness.ExperimentSandboxTests.test_evaluation_seals_multiple_taskpack_authority_roots"
-      ],
-      "add_or_extend": [
-        "Exercise all three adapters and a recoverable infrastructure failure through the common P2-05C receipt path with no live provider.",
-        "Reject missing, stale, extra, unconsumed, and non-terminal lifecycle registrations before evaluation.",
-        "Prove author, attempt, and candidate repositories have distinct in-workspace Git object stores and no linked-worktree control files."
-      ],
-      "focused_command": [
-        "python3",
-        "-m",
-        "unittest",
-        "tests.test_experiment_harness.ExperimentModeAdapterTests",
-        "tests.test_experiment_harness.ExperimentWorkspaceTests",
-        "tests.test_experiment_harness.ExperimentSandboxTests"
-      ]
+    {
+      "test_id": "tests.test_experiment_harness.ExperimentCalibrationTests.test_calibration_rejects_duplicate_request_cost_drift",
+      "line": 11533,
+      "failure_family": "post_cleanup_historical_sandbox_replay",
+      "trigger": "The test builds the same cleaned calibration fixture, so mount-source rejection occurs before the intended duplicate-request drift assertion.",
+      "required_recovery_assertion": "Historical replay validation succeeds far enough for forged stable_request_key evidence to fail for the intended duplicate-request reason."
     },
-    "p2_07b_r": {
-      "present": [
-        "tests.test_experiment_harness.Phase2GateTests.test_gate_registry_rejects_incomplete_action_contract",
-        "tests.test_experiment_harness.Phase2GateTests.test_live_authorization_is_epoch_bound_and_precedes_provider",
-        "tests.test_experiment_harness.Phase2GateTests.test_live_action_denies_before_run_allocation_without_authorization",
-        "tests.test_experiment_harness.Phase2GateTests.test_readiness_relation_recomputes_pilot_and_exact_commit",
-        "tests.test_experiment_harness.Phase2GateTests.test_live_calibration_relation_recomputes_sealed_results",
-        "tests.test_experiment_harness.Phase2GateTests.test_finalization_relation_recomputes_exact_git_child",
-        "tests.test_taskpack.TaskpackTests.test_phase2_existing_promotion_release_is_revalidated",
-        "tests.test_taskpack.TaskpackTests.test_phase2_action_receipts_keep_epoch_scoped_relation_contexts",
-        "tests.test_taskpack.TaskpackTests.test_phase2_controller_restarts_dependency_chain_after_epoch_refresh",
-        "tests.test_taskpack.TaskpackTests.test_controller_only_blueprint_materializes_and_freezes",
-        "tests.test_taskpack.TaskpackTests.test_controller_only_taskpack_requires_blueprint_and_fixed_registry",
-        "tests.test_taskpack.TaskpackTests.test_controller_only_launcher_rejects_handcrafted_frozen_authority"
-      ],
-      "add_or_extend": [
-        "Keep all provider launchers fake and assert the recovery run never executes P2-08.",
-        "Prove stale epoch receipts/authorization are rejected and deterministic resume continues from the first unresolved gate.",
-        "Prove the controller-only path starts no worker pool and cannot use experiment mode runtime context."
-      ],
-      "focused_command": [
-        "python3",
-        "-m",
-        "unittest",
-        "tests.test_experiment_harness.Phase2GateTests",
-        "tests.test_taskpack.TaskpackTests.test_phase2_existing_promotion_release_is_revalidated",
-        "tests.test_taskpack.TaskpackTests.test_phase2_action_receipts_keep_epoch_scoped_relation_contexts",
-        "tests.test_taskpack.TaskpackTests.test_phase2_controller_restarts_dependency_chain_after_epoch_refresh",
-        "tests.test_taskpack.TaskpackTests.test_controller_only_blueprint_materializes_and_freezes",
-        "tests.test_taskpack.TaskpackTests.test_controller_only_taskpack_requires_blueprint_and_fixed_registry",
-        "tests.test_taskpack.TaskpackTests.test_controller_only_launcher_rejects_handcrafted_frozen_authority"
-      ]
+    {
+      "test_id": "tests.test_experiment_harness.Phase2GateTests.test_readiness_relation_recomputes_pilot_and_exact_commit",
+      "line": 12414,
+      "failure_family": "readiness_clone_schema_discovery",
+      "trigger": "_repository_clone copies the committed tree and overlays tracked diffs; readiness capability validation cannot discover a newly added cleanup schema unless that path is present in the integration Git inventory.",
+      "required_recovery_assertion": "The cleanup receipt schema is tracked and discoverable in the reconstructed repository before readiness relation recomputation."
     },
-    "full_taskpack_verification": [
+    {
+      "test_id": "tests.test_experiment_harness.Phase2GateTests.test_readiness_action_creates_exact_promoted_child",
+      "line": 12751,
+      "failure_family": "readiness_clone_schema_discovery",
+      "trigger": "The action validates fixed capability evidence against a cloned/reconstructed repository and shares the cleanup-schema inventory dependency.",
+      "required_recovery_assertion": "The readiness action can load the tracked cleanup schema while still producing only the exact promoted child commit."
+    },
+    {
+      "test_id": "tests.test_experiment_harness.Phase2GateTests.test_live_calibration_relation_recomputes_sealed_results",
+      "line": 12995,
+      "failure_family": "post_cleanup_historical_sandbox_replay",
+      "trigger": "The relation recomputes sealed mode results from _real_calibration_fixture; after cleanup, live sandbox descriptor loading rejects deleted repository sources before the historical relation can be checked.",
+      "required_recovery_assertion": "Gate relation recomputation uses historical digest-bound validation for prior sealed runs, while the provider launcher and all new live executions retain live mount validation."
+    }
+  ],
+  "repo_map_handoff": {
+    "status": "ready",
+    "implementation_task": "P2-05C-R",
+    "current_gap_summary": [
+      "The common finalizer does not call cleanup_clean_snapshot or publish a durable cleanup receipt.",
+      "A terminal replay can recreate run_dir/repository before it detects the sealed result.",
+      "Sandbox reference loaders conflate live launch validation with digest-bound historical evidence validation.",
+      "Deterministic calibration and the P2-09 relation use those live loaders when recomputing sealed historical runs.",
+      "Projection and rendering expose the sealed pending value rather than receipt-derived cleanup state.",
+      "The cleanup receipt schema must be present in the committed Git inventory before readiness clone/reconstruction tests run."
+    ],
+    "implementation_order": [
+      "Define and load the immutable cleanup receipt without changing sealed result authority.",
+      "Connect cleanup after common seal, reload, and validation; publish removed, already_absent, or failed evidence and revalidate the sealed result digest.",
+      "Make terminal replay validate sealed result plus receipt before any clean-snapshot allocation.",
+      "Add an internal historical sandbox/evaluation validation path selected only by a valid sealed-result and cleanup-receipt context.",
+      "Keep publication, registration, prelaunch, provider launch, and evaluator launch on strict live validation.",
+      "Switch deterministic calibration and historical gate relation recomputation to the historical path.",
+      "Project and render receipt-derived effective cleanup state from authoritative files with DB/file parity.",
+      "Register the cleanup schema in Git before readiness clone/reconstruction verification."
+    ],
+    "integration_guards": [
+      "Seal, reload, and validate results/terminal before cleanup.",
+      "Remove only run_dir/repository.",
+      "Never mutate the sealed bundle.",
+      "A missing receipt is incomplete, not successful.",
+      "A failed cleanup receipt remains visible as failed while preserving the terminal result.",
+      "Historical replay cannot be selected by live callers.",
+      "No live provider call, P2-08 execution, candidate release activation, merge, or push is part of P2-05C-R."
+    ],
+    "focused_verification_targets": [
+      "tests.test_experiment_harness.ExperimentWorkspaceTests.test_cleanup_preserves_sealed_result_and_records_failure",
+      "tests.test_experiment_harness.ExperimentCalibrationTests.test_deterministic_l1_l2_calibration_rebuilds_all_evidence",
+      "tests.test_experiment_harness.ExperimentCalibrationTests.test_calibration_rejects_duplicate_request_cost_drift",
+      "tests.test_experiment_harness.Phase2GateTests.test_readiness_relation_recomputes_pilot_and_exact_commit",
+      "tests.test_experiment_harness.Phase2GateTests.test_readiness_action_creates_exact_promoted_child",
+      "tests.test_experiment_harness.Phase2GateTests.test_live_calibration_relation_recomputes_sealed_results",
+      "tests.test_experiment_harness.ExperimentSandboxTests.test_sandbox_publication_requires_fresh_probe_and_valid_policy",
+      "tests.test_experiment_harness.ExperimentResultBundleTests.test_projection_rebuild_preserves_all_outcomes_and_digests"
+    ],
+    "full_verification_command": [
       "python3",
       "-m",
       "unittest",
