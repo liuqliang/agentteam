@@ -33,7 +33,11 @@ from .experiment_results import (
     seal_experiment_result_bundle,
 )
 from .experiment_workspace import (
+    CLEANUP_RECEIPT_FILE_NAME,
     allocate_clean_snapshot,
+    cleanup_clean_snapshot,
+    load_clean_snapshot_cleanup_receipt,
+    publish_clean_snapshot_cleanup_receipt,
     verify_clean_snapshot,
 )
 from .experiment_sandbox import (
@@ -263,6 +267,10 @@ class ExperimentCommonFinalizer:
             evaluation,
             sealed,
         )
+        cleanup = _ensure_sealed_result_cleanup(
+            request.run_dir,
+            sealed,
+        )
         return {
             **copy.deepcopy(mode_result),
             "evaluation": evaluation,
@@ -275,7 +283,11 @@ class ExperimentCommonFinalizer:
                 "acceptance_status": sealed["bundle"][
                     "acceptance_result"
                 ]["status"],
+                "cleanup_status": cleanup["receipt"][
+                    "cleanup_status"
+                ],
             },
+            "cleanup_receipt": copy.deepcopy(cleanup),
             "invocation_set_reference": copy.deepcopy(
                 invocation_set_reference
             ),
@@ -736,6 +748,9 @@ def execute_bound_experiment_mode(
     protocol = validated["protocol"]
     run_manifest = validated["run_manifest"]
     run_dir = Path(validated["run_dir"]).resolve(strict=True)
+    terminal_result = run_dir / "results" / "terminal"
+    if terminal_result.exists() or terminal_result.is_symlink():
+        return _replayed_mode_result(run_dir, run_manifest)
     snapshot = run_dir / "repository"
     if snapshot.exists():
         verify_clean_snapshot(snapshot, protocol["repository"])
@@ -1763,10 +1778,19 @@ def _build_common_result_bundle(
     )
 
 
-def _registered_invocation_usage(reference, authority_root):
-    manifest = load_model_invocation_set_reference(
-        reference,
-        authority_root,
+def _registered_invocation_usage(
+    reference,
+    authority_root,
+    *,
+    invocation_manifest=None,
+):
+    manifest = (
+        invocation_manifest
+        if invocation_manifest is not None
+        else load_model_invocation_set_reference(
+            reference,
+            authority_root,
+        )
     )
     totals = {
         "input_tokens": 0,
@@ -2192,25 +2216,54 @@ def _fail_mode_execution(
 
 def _replayed_mode_result(run_dir, run_manifest):
     sealed = load_experiment_result_bundle(run_dir)
+    bundle = sealed["bundle"]
+    expected = {
+        "experiment_run_id": run_manifest["experiment_run_id"],
+        "protocol_sha256": run_manifest["protocol_sha256"],
+        "run_manifest_sha256": canonical_json_sha256(run_manifest),
+        "mode": run_manifest["mode"],
+    }
+    if any(bundle.get(field) != value for field, value in expected.items()):
+        raise ExperimentModeError(
+            "sealed replay result differs from immutable run authority"
+        )
+    cleanup = _ensure_sealed_result_cleanup(run_dir, sealed)
     return {
         "schema_version": MODE_RESULT_SCHEMA_VERSION,
         "experiment_run_id": run_manifest["experiment_run_id"],
         "protocol_sha256": run_manifest["protocol_sha256"],
         "run_manifest_sha256": canonical_json_sha256(run_manifest),
         "mode": run_manifest["mode"],
-        "terminal_status": sealed["bundle"]["terminal_status"],
+        "terminal_status": bundle["terminal_status"],
         "replayed": True,
         "sealed_result": {
             "result_dir": sealed["result_dir"],
             "bundle_sha256": sealed["bundle_sha256"],
-            "terminal_status": sealed["bundle"][
-                "terminal_status"
-            ],
-            "acceptance_status": sealed["bundle"][
-                "acceptance_result"
-            ]["status"],
+            "terminal_status": bundle["terminal_status"],
+            "acceptance_status": bundle["acceptance_result"]["status"],
+            "cleanup_status": cleanup["receipt"]["cleanup_status"],
         },
+        "cleanup_receipt": copy.deepcopy(cleanup),
     }
+
+
+def _ensure_sealed_result_cleanup(run_dir, sealed):
+    run_dir = Path(run_dir).resolve(strict=True)
+    receipt_path = run_dir / CLEANUP_RECEIPT_FILE_NAME
+    if receipt_path.exists() or receipt_path.is_symlink():
+        return load_clean_snapshot_cleanup_receipt(
+            run_dir,
+            sealed_result=sealed,
+        )
+    cleanup_record = cleanup_clean_snapshot(
+        run_dir,
+        sealed_result_path=sealed["result_dir"],
+    )
+    return publish_clean_snapshot_cleanup_receipt(
+        run_dir,
+        sealed_result=sealed,
+        cleanup_record=cleanup_record,
+    )
 
 
 def _load_mode_order_authority(controller_root, protocol):

@@ -353,6 +353,38 @@ def publish_provider_sandbox_reference(
 
 
 def load_provider_sandbox_reference(reference, authority_root):
+    return _load_provider_sandbox_reference(
+        reference,
+        authority_root,
+    )
+
+
+def _load_historical_provider_sandbox_reference(
+    reference,
+    authority_root,
+    *,
+    sealed_result,
+    cleanup_receipt,
+    clean_snapshot_attestation,
+):
+    historical_context = _validate_historical_cleanup_context(
+        sealed_result,
+        cleanup_receipt,
+        clean_snapshot_attestation,
+    )
+    return _load_provider_sandbox_reference(
+        reference,
+        authority_root,
+        historical_context=historical_context,
+    )
+
+
+def _load_provider_sandbox_reference(
+    reference,
+    authority_root,
+    *,
+    historical_context=None,
+):
     _path, payload = _load_authority_reference(
         reference,
         authority_root,
@@ -365,10 +397,17 @@ def load_provider_sandbox_reference(reference, authority_root):
         raise ExperimentSandboxUnavailable(
             "provider sandbox authority is unreadable"
         ) from exc
-    validate_provider_sandbox_descriptor(
-        descriptor,
-        require_namespace_evidence=True,
-    )
+    if historical_context is None:
+        validate_provider_sandbox_descriptor(
+            descriptor,
+            require_namespace_evidence=True,
+        )
+    else:
+        _validate_provider_sandbox_descriptor(
+            descriptor,
+            require_namespace_evidence=True,
+            historical_context=historical_context,
+        )
     return descriptor
 
 
@@ -709,6 +748,38 @@ def publish_registered_model_invocation_set_reference(
 
 
 def load_model_invocation_set_reference(reference, authority_root):
+    return _load_model_invocation_set_reference(
+        reference,
+        authority_root,
+    )
+
+
+def _load_historical_model_invocation_set_reference(
+    reference,
+    authority_root,
+    *,
+    sealed_result,
+    cleanup_receipt,
+    clean_snapshot_attestation,
+):
+    historical_context = _validate_historical_cleanup_context(
+        sealed_result,
+        cleanup_receipt,
+        clean_snapshot_attestation,
+    )
+    return _load_model_invocation_set_reference(
+        reference,
+        authority_root,
+        historical_context=historical_context,
+    )
+
+
+def _load_model_invocation_set_reference(
+    reference,
+    authority_root,
+    *,
+    historical_context=None,
+):
     _path, payload = _load_authority_reference(
         reference,
         authority_root,
@@ -733,6 +804,7 @@ def load_model_invocation_set_reference(reference, authority_root):
     normalized = _normalize_invocation_sets(
         record["invocation_sets"],
         authority_root=authority_root,
+        historical_context=historical_context,
     )
     if record["invocation_sets"] != normalized:
         raise ExperimentSandboxError(
@@ -770,10 +842,120 @@ def _validate_namespace_evidence(descriptor, evidence):
         raise ExperimentSandboxError("namespace evidence has invalid canary digest")
 
 
+def _validate_historical_cleanup_context(
+    sealed_result,
+    cleanup_receipt,
+    clean_snapshot_attestation,
+):
+    if (
+        not isinstance(sealed_result, dict)
+        or not isinstance(sealed_result.get("bundle"), dict)
+        or not isinstance(cleanup_receipt, dict)
+        or not isinstance(clean_snapshot_attestation, dict)
+    ):
+        raise ExperimentSandboxError(
+            "historical sandbox replay requires sealed cleanup authority"
+        )
+    bundle = sealed_result["bundle"]
+    if (
+        cleanup_receipt.get("schema_version")
+        != "experiment_clean_snapshot_cleanup.v1"
+        or cleanup_receipt.get("cleanup_status")
+        not in {"removed", "already_absent"}
+        or cleanup_receipt.get("result_preserved") is not True
+        or cleanup_receipt.get("experiment_run_id")
+        != bundle.get("experiment_run_id")
+        or sealed_result.get("cleanup_status")
+        != cleanup_receipt.get("cleanup_status")
+    ):
+        raise ExperimentSandboxError(
+            "historical sandbox replay cleanup authority is incomplete"
+        )
+    result_authority = cleanup_receipt.get("sealed_result")
+    if (
+        not isinstance(result_authority, dict)
+        or result_authority.get("path")
+        != sealed_result.get("result_dir")
+        or result_authority.get("bundle_sha256")
+        != sealed_result.get("bundle_sha256")
+        or result_authority.get("sha256_before_cleanup")
+        != result_authority.get("sha256_after_cleanup")
+        or not _is_sha256(
+            result_authority.get("sha256_after_cleanup")
+        )
+    ):
+        raise ExperimentSandboxError(
+            "historical sandbox replay result binding is invalid"
+        )
+    attestation_reference = cleanup_receipt.get(
+        "clean_snapshot_attestation"
+    )
+    if not isinstance(attestation_reference, dict):
+        raise ExperimentSandboxError(
+            "historical sandbox replay lacks snapshot authority"
+        )
+    try:
+        attestation_path = Path(attestation_reference["path"])
+        attestation_payload = _read_bounded_regular_file(
+            attestation_path,
+            max_bytes=4 * 1024 * 1024,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ExperimentSandboxError(
+            "historical snapshot attestation reference is invalid"
+        ) from exc
+    if (
+        hashlib.sha256(attestation_payload).hexdigest()
+        != attestation_reference.get("sha256")
+        or attestation_payload
+        != _canonical_json_bytes(clean_snapshot_attestation) + b"\n"
+    ):
+        raise ExperimentSandboxError(
+            "historical snapshot attestation digest changed"
+        )
+    deleted_snapshot_path = Path(
+        clean_snapshot_attestation.get("snapshot_path", "")
+    )
+    if (
+        clean_snapshot_attestation.get("schema_version")
+        != "experiment_clean_snapshot.v1"
+        or clean_snapshot_attestation.get("experiment_run_id")
+        != bundle.get("experiment_run_id")
+        or str(deleted_snapshot_path)
+        != cleanup_receipt.get("cleanup_target")
+        or str(deleted_snapshot_path)
+        != attestation_reference.get("snapshot_path")
+        or not deleted_snapshot_path.is_absolute()
+        or deleted_snapshot_path.exists()
+        or deleted_snapshot_path.is_symlink()
+    ):
+        raise ExperimentSandboxError(
+            "historical snapshot cleanup binding is invalid"
+        )
+    return {
+        "sealed_result": sealed_result,
+        "cleanup_receipt": cleanup_receipt,
+        "clean_snapshot_attestation": clean_snapshot_attestation,
+        "deleted_snapshot_path": deleted_snapshot_path,
+    }
+
+
 def validate_provider_sandbox_descriptor(
     descriptor,
     *,
     require_namespace_evidence=True,
+):
+    return _validate_provider_sandbox_descriptor(
+        descriptor,
+        require_namespace_evidence=require_namespace_evidence,
+    )
+
+
+def _validate_provider_sandbox_descriptor(
+    descriptor,
+    *,
+    require_namespace_evidence=True,
+    historical_context=None,
 ):
     if not isinstance(descriptor, dict):
         raise ExperimentSandboxError("provider sandbox descriptor must be an object")
@@ -827,18 +1009,42 @@ def validate_provider_sandbox_descriptor(
     ):
         raise ExperimentSandboxError("repository must be the sole writable view")
     repository_identity = descriptor["repository_identity"]
-    if repository_identity is not None:
+    repository_source = Path(repository["source"])
+    historical_repository = (
+        historical_context is not None
+        and repository_source
+        == historical_context["deleted_snapshot_path"]
+    )
+    if historical_repository:
+        if repository_source.exists() or repository_source.is_symlink():
+            raise ExperimentSandboxError(
+                "historical cleanup context requires an absent snapshot"
+            )
+        attested_repository = historical_context[
+            "clean_snapshot_attestation"
+        ]["repository"]
+        expected_repository_identity = {
+            field: attested_repository[field]
+            for field in ("commit", "tree", "git_object_format")
+        }
+        if repository_identity != expected_repository_identity:
+            raise ExperimentSandboxError(
+                "historical sandbox repository identity differs from "
+                "clean snapshot attestation"
+            )
+    elif repository_identity is not None:
         _validated_repository_identity(
-            Path(repository["source"]),
+            repository_source,
             repository_identity,
             verify_workspace=False,
         )
-    _validate_mount_source(
-        repository["source"],
-        repository["source_identity"],
-        "repository",
-        require_directory=True,
-    )
+    if not historical_repository:
+        _validate_mount_source(
+            repository["source"],
+            repository["source_identity"],
+            "repository",
+            require_directory=True,
+        )
     _absolute_target(repository["target"], "repository")
     _validate_normalized_views(descriptor["runtime_views"], "runtime")
     _validate_normalized_views(descriptor["library_views"], "library")
@@ -851,7 +1057,6 @@ def validate_provider_sandbox_descriptor(
             *descriptor["credential_views"],
         ]
     )
-    repository_source = Path(repository["source"])
     repository_target = Path(repository["target"])
     for view in (
         *descriptor["runtime_views"],
@@ -2051,6 +2256,36 @@ def run_trusted_argv_evaluator(
 
 def validate_evaluation_evidence(
     evidence,
+    **validation_authority,
+):
+    return _validate_evaluation_evidence(
+        evidence,
+        **validation_authority,
+    )
+
+
+def _validate_historical_evaluation_evidence(
+    evidence,
+    *,
+    sealed_result,
+    cleanup_receipt,
+    clean_snapshot_attestation,
+    **validation_authority,
+):
+    historical_context = _validate_historical_cleanup_context(
+        sealed_result,
+        cleanup_receipt,
+        clean_snapshot_attestation,
+    )
+    return _validate_evaluation_evidence(
+        evidence,
+        _historical_context=historical_context,
+        **validation_authority,
+    )
+
+
+def _validate_evaluation_evidence(
+    evidence,
     *,
     expected_run_id=None,
     expected_taskpack_ids=None,
@@ -2066,6 +2301,7 @@ def validate_evaluation_evidence(
     experiment_protocol_reference=None,
     provider_sandbox_reference=None,
     canary_path=None,
+    _historical_context=None,
 ):
     schema_path = (
         Path(__file__).resolve().parents[2]
@@ -2158,9 +2394,10 @@ def validate_evaluation_evidence(
                 "evaluation evidence protocol authority binding mismatch"
             )
     if authority_root is not None:
-        manifest = load_model_invocation_set_reference(
+        manifest = _load_model_invocation_set_reference(
             invocation_set_reference,
             authority_root,
+            historical_context=_historical_context,
         )
         authority_sets = []
         authority_terminals = []
@@ -2178,9 +2415,10 @@ def validate_evaluation_evidence(
                 )
             ).hexdigest()
         for item in manifest["invocation_sets"]:
-            invocation_sandbox = load_provider_sandbox_reference(
+            invocation_sandbox = _load_provider_sandbox_reference(
                 item["sandbox_reference"],
                 authority_root,
+                historical_context=_historical_context,
             )
             if (
                 actual_canary_sha256 is not None
@@ -2241,9 +2479,10 @@ def validate_evaluation_evidence(
                 "evaluation evidence invocation authority binding mismatch"
             )
     if provider_sandbox_reference is not None:
-        candidate_sandbox = load_provider_sandbox_reference(
+        candidate_sandbox = _load_provider_sandbox_reference(
             provider_sandbox_reference,
             authority_root,
+            historical_context=_historical_context,
         )
         canary_sha256 = hashlib.sha256(
             _read_bounded_regular_file(
@@ -3005,7 +3244,12 @@ def _normalized_scan_scope(scan_groups):
     return scope
 
 
-def _normalize_invocation_sets(invocation_sets, *, authority_root):
+def _normalize_invocation_sets(
+    invocation_sets,
+    *,
+    authority_root,
+    historical_context=None,
+):
     if (
         not isinstance(invocation_sets, (list, tuple))
         or not invocation_sets
@@ -3055,9 +3299,10 @@ def _normalize_invocation_sets(invocation_sets, *, authority_root):
             "model invocation taskpack id",
         )
         sandbox_reference = item["sandbox_reference"]
-        sandbox_descriptor = load_provider_sandbox_reference(
+        sandbox_descriptor = _load_provider_sandbox_reference(
             sandbox_reference,
             authority_root,
+            historical_context=historical_context,
         )
         validate_provider_authority_separation(
             sandbox_descriptor,

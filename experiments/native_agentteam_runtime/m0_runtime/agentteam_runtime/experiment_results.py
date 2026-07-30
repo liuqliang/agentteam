@@ -39,8 +39,10 @@ from .experiment_sandbox import (
 )
 from .experiment_workspace import (
     ATTESTATION_FILE_NAME,
+    CLEANUP_RECEIPT_FILE_NAME,
     ExperimentWorkspaceError,
     load_clean_snapshot_attestation,
+    load_clean_snapshot_cleanup_receipt,
 )
 
 
@@ -658,11 +660,30 @@ def load_experiment_result_bundle(run_dir):
         raise ExperimentResultIntegrityError(
             "sealed result projection expectation is inconsistent"
         )
-    return {
+    sealed = {
         "result_dir": str(result_dir),
         "bundle_sha256": digest,
         "bundle": bundle,
     }
+    receipt_path = run_dir / CLEANUP_RECEIPT_FILE_NAME
+    if receipt_path.exists() or receipt_path.is_symlink():
+        try:
+            receipt = load_clean_snapshot_cleanup_receipt(
+                run_dir,
+                sealed_result=sealed,
+            )
+        except ExperimentWorkspaceError as exc:
+            raise ExperimentResultIntegrityError(
+                "clean snapshot cleanup receipt is invalid"
+            ) from exc
+        sealed["cleanup_status"] = receipt["receipt"][
+            "cleanup_status"
+        ]
+        sealed["cleanup_receipt"] = receipt
+    else:
+        sealed["cleanup_status"] = "pending"
+        sealed["cleanup_receipt"] = None
+    return sealed
 
 
 def validate_experiment_result_bundle(bundle):
@@ -689,7 +710,19 @@ def validate_experiment_recovery_snapshot(snapshot):
 
 
 def render_experiment_result(bundle, *, bundle_sha256=None):
+    cleanup_status = None
+    if (
+        isinstance(bundle, dict)
+        and isinstance(bundle.get("bundle"), dict)
+    ):
+        result = bundle
+        bundle = result["bundle"]
+        bundle_sha256 = (
+            bundle_sha256 or result.get("bundle_sha256")
+        )
+        cleanup_status = result.get("cleanup_status")
     validate_experiment_result_bundle(bundle)
+    cleanup_status = cleanup_status or bundle["cleanup_status"]
     acceptance = bundle["acceptance_result"]["status"]
     usage = bundle["usage_totals"]
     coverage = bundle["usage_coverage"]
@@ -711,6 +744,7 @@ def render_experiment_result(bundle, *, bundle_sha256=None):
             ),
             f"interventions: {interventions}",
             f"changed_files: {len(bundle['changed_files'])}",
+            f"cleanup: {cleanup_status}",
             f"bundle_sha256: {bundle_sha256 or 'unsealed'}",
         )
     )
@@ -726,11 +760,19 @@ def render_experiment_comparison(results):
             else None
         )
         validate_experiment_result_bundle(bundle)
-        normalized.append((bundle, digest))
+        cleanup_status = (
+            result.get("cleanup_status")
+            if isinstance(result, dict)
+            else None
+        ) or bundle["cleanup_status"]
+        normalized.append((bundle, digest, cleanup_status))
     lines = [
-        "mode | status | acceptance | tokens | coverage | interventions | digest"
+        (
+            "mode | status | acceptance | cleanup | tokens | coverage | "
+            "interventions | digest"
+        )
     ]
-    for bundle, digest in sorted(
+    for bundle, digest, cleanup_status in sorted(
         normalized,
         key=lambda item: (
             item[0]["mode"],
@@ -744,6 +786,7 @@ def render_experiment_comparison(results):
                     bundle["mode"],
                     bundle["terminal_status"],
                     bundle["acceptance_result"]["status"],
+                    cleanup_status,
                     str(bundle["usage_totals"].get("total_tokens")),
                     (
                         f"{bundle['usage_coverage'].get('covered_invocations')}/"

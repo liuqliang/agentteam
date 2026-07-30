@@ -29,10 +29,14 @@ from .experiment_contract import (
 
 
 CLEAN_SNAPSHOT_SCHEMA_VERSION = "experiment_clean_snapshot.v1"
+CLEAN_SNAPSHOT_CLEANUP_SCHEMA_VERSION = (
+    "experiment_clean_snapshot_cleanup.v1"
+)
 DEFAULT_INVENTORY_LIMIT = 100_000
 MAX_INVENTORY_LIMIT = 1_000_000
 SNAPSHOT_DIRECTORY_NAME = "repository"
 ATTESTATION_FILE_NAME = "clean-snapshot.json"
+CLEANUP_RECEIPT_FILE_NAME = "clean-snapshot-cleanup.json"
 
 _OBJECT_ID_LENGTHS = {"sha1": 40, "sha256": 64}
 _HEX = re.compile(r"^[0-9a-f]+$")
@@ -498,10 +502,22 @@ def cleanup_clean_snapshot(run_dir, *, sealed_result_path):
             "clean snapshot attestation does not bind the cleanup target"
         )
     result_path = _safe_result_path(run_dir, snapshot_path, sealed_result_path)
+    if result_path != run_dir / "results" / "terminal":
+        raise ExperimentWorkspaceError(
+            "cleanup requires the sealed terminal result"
+        )
     _fsync_result_tree(result_path)
     before_sha256 = _result_digest(result_path)
     record = {
+        "experiment_run_id": attestation["experiment_run_id"],
         "cleanup_status": "removed",
+        "cleanup_target": str(snapshot_path),
+        "clean_snapshot_attestation_path": str(
+            run_dir / ATTESTATION_FILE_NAME
+        ),
+        "clean_snapshot_attestation_sha256": hashlib.sha256(
+            (run_dir / ATTESTATION_FILE_NAME).read_bytes()
+        ).hexdigest(),
         "snapshot_path": str(snapshot_path),
         "sealed_result_path": str(result_path),
         "sealed_result_sha256": before_sha256,
@@ -530,6 +546,257 @@ def cleanup_clean_snapshot(run_dir, *, sealed_result_path):
         )
     record["sealed_result_sha256_after_cleanup"] = after_sha256
     return record
+
+
+def publish_clean_snapshot_cleanup_receipt(
+    run_dir,
+    *,
+    sealed_result,
+    cleanup_record,
+):
+    """Publish immutable cleanup evidence bound to one sealed result."""
+
+    run_dir = _safe_run_directory(run_dir)
+    if not isinstance(sealed_result, dict):
+        raise ExperimentWorkspaceError(
+            "sealed result authority is unavailable for cleanup receipt"
+        )
+    result_path = _safe_result_path(
+        run_dir,
+        run_dir / SNAPSHOT_DIRECTORY_NAME,
+        sealed_result.get("result_dir"),
+    )
+    if result_path != run_dir / "results" / "terminal":
+        raise ExperimentWorkspaceError(
+            "cleanup receipt requires the sealed terminal result"
+        )
+    bundle_sha256 = sealed_result.get("bundle_sha256")
+    if not _is_sha256(bundle_sha256):
+        raise ExperimentWorkspaceError(
+            "sealed result bundle digest is invalid"
+        )
+    if not isinstance(cleanup_record, dict):
+        raise ExperimentWorkspaceError(
+            "clean snapshot cleanup record is invalid"
+        )
+    attestation_path = run_dir / ATTESTATION_FILE_NAME
+    attestation = load_clean_snapshot_attestation(attestation_path)
+    attestation_sha256 = hashlib.sha256(
+        attestation_path.read_bytes()
+    ).hexdigest()
+    expected = {
+        "experiment_run_id": attestation["experiment_run_id"],
+        "cleanup_target": attestation["snapshot_path"],
+        "clean_snapshot_attestation_path": str(attestation_path),
+        "clean_snapshot_attestation_sha256": attestation_sha256,
+        "sealed_result_path": str(result_path),
+    }
+    if any(
+        cleanup_record.get(field) != value
+        for field, value in expected.items()
+    ):
+        raise ExperimentWorkspaceError(
+            "cleanup record differs from immutable run authority"
+        )
+    before_sha256 = cleanup_record.get("sealed_result_sha256")
+    after_sha256 = cleanup_record.get(
+        "sealed_result_sha256_after_cleanup"
+    )
+    if (
+        not _is_sha256(before_sha256)
+        or before_sha256 != after_sha256
+        or _result_digest(result_path) != after_sha256
+        or cleanup_record.get("result_preserved") is not True
+    ):
+        raise ExperimentWorkspaceError(
+            "cleanup record does not preserve the sealed result"
+        )
+    cleanup_status = cleanup_record.get("cleanup_status")
+    if cleanup_status not in {
+        "removed",
+        "already_absent",
+        "failed",
+    }:
+        raise ExperimentWorkspaceError(
+            "cleanup record has an invalid status"
+        )
+    failure_evidence = None
+    if cleanup_status == "failed":
+        error = cleanup_record.get("error")
+        if not isinstance(error, str) or not error:
+            raise ExperimentWorkspaceError(
+                "failed cleanup lacks bounded failure evidence"
+            )
+        failure_evidence = {
+            "error_type": error.split(":", 1)[0][:128],
+            "error_sha256": hashlib.sha256(
+                error.encode("utf-8")
+            ).hexdigest(),
+        }
+    cleanup_target = Path(attestation["snapshot_path"])
+    if (
+        cleanup_status in {"removed", "already_absent"}
+        and (cleanup_target.exists() or cleanup_target.is_symlink())
+    ):
+        raise ExperimentWorkspaceError(
+            "cleanup record reports completion while snapshot remains"
+        )
+    receipt = {
+        "schema_version": CLEAN_SNAPSHOT_CLEANUP_SCHEMA_VERSION,
+        "experiment_run_id": attestation["experiment_run_id"],
+        "clean_snapshot_attestation": {
+            "path": str(attestation_path),
+            "sha256": attestation_sha256,
+            "snapshot_path": attestation["snapshot_path"],
+        },
+        "sealed_result": {
+            "path": str(result_path),
+            "bundle_sha256": bundle_sha256,
+            "sha256_before_cleanup": before_sha256,
+            "sha256_after_cleanup": after_sha256,
+        },
+        "cleanup_target": attestation["snapshot_path"],
+        "cleanup_status": cleanup_status,
+        "result_preserved": True,
+        "failure_evidence": failure_evidence,
+    }
+    validate_clean_snapshot_cleanup_receipt(receipt)
+    receipt_path = run_dir / CLEANUP_RECEIPT_FILE_NAME
+    try:
+        publication = publish_immutable_json(
+            receipt_path,
+            receipt,
+            label="clean snapshot cleanup receipt",
+        )
+    except ExperimentContractError as exc:
+        raise ExperimentWorkspaceError(str(exc)) from exc
+    loaded = load_clean_snapshot_cleanup_receipt(
+        run_dir,
+        sealed_result=sealed_result,
+    )
+    return {
+        **publication,
+        **loaded,
+    }
+
+
+def load_clean_snapshot_cleanup_receipt(
+    run_dir,
+    *,
+    sealed_result=None,
+):
+    """Load and revalidate immutable cleanup evidence."""
+
+    run_dir = _safe_run_directory(run_dir)
+    receipt_path = run_dir / CLEANUP_RECEIPT_FILE_NAME
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        raise ExperimentWorkspaceError(
+            "clean snapshot cleanup receipt is missing or unsafe"
+        )
+    payload = receipt_path.read_bytes()
+    try:
+        receipt = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExperimentWorkspaceError(
+            "clean snapshot cleanup receipt is not valid UTF-8 JSON"
+        ) from exc
+    if payload != canonical_json_bytes(receipt) + b"\n":
+        raise ExperimentWorkspaceError(
+            "clean snapshot cleanup receipt is not canonically published"
+        )
+    validate_clean_snapshot_cleanup_receipt(receipt)
+    attestation_path = run_dir / ATTESTATION_FILE_NAME
+    attestation = load_clean_snapshot_attestation(attestation_path)
+    attestation_reference = receipt["clean_snapshot_attestation"]
+    if (
+        receipt["experiment_run_id"] != run_dir.name
+        or receipt["experiment_run_id"]
+        != attestation["experiment_run_id"]
+        or attestation_reference["path"] != str(attestation_path)
+        or attestation_reference["sha256"]
+        != hashlib.sha256(attestation_path.read_bytes()).hexdigest()
+        or attestation_reference["snapshot_path"]
+        != attestation["snapshot_path"]
+        or receipt["cleanup_target"] != attestation["snapshot_path"]
+    ):
+        raise ExperimentWorkspaceError(
+            "cleanup receipt differs from clean snapshot attestation"
+        )
+    result_authority = receipt["sealed_result"]
+    result_path = _safe_result_path(
+        run_dir,
+        run_dir / SNAPSHOT_DIRECTORY_NAME,
+        result_authority["path"],
+    )
+    if result_path != run_dir / "results" / "terminal":
+        raise ExperimentWorkspaceError(
+            "cleanup receipt does not bind the sealed terminal result"
+        )
+    before_sha256 = result_authority["sha256_before_cleanup"]
+    after_sha256 = result_authority["sha256_after_cleanup"]
+    if (
+        before_sha256 != after_sha256
+        or _result_digest(result_path) != after_sha256
+        or receipt["result_preserved"] is not True
+    ):
+        raise ExperimentWorkspaceError(
+            "cleanup receipt does not preserve the sealed result"
+        )
+    target = Path(receipt["cleanup_target"])
+    if (
+        receipt["cleanup_status"] in {"removed", "already_absent"}
+        and (target.exists() or target.is_symlink())
+    ):
+        raise ExperimentWorkspaceError(
+            "cleanup receipt reports completion while snapshot remains"
+        )
+    if sealed_result is not None:
+        if (
+            not isinstance(sealed_result, dict)
+            or sealed_result.get("result_dir") != str(result_path)
+            or sealed_result.get("bundle_sha256")
+            != result_authority["bundle_sha256"]
+        ):
+            raise ExperimentWorkspaceError(
+                "cleanup receipt differs from sealed result authority"
+            )
+    return {
+        "path": str(receipt_path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "receipt": receipt,
+    }
+
+
+def validate_clean_snapshot_cleanup_receipt(receipt):
+    schema_path = (
+        Path(__file__).resolve().parents[2]
+        / "schemas"
+        / "experiment_clean_snapshot_cleanup.schema.json"
+    )
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ExperimentWorkspaceError(
+            "clean snapshot cleanup receipt schema is unavailable"
+        ) from exc
+    validator = Draft202012Validator(
+        schema,
+        format_checker=FormatChecker(),
+    )
+    errors = sorted(
+        validator.iter_errors(receipt),
+        key=lambda item: list(item.absolute_path),
+    )
+    if errors:
+        first = errors[0]
+        location = ".".join(
+            str(item) for item in first.absolute_path
+        ) or "<root>"
+        raise ExperimentWorkspaceError(
+            "clean snapshot cleanup receipt schema validation failed at "
+            f"{location}: {first.message}"
+        )
+    return receipt
 
 
 def _inspect_source(repository, *, inventory_limit):
@@ -874,6 +1141,14 @@ def _result_digest(path):
                 "sealed result contains a non-regular filesystem entry"
             )
     return digest.hexdigest()
+
+
+def _is_sha256(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _fsync_result_tree(path):

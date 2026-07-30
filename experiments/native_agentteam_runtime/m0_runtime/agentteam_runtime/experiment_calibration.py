@@ -24,9 +24,9 @@ from .experiment_results import (
     render_experiment_comparison,
 )
 from .experiment_sandbox import (
-    load_model_invocation_set_reference,
-    load_provider_sandbox_reference,
-    validate_evaluation_evidence,
+    _load_historical_model_invocation_set_reference,
+    _load_historical_provider_sandbox_reference,
+    _validate_historical_evaluation_evidence,
 )
 from .experiment_workspace import load_clean_snapshot_attestation
 from .projection_db import (
@@ -440,6 +440,17 @@ def _load_run_record(record, protocol, protocol_sha256, projection_root):
     attestation = load_clean_snapshot_attestation(
         run_dir / "clean-snapshot.json"
     )
+    cleanup_reference = sealed.get("cleanup_receipt")
+    if (
+        not isinstance(cleanup_reference, dict)
+        or not isinstance(cleanup_reference.get("receipt"), dict)
+        or sealed.get("cleanup_status")
+        not in {"removed", "already_absent"}
+    ):
+        raise ExperimentCalibrationError(
+            "calibration run lacks complete cleanup receipt evidence"
+        )
+    cleanup_receipt = cleanup_reference["receipt"]
     if attestation["repository"] != protocol["repository"]:
         raise ExperimentCalibrationError(
             "clean snapshot attestation repository differs"
@@ -471,14 +482,18 @@ def _load_run_record(record, protocol, protocol_sha256, projection_root):
             "experiment_model_invocation_set_reference.v1"
         ),
     )
-    invocation_manifest = load_model_invocation_set_reference(
+    invocation_manifest = _load_historical_model_invocation_set_reference(
         invocation_reference,
         authority_root,
+        sealed_result=sealed,
+        cleanup_receipt=cleanup_receipt,
+        clean_snapshot_attestation=attestation,
     )
     recomputed_usage, recomputed_coverage, _statuses = (
         _registered_invocation_usage(
             invocation_reference,
             authority_root,
+            invocation_manifest=invocation_manifest,
         )
     )
     if (
@@ -492,9 +507,12 @@ def _load_run_record(record, protocol, protocol_sha256, projection_root):
     invocation_ids = []
     for invocation_set in invocation_manifest["invocation_sets"]:
         reference = invocation_set["sandbox_reference"]
-        descriptor = load_provider_sandbox_reference(
+        descriptor = _load_historical_provider_sandbox_reference(
             reference,
             authority_root,
+            sealed_result=sealed,
+            cleanup_receipt=cleanup_receipt,
+            clean_snapshot_attestation=attestation,
         )
         evidence = descriptor["namespace_evidence"]
         if (
@@ -560,8 +578,11 @@ def _load_run_record(record, protocol, protocol_sha256, projection_root):
         "calibration gold canary",
     )
     try:
-        validate_evaluation_evidence(
+        _validate_historical_evaluation_evidence(
             evaluation,
+            sealed_result=sealed,
+            cleanup_receipt=cleanup_receipt,
+            clean_snapshot_attestation=attestation,
             expected_run_id=bundle["experiment_run_id"],
             expected_taskpack_ids=bundle["result_evidence"][
                 "taskpack_ids"
@@ -613,6 +634,8 @@ def _load_run_record(record, protocol, protocol_sha256, projection_root):
         "evaluation_sha256": evaluation_sha256,
         "recomputed_usage": recomputed_usage,
         "recomputed_coverage": recomputed_coverage,
+        "cleanup_status": sealed["cleanup_status"],
+        "cleanup_receipt_sha256": cleanup_reference["sha256"],
     }
 
 
@@ -786,6 +809,8 @@ def _validate_isolation(runs):
     return {
         "clean_snapshot_status": "passed",
         "clean_snapshot_count": len(runs),
+        "cleanup_receipt_status": "passed",
+        "cleanup_receipt_count": len(runs),
         "canary_denial_status": "passed",
         "sandbox_reference_count": sandbox_reference_count,
         "retained_leak_scan_status": "passed",

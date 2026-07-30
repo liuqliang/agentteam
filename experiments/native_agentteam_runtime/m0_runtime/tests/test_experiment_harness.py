@@ -11,7 +11,7 @@ import threading
 import time
 import unittest
 import uuid
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -108,15 +108,19 @@ from agentteam_runtime.experiment_contract import (
     validate_resume_binding,
 )
 from agentteam_runtime.experiment_workspace import (
+    CLEANUP_RECEIPT_FILE_NAME,
     ExperimentWorkspaceError,
     allocate_clean_snapshot,
     cleanup_clean_snapshot,
     load_clean_snapshot_attestation,
+    load_clean_snapshot_cleanup_receipt,
+    publish_clean_snapshot_cleanup_receipt,
     validate_clean_snapshot_attestation,
     verify_clean_snapshot,
 )
 from agentteam_runtime.token_usage import usage_event_id_for_invocation
 from agentteam_runtime.experiment_sandbox import (
+    _load_historical_provider_sandbox_reference,
     _capture_bounded_process,
     _candidate_repository_state,
     _approved_acceptance_executable,
@@ -130,6 +134,7 @@ from agentteam_runtime.experiment_sandbox import (
     _attach_namespace_evidence,
     build_provider_sandbox_descriptor,
     experiment_lifecycle_authority_root,
+    load_provider_sandbox_reference,
     prepare_candidate_evaluation_launch,
     prepare_provider_launch,
     probe_gold_canary_denial,
@@ -6154,6 +6159,28 @@ class ExperimentResultBundleTests(unittest.TestCase):
                     )
                 result, _validate = self._seal(fixture)
                 sealed.append(result)
+                if status != "interrupted":
+                    cleanup_patch = (
+                        patch(
+                            "agentteam_runtime.experiment_workspace."
+                            "shutil.rmtree",
+                            side_effect=OSError(
+                                "projected cleanup failure"
+                            ),
+                        )
+                        if status == "failed"
+                        else nullcontext()
+                    )
+                    with cleanup_patch:
+                        cleanup_record = cleanup_clean_snapshot(
+                            fixture["run_dir"],
+                            sealed_result_path=result["result_dir"],
+                        )
+                    publish_clean_snapshot_cleanup_receipt(
+                        fixture["run_dir"],
+                        sealed_result=result,
+                        cleanup_record=cleanup_record,
+                    )
 
             rebuilt = rebuild_project_projection_db(work_root)
             checked = check_project_projection_db(work_root)
@@ -6169,6 +6196,32 @@ class ExperimentResultBundleTests(unittest.TestCase):
             self.assertEqual(
                 {item["bundle_sha256"] for item in projected},
                 {item["bundle_sha256"] for item in sealed},
+            )
+            self.assertEqual(
+                {
+                    item["bundle"]["terminal_status"]: item[
+                        "cleanup_status"
+                    ]
+                    for item in projected
+                },
+                {
+                    "completed": "removed",
+                    "failed": "failed",
+                    "interrupted": "pending",
+                },
+            )
+            failed_result = next(
+                item
+                for item in projected
+                if item["bundle"]["terminal_status"] == "failed"
+            )
+            self.assertIn(
+                "cleanup: failed",
+                render_experiment_result(failed_result),
+            )
+            self.assertIn(
+                "failed | failed",
+                render_experiment_comparison(projected),
             )
             recovery = read_projected_experiment_recovery(work_root)
             self.assertEqual(len(recovery), 1)
@@ -6205,6 +6258,19 @@ class ExperimentResultBundleTests(unittest.TestCase):
             )
             self.assertTrue(
                 all(item["projection_source"] == "files" for item in fallback)
+            )
+            self.assertEqual(
+                {
+                    item["bundle"]["terminal_status"]: item[
+                        "cleanup_status"
+                    ]
+                    for item in fallback
+                },
+                {
+                    "completed": "removed",
+                    "failed": "failed",
+                    "interrupted": "pending",
+                },
             )
 
     def test_comparison_retains_unsuccessful_results(self):
@@ -6431,6 +6497,10 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             "agentteam_runtime.experiment_sandbox."
             "probe_gold_canary_denial",
             side_effect=_successful_namespace_probe,
+        ), patch(
+            "agentteam_runtime.experiment_sandbox."
+            "_is_privileged_system_tree",
+            return_value=True,
         ), patch(
             "agentteam_runtime.experiment_modes."
             "run_trusted_argv_evaluator",
@@ -6911,6 +6981,36 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             self.assertEqual(
                 result["sealed_result"]["acceptance_status"],
                 "passed",
+            )
+            run_dir = Path(allocation["run_dir"])
+            self.assertFalse((run_dir / "repository").exists())
+            cleanup = load_clean_snapshot_cleanup_receipt(
+                run_dir,
+                sealed_result={
+                    "result_dir": result["sealed_result"]["result_dir"],
+                    "bundle_sha256": result["sealed_result"][
+                        "bundle_sha256"
+                    ],
+                },
+            )
+            self.assertEqual(
+                cleanup["receipt"]["cleanup_status"],
+                "removed",
+            )
+            replay = execute_bound_experiment_mode(
+                allocation,
+                sandbox_configuration=sandbox_configuration,
+                adapter=SingleCodexModeAdapter(),
+                common_finalizer=ExperimentCommonFinalizer(
+                    evaluator_artifact=evaluator,
+                    runtime_release_identity=_release(),
+                ),
+            )
+            self.assertTrue(replay["replayed"])
+            self.assertFalse((run_dir / "repository").exists())
+            self.assertEqual(
+                replay["cleanup_receipt"]["sha256"],
+                cleanup["sha256"],
             )
 
     def test_counterbalanced_mode_order_is_enforced_and_immutable(self):
@@ -8466,7 +8566,7 @@ class ExperimentWorkspaceTests(unittest.TestCase):
                 run_dir,
                 fixture["repository"],
             )
-            result_dir = run_dir / "results" / "sealed-result"
+            result_dir = run_dir / "results" / "terminal"
             result_dir.mkdir(parents=True)
             result_path = result_dir / "result.json"
             result_path.write_text('{"status":"completed"}\n', encoding="utf-8")
@@ -8484,6 +8584,15 @@ class ExperimentWorkspaceTests(unittest.TestCase):
                 )
             self.assertTrue(Path(allocation["snapshot_path"]).is_dir())
             unsafe_result.unlink()
+
+            with self.assertRaisesRegex(
+                ExperimentWorkspaceError,
+                "sealed terminal result",
+            ):
+                cleanup_clean_snapshot(
+                    run_dir,
+                    sealed_result_path=run_dir / "results",
+                )
 
             cleanup = cleanup_clean_snapshot(
                 run_dir,
@@ -8510,8 +8619,12 @@ class ExperimentWorkspaceTests(unittest.TestCase):
                 run_dir,
                 fixture["repository"],
             )
-            result_path = run_dir / "sealed-result.json"
-            result_path.write_text('{"status":"failed"}\n', encoding="utf-8")
+            result_path = run_dir / "results" / "terminal"
+            result_path.mkdir(parents=True)
+            (result_path / "result.json").write_text(
+                '{"status":"failed"}\n',
+                encoding="utf-8",
+            )
 
             with patch(
                 "agentteam_runtime.experiment_workspace.shutil.rmtree",
@@ -8526,12 +8639,161 @@ class ExperimentWorkspaceTests(unittest.TestCase):
             self.assertIn("simulated cleanup failure", cleanup["error"])
             self.assertTrue(Path(allocation["snapshot_path"]).is_dir())
             self.assertEqual(
-                result_path.read_text(encoding="utf-8"),
+                (result_path / "result.json").read_text(encoding="utf-8"),
                 '{"status":"failed"}\n',
+            )
+            sealed_result = {
+                "result_dir": str(result_path),
+                "bundle_sha256": "a" * 64,
+            }
+            published = publish_clean_snapshot_cleanup_receipt(
+                run_dir,
+                sealed_result=sealed_result,
+                cleanup_record=cleanup,
+            )
+            loaded = load_clean_snapshot_cleanup_receipt(
+                run_dir,
+                sealed_result=sealed_result,
+            )
+            self.assertTrue(published["created"])
+            self.assertEqual(
+                loaded["receipt"]["cleanup_status"],
+                "failed",
+            )
+            self.assertEqual(
+                loaded["receipt"]["failure_evidence"]["error_type"],
+                "OSError",
+            )
+            self.assertNotIn(
+                "simulated cleanup failure",
+                json.dumps(loaded["receipt"]),
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp)
+            run_dir = Path(tmp) / "experiment-run-cleanup-race"
+            run_dir.mkdir()
+            allocation = allocate_clean_snapshot(
+                run_dir,
+                fixture["repository"],
+            )
+            result_dir = run_dir / "results" / "terminal"
+            result_dir.mkdir(parents=True)
+            (result_dir / "result.json").write_text(
+                '{"status":"completed"}\n',
+                encoding="utf-8",
+            )
+            cleanup = cleanup_clean_snapshot(
+                run_dir,
+                sealed_result_path=result_dir,
+            )
+            Path(allocation["snapshot_path"]).mkdir()
+            with self.assertRaisesRegex(
+                ExperimentWorkspaceError,
+                "snapshot remains",
+            ):
+                publish_clean_snapshot_cleanup_receipt(
+                    run_dir,
+                    sealed_result={
+                        "result_dir": str(result_dir),
+                        "bundle_sha256": "b" * 64,
+                    },
+                    cleanup_record=cleanup,
+                )
+            self.assertFalse(
+                (run_dir / CLEANUP_RECEIPT_FILE_NAME).exists()
             )
 
 
 class ExperimentSandboxTests(unittest.TestCase):
+    def test_historical_loader_accepts_only_receipt_bound_deleted_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _fixture_repository(tmp)
+            run_dir = Path(tmp) / "historical-sandbox-run"
+            run_dir.mkdir()
+            allocation = allocate_clean_snapshot(
+                run_dir,
+                fixture["repository"],
+            )
+            snapshot = Path(allocation["snapshot_path"])
+            canary = Path(tmp) / "historical-canary"
+            canary.write_text("historical-canary\n", encoding="utf-8")
+            descriptor = build_provider_sandbox_descriptor(
+                snapshot,
+                runtime_views=[],
+                library_views=[],
+                credential_mounts=[],
+                environment={},
+                repository_identity={
+                    "commit": fixture["repository"]["commit"],
+                    "tree": fixture["repository"]["tree"],
+                    "git_object_format": fixture["repository"][
+                        "git_object_format"
+                    ],
+                },
+                forbidden_paths=[canary],
+            )
+            authority_root = run_dir / "authority"
+            authority_root.mkdir()
+            with patch(
+                "agentteam_runtime.experiment_sandbox."
+                "probe_gold_canary_denial",
+                side_effect=_successful_namespace_probe,
+            ):
+                reference = publish_provider_sandbox_reference(
+                    authority_root,
+                    descriptor,
+                    canary,
+                )
+            result_dir = run_dir / "results" / "terminal"
+            result_dir.mkdir(parents=True)
+            (result_dir / "result.json").write_text(
+                '{"status":"completed"}\n',
+                encoding="utf-8",
+            )
+            sealed = {
+                "result_dir": str(result_dir),
+                "bundle_sha256": "b" * 64,
+                "bundle": {
+                    "experiment_run_id": run_dir.name,
+                },
+            }
+            cleanup_record = cleanup_clean_snapshot(
+                run_dir,
+                sealed_result_path=result_dir,
+            )
+            cleanup = publish_clean_snapshot_cleanup_receipt(
+                run_dir,
+                sealed_result=sealed,
+                cleanup_record=cleanup_record,
+            )
+            sealed["cleanup_status"] = "removed"
+            sealed["cleanup_receipt"] = cleanup
+
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "repository source",
+            ):
+                load_provider_sandbox_reference(
+                    reference,
+                    authority_root,
+                )
+            historical = _load_historical_provider_sandbox_reference(
+                reference,
+                authority_root,
+                sealed_result=sealed,
+                cleanup_receipt=cleanup["receipt"],
+                clean_snapshot_attestation=(
+                    load_clean_snapshot_attestation(
+                        run_dir / "clean-snapshot.json"
+                    )
+                ),
+            )
+            self.assertEqual(
+                historical["repository"]["source"],
+                str(snapshot),
+            )
+
     def test_privileged_system_tree_requires_root_owned_bwrap(self):
         fake_bwrap = Mock()
         fake_bwrap.stat.return_value.st_uid = 12345
@@ -9480,7 +9742,15 @@ class ExperimentSandboxTests(unittest.TestCase):
                     supported=False,
                 )
 
-    def test_sandbox_publication_requires_fresh_probe_and_valid_policy(self):
+    @patch(
+        "agentteam_runtime.experiment_sandbox."
+        "_is_privileged_system_tree",
+        return_value=True,
+    )
+    def test_sandbox_publication_requires_fresh_probe_and_valid_policy(
+        self,
+        _privileged_system_tree,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = _sandbox_fixture(tmp)
             tampered_environment = copy.deepcopy(fixture["descriptor"])
@@ -11319,6 +11589,10 @@ class ExperimentCalibrationTests(unittest.TestCase):
             side_effect=run_bounded_argv_without_systemd,
         ), patch(
             "agentteam_runtime.experiment_sandbox."
+            "_is_privileged_system_tree",
+            return_value=True,
+        ), patch(
+            "agentteam_runtime.experiment_sandbox."
             "probe_gold_canary_denial",
             side_effect=_successful_namespace_probe,
         ):
@@ -11439,9 +11713,27 @@ class ExperimentCalibrationTests(unittest.TestCase):
             },
         }
 
-    def test_deterministic_l1_l2_calibration_rebuilds_all_evidence(self):
+    @patch(
+        "agentteam_runtime.experiment_sandbox."
+        "_is_privileged_system_tree",
+        return_value=True,
+    )
+    def test_deterministic_l1_l2_calibration_rebuilds_all_evidence(
+        self,
+        _privileged_system_tree,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = self._real_calibration_fixture(tmp)
+            for record in [
+                *fixture["primary"],
+                fixture["repeat"],
+                *fixture["controlled"],
+            ]:
+                run_dir = Path(record["run_dir"])
+                self.assertFalse((run_dir / "repository").exists())
+                self.assertTrue(
+                    (run_dir / "clean-snapshot-cleanup.json").is_file()
+                )
             output_path = (
                 fixture["projection_root"]
                 / "calibration"
@@ -11489,6 +11781,10 @@ class ExperimentCalibrationTests(unittest.TestCase):
                 "passed",
             )
             self.assertEqual(
+                report["isolation"]["cleanup_receipt_count"],
+                9,
+            )
+            self.assertEqual(
                 set(
                     report["controlled_outcomes"][
                         "terminal_statuses"
@@ -11530,7 +11826,15 @@ class ExperimentCalibrationTests(unittest.TestCase):
             )
             self.assertFalse(replay["publication"]["created"])
 
-    def test_calibration_rejects_duplicate_request_cost_drift(self):
+    @patch(
+        "agentteam_runtime.experiment_sandbox."
+        "_is_privileged_system_tree",
+        return_value=True,
+    )
+    def test_calibration_rejects_duplicate_request_cost_drift(
+        self,
+        _privileged_system_tree,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = self._real_calibration_fixture(tmp)
             fixture["duplicate"]["stable_request_key"] = (
@@ -12992,7 +13296,15 @@ class Phase2GateTests(unittest.TestCase):
             )
             self.assertEqual(relation["relation_status"], "passed")
 
-    def test_live_calibration_relation_recomputes_sealed_results(self):
+    @patch(
+        "agentteam_runtime.experiment_sandbox."
+        "_is_privileged_system_tree",
+        return_value=True,
+    )
+    def test_live_calibration_relation_recomputes_sealed_results(
+        self,
+        _privileged_system_tree,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fixture = ExperimentCalibrationTests()._real_calibration_fixture(

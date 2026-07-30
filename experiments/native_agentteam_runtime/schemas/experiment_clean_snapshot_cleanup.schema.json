@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/experiment_clean_snapshot_cleanup.schema.json",
+  "title": "Experiment Clean Snapshot Cleanup Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_run_id",
+    "clean_snapshot_attestation",
+    "sealed_result",
+    "cleanup_target",
+    "cleanup_status",
+    "result_preserved",
+    "failure_evidence"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "experiment_clean_snapshot_cleanup.v1"
+    },
+    "experiment_run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "clean_snapshot_attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "snapshot_path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "snapshot_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "sealed_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "bundle_sha256",
+        "sha256_before_cleanup",
+        "sha256_after_cleanup"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "bundle_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sha256_before_cleanup": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sha256_after_cleanup": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "cleanup_target": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "cleanup_status": {
+      "enum": [
+        "removed",
+        "already_absent",
+        "failed"
+      ]
+    },
+    "result_preserved": {
+      "const": true
+    },
+    "failure_evidence": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "error_type",
+            "error_sha256"
+          ],
+          "properties": {
+            "error_type": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "error_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "cleanup_status": {
+            "const": "failed"
+          }
+        },
+        "required": [
+          "cleanup_status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "failure_evidence": {
+            "type": "object"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "failure_evidence": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -12,9 +12,13 @@ from .experiment_results import (
     validate_experiment_recovery_snapshot,
     validate_experiment_result_bundle,
 )
+from .experiment_workspace import (
+    ExperimentWorkspaceError,
+    validate_clean_snapshot_cleanup_receipt,
+)
 from .token_usage import normalize_token_usage, token_usage_from_state
 
-PROJECTION_SCHEMA_VERSION = "agentteam_projection.v6"
+PROJECTION_SCHEMA_VERSION = "agentteam_projection.v7"
 PROJECTION_WARNING_UNAVAILABLE = "projection_db_unavailable"
 PROJECTION_REBUILD_NEXT_ACTION = "run agentteam db rebuild"
 PROJECTION_REBUILD_HINT = "agentteam db rebuild"
@@ -665,7 +669,9 @@ def read_projected_experiment_results(work_root):
             ) as connection:
                 rows = connection.execute(
                     """
-                    select bundle_sha256, bundle_json
+                    select bundle_sha256, bundle_json, cleanup_status,
+                           cleanup_receipt_path, cleanup_receipt_sha256,
+                           cleanup_receipt_json
                     from experiment_results
                     order by experiment_run_id
                     """
@@ -674,9 +680,26 @@ def read_projected_experiment_results(work_root):
                 {
                     "bundle_sha256": digest,
                     "bundle": json.loads(bundle_json),
+                    "cleanup_status": cleanup_status,
+                    "cleanup_receipt": (
+                        {
+                            "path": receipt_path,
+                            "sha256": receipt_sha256,
+                            "receipt": json.loads(receipt_json),
+                        }
+                        if receipt_json is not None
+                        else None
+                    ),
                     "projection_source": "db",
                 }
-                for digest, bundle_json in rows
+                for (
+                    digest,
+                    bundle_json,
+                    cleanup_status,
+                    receipt_path,
+                    receipt_sha256,
+                    receipt_json,
+                ) in rows
             ]
         except (sqlite3.DatabaseError, json.JSONDecodeError):
             pass
@@ -684,6 +707,8 @@ def read_projected_experiment_results(work_root):
         {
             "bundle_sha256": item["bundle_sha256"],
             "bundle": item["bundle"],
+            "cleanup_status": item["cleanup_status"],
+            "cleanup_receipt": item["cleanup_receipt"],
             "projection_source": "files",
         }
         for item in _scan_work_root(work_root)["experiment_results"]
@@ -1022,6 +1047,8 @@ def _scan_experiment_results(runs):
                 ]["identity_sha256"],
                 "bundle_sha256": sealed["bundle_sha256"],
                 "bundle": bundle,
+                "cleanup_status": sealed["cleanup_status"],
+                "cleanup_receipt": sealed["cleanup_receipt"],
             }
         )
     return sorted(
@@ -2219,7 +2246,11 @@ def _create_projection_schema(connection):
             raw_spool_bytes_written integer not null,
             projection_identity_sha256 text not null,
             bundle_sha256 text not null,
-            bundle_json text not null
+            bundle_json text not null,
+            cleanup_status text not null,
+            cleanup_receipt_path text,
+            cleanup_receipt_sha256 text,
+            cleanup_receipt_json text
         )
         """
     )
@@ -2667,10 +2698,12 @@ def _write_projection_rows(connection, projection):
             expected_operator_actions, corrective_interventions,
             decision_escalations, artifact_bytes_written,
             raw_spool_bytes_written, projection_identity_sha256,
-            bundle_sha256, bundle_json
+            bundle_sha256, bundle_json, cleanup_status,
+            cleanup_receipt_path, cleanup_receipt_sha256,
+            cleanup_receipt_json
         ) values(
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?
+            ?, ?, ?, ?, ?, ?
         )
         """,
         [
@@ -2702,6 +2735,22 @@ def _write_projection_rows(connection, projection):
                 item["projection_identity_sha256"],
                 item["bundle_sha256"],
                 _json_dumps(item["bundle"]),
+                item["cleanup_status"],
+                (
+                    item["cleanup_receipt"]["path"]
+                    if item["cleanup_receipt"] is not None
+                    else None
+                ),
+                (
+                    item["cleanup_receipt"]["sha256"]
+                    if item["cleanup_receipt"] is not None
+                    else None
+                ),
+                (
+                    _json_dumps(item["cleanup_receipt"]["receipt"])
+                    if item["cleanup_receipt"] is not None
+                    else None
+                ),
             )
             for item in projection["experiment_results"]
         ],
@@ -2889,7 +2938,9 @@ def _database_experiment_result_digest(connection):
                    expected_operator_actions, corrective_interventions,
                    decision_escalations, artifact_bytes_written,
                    raw_spool_bytes_written, projection_identity_sha256,
-                   bundle_sha256, bundle_json
+                   bundle_sha256, bundle_json, cleanup_status,
+                   cleanup_receipt_path, cleanup_receipt_sha256,
+                   cleanup_receipt_json
             from experiment_results
             order by experiment_run_id
             """
@@ -2904,10 +2955,49 @@ def _database_experiment_result_digest(connection):
             bundle = json.loads(row[21])
             validate_experiment_result_bundle(bundle)
             budget = json.loads(row[13])
-        except (json.JSONDecodeError, ExperimentResultError) as exc:
+            receipt = (
+                json.loads(row[25])
+                if row[25] is not None
+                else None
+            )
+            if receipt is not None:
+                validate_clean_snapshot_cleanup_receipt(receipt)
+        except (
+            json.JSONDecodeError,
+            ExperimentResultError,
+            ExperimentWorkspaceError,
+            ValueError,
+        ) as exc:
             raise ProjectionIntegrityError(
                 "experiment result projection payload is invalid"
             ) from exc
+        cleanup_status = row[22]
+        receipt_reference = (
+            {
+                "path": row[23],
+                "sha256": row[24],
+                "receipt": receipt,
+            }
+            if receipt is not None
+            else None
+        )
+        if (
+            cleanup_status
+            not in {"pending", "removed", "already_absent", "failed"}
+            or (cleanup_status == "pending")
+            is not (receipt_reference is None)
+            or (
+                receipt_reference is not None
+                and (
+                    receipt["cleanup_status"] != cleanup_status
+                    or not isinstance(row[23], str)
+                    or not _is_sha256(row[24])
+                )
+            )
+        ):
+            raise ProjectionIntegrityError(
+                "experiment cleanup projection is invalid"
+            )
         expected = (
             bundle["experiment_run_id"],
             bundle["protocol_sha256"],
@@ -2943,6 +3033,8 @@ def _database_experiment_result_digest(connection):
                 "bundle_sha256": row[20],
                 "projection_identity_sha256": row[19],
                 "bundle": bundle,
+                "cleanup_status": cleanup_status,
+                "cleanup_receipt": receipt_reference,
             }
         )
     return _experiment_result_digest(projected)
@@ -3986,11 +4078,21 @@ def _experiment_result_digest(results):
                         "projection_identity_sha256"
                     ],
                     "bundle": item["bundle"],
+                    "cleanup_status": item["cleanup_status"],
+                    "cleanup_receipt": item["cleanup_receipt"],
                 }
             ).encode("utf-8")
         )
         digest.update(b"\n")
     return digest.hexdigest()
+
+
+def _is_sha256(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _experiment_recovery_digest(snapshots):
