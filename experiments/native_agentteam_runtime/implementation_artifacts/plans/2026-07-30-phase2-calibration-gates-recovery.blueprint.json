@@ -1,0 +1,253 @@
+{
+  "schema_version": "agentteam_taskpack_blueprint.v1",
+  "blueprint_id": "phase2-calibration-gates-recovery",
+  "source_plan": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-27-phase2-experiment-harness-and-calibration.md",
+  "research_authority": "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md",
+  "schema_inventory": [
+    "experiments/native_agentteam_runtime/schemas/experiment_clean_snapshot_cleanup.schema.json",
+    "experiments/native_agentteam_runtime/schemas/experiment_evaluation.schema.json",
+    "experiments/native_agentteam_runtime/schemas/model_invocation_started.schema.json",
+    "experiments/native_agentteam_runtime/schemas/model_invocation_usage.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_calibration.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_contract_review.schema.json",
+    "experiments/native_agentteam_runtime/schemas/taskpack_blueprint.schema.json"
+  ],
+  "taskpack": {
+    "taskpack_id": "phase2-calibration-gates-recovery",
+    "goal_kind": "implementation",
+    "milestone": "research-phase-2-calibration-and-gates",
+    "goal": "Implement and verify the approved deterministic P2-07A-R calibration evidence and P2-07B-R gate-controller repairs from the accepted P2-06R source.",
+    "overall_risk": "L2",
+    "integration_policy": "verified integration baseline followed by operator review; never execute P2-08, call a live provider, merge to main, push, or activate a post-run candidate release"
+  },
+  "contract": {
+    "authority_model": "approved_phase2_v4_contract_plus_verified_p2_06r",
+    "recovery_source_commit": "b20a58659159297f4463367bd9ef74f0f6a7dd06",
+    "accepted_recovery_tasks": [
+      "P2-MAP-R",
+      "P2-04R",
+      "P2-05R",
+      "P2-MAP-CLEANUP-R",
+      "P2-05C-R",
+      "P2-MAP-MODES-R",
+      "P2-06R"
+    ],
+    "remaining_task_sequence": [
+      "P2-MAP-GATES-R",
+      "P2-07A-R",
+      "P2-07B-R"
+    ],
+    "calibration_policy": "calibration is deterministic, provider-free, equal-input, all-outcome, cleanup-aware, projection-rebuildable, and makes no benchmark superiority claim",
+    "gate_policy": "gate validators recompute Git, evidence, epoch, authorization, release, and protocol relations instead of trusting schema-valid declarations",
+    "promotion_policy": "P2-08, live calibration, candidate release promotion, main-branch merge, and push remain forbidden",
+    "write_scope_cardinality_policy": {
+      "default_max_entries": 5,
+      "exact_path_exceptions": {
+        "P2-07B-R": 6
+      },
+      "exception_scope_rule": "production and schema paths exact; test and fixture directory scopes allowed",
+      "exception_verification": "focused task verification plus complete runtime suite"
+    }
+  },
+  "approval": {
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase2-calibration-gates-recovery-contract-review.v1.json",
+    "schema_path": "experiments/native_agentteam_runtime/schemas/phase2_contract_review.schema.json",
+    "required_decision": "approved",
+    "git_object_format_required": true,
+    "runtime_release_binding_required": true,
+    "digest_bindings": [
+      "source_plan",
+      "blueprint",
+      "research_authority",
+      "review_schema",
+      "contract",
+      "schema_inventory"
+    ]
+  },
+  "agents": [
+    {
+      "agent_id": "agent-repo-map-1",
+      "role": "repo_map_agent",
+      "runtime_profile": {
+        "adapter": "codex"
+      }
+    },
+    {
+      "agent_id": "agent-implementation-worker-1",
+      "role": "implementation_worker",
+      "runtime_profile": {
+        "adapter": "codex"
+      }
+    }
+  ],
+  "verification": {
+    "command": [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "experiments/native_agentteam_runtime/m0_runtime/tests",
+      "-p",
+      "test*.py"
+    ],
+    "success_criteria": [
+      "Deterministic three-mode calibration retains equal-input, usage, isolation, cleanup, terminal-outcome, replay, and projection evidence.",
+      "Gate validators recompute all material relations and current epoch-bound authorization.",
+      "The candidate runtime can materialize the separately governed controller-only promotion blueprint.",
+      "No P2-08 action or live provider call occurs.",
+      "The complete runtime suite passes on the final integration baseline."
+    ]
+  },
+  "policy": {
+    "semantic_authority": "approved Phase 2 v4 contract plus independently reviewed P2-06R and this bounded continuation",
+    "task_generation": "disabled",
+    "repo_map_policy": "rebind the committed P2-06R handoff with one bounded calibration and gate symbol check; never perform a broad repository reread",
+    "trace_policy": "compact task evidence plus one milestone integration report",
+    "merge_policy": "integration baseline only; operator controls source merge",
+    "network_policy": "no live provider calls"
+  },
+  "tasks": [
+    {
+      "task_id": "P2-MAP-GATES-R",
+      "objective": "Rebind the accepted P2-06R repository handoff to current calibration and gate symbols without broad repository exploration.",
+      "goal_alignment": "Provides mechanically validated L2 gate context while retaining the accepted bounded handoff.",
+      "work_type": "repository_mapping",
+      "required_role": "repo_map_agent",
+      "backlog_status": "ready",
+      "risk_target": "L0",
+      "depends_on": [],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/handoffs/phase2-repo-map-handoff.json",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_calibration.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_gates.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/handoffs/phase2-repo-map-handoff.json"
+      ],
+      "required_deliverables": [
+        "current_source_binding",
+        "calibration_extension_points",
+        "gate_extension_points",
+        "focused_test_inventory",
+        "repo_map_handoff"
+      ],
+      "acceptance_criteria": [
+        "The handoff binds the accepted P2-06R source.",
+        "Only calibration, gate-controller, taskpack materialization, and focused test symbols are refreshed.",
+        "The handoff remains compact and evidence-linked."
+      ],
+      "stop_condition": "Stop if rebinding requires a broad repository reread or changes semantic architecture.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-30-phase2-calibration-gates-recovery.blueprint.json"
+      ],
+      "expected_output_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/handoffs/phase2-repo-map-handoff.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/handoffs/phase2-repo-map-handoff.json"
+      ]
+    },
+    {
+      "task_id": "P2-07A-R",
+      "objective": "Re-run deterministic L1 and bounded L2 calibration across all modes and retain equal-input, usage, isolation, cleanup, bundle, replay, and projection evidence.",
+      "goal_alignment": "Proves the repaired harness before any separately governed candidate promotion.",
+      "work_type": "verification_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/projection_db.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_calibration.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/fixtures/phase2_experiments"
+      ],
+      "required_deliverables": [
+        "three_mode_equal_input_evidence",
+        "repeat_drift_evidence",
+        "complete_usage_coverage",
+        "isolation_and_cleanup_evidence",
+        "all_terminal_status_evidence",
+        "projection_rebuild_equality"
+      ],
+      "acceptance_criteria": [
+        "All three modes execute the same deterministic protocol family and environment contract.",
+        "Counted lifecycle and token usage coverage are 100 percent without duplicate stable-request cost.",
+        "Canary denial, sealed result preservation, and cleanup receipt completion are proven.",
+        "Every required terminal outcome remains visible after projection rebuild.",
+        "Calibration output makes no benchmark superiority claim."
+      ],
+      "stop_condition": "Stop if deterministic evidence requires a live provider or is presented as scored evidence.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-30-phase2-calibration-gates-recovery.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/fixtures/phase2_experiments"
+      ]
+    },
+    {
+      "task_id": "P2-07B-R",
+      "objective": "Audit and repair deterministic Phase 2 gate controllers and relation validators without executing promotion or any live provider call.",
+      "goal_alignment": "Leaves a reviewed executable candidate for the separately approved P2-08 promotion taskpack.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L2",
+      "depends_on": [
+        "P2-MAP-GATES-R",
+        "P2-07A-R"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/handoffs/phase2-repo-map-handoff.json",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_gates.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_calibration.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_gates.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py",
+        "experiments/native_agentteam_runtime/schemas/taskpack_blueprint.schema.json"
+      ],
+      "required_deliverables": [
+        "readiness_relation_validator",
+        "live_relation_validator",
+        "finalization_relation_validator",
+        "epoch_bound_authorization",
+        "controller_only_taskpack_contract",
+        "deterministic_pause_and_resume"
+      ],
+      "acceptance_criteria": [
+        "Gate validators recompute Git and evidence relations rather than trusting schema-valid strings.",
+        "P2-09 cannot call a provider without current epoch-bound operator authorization.",
+        "The candidate runtime can materialize the separately governed controller-only promotion blueprint.",
+        "This recovery run does not execute P2-08, install a post-run candidate release, merge the source branch to main, or push.",
+        "The complete runtime suite passes on the final integration baseline."
+      ],
+      "stop_condition": "Stop if a gate can pass without recomputation or a live call can bypass current authorization.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-30-phase2-calibration-gates-recovery.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/handoffs/phase2-repo-map-handoff.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_taskpack.py"
+      ]
+    }
+  ]
+}
