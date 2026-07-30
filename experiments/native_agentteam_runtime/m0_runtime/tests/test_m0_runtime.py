@@ -6895,7 +6895,14 @@ class M0RuntimeTests(unittest.TestCase):
                 integration_verification_command=[
                     sys.executable,
                     "-c",
-                    "import pathlib; assert pathlib.Path('generated/two_phase_commit.json').exists()",
+                    (
+                        "import pathlib, subprocess; "
+                        "path = 'generated/two_phase_commit.json'; "
+                        "assert pathlib.Path(path).exists(); "
+                        "subprocess.run("
+                        "['git', 'ls-files', '--error-unmatch', '--', path], "
+                        "check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)"
+                    ),
                 ],
                 commit_verified_integration=True,
             )
@@ -11828,7 +11835,21 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertTrue((integration_worktree / "generated" / "recovered.json").exists())
             self.assertEqual(
                 _git_status_short(integration_worktree),
-                "?? generated/",
+                "A generated/recovered.json",
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(integration_worktree),
+                    "ls-files",
+                    "--error-unmatch",
+                    "--",
+                    "generated/recovered.json",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
 
     def test_integration_verification_command_passes_in_integration_worktree(self):

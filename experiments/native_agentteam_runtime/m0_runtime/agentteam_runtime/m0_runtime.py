@@ -3599,6 +3599,7 @@ def apply_patch_to_integration_baseline_worktree(project_root, output_dir, patch
             stderr=subprocess.PIPE,
             text=True,
         )
+    _register_new_integration_paths(integration_worktree)
     return {
         **baseline,
         "integration_status": "applied",
@@ -3607,6 +3608,31 @@ def apply_patch_to_integration_baseline_worktree(project_root, output_dir, patch
         "integration_recovery_status": recovery_status,
         "integration_base_sha": baseline["integration_baseline_head_sha"],
     }
+
+
+def _register_new_integration_paths(integration_worktree):
+    untracked_paths = [
+        entry["path"]
+        for entry in _git_status_entries(integration_worktree)
+        if entry["status"] == "??"
+    ]
+    if not untracked_paths:
+        return
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(integration_worktree),
+            "add",
+            "--intent-to-add",
+            "--",
+            *untracked_paths,
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
 
 def commit_integration_baseline_worktree(integration_worktree_path, task_id, attempt_id):
@@ -3707,6 +3733,7 @@ def apply_patch_to_integration_worktree(project_root, output_dir, task_id, patch
             stderr=subprocess.PIPE,
             text=True,
         )
+    _register_new_integration_paths(integration_worktree)
     return {
         "integration_status": "applied",
         "integration_branch": integration_branch,
