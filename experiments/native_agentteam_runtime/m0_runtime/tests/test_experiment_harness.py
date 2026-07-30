@@ -6173,6 +6173,30 @@ class ExperimentResultBundleTests(unittest.TestCase):
             recovery = read_projected_experiment_recovery(work_root)
             self.assertEqual(len(recovery), 1)
             self.assertFalse(recovery[0]["resumable"])
+            import sqlite3
+
+            with sqlite3.connect(work_root / "agentteam.db") as connection:
+                connection.execute(
+                    "update experiment_results set bundle_json = '{}'"
+                )
+            corrupted_check = check_project_projection_db(work_root)
+            corrupted_fallback = read_projected_experiment_results(
+                work_root
+            )
+            self.assertEqual(
+                corrupted_check["mismatches"],
+                ["db_unreadable"],
+            )
+            self.assertEqual(
+                {item["bundle_sha256"] for item in corrupted_fallback},
+                {item["bundle_sha256"] for item in sealed},
+            )
+            self.assertTrue(
+                all(
+                    item["projection_source"] == "files"
+                    for item in corrupted_fallback
+                )
+            )
             (work_root / "agentteam.db").unlink()
             fallback = read_projected_experiment_results(work_root)
             self.assertEqual(

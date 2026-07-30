@@ -220,7 +220,7 @@ def check_project_projection_db(work_root):
     try:
         actual = _database_counts(db_path)
         schema_version = _database_schema_version(db_path)
-    except sqlite3.DatabaseError as exc:
+    except (sqlite3.DatabaseError, ProjectionIntegrityError) as exc:
         return _with_projection_contract({
             "check_status": "failed",
             "db_path": str(db_path),
