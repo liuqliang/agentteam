@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase2_deterministic_calibration_request.schema.json",
+  "title": "Phase 2 deterministic calibration request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "protocol_path",
+    "projection_root",
+    "primary_runs",
+    "repeat_run",
+    "controlled_runs",
+    "duplicate_request_evidence",
+    "fixture_roots",
+    "authority_roots"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase2_deterministic_calibration_request.v1"
+    },
+    "protocol_path": {
+      "$ref": "#/$defs/path"
+    },
+    "projection_root": {
+      "$ref": "#/$defs/path"
+    },
+    "primary_runs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/run_record"
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "repeat_run": {
+      "$ref": "#/$defs/run_record"
+    },
+    "controlled_runs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/run_record"
+      },
+      "minItems": 4
+    },
+    "duplicate_request_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stable_request_key",
+        "experiment_run_id",
+        "result_bundle_sha256"
+      ],
+      "properties": {
+        "stable_request_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "experiment_run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "result_bundle_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "fixture_roots": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deterministic_l1",
+        "bounded_l2"
+      ],
+      "properties": {
+        "deterministic_l1": {
+          "$ref": "#/$defs/path"
+        },
+        "bounded_l2": {
+          "$ref": "#/$defs/path"
+        }
+      }
+    },
+    "authority_roots": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/path"
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "run_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_dir",
+        "sandbox_authority_root",
+        "canary_path"
+      ],
+      "properties": {
+        "run_dir": {
+          "$ref": "#/$defs/path"
+        },
+        "sandbox_authority_root": {
+          "$ref": "#/$defs/path"
+        },
+        "canary_path": {
+          "$ref": "#/$defs/path"
+        }
+      }
+    }
+  }
+}

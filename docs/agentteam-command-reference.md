@@ -299,6 +299,63 @@ Important behavior:
 - M60 does not delete artifacts, does not make `agentteam.db` authoritative,
   and does not add automatic rebuilds to read-only operator commands.
 
+### `agentteam experiment`
+
+Validates readiness and experiment authority without implicitly authorizing a
+provider call.
+
+Examples:
+
+```bash
+agentteam experiment readiness
+agentteam experiment validate-manifest --manifest manifest.json
+agentteam experiment check-pilot --manifest manifest.json
+agentteam experiment calibrate-deterministic \
+  --request calibration-request.json \
+  --output phase2-deterministic-calibration.json
+agentteam experiment show --run <run-id>
+agentteam experiment compare --experiment <experiment-id>
+```
+
+`calibrate-deterministic` reads a bounded request describing an existing
+sealed run family. It recomputes and publishes a canonical
+`phase2_deterministic_calibration.v2` report. The report separately binds the
+evaluated repository through `target_source_commit` and the AgentTeam release
+through `runtime_source_commit` plus `runtime_release_identity`. The command
+does not create runs, start workers, or invoke a provider.
+
+The request follows
+`experiments/native_agentteam_runtime/schemas/phase2_deterministic_calibration_request.schema.json`.
+It contains exactly three primary mode runs, one repeat, the controlled
+terminal-outcome runs, duplicate-request evidence, fixture roots, and explicit
+authority roots. Relative paths resolve from the request file. Every input and
+the output must remain under an authority root, and symlinked path components
+are rejected.
+
+Each run record has exactly `run_dir`, `sandbox_authority_root`, and
+`canary_path`. The request schema requires three primary records and at least
+four controlled records. Use the packaged driver below to produce the request
+instead of assembling this inventory manually.
+
+For the one-time P2-08 promotion, install the candidate with
+`agentteam update --from-git` using a retained local Git repository, then run
+the packaged deterministic driver from that Git-backed release itself:
+
+```bash
+python3 <release-root>/experiments/native_agentteam_runtime/m0_runtime/tools/generate_phase2_deterministic_authority.py \
+  --runtime-release-root <release-root> \
+  --output-root <empty-authority-root>
+```
+
+The driver verifies the installed release manifest, creates a persistent
+sealed fixture run family, publishes the request and report immutably, and
+uses deterministic adapters only. It refuses a non-empty output root and
+does not invoke a provider. P2-08 rejects checkout-only releases because they
+do not retain the full Git-exported tree needed for commit-content
+recomputation. Remote-URL installs remain supported for ordinary AgentTeam
+use, but this one-time promotion gate requires the local source object store
+to recompute every blob OID.
+
 ### `agentteam stats`
 
 Shows compact project-level statistics from AgentTeam runtime artifacts.

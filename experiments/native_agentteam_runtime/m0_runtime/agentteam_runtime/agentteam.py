@@ -75,6 +75,10 @@ from .experiment_gates import (
     validate_gate_relation,
 )
 from .experiment_contract import canonical_json_sha256
+from .experiment_calibration import (
+    ExperimentCalibrationError,
+    run_deterministic_calibration_from_manifest,
+)
 from .experiment_results import (
     ExperimentResultError,
     load_experiment_result_bundle,
@@ -1370,6 +1374,27 @@ def _add_experiment_parser(subcommands):
     check.add_argument("--manifest", required=True, help="Experiment manifest JSON path.")
     check.add_argument("--json", action="store_true", help="Print authorization details as JSON.")
     check.set_defaults(handler=_handle_experiment)
+
+    calibrate = experiment_subcommands.add_parser(
+        "calibrate-deterministic",
+        help="Publish a deterministic calibration report from sealed runs.",
+    )
+    calibrate.add_argument(
+        "--request",
+        required=True,
+        help="Deterministic calibration request JSON path.",
+    )
+    calibrate.add_argument(
+        "--output",
+        required=True,
+        help="Create-if-absent canonical calibration report path.",
+    )
+    calibrate.add_argument(
+        "--json",
+        action="store_true",
+        help="Print calibration publication details as JSON.",
+    )
+    calibrate.set_defaults(handler=_handle_experiment)
 
     show = experiment_subcommands.add_parser(
         "show",
@@ -6134,6 +6159,29 @@ def _handle_experiment(args):
                 return summary
             _write_experiment_pilot_text(summary)
             return 0
+        if args.experiment_command == "calibrate-deterministic":
+            summary = run_deterministic_calibration_from_manifest(
+                args.request,
+                output_path=args.output,
+            )
+            if args.json:
+                return summary
+            sys.stdout.write(
+                "\n".join(
+                    (
+                        "calibration_status: "
+                        f"{summary['calibration_status']}",
+                        "target_source_commit: "
+                        f"{summary['target_source_commit']}",
+                        "runtime_source_commit: "
+                        f"{summary['runtime_source_commit']}",
+                        f"report_sha256: {summary['report_sha256']}",
+                        f"report_path: {summary['report_path']}",
+                    )
+                )
+                + "\n"
+            )
+            return 0
         if args.experiment_command == "show":
             result = load_experiment_result_bundle(
                 _resolve_experiment_run_dir(
@@ -6166,7 +6214,11 @@ def _handle_experiment(args):
                 render_experiment_comparison(results) + "\n"
             )
             return 0
-    except (ExperimentReadinessError, ExperimentResultError) as exc:
+    except (
+        ExperimentCalibrationError,
+        ExperimentReadinessError,
+        ExperimentResultError,
+    ) as exc:
         raise AgentTeamCliError(str(exc)) from exc
     raise AgentTeamCliError(
         "unsupported experiment command",

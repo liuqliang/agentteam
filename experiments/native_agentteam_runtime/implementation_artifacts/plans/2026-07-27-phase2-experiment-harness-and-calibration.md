@@ -749,6 +749,21 @@ Add a bounded multi-file fixture with one repair opportunity. Exercise clean
 snapshot, canary denial, budget stop, intervention ledger, and all bundle
 statuses. This validates the harness and is not benchmark evidence.
 
+The canonical calibration report keeps two source identities separate:
+
+- `target_source_commit` identifies the repository revision modified and
+  evaluated by every mode.
+- `runtime_source_commit` and `runtime_release_identity` identify the exact
+  AgentTeam implementation executing those modes.
+
+P2-08 binds readiness promotion to the runtime source commit. It does not
+require an arbitrary benchmark target to share the AgentTeam repository
+commit. A deterministic calibration request may publish the report only from
+already sealed runs; it cannot start a provider invocation. The retained
+request bytes are digest-bound by the report. Before promotion, P2-08 also
+recomputes the Git-installed release inventory, file modes, and blob OIDs
+against that runtime source commit.
+
 ### P2-07B Executable Gates And Relation Validators
 
 **Risk:** L2

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 import agentteam_runtime.agentteam as agentteam_module
 from agentteam_runtime.experiment_readiness import (
@@ -297,6 +298,39 @@ class ExperimentReadinessTests(unittest.TestCase):
         text = stdout.getvalue()
         self.assertNotIn("budget limits", text)
         self.assertIn("not available until P0-B", text)
+
+    def test_cli_routes_deterministic_calibration_request(self):
+        summary = {
+            "calibration_status": "passed",
+            "target_source_commit": "a" * 40,
+            "runtime_source_commit": "b" * 40,
+            "report_sha256": "c" * 64,
+            "report_path": "/tmp/calibration.json",
+        }
+        stdout = io.StringIO()
+        with patch.object(
+            agentteam_module,
+            "run_deterministic_calibration_from_manifest",
+            return_value=summary,
+        ) as calibrate, redirect_stdout(stdout):
+            result = agentteam_module.main(
+                [
+                    "experiment",
+                    "calibrate-deterministic",
+                    "--request",
+                    "request.json",
+                    "--output",
+                    "calibration.json",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), summary)
+        calibrate.assert_called_once_with(
+            "request.json",
+            output_path="calibration.json",
+        )
 
 
 if __name__ == "__main__":

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Small pre-import launcher for immutable AgentTeam runtime releases."""
 
+import atexit
 import hashlib
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -47,6 +50,7 @@ def main():
         else:
             os.environ.pop(SELECTION_ENV, None)
             runtime_root = _active_release_runtime_root(sys.argv[1:]) or _development_runtime_root()
+        _configure_external_bytecode_cache(runtime_root)
         sys.path.insert(0, str(runtime_root))
         from agentteam_runtime.agentteam import main as agentteam_main
 
@@ -66,6 +70,21 @@ def main():
             + "\n"
         )
         return 1
+
+
+def _configure_external_bytecode_cache(runtime_root):
+    runtime_key = hashlib.sha256(
+        str(Path(runtime_root).resolve()).encode("utf-8")
+    ).hexdigest()[:24]
+    cache_root = Path(
+        tempfile.mkdtemp(
+            prefix=f"agentteam-pycache-{runtime_key}-",
+        )
+    )
+    cache_root.chmod(0o700)
+    atexit.register(shutil.rmtree, cache_root, True)
+    os.environ["PYTHONPYCACHEPREFIX"] = str(cache_root)
+    sys.pycache_prefix = str(cache_root)
 
 
 def _launcher_selection(argv):

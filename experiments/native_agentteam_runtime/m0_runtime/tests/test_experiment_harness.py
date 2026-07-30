@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -29,7 +30,9 @@ from agentteam_runtime.experiment_budget import (
 )
 from agentteam_runtime.experiment_calibration import (
     ExperimentCalibrationError,
+    _validate_common_run_identity,
     load_deterministic_calibration_report,
+    run_deterministic_calibration_from_manifest,
     run_deterministic_experiment_calibration,
     validate_deterministic_calibration_report,
 )
@@ -337,6 +340,70 @@ def _filesystem_release(
         "release_id": release_id,
         "release_root": str(release_root),
         "runtime_root": str(runtime_root),
+        "source_commit": source_commit,
+        "git_object_format": (
+            "sha1" if len(source_commit) == 40 else "sha256"
+        ),
+    }
+    manifest_path = release_root / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "release_id": release_id,
+        "release_root": str(release_root),
+        "runtime_root": str(runtime_root),
+        "release_manifest_sha256": hashlib.sha256(
+            manifest_path.read_bytes()
+        ).hexdigest(),
+        "source_commit": source_commit,
+        "git_object_format": manifest["git_object_format"],
+    }
+
+
+def _git_release(
+    release_root,
+    repository,
+    source_commit,
+    *,
+    release_id,
+):
+    release_root = Path(release_root).resolve()
+    repository = Path(repository).resolve()
+    archive = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "archive",
+            "--format=tar",
+            source_commit,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    ).stdout
+    release_root.mkdir(parents=True)
+    with tarfile.open(
+        fileobj=io.BytesIO(archive),
+        mode="r:",
+    ) as stream:
+        stream.extractall(release_root, filter="data")
+    runtime_root = (
+        release_root
+        / "experiments"
+        / "native_agentteam_runtime"
+        / "m0_runtime"
+    )
+    manifest = {
+        "manifest_schema_version": "agentteam_release_manifest.v2",
+        "install_method": "git_ref",
+        "release_id": release_id,
+        "release_root": str(release_root),
+        "runtime_root": str(runtime_root),
+        "source_repo": str(repository),
+        "source_ref": source_commit,
         "source_commit": source_commit,
         "git_object_format": (
             "sha1" if len(source_commit) == 40 else "sha256"
@@ -11934,7 +12001,14 @@ class ExperimentCalibrationTests(unittest.TestCase):
             answered_at=answered_at,
         )
 
-    def _real_calibration_fixture(self, root):
+    def _real_calibration_fixture(
+        self,
+        root,
+        *,
+        separate_runtime_identity=True,
+        runtime_release_identity=None,
+        controlled_runtime_release_identity=None,
+    ):
         root = Path(root)
         projection_root = root / "projection"
         projection_root.mkdir()
@@ -12001,10 +12075,20 @@ class ExperimentCalibrationTests(unittest.TestCase):
             },
             "source": source,
         }
-        runtime_release = _filesystem_release(
-            root / "candidate-runtime",
-            repository["repository"]["commit"],
-        )
+        if runtime_release_identity is None:
+            runtime_source_commit = (
+                "f" * 40
+                if separate_runtime_identity
+                else repository["repository"]["commit"]
+            )
+            runtime_release = _filesystem_release(
+                root / "candidate-runtime",
+                runtime_source_commit,
+            )
+        else:
+            runtime_release = copy.deepcopy(
+                runtime_release_identity
+            )
         taskpack_draft = draft_taskpack_files(
             project_root=repository["source"],
             goal="Repair both deterministic calibration fixtures.",
@@ -12521,13 +12605,22 @@ class ExperimentCalibrationTests(unittest.TestCase):
                 key = (
                     f"real-calibration-r{repetition}-{mode}"
                 )
+                run_runtime_release = (
+                    controlled_runtime_release_identity
+                    if (
+                        controlled_runtime_release_identity
+                        is not None
+                        and status == "budget_stopped"
+                    )
+                    else runtime_release
+                )
                 allocation = allocate_experiment_run(
                     projection_root,
                     protocol,
                     mode=mode,
                     repetition_index=repetition,
                     stable_request_key=key,
-                    runtime_release=runtime_release,
+                    runtime_release=run_runtime_release,
                     bound_at="2026-07-27T00:00:00Z",
                 )
                 run_dir = Path(allocation["run_dir"])
@@ -12576,9 +12669,9 @@ class ExperimentCalibrationTests(unittest.TestCase):
                     sandbox_configuration=sandbox_configuration,
                     common_finalizer=ExperimentCommonFinalizer(
                         evaluator_artifact=evaluator,
-                        runtime_release_identity=runtime_release,
+                        runtime_release_identity=run_runtime_release,
                     ),
-                    runtime_release_identity=runtime_release,
+                    runtime_release_identity=run_runtime_release,
                 )
                 mode_result = mode_controller.execute(adapter)
                 results.append(
@@ -12698,6 +12791,38 @@ class ExperimentCalibrationTests(unittest.TestCase):
                 report["protocol_sha256"],
             )
             self.assertEqual(
+                report["target_source_commit"],
+                fixture["protocol"]["repository"]["commit"],
+            )
+            self.assertEqual(
+                report["runtime_source_commit"],
+                fixture["release"]["source_commit"],
+            )
+            self.assertNotEqual(
+                report["target_source_commit"],
+                report["runtime_source_commit"],
+            )
+            forged_runtime = copy.deepcopy(report)
+            forged_runtime["runtime_source_commit"] = "e" * 40
+            with self.assertRaisesRegex(
+                ExperimentCalibrationError,
+                "source identities",
+            ):
+                validate_deterministic_calibration_report(
+                    forged_runtime
+                )
+            forged_nested_runtime = copy.deepcopy(report)
+            forged_nested_runtime["equal_input_evidence"][
+                "runtime_release_identity"
+            ]["release_id"] = "forged-release"
+            with self.assertRaisesRegex(
+                ExperimentCalibrationError,
+                "equal-input evidence",
+            ):
+                validate_deterministic_calibration_report(
+                    forged_nested_runtime
+                )
+            self.assertEqual(
                 report["equal_input_evidence"]["repetition_count"],
                 4,
             )
@@ -12812,6 +12937,110 @@ class ExperimentCalibrationTests(unittest.TestCase):
                 output_path=output_path,
             )
             self.assertFalse(replay["publication"]["created"])
+            protocol_path = Path(tmp) / "protocol.json"
+            protocol_path.write_bytes(
+                canonical_json_bytes(fixture["protocol"]) + b"\n"
+            )
+            request_path = Path(tmp) / "calibration-request.json"
+
+            def request_record(record):
+                return {
+                    "run_dir": record["run_dir"],
+                    "sandbox_authority_root": record[
+                        "sandbox_authority_root"
+                    ],
+                    "canary_path": record["canary_path"],
+                }
+
+            request_path.write_bytes(
+                canonical_json_bytes(
+                    {
+                        "schema_version": (
+                            "phase2_deterministic_calibration_request.v1"
+                        ),
+                        "protocol_path": str(protocol_path),
+                        "projection_root": str(
+                            fixture["projection_root"]
+                        ),
+                        "primary_runs": [
+                            request_record(record)
+                            for record in fixture["primary"]
+                        ],
+                        "repeat_run": request_record(
+                            fixture["repeat"]
+                        ),
+                        "controlled_runs": [
+                            request_record(record)
+                            for record in fixture["controlled"]
+                        ],
+                        "duplicate_request_evidence": fixture[
+                            "duplicate"
+                        ],
+                        "fixture_roots": {
+                            "deterministic_l1": str(
+                                self.FIXTURES / "deterministic_l1"
+                            ),
+                            "bounded_l2": str(
+                                self.FIXTURES / "bounded_l2"
+                            ),
+                        },
+                        "authority_roots": [
+                            str(Path(tmp)),
+                            str(self.FIXTURES),
+                        ],
+                    }
+                )
+                + b"\n"
+            )
+            requested = run_deterministic_calibration_from_manifest(
+                request_path,
+                output_path=(
+                    fixture["projection_root"]
+                    / "calibration"
+                    / "phase2-requested.json"
+                ),
+            )
+            self.assertEqual(
+                requested["target_source_commit"],
+                report["target_source_commit"],
+            )
+            self.assertEqual(
+                requested["runtime_source_commit"],
+                report["runtime_source_commit"],
+            )
+            recomputed = (
+                run_deterministic_calibration_from_manifest(
+                    request_path
+                )
+            )
+            self.assertEqual(
+                recomputed["report_sha256"],
+                requested["report_sha256"],
+            )
+            self.assertIsNone(recomputed["report_path"])
+            loaded_runs = [
+                {
+                    "bundle": load_experiment_result_bundle(
+                        record["run_dir"]
+                    )["bundle"]
+                }
+                for record in [
+                    *fixture["primary"],
+                    fixture["repeat"],
+                    *fixture["controlled"],
+                ]
+            ]
+            loaded_runs[-1]["bundle"] = copy.deepcopy(
+                loaded_runs[-1]["bundle"]
+            )
+            loaded_runs[-1]["bundle"]["runtime_release_identity"][
+                "release_id"
+            ] = "forged-controlled-release"
+            with self.assertRaisesRegex(
+                ExperimentCalibrationError,
+                "target and runtime identity",
+            ):
+                _validate_common_run_identity(loaded_runs)
 
     @patch(
         "agentteam_runtime.experiment_sandbox."
@@ -12847,6 +13076,137 @@ class ExperimentCalibrationTests(unittest.TestCase):
                         ),
                     },
                 )
+
+    @patch(
+        "agentteam_runtime.experiment_sandbox."
+        "_is_privileged_system_tree",
+        return_value=True,
+    )
+    def test_calibration_rejects_sealed_controlled_runtime_drift(
+        self,
+        _privileged_system_tree,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            alternate_release = _filesystem_release(
+                root / "alternate-runtime",
+                "e" * 40,
+                release_id="alternate-controlled-runtime",
+            )
+            fixture_root = root / "fixture"
+            fixture_root.mkdir()
+            fixture = self._real_calibration_fixture(
+                fixture_root,
+                controlled_runtime_release_identity=alternate_release,
+            )
+            with self.assertRaisesRegex(
+                ExperimentCalibrationError,
+                "target and runtime identity",
+            ):
+                run_deterministic_experiment_calibration(
+                    protocol=fixture["protocol"],
+                    projection_root=fixture["projection_root"],
+                    primary_runs=fixture["primary"],
+                    repeat_run=fixture["repeat"],
+                    controlled_runs=fixture["controlled"],
+                    duplicate_request_evidence=fixture["duplicate"],
+                    fixture_roots={
+                        "deterministic_l1": (
+                            self.FIXTURES / "deterministic_l1"
+                        ),
+                        "bounded_l2": (
+                            self.FIXTURES / "bounded_l2"
+                        ),
+                    },
+                )
+
+    def test_calibration_request_rejects_schema_and_symlink_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request_path = root / "request.json"
+            record = {
+                "run_dir": "projection/runs/run",
+                "sandbox_authority_root": (
+                    "projection/runs/run/authority"
+                ),
+                "canary_path": "projection/canary",
+            }
+            request = {
+                "schema_version": (
+                    "phase2_deterministic_calibration_request.v1"
+                ),
+                "protocol_path": "protocol.json",
+                "projection_root": "projection",
+                "primary_runs": [dict(record) for _ in range(3)],
+                "repeat_run": dict(record),
+                "controlled_runs": [
+                    dict(record) for _ in range(4)
+                ],
+                "duplicate_request_evidence": {
+                    "stable_request_key": "request-key",
+                    "experiment_run_id": "run",
+                    "result_bundle_sha256": "0" * 64,
+                },
+                "fixture_roots": {
+                    "deterministic_l1": "fixtures/l1",
+                    "bounded_l2": "fixtures/l2",
+                },
+                "authority_roots": [str(root)],
+            }
+            request_path.write_bytes(
+                canonical_json_bytes(
+                    {**request, "unexpected": True}
+                )
+                + b"\n"
+            )
+            with self.assertRaisesRegex(
+                ExperimentCalibrationError,
+                "schema",
+            ):
+                run_deterministic_calibration_from_manifest(
+                    request_path,
+                    output_path=root / "report.json",
+                )
+
+            real_root = root / "real-authority"
+            real_root.mkdir()
+            linked_root = root / "linked-authority"
+            linked_root.symlink_to(real_root, target_is_directory=True)
+            request["authority_roots"] = [str(linked_root)]
+            request_path.write_bytes(
+                canonical_json_bytes(request) + b"\n"
+            )
+            with self.assertRaisesRegex(
+                ExperimentCalibrationError,
+                "unsafe",
+            ):
+                run_deterministic_calibration_from_manifest(
+                    request_path,
+                    output_path=real_root / "report.json",
+                )
+
+
+def build_phase2_deterministic_fixture(
+    root,
+    *,
+    runtime_release_identity,
+):
+    """Build the packaged deterministic calibration run family."""
+
+    fixture = ExperimentCalibrationTests()._real_calibration_fixture(
+        root,
+        runtime_release_identity=runtime_release_identity,
+    )
+    fixture["fixture_roots"] = {
+        "deterministic_l1": (
+            ExperimentCalibrationTests.FIXTURES
+            / "deterministic_l1"
+        ),
+        "bounded_l2": (
+            ExperimentCalibrationTests.FIXTURES / "bounded_l2"
+        ),
+    }
+    return fixture
 
 
 class Phase2GateTests(unittest.TestCase):
@@ -12964,6 +13324,9 @@ class Phase2GateTests(unittest.TestCase):
                 },
                 "authority_artifacts": {
                     "protocol_template": dict(binding),
+                    "deterministic_calibration_request": dict(
+                        binding
+                    ),
                     "deterministic_calibration": dict(binding),
                 },
                 "pilot_mode": "agentteam_full",
@@ -13010,7 +13373,12 @@ class Phase2GateTests(unittest.TestCase):
         return repository
 
     @staticmethod
-    def _write_calibration_report(path, source_commit):
+    def _write_calibration_report(
+        path,
+        runtime_release_identity,
+        calibration_request_sha256,
+    ):
+        source_commit = runtime_release_identity["source_commit"]
         projection_identity = {
             "runs": 8,
             "invocations": 8,
@@ -13033,13 +13401,18 @@ class Phase2GateTests(unittest.TestCase):
             "budget_stopped",
         ]
         report = {
-            "schema_version": "phase2_deterministic_calibration.v1",
+            "schema_version": "phase2_deterministic_calibration.v2",
             "calibration_status": "passed",
             "claim_scope": (
                 "experiment_harness_readiness_only_not_benchmark_evidence"
             ),
+            "calibration_request_sha256": (
+                calibration_request_sha256
+            ),
             "protocol_sha256": "1" * 64,
-            "source_commit": source_commit,
+            "target_source_commit": "b" * 40,
+            "runtime_source_commit": source_commit,
+            "runtime_release_identity": runtime_release_identity,
             "fixture_evidence": {
                 name: {
                     "fixture_sha256": digest * 64,
@@ -13060,9 +13433,13 @@ class Phase2GateTests(unittest.TestCase):
                 ],
                 "repetition_count": 4,
                 "protocol_sha256": "1" * 64,
-                "source_commit": source_commit,
+                "target_source_commit": "b" * 40,
+                "runtime_source_commit": source_commit,
                 "environment_contract_sha256": "8" * 64,
-                "runtime_release_identity_sha256": "9" * 64,
+                "runtime_release_identity": runtime_release_identity,
+                "runtime_release_identity_sha256": (
+                    canonical_json_sha256(runtime_release_identity)
+                ),
                 "common_evaluation_inputs_sha256": "a" * 64,
             },
             "mode_results": [
@@ -13386,6 +13763,32 @@ class Phase2GateTests(unittest.TestCase):
                 "--quiet",
                 "-m",
                 "overlay Phase 2 test worktree",
+            )
+        request_schema = (
+            self.REPOSITORY_ROOT
+            / "experiments"
+            / "native_agentteam_runtime"
+            / "schemas"
+            / "phase2_deterministic_calibration_request.schema.json"
+        )
+        if request_schema.is_file():
+            destination = (
+                repository
+                / request_schema.relative_to(self.REPOSITORY_ROOT)
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(request_schema, destination)
+            _git(
+                repository,
+                "add",
+                destination.relative_to(repository),
+            )
+            _git(
+                repository,
+                "commit",
+                "--quiet",
+                "-m",
+                "add deterministic calibration request schema",
             )
         return repository
 
@@ -13836,7 +14239,14 @@ class Phase2GateTests(unittest.TestCase):
                 list(protocol["modes"]),
             )
 
-    def test_readiness_relation_recomputes_pilot_and_exact_commit(self):
+    @patch(
+        "agentteam_runtime.experiment_gates."
+        "run_deterministic_calibration_from_manifest"
+    )
+    def test_readiness_relation_recomputes_pilot_and_exact_commit(
+        self,
+        recompute_calibration,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repository = self._repository_clone(root)
@@ -13933,6 +14343,7 @@ class Phase2GateTests(unittest.TestCase):
 
             protocol = root / "protocol.json"
             run_manifest = root / "run-manifest.json"
+            calibration_request = root / "calibration-request.json"
             calibration = root / "deterministic-calibration.json"
             pilot_manifest = root / "pilot-manifest.json"
             pilot_guard = root / "pilot-guard.json"
@@ -13960,7 +14371,28 @@ class Phase2GateTests(unittest.TestCase):
                     )
                 )
             )
-            self._write_calibration_report(calibration, parent)
+            calibration_release = _git_release(
+                root / "calibration-runtime",
+                repository,
+                parent,
+                release_id="phase2-calibration-runtime",
+            )
+            calibration_request.write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            self._write_calibration_report(
+                calibration,
+                calibration_release,
+                hashlib.sha256(
+                    calibration_request.read_bytes()
+                ).hexdigest(),
+            )
+            recompute_calibration.return_value = {
+                "report_sha256": canonical_json_sha256(
+                    json.loads(calibration.read_text(encoding="utf-8"))
+                )
+            }
             pilot_manifest.write_text(
                 json.dumps(
                     {
@@ -14105,6 +14537,9 @@ class Phase2GateTests(unittest.TestCase):
                     "integration_head": head,
                     "protocol_path": str(protocol),
                     "run_manifest_path": str(run_manifest),
+                    "deterministic_calibration_request_path": str(
+                        calibration_request
+                    ),
                     "deterministic_calibration_path": str(calibration),
                     "pilot_manifest_path": str(pilot_manifest),
                     "pilot_guard_path": str(pilot_guard),
@@ -14113,6 +14548,22 @@ class Phase2GateTests(unittest.TestCase):
             )
             self.assertEqual(relation["relation_status"], "passed")
             self.assertEqual(relation["capability_count"], 7)
+            release_launcher = (
+                Path(calibration_release["release_root"])
+                / "agentteam"
+            )
+            release_launcher_before = release_launcher.read_bytes()
+            release_launcher.write_bytes(
+                release_launcher_before + b"\n# tampered\n"
+            )
+            with self.assertRaisesRegex(
+                Phase2GateError,
+                "content differs",
+            ):
+                experiment_gates_module._validate_git_release_tree(
+                    calibration_release
+                )
+            release_launcher.write_bytes(release_launcher_before)
             calibration.write_text(
                 '{"calibration_status":"passed"}\n',
                 encoding="utf-8",
@@ -14136,13 +14587,22 @@ class Phase2GateTests(unittest.TestCase):
                         "integration_head": head,
                         "protocol_path": str(protocol),
                         "run_manifest_path": str(run_manifest),
+                        "deterministic_calibration_request_path": str(
+                            calibration_request
+                        ),
                         "deterministic_calibration_path": str(calibration),
                         "pilot_manifest_path": str(pilot_manifest),
                         "pilot_guard_path": str(pilot_guard),
                         "runtime_release": candidate_release,
                     },
                 )
-            self._write_calibration_report(calibration, parent)
+            self._write_calibration_report(
+                calibration,
+                calibration_release,
+                hashlib.sha256(
+                    calibration_request.read_bytes()
+                ).hexdigest(),
+            )
             artifact["deterministic_calibration_sha256"] = hashlib.sha256(
                 calibration.read_bytes()
             ).hexdigest()
@@ -14166,6 +14626,9 @@ class Phase2GateTests(unittest.TestCase):
                         "integration_head": head,
                         "protocol_path": str(protocol),
                         "run_manifest_path": str(run_manifest),
+                        "deterministic_calibration_request_path": str(
+                            calibration_request
+                        ),
                         "deterministic_calibration_path": str(calibration),
                         "pilot_manifest_path": str(pilot_manifest),
                         "pilot_guard_path": str(pilot_guard),
@@ -14173,7 +14636,14 @@ class Phase2GateTests(unittest.TestCase):
                     },
                 )
 
-    def test_readiness_action_creates_exact_promoted_child(self):
+    @patch(
+        "agentteam_runtime.experiment_gates."
+        "run_deterministic_calibration_from_manifest"
+    )
+    def test_readiness_action_creates_exact_promoted_child(
+        self,
+        recompute_calibration,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repository = self._repository_clone(root)
@@ -14273,13 +14743,35 @@ class Phase2GateTests(unittest.TestCase):
                 }
             )
             protocol = root / "protocol-template.json"
+            calibration_request = root / "calibration-request.json"
             calibration = root / "calibration.json"
             parent = _git(
                 repository,
                 "rev-parse",
                 "HEAD",
             ).stdout.strip()
-            self._write_calibration_report(calibration, parent)
+            calibration_release = _git_release(
+                root / "calibration-runtime",
+                repository,
+                parent,
+                release_id="phase2-calibration-runtime",
+            )
+            calibration_request.write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            self._write_calibration_report(
+                calibration,
+                calibration_release,
+                hashlib.sha256(
+                    calibration_request.read_bytes()
+                ).hexdigest(),
+            )
+            recompute_calibration.return_value = {
+                "report_sha256": canonical_json_sha256(
+                    json.loads(calibration.read_text(encoding="utf-8"))
+                )
+            }
             protocol_template = _protocol()
             protocol_template["repository"] = {
                 "source": str(repository),
@@ -14350,6 +14842,9 @@ class Phase2GateTests(unittest.TestCase):
                         "capability_evidence": evidence,
                         "authority_artifacts": {
                             "protocol_template": binding(protocol),
+                            "deterministic_calibration_request": (
+                                binding(calibration_request)
+                            ),
                             "deterministic_calibration": binding(
                                 calibration
                             ),
@@ -14429,7 +14924,8 @@ class Phase2GateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fixture = ExperimentCalibrationTests()._real_calibration_fixture(
-                root
+                root,
+                separate_runtime_identity=False,
             )
             repository = Path(
                 fixture["protocol"]["repository"]["source"]

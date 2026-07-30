@@ -1120,6 +1120,7 @@ def _phase2_controller_action_input(gate_id):
             },
             "authority_artifacts": {
                 "protocol_template": dict(binding),
+                "deterministic_calibration_request": dict(binding),
                 "deterministic_calibration": dict(binding),
             },
             "pilot_mode": "agentteam_full",
@@ -2169,9 +2170,16 @@ class TaskpackTests(unittest.TestCase):
             deterministic_calibration = (
                 authority_root / "deterministic-calibration.json"
             )
+            deterministic_calibration_request = (
+                authority_root / "calibration-request.json"
+            )
             evaluator = authority_root / "evaluator.json"
             for path, value in (
                 (protocol_template, {"protocol": "fixture"}),
+                (
+                    deterministic_calibration_request,
+                    {"request": "fixture"},
+                ),
                 (
                     deterministic_calibration,
                     {"calibration_status": "passed"},
@@ -2288,6 +2296,11 @@ class TaskpackTests(unittest.TestCase):
                     ] = {
                         "protocol_template": authority_binding(
                             protocol_template
+                        ),
+                        "deterministic_calibration_request": (
+                            authority_binding(
+                                deterministic_calibration_request
+                            )
                         ),
                         "deterministic_calibration": authority_binding(
                             deterministic_calibration

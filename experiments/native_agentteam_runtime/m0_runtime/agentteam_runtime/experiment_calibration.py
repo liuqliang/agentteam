@@ -5,9 +5,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
+
+from jsonschema import Draft202012Validator
 
 from .experiment_contract import (
     ExperimentContractError,
@@ -37,7 +40,10 @@ from .projection_db import (
 )
 
 
-CALIBRATION_SCHEMA_VERSION = "phase2_deterministic_calibration.v1"
+CALIBRATION_SCHEMA_VERSION = "phase2_deterministic_calibration.v2"
+CALIBRATION_REQUEST_SCHEMA_VERSION = (
+    "phase2_deterministic_calibration_request.v1"
+)
 CALIBRATION_CLAIM_SCOPE = (
     "experiment_harness_readiness_only_not_benchmark_evidence"
 )
@@ -76,6 +82,7 @@ def run_deterministic_experiment_calibration(
     duplicate_request_evidence,
     fixture_roots,
     output_path=None,
+    calibration_request_sha256=None,
 ):
     """Recompute the bounded Phase 2 calibration and optionally publish it.
 
@@ -120,6 +127,7 @@ def run_deterministic_experiment_calibration(
 
     all_runs = [*primary, repeat, *controlled]
     _validate_unique_results(all_runs)
+    _validate_common_run_identity(all_runs)
     equal_input = _validate_equal_contract(
         primary + [repeat],
         protocol,
@@ -155,8 +163,15 @@ def run_deterministic_experiment_calibration(
         "schema_version": CALIBRATION_SCHEMA_VERSION,
         "calibration_status": "passed",
         "claim_scope": CALIBRATION_CLAIM_SCOPE,
+        "calibration_request_sha256": calibration_request_sha256,
         "protocol_sha256": protocol_sha256,
-        "source_commit": protocol["repository"]["commit"],
+        "target_source_commit": protocol["repository"]["commit"],
+        "runtime_source_commit": equal_input[
+            "runtime_release_identity"
+        ]["source_commit"],
+        "runtime_release_identity": equal_input[
+            "runtime_release_identity"
+        ],
         "fixture_evidence": fixtures,
         "equal_input_evidence": equal_input,
         "mode_results": [
@@ -233,8 +248,11 @@ def validate_deterministic_calibration_report(report):
         "schema_version",
         "calibration_status",
         "claim_scope",
+        "calibration_request_sha256",
         "protocol_sha256",
-        "source_commit",
+        "target_source_commit",
+        "runtime_source_commit",
+        "runtime_release_identity",
         "fixture_evidence",
         "equal_input_evidence",
         "mode_results",
@@ -256,6 +274,21 @@ def validate_deterministic_calibration_report(report):
         raise ExperimentCalibrationError(
             "deterministic calibration protocol digest is invalid"
         )
+    request_sha256 = report.get("calibration_request_sha256")
+    if request_sha256 is not None and not _is_sha256(request_sha256):
+        raise ExperimentCalibrationError(
+            "deterministic calibration request digest is invalid"
+        )
+    runtime_release = report.get("runtime_release_identity")
+    if (
+        not _valid_runtime_release_identity(runtime_release)
+        or report.get("runtime_source_commit")
+        != runtime_release["source_commit"]
+        or not _valid_git_oid(report.get("target_source_commit"))
+    ):
+        raise ExperimentCalibrationError(
+            "deterministic calibration source identities are invalid"
+        )
     fixtures = report.get("fixture_evidence")
     if (
         not isinstance(fixtures, dict)
@@ -275,20 +308,37 @@ def validate_deterministic_calibration_report(report):
     equal_input = report.get("equal_input_evidence")
     if (
         not isinstance(equal_input, dict)
+        or set(equal_input)
+        != {
+            "status",
+            "protocol_family",
+            "modes",
+            "repetition_count",
+            "protocol_sha256",
+            "target_source_commit",
+            "runtime_source_commit",
+            "runtime_release_identity",
+            "runtime_release_identity_sha256",
+            "environment_contract_sha256",
+            "common_evaluation_inputs_sha256",
+        }
         or equal_input.get("status") != "passed"
         or equal_input.get("protocol_family")
         != "phase2_three_mode_equal_input"
         or equal_input.get("modes") != list(_MODES)
         or equal_input.get("protocol_sha256")
         != report["protocol_sha256"]
-        or equal_input.get("source_commit")
-        != report["source_commit"]
+        or equal_input.get("target_source_commit")
+        != report["target_source_commit"]
+        or equal_input.get("runtime_source_commit")
+        != report["runtime_source_commit"]
+        or equal_input.get("runtime_release_identity")
+        != runtime_release
         or not _is_sha256(
             equal_input.get("environment_contract_sha256")
         )
-        or not _is_sha256(
-            equal_input.get("runtime_release_identity_sha256")
-        )
+        or equal_input.get("runtime_release_identity_sha256")
+        != canonical_json_sha256(runtime_release)
         or not _is_sha256(
             equal_input.get("common_evaluation_inputs_sha256")
         )
@@ -667,6 +717,158 @@ def load_deterministic_calibration_report(path):
     return {"report": report, "report_sha256": expected, "path": str(path)}
 
 
+def run_deterministic_calibration_from_manifest(
+    manifest_path,
+    *,
+    output_path=None,
+):
+    manifest_path = _regular_file(
+        manifest_path,
+        "deterministic calibration request",
+    )
+    try:
+        request_bytes = manifest_path.read_bytes()
+        if len(request_bytes) > 1024 * 1024:
+            raise ExperimentCalibrationError(
+                "deterministic calibration request is oversized"
+            )
+        request = json.loads(request_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExperimentCalibrationError(
+            "deterministic calibration request is unreadable"
+        ) from exc
+    _validate_calibration_request_schema(request)
+    if (
+        not isinstance(request, dict)
+        or set(request)
+        != {
+            "schema_version",
+            "protocol_path",
+            "projection_root",
+            "primary_runs",
+            "repeat_run",
+            "controlled_runs",
+            "duplicate_request_evidence",
+            "fixture_roots",
+            "authority_roots",
+        }
+        or request.get("schema_version")
+        != CALIBRATION_REQUEST_SCHEMA_VERSION
+    ):
+        raise ExperimentCalibrationError(
+            "deterministic calibration request fields are invalid"
+        )
+    root = manifest_path.parent
+    authority_roots = _request_authority_roots(
+        root,
+        request["authority_roots"],
+    )
+    if not any(
+        manifest_path == authority_root
+        or manifest_path.is_relative_to(authority_root)
+        for authority_root in authority_roots
+    ):
+        raise ExperimentCalibrationError(
+            "deterministic calibration request is outside authority roots"
+        )
+    protocol_path = _request_path(
+        root,
+        request["protocol_path"],
+        "calibration protocol",
+        authority_roots=authority_roots,
+    )
+    try:
+        protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExperimentCalibrationError(
+            "deterministic calibration protocol is unreadable"
+        ) from exc
+    primary_runs = _request_run_records(
+        root,
+        request["primary_runs"],
+        "primary_runs",
+        authority_roots=authority_roots,
+    )
+    repeat_runs = _request_run_records(
+        root,
+        [request["repeat_run"]],
+        "repeat_run",
+        authority_roots=authority_roots,
+    )
+    controlled_runs = _request_run_records(
+        root,
+        request["controlled_runs"],
+        "controlled_runs",
+        authority_roots=authority_roots,
+    )
+    fixture_roots = request["fixture_roots"]
+    if (
+        not isinstance(fixture_roots, dict)
+        or set(fixture_roots)
+        != {"deterministic_l1", "bounded_l2"}
+    ):
+        raise ExperimentCalibrationError(
+            "deterministic calibration fixture roots are invalid"
+        )
+    normalized_output_path = None
+    if output_path is not None:
+        normalized_output_path = _request_path(
+            root,
+            output_path,
+            "deterministic calibration output",
+            authority_roots=authority_roots,
+            allow_missing=True,
+        )
+    result = run_deterministic_experiment_calibration(
+        protocol=protocol,
+        projection_root=_request_path(
+            root,
+            request["projection_root"],
+            "calibration projection root",
+            authority_roots=authority_roots,
+        ),
+        primary_runs=primary_runs,
+        repeat_run=repeat_runs[0],
+        controlled_runs=controlled_runs,
+        duplicate_request_evidence=request[
+            "duplicate_request_evidence"
+        ],
+        fixture_roots={
+            name: _request_path(
+                root,
+                path,
+                f"{name} fixture root",
+                authority_roots=authority_roots,
+            )
+            for name, path in fixture_roots.items()
+        },
+        output_path=normalized_output_path,
+        calibration_request_sha256=hashlib.sha256(
+            request_bytes
+        ).hexdigest(),
+    )
+    return {
+        "calibration_status": result["report"][
+            "calibration_status"
+        ],
+        "request_path": str(manifest_path),
+        "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
+        "report_path": (
+            str(normalized_output_path)
+            if normalized_output_path is not None
+            else None
+        ),
+        "report_sha256": result["report_sha256"],
+        "target_source_commit": result["report"][
+            "target_source_commit"
+        ],
+        "runtime_source_commit": result["report"][
+            "runtime_source_commit"
+        ],
+        "publication": result["publication"],
+    }
+
+
 def _load_run_record(record, protocol, protocol_sha256, projection_root):
     if not isinstance(record, dict):
         raise ExperimentCalibrationError(
@@ -1009,7 +1211,13 @@ def _validate_equal_contract(runs, protocol=None):
         "modes": list(_MODES),
         "repetition_count": len(runs),
         "protocol_sha256": first["protocol_sha256"],
-        "source_commit": first["source_commit"],
+        "target_source_commit": first["source_commit"],
+        "runtime_source_commit": first[
+            "runtime_release_identity"
+        ]["source_commit"],
+        "runtime_release_identity": copy.deepcopy(
+            first["runtime_release_identity"]
+        ),
         "runtime_release_identity_sha256": canonical_json_sha256(
             first["runtime_release_identity"]
         ),
@@ -1022,6 +1230,195 @@ def _validate_equal_contract(runs, protocol=None):
             canonical_json_sha256(protocol["environment"])
         )
     return evidence
+
+
+def _validate_common_run_identity(runs):
+    first = runs[0]["bundle"]
+    fields = (
+        "protocol_sha256",
+        "source_commit",
+        "runtime_release_identity",
+    )
+    if any(
+        any(item["bundle"][field] != first[field] for field in fields)
+        for item in runs[1:]
+    ):
+        raise ExperimentCalibrationError(
+            "calibration runs do not share one target and runtime identity"
+        )
+
+
+def _request_authority_roots(root, values):
+    if not isinstance(values, list) or not values:
+        raise ExperimentCalibrationError(
+            "deterministic calibration authority roots are invalid"
+        )
+    roots = []
+    for value in values:
+        path = _request_path(
+            root,
+            value,
+            "calibration authority root",
+            authority_roots=None,
+        )
+        if not path.is_dir():
+            raise ExperimentCalibrationError(
+                "calibration authority root is unavailable"
+            )
+        roots.append(path)
+    return tuple(roots)
+
+
+def _validate_calibration_request_schema(request):
+    schema_path = (
+        Path(__file__).resolve().parents[2]
+        / "schemas"
+        / "phase2_deterministic_calibration_request.schema.json"
+    )
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        Draft202012Validator.check_schema(schema)
+        Draft202012Validator(schema).validate(request)
+    except Exception as exc:
+        raise ExperimentCalibrationError(
+            "deterministic calibration request schema is invalid"
+        ) from exc
+
+
+def _request_path(
+    root,
+    value,
+    label,
+    *,
+    authority_roots,
+    allow_missing=False,
+):
+    if not isinstance(value, (str, os.PathLike)) or not os.fspath(value):
+        raise ExperimentCalibrationError(f"{label} path is invalid")
+    requested = Path(value).expanduser()
+    if not requested.is_absolute():
+        requested = root / requested
+    if _path_contains_symlink(requested):
+        raise ExperimentCalibrationError(f"{label} path is unsafe")
+    resolved = requested.resolve()
+    if not allow_missing and not resolved.exists():
+        raise ExperimentCalibrationError(f"{label} path is unavailable")
+    if authority_roots is not None and not any(
+        resolved == authority_root
+        or resolved.is_relative_to(authority_root)
+        for authority_root in authority_roots
+    ):
+        raise ExperimentCalibrationError(
+            f"{label} path is outside calibration authority roots"
+        )
+    return resolved
+
+
+def _request_run_records(
+    root,
+    records,
+    label,
+    *,
+    authority_roots,
+):
+    if (
+        not isinstance(records, list)
+        or not records
+        or any(not isinstance(item, dict) for item in records)
+    ):
+        raise ExperimentCalibrationError(
+            f"deterministic calibration {label} is invalid"
+        )
+    normalized = []
+    for item in records:
+        if set(item) != {
+            "run_dir",
+            "sandbox_authority_root",
+            "canary_path",
+        }:
+            raise ExperimentCalibrationError(
+                f"deterministic calibration {label} record is invalid"
+            )
+        normalized.append(
+            {
+                "run_dir": str(
+                    _request_path(
+                        root,
+                        item["run_dir"],
+                        f"{label} run",
+                        authority_roots=authority_roots,
+                    )
+                ),
+                "sandbox_authority_root": str(
+                    _request_path(
+                        root,
+                        item["sandbox_authority_root"],
+                        f"{label} sandbox authority",
+                        authority_roots=authority_roots,
+                    )
+                ),
+                "canary_path": str(
+                    _request_path(
+                        root,
+                        item["canary_path"],
+                        f"{label} gold canary",
+                        authority_roots=authority_roots,
+                    )
+                ),
+            }
+        )
+    return normalized
+
+
+def _path_contains_symlink(path):
+    path = Path(path).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _valid_git_oid(value):
+    return (
+        isinstance(value, str)
+        and len(value) in {40, 64}
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _valid_runtime_release_identity(value):
+    required = {
+        "release_id",
+        "release_root",
+        "runtime_root",
+        "release_manifest_sha256",
+        "source_commit",
+        "git_object_format",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        return False
+    object_format = value.get("git_object_format")
+    expected_length = 40 if object_format == "sha1" else 64
+    return (
+        isinstance(value.get("release_id"), str)
+        and bool(value["release_id"])
+        and isinstance(value.get("release_root"), str)
+        and bool(value["release_root"])
+        and isinstance(value.get("runtime_root"), str)
+        and bool(value["runtime_root"])
+        and _is_sha256(value.get("release_manifest_sha256"))
+        and isinstance(value.get("source_commit"), str)
+        and len(value["source_commit"]) == expected_length
+        and all(
+            character in "0123456789abcdef"
+            for character in value["source_commit"]
+        )
+        and object_format in {"sha1", "sha256"}
+    )
 
 
 def _validate_usage_coverage(runs):

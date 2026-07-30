@@ -22,6 +22,7 @@ from .experiment_calibration import (
     _validate_unique_results,
     _validate_usage_coverage,
     load_deterministic_calibration_report,
+    run_deterministic_calibration_from_manifest,
 )
 from .experiment_contract import (
     allocate_experiment_run,
@@ -520,13 +521,17 @@ def execute_readiness_promotion_action(
         configuration.get("authority_artifacts"),
         required=(
             "protocol_template",
+            "deterministic_calibration_request",
             "deterministic_calibration",
         ),
         authority_roots=context.get("authority_roots"),
     )
     _validated_deterministic_calibration(
         authority["deterministic_calibration"]["path"],
-        expected_source_commit=validated_code,
+        expected_runtime_source_commit=validated_code,
+        calibration_request_path=authority[
+            "deterministic_calibration_request"
+        ]["path"],
     )
     readiness_path = worktree / _READINESS_PATH
     readiness_before = _safe_file(
@@ -783,6 +788,9 @@ def execute_readiness_promotion_action(
             "run_manifest_path": run_manifest_publication["path"],
             "deterministic_calibration_path": authority[
                 "deterministic_calibration"
+            ]["path"],
+            "deterministic_calibration_request_path": authority[
+                "deterministic_calibration_request"
             ]["path"],
             "pilot_manifest_path": pilot_manifest_publication["path"],
             "pilot_guard_path": pilot_publication["path"],
@@ -1454,7 +1462,10 @@ def _validate_readiness_relation(artifact, repository_root, context):
     )
     _validated_deterministic_calibration(
         context["deterministic_calibration_path"],
-        expected_source_commit=artifact["validated_code_sha"],
+        expected_runtime_source_commit=artifact["validated_code_sha"],
+        calibration_request_path=context[
+            "deterministic_calibration_request_path"
+        ],
     )
     _require_canonical_json_digest(
         context["pilot_manifest_path"],
@@ -2402,6 +2413,7 @@ def _validate_action_input_structure(action_input, gate_id):
             configuration["authority_artifacts"],
             required=(
                 "protocol_template",
+                "deterministic_calibration_request",
                 "deterministic_calibration",
             ),
         )
@@ -2904,18 +2916,179 @@ def _require_file_digest(path, expected, label):
         raise Phase2GateError(f"{label} digest mismatch")
 
 
-def _validated_deterministic_calibration(path, *, expected_source_commit):
+def _validated_deterministic_calibration(
+    path,
+    *,
+    expected_runtime_source_commit,
+    calibration_request_path,
+):
     try:
         loaded = load_deterministic_calibration_report(path)
     except (ExperimentCalibrationError, OSError) as exc:
         raise Phase2GateError(
             "deterministic calibration authority is invalid"
         ) from exc
-    if loaded["report"].get("source_commit") != expected_source_commit:
+    runtime_release = loaded["report"].get(
+        "runtime_release_identity"
+    )
+    _validate_runtime_release_identity(
+        runtime_release,
+        source_commit=expected_runtime_source_commit,
+        require_files=True,
+    )
+    request_sha256 = loaded["report"].get(
+        "calibration_request_sha256"
+    )
+    if not request_sha256:
         raise Phase2GateError(
-            "deterministic calibration source commit mismatch"
+            "deterministic calibration request authority is missing"
+        )
+    _require_file_digest(
+        calibration_request_path,
+        request_sha256,
+        "deterministic calibration request",
+    )
+    try:
+        recomputed = run_deterministic_calibration_from_manifest(
+            calibration_request_path
+        )
+    except (ExperimentCalibrationError, OSError) as exc:
+        raise Phase2GateError(
+            "deterministic calibration recomputation failed"
+        ) from exc
+    if recomputed["report_sha256"] != loaded["report_sha256"]:
+        raise Phase2GateError(
+            "deterministic calibration report differs from sealed runs"
+        )
+    _validate_git_release_tree(runtime_release)
+    if (
+        loaded["report"].get("runtime_source_commit")
+        != expected_runtime_source_commit
+    ):
+        raise Phase2GateError(
+            "deterministic calibration runtime source commit mismatch"
         )
     return loaded
+
+
+def _validate_git_release_tree(runtime_release):
+    release_root = Path(runtime_release["release_root"])
+    manifest = _read_json(
+        release_root / "manifest.json",
+        "runtime release manifest",
+    )
+    source_repo = manifest.get("source_repo")
+    source_commit = manifest.get("source_commit")
+    if (
+        manifest.get("install_method") != "git_ref"
+        or not isinstance(source_repo, str)
+        or not source_repo
+        or source_commit != runtime_release["source_commit"]
+    ):
+        raise Phase2GateError(
+            "deterministic calibration requires a Git-installed release"
+        )
+    source_repo_path = Path(source_repo).expanduser()
+    if (
+        _path_contains_symlink(source_repo_path)
+        or not source_repo_path.resolve().is_dir()
+    ):
+        raise Phase2GateError(
+            "runtime release source repository is unavailable"
+        )
+    environment = dict(os.environ)
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_repo_path.resolve()),
+            "ls-tree",
+            "-r",
+            "-z",
+            "--full-tree",
+            source_commit,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        env=environment,
+    )
+    if completed.returncode != 0:
+        raise Phase2GateError(
+            "runtime release source commit is unavailable"
+        )
+    expected = {}
+    for encoded in completed.stdout.split(b"\0"):
+        if not encoded:
+            continue
+        try:
+            metadata, raw_path = encoded.split(b"\t", 1)
+            mode, object_type, object_id = metadata.decode(
+                "ascii"
+            ).split()
+            relative_path = raw_path.decode("utf-8")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise Phase2GateError(
+                "runtime release Git tree inventory is invalid"
+            ) from exc
+        if object_type == "commit" and mode == "160000":
+            continue
+        if (
+            object_type != "blob"
+            or mode not in {"100644", "100755", "120000"}
+            or relative_path == "manifest.json"
+        ):
+            raise Phase2GateError(
+                "runtime release Git tree contains unsupported entries"
+            )
+        expected[relative_path] = (mode, object_id)
+
+    actual_paths = {}
+    for path in release_root.rglob("*"):
+        relative = path.relative_to(release_root)
+        if (
+            relative.as_posix() == "manifest.json"
+            or (path.is_dir() and not path.is_symlink())
+        ):
+            continue
+        actual_paths[relative.as_posix()] = path
+    if set(actual_paths) != set(expected):
+        raise Phase2GateError(
+            "runtime release file inventory differs from source commit"
+        )
+
+    hash_name = runtime_release["git_object_format"]
+    for relative_path, (expected_mode, expected_oid) in expected.items():
+        path = actual_paths[relative_path]
+        if expected_mode == "120000":
+            if not path.is_symlink():
+                raise Phase2GateError(
+                    "runtime release file mode differs from source commit"
+                )
+            payload = os.readlink(os.fsencode(path))
+            actual_mode = "120000"
+        else:
+            if path.is_symlink() or not path.is_file():
+                raise Phase2GateError(
+                    "runtime release file type differs from source commit"
+                )
+            payload = path.read_bytes()
+            actual_mode = (
+                "100755"
+                if path.stat().st_mode & 0o111
+                else "100644"
+            )
+        digest = hashlib.new(hash_name)
+        digest.update(f"blob {len(payload)}\0".encode("ascii"))
+        digest.update(payload)
+        if (
+            actual_mode != expected_mode
+            or digest.hexdigest() != expected_oid
+        ):
+            raise Phase2GateError(
+                "runtime release content differs from source commit"
+            )
 
 
 def _require_canonical_json_digest(path, expected, label):
