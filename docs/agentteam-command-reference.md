@@ -356,6 +356,62 @@ recomputation. Remote-URL installs remain supported for ordinary AgentTeam
 use, but this one-time promotion gate requires the local source object store
 to recompute every blob OID.
 
+Controller-only promotion blueprints may defer external authority digests
+until materialization without weakening the frozen taskpack. A late-bound
+file or frozen direct taskpack uses this declaration:
+
+```json
+{
+  "resolve_at_materialization": {
+    "authority_root": "project_work_root",
+    "relative_path": "phase2/calibration/<candidate>/calibration-request.json"
+  }
+}
+```
+
+`authority_root` is limited to `project_root` or the `work_root` in the
+project profile. The relative path must be normalized, remain below that
+root, contain no symlink component, and already identify a regular file or
+valid frozen taskpack. Materialization reads and verifies the source once,
+copies it into `controller_authority/` inside the taskpack, replaces the
+declaration with that relative snapshot path and exact digest, and records
+the source-resolution inventory in taskpack context and the materialization
+manifest. Directly pinned external paths are rejected; external artifacts
+must take this snapshot route. Freeze independently re-resolves the tracked
+blueprint, recreates the snapshots, and rejects missing, changed, moved, or
+digest-drifted authority. The frozen taskpack digest covers every snapshot
+file. Runtime resolves only the retained relative paths below the frozen
+taskpack and no longer reads the mutable external source. File authorities
+are read once: their digest and subsequent JSON/calibration/evaluator use are
+derived from the same retained bytes. Each direct-mode experiment additionally
+copies the verified frozen direct taskpack into that run's authority directory,
+verifies the copy, marks it read-only, and executes only the private copy.
+
+The deterministic calibration request is a closure binding rather than an
+isolated file binding. Materialization snapshots every declared authority root
+and records a deterministic regular-file inventory digest over each relative
+path, byte size, and content SHA-256. Symlinks and special files are rejected;
+empty directories and permission bits are intentionally excluded because
+freeze and read-only private execution do not preserve them as input semantics.
+Existing sealed run attestations contain absolute authority paths, so P2-08
+recomputes against those persistent source roots while using the request bytes
+retained in the taskpack. It compares every source-root inventory to the frozen
+closure immediately before and after recomputation; a missing, added, removed,
+or changed regular file fails the gate.
+
+This closure check has an explicit control-plane trust boundary. The Linux
+account running taskpack materialization, freeze, and P2-08 is trusted for the
+duration of those operations. The check detects ordinary drift, accidental
+mutation, unsafe paths or symlinks, stale digests, and changes that remain
+visible at either comparison. It does not defend against a malicious process
+running as that same account that replaces authority content during
+recomputation and restores the original byte-identical tree before the
+post-check. Defending against that actor requires a separate privileged
+immutable store or mount boundary and is outside this promotion contract.
+The persistent source roots are used because historical sealed-run evidence
+also binds absolute paths and filesystem identity; relocating those roots would
+invalidate the evidence rather than strengthen it.
+
 ### `agentteam stats`
 
 Shows compact project-level statistics from AgentTeam runtime artifacts.

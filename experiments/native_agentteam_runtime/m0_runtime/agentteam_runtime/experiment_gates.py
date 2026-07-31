@@ -22,6 +22,7 @@ from .experiment_calibration import (
     _validate_unique_results,
     _validate_usage_coverage,
     load_deterministic_calibration_report,
+    load_deterministic_calibration_report_bytes,
     run_deterministic_calibration_from_manifest,
 )
 from .experiment_contract import (
@@ -529,9 +530,21 @@ def execute_readiness_promotion_action(
     _validated_deterministic_calibration(
         authority["deterministic_calibration"]["path"],
         expected_runtime_source_commit=validated_code,
-        calibration_request_path=authority[
+        calibration_request_path=(
+            context.get("calibration_recompute_request_path")
+            or authority[
+                "deterministic_calibration_request"
+            ]["path"]
+        ),
+        calibration_bytes=authority[
+            "deterministic_calibration"
+        ]["bytes"],
+        calibration_request_bytes=authority[
             "deterministic_calibration_request"
-        ]["path"],
+        ]["bytes"],
+        calibration_closure_mounts=context.get(
+            "calibration_closure_mounts"
+        ),
     )
     readiness_path = worktree / _READINESS_PATH
     readiness_before = _safe_file(
@@ -650,8 +663,8 @@ def execute_readiness_promotion_action(
         raise Phase2GateError(
             "readiness promotion did not create the exact child commit"
         )
-    protocol_template = _read_json(
-        authority["protocol_template"]["path"],
+    protocol_template = _json_bytes(
+        authority["protocol_template"]["bytes"],
         "Phase 2 protocol template",
     )
     if not isinstance(protocol_template.get("repository"), dict):
@@ -791,7 +804,12 @@ def execute_readiness_promotion_action(
             ]["path"],
             "deterministic_calibration_request_path": authority[
                 "deterministic_calibration_request"
-            ]["path"],
+            ]["path"] if not context.get(
+                "calibration_recompute_request_path"
+            ) else context["calibration_recompute_request_path"],
+            "calibration_closure_mounts": context.get(
+                "calibration_closure_mounts"
+            ),
             "pilot_manifest_path": pilot_manifest_publication["path"],
             "pilot_guard_path": pilot_publication["path"],
             "runtime_release": runtime_release,
@@ -917,6 +935,7 @@ def execute_live_calibration_action(
     )
     projection_root.mkdir(parents=True, exist_ok=True)
     evaluator_path = authority["evaluator"]["path"]
+    evaluator_bytes = authority["evaluator"]["bytes"]
     direct_taskpack = configuration.get("direct_taskpack")
     if (
         not isinstance(direct_taskpack, dict)
@@ -985,6 +1004,7 @@ def execute_live_calibration_action(
                 adapter=adapter,
                 common_finalizer=ExperimentCommonFinalizer(
                     evaluator_artifact=evaluator_path,
+                    evaluator_bytes=evaluator_bytes,
                     runtime_release_identity=runtime_release,
                 ),
             )
@@ -1466,6 +1486,9 @@ def _validate_readiness_relation(artifact, repository_root, context):
         calibration_request_path=context[
             "deterministic_calibration_request_path"
         ],
+        calibration_closure_mounts=context.get(
+            "calibration_closure_mounts"
+        ),
     )
     _require_canonical_json_digest(
         context["pilot_manifest_path"],
@@ -2584,13 +2607,20 @@ def _action_authority_files(
             {"sha256": item.get("sha256")},
             "sha256",
         )
-        if _sha256_file(path) != digest:
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            raise Phase2GateError(
+                f"{name} controller authority is unreadable"
+            ) from exc
+        if hashlib.sha256(payload).hexdigest() != digest:
             raise Phase2GateError(
                 f"{name} controller authority digest mismatch"
             )
         authority[name] = {
             "path": str(path),
             "sha256": digest,
+            "bytes": payload,
         }
     return authority
 
@@ -2921,9 +2951,18 @@ def _validated_deterministic_calibration(
     *,
     expected_runtime_source_commit,
     calibration_request_path,
+    calibration_bytes=None,
+    calibration_request_bytes=None,
+    calibration_closure_mounts=None,
 ):
     try:
-        loaded = load_deterministic_calibration_report(path)
+        loaded = (
+            load_deterministic_calibration_report(path)
+            if calibration_bytes is None
+            else load_deterministic_calibration_report_bytes(
+                calibration_bytes
+            )
+        )
     except (ExperimentCalibrationError, OSError) as exc:
         raise Phase2GateError(
             "deterministic calibration authority is invalid"
@@ -2943,19 +2982,31 @@ def _validated_deterministic_calibration(
         raise Phase2GateError(
             "deterministic calibration request authority is missing"
         )
-    _require_file_digest(
-        calibration_request_path,
-        request_sha256,
-        "deterministic calibration request",
-    )
+    request_bytes = calibration_request_bytes
+    if request_bytes is None:
+        request_bytes = _safe_file(
+            calibration_request_path,
+            "deterministic calibration request",
+        ).read_bytes()
+    if hashlib.sha256(request_bytes).hexdigest() != request_sha256:
+        raise Phase2GateError(
+            "deterministic calibration request digest mismatch"
+        )
     try:
+        _validate_calibration_closure_mounts(
+            calibration_closure_mounts
+        )
         recomputed = run_deterministic_calibration_from_manifest(
-            calibration_request_path
+            calibration_request_path,
+            manifest_bytes=request_bytes,
         )
     except (ExperimentCalibrationError, OSError) as exc:
         raise Phase2GateError(
             "deterministic calibration recomputation failed"
         ) from exc
+    _validate_calibration_closure_mounts(
+        calibration_closure_mounts
+    )
     if recomputed["report_sha256"] != loaded["report_sha256"]:
         raise Phase2GateError(
             "deterministic calibration report differs from sealed runs"
@@ -2969,6 +3020,49 @@ def _validated_deterministic_calibration(
             "deterministic calibration runtime source commit mismatch"
         )
     return loaded
+
+
+def _validate_calibration_closure_mounts(mounts):
+    if mounts is None:
+        return
+    if not isinstance(mounts, list) or not mounts:
+        raise Phase2GateError(
+            "deterministic calibration closure mounts are invalid"
+        )
+    from .taskpack import _digest_directory_tree
+
+    for item in mounts:
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {
+                "source_root",
+                "snapshot_root",
+                "tree_sha256",
+            }
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                item.get("tree_sha256", ""),
+            )
+        ):
+            raise Phase2GateError(
+                "deterministic calibration closure mount is invalid"
+            )
+        snapshot_root = Path(item["snapshot_root"])
+        source_root = Path(item["source_root"])
+        if (
+            snapshot_root.is_symlink()
+            or not snapshot_root.is_dir()
+            or source_root.is_symlink()
+            or not source_root.is_dir()
+            or _digest_directory_tree(snapshot_root)
+            != item["tree_sha256"]
+            or _digest_directory_tree(source_root)
+            != item["tree_sha256"]
+        ):
+            raise Phase2GateError(
+                "deterministic calibration closure drifted"
+            )
 
 
 def _validate_git_release_tree(runtime_release):

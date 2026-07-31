@@ -1,9 +1,11 @@
+import copy
 import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -675,9 +677,15 @@ def materialize_taskpack_blueprint(
     if not project_root.is_dir() or not _is_git_repo(project_root):
         raise TaskpackValidationError("project_root must be a git repository")
 
-    blueprint = _read_json(blueprint_path)
+    source_blueprint = _read_json(blueprint_path)
     blueprint_relative_path = blueprint_path.relative_to(project_root).as_posix()
-    _validate_taskpack_blueprint_schema(blueprint)
+    _validate_taskpack_blueprint_schema(source_blueprint)
+    blueprint, authority_resolutions = (
+        _resolve_blueprint_controller_action_inputs(
+            source_blueprint,
+            project_root=project_root,
+        )
+    )
     _validate_taskpack_blueprint(
         blueprint,
         project_root=project_root,
@@ -703,15 +711,22 @@ def materialize_taskpack_blueprint(
     taskpack_id = declared_taskpack_id
 
     context = _taskpack_blueprint_context(
-        blueprint,
+        source_blueprint,
         project_root=project_root,
         blueprint_path=blueprint_path,
         blueprint_relative_path=blueprint_relative_path,
     )
+    if authority_resolutions:
+        context["materialized_authority_bindings"] = (
+            authority_resolutions
+        )
+        context["materialized_authority_bindings_sha256"] = (
+            _sha256_json(authority_resolutions)
+        )
     approval_diagnostics = []
     try:
         approval_context = _validate_taskpack_blueprint_approval(
-            blueprint,
+            source_blueprint,
             project_root=project_root,
             context=context,
         )
@@ -724,7 +739,7 @@ def materialize_taskpack_blueprint(
     if not dry_run:
         _require_blueprint_authority_matches_head(
             project_root,
-            blueprint,
+            source_blueprint,
             blueprint_relative_path,
         )
 
@@ -1641,9 +1656,30 @@ def _generate_taskpack_blueprint(
         if field_name in taskpack_declaration:
             taskpack[field_name] = taskpack_declaration[field_name]
     if "post_backlog_gates" in blueprint:
-        taskpack["post_backlog_gates"] = [
-            dict(gate) for gate in blueprint["post_backlog_gates"]
-        ]
+        gates, authority_snapshot_files = (
+            _snapshot_blueprint_controller_authority(
+                blueprint["post_backlog_gates"],
+                taskpack_dir=taskpack_dir,
+                resolutions=context.get(
+                    "materialized_authority_bindings",
+                    [],
+                ),
+            )
+        )
+        taskpack["post_backlog_gates"] = gates
+        if authority_snapshot_files:
+            taskpack["files"]["controller_authority"] = (
+                authority_snapshot_files
+            )
+        if context.get("materialized_authority_bindings"):
+            context["materialized_authority_bindings_sha256"] = (
+                _sha256_json(
+                    context["materialized_authority_bindings"]
+                )
+            )
+            taskpack["context"][
+                "materialized_authority_bindings_sha256"
+            ] = context["materialized_authority_bindings_sha256"]
 
     role_runtime_profiles = {}
     agents = []
@@ -1707,8 +1743,10 @@ def _generate_taskpack_blueprint(
     validation = validate_taskpack(taskpack_dir)
 
     artifact_digests = {
-        name: _sha256_file(taskpack_dir / name)
-        for name in TASKPACK_BLUEPRINT_ARTIFACT_NAMES
+        relative_path.as_posix(): _sha256_file(source_path)
+        for relative_path, source_path in (
+            _build_taskpack_artifact_inventory(taskpack_dir)
+        )
     }
     dependency_edges = [
         {
@@ -1718,7 +1756,7 @@ def _generate_taskpack_blueprint(
         for task in blueprint["tasks"]
         for dependency in task["depends_on"]
     ]
-    return {
+    manifest = {
         "manifest_schema_version": "taskpack_blueprint_materialization.v1",
         "taskpack_id": taskpack_id,
         "blueprint_sha256": context["blueprint_sha256"],
@@ -1732,6 +1770,14 @@ def _generate_taskpack_blueprint(
         "freeze_eligible": bool(freeze_eligible),
         "approval_diagnostics": list(approval_diagnostics),
     }
+    if context.get("materialized_authority_bindings"):
+        manifest["materialized_authority_bindings"] = context[
+            "materialized_authority_bindings"
+        ]
+        manifest["materialized_authority_bindings_sha256"] = context[
+            "materialized_authority_bindings_sha256"
+        ]
+    return manifest
 
 
 def _git_output(project_root, *arguments):
@@ -2970,6 +3016,7 @@ def freeze_taskpack(
         _validate_controller_action_authority(
             Path(loaded["taskpack"]["project_root"]).resolve(),
             loaded["taskpack"].get("post_backlog_gates", []),
+            taskpack_root=taskpack_dir,
         )
     taskpack_id = validation["taskpack_id"]
     frozen_root = Path(frozen_root).resolve()
@@ -3195,26 +3242,33 @@ def _blueprint_taskpack_freeze_source(
         )
     blueprint_path = (project_root / blueprint_relative_path).resolve()
     _require_contained_path(blueprint_path, project_root, "context.blueprint_path")
-    blueprint = _read_json(blueprint_path)
-    _validate_taskpack_blueprint_schema(blueprint)
+    source_blueprint = _read_json(blueprint_path)
+    _validate_taskpack_blueprint_schema(source_blueprint)
+    blueprint, authority_resolutions = (
+        _resolve_blueprint_controller_action_inputs(
+            source_blueprint,
+            project_root=project_root,
+        )
+    )
     current_context = _taskpack_blueprint_context(
-        blueprint,
+        source_blueprint,
         project_root=project_root,
         blueprint_path=blueprint_path,
         blueprint_relative_path=blueprint_relative_path,
     )
+    if authority_resolutions:
+        current_context["materialized_authority_bindings"] = (
+            authority_resolutions
+        )
+        current_context["materialized_authority_bindings_sha256"] = (
+            _sha256_json(authority_resolutions)
+        )
     approval_context = _validate_taskpack_blueprint_approval(
-        blueprint,
+        source_blueprint,
         project_root=project_root,
         context=current_context,
     )
     current_context.update(approval_context)
-    for field_name, value in current_context.items():
-        if context.get(field_name) != value:
-            raise TaskpackValidationError(
-                f"blueprint-materialized taskpack context changed before freeze: {field_name}"
-            )
-
     expected_dir = (
         verification_root / blueprint["taskpack"]["taskpack_id"]
     )
@@ -3227,6 +3281,12 @@ def _blueprint_taskpack_freeze_source(
         freeze_eligible=True,
         approval_diagnostics=[],
     )
+    for field_name, value in current_context.items():
+        if context.get(field_name) != value:
+            raise TaskpackValidationError(
+                "blueprint-materialized taskpack context changed "
+                f"before freeze: {field_name}"
+            )
     if bound_manifest != expected_manifest:
         raise TaskpackValidationError(
             "blueprint materialization manifest changed before freeze"
@@ -3927,6 +3987,594 @@ def _string_dict(value, field_name):
     return result
 
 
+def _resolve_blueprint_controller_action_inputs(
+    blueprint,
+    *,
+    project_root,
+):
+    resolved_blueprint = copy.deepcopy(blueprint)
+    resolutions = []
+    roots = {}
+
+    def authority_root(root_name):
+        if root_name in roots:
+            return roots[root_name]
+        if root_name == "project_root":
+            root = Path(project_root).resolve()
+        elif root_name == "project_work_root":
+            root = _blueprint_project_work_root(project_root)
+        else:
+            raise TaskpackValidationError(
+                "late-bound controller authority root must be "
+                "project_root or project_work_root"
+            )
+        if (
+            _taskpack_path_contains_symlink(root)
+            or not root.is_dir()
+        ):
+            raise TaskpackValidationError(
+                f"late-bound controller authority root is unsafe: {root}"
+            )
+        roots[root_name] = root
+        return root
+
+    def resolve_binding(binding, *, gate_id, binding_name, directory):
+        if not isinstance(binding, dict):
+            return binding
+        declaration = binding.get("resolve_at_materialization")
+        if declaration is None:
+            path_value = binding.get("path")
+            if isinstance(path_value, str) and Path(
+                path_value
+            ).expanduser().is_absolute():
+                resolved_path = Path(path_value).expanduser().resolve()
+                if not _path_is_contained_by(
+                    resolved_path,
+                    project_root,
+                ):
+                    raise TaskpackValidationError(
+                        f"{gate_id} {binding_name} external authority "
+                        "must use resolve_at_materialization"
+                    )
+            return binding
+        if set(binding) != {"resolve_at_materialization"}:
+            raise TaskpackValidationError(
+                f"{gate_id} {binding_name} late binding must not mix "
+                "resolved fields"
+            )
+        if (
+            not isinstance(declaration, dict)
+            or set(declaration) != {
+                "authority_root",
+                "relative_path",
+            }
+        ):
+            raise TaskpackValidationError(
+                f"{gate_id} {binding_name} late binding is invalid"
+            )
+        root_name = declaration.get("authority_root")
+        relative_value = declaration.get("relative_path")
+        relative_path = Path(relative_value) if isinstance(
+            relative_value,
+            str,
+        ) else None
+        if (
+            relative_path is None
+            or relative_path.is_absolute()
+            or not relative_path.parts
+            or any(
+                part in {"", ".", ".."}
+                for part in relative_path.parts
+            )
+        ):
+            raise TaskpackValidationError(
+                f"{gate_id} {binding_name} late-bound path must be "
+                "a normalized relative path"
+            )
+        root = authority_root(root_name)
+        requested = root / relative_path
+        if _taskpack_path_contains_symlink(requested):
+            raise TaskpackValidationError(
+                f"{gate_id} {binding_name} late-bound path is unsafe"
+            )
+        path = requested.resolve()
+        _require_contained_path(
+            path,
+            root,
+            f"{gate_id} {binding_name} late-bound path",
+        )
+        available = path.is_dir() if directory else path.is_file()
+        if not available:
+            raise TaskpackValidationError(
+                f"{gate_id} {binding_name} late-bound artifact does "
+                f"not exist: {path}"
+            )
+        if directory:
+            manifest_path = path / "manifest.json"
+            if (
+                _taskpack_path_contains_symlink(manifest_path)
+                or not manifest_path.is_file()
+            ):
+                raise TaskpackValidationError(
+                    f"{gate_id} {binding_name} frozen taskpack "
+                    "manifest is missing or unsafe"
+                )
+            manifest = _read_json(manifest_path)
+            digest = manifest.get("digest_sha256")
+            verify_frozen_taskpack_digest(path, digest)
+            resolved = {
+                "path": str(path),
+                "digest_sha256": digest,
+            }
+            digest_field = "digest_sha256"
+        else:
+            digest = _sha256_file(path)
+            resolved = {
+                "path": str(path),
+                "sha256": digest,
+            }
+            digest_field = "sha256"
+        resolutions.append(
+            {
+                "gate_id": gate_id,
+                "binding": binding_name,
+                "authority_root": root_name,
+                "relative_path": relative_path.as_posix(),
+                "resolved_path": str(path),
+                "digest_field": digest_field,
+                "digest": digest,
+            }
+        )
+        return resolved
+
+    for gate in resolved_blueprint.get("post_backlog_gates", []):
+        if not isinstance(gate, dict):
+            continue
+        gate_id = gate.get("gate_id") or "<unknown>"
+        action_input = gate.get("controller_action_input")
+        configuration = (
+            action_input.get("configuration")
+            if isinstance(action_input, dict)
+            else None
+        )
+        if not isinstance(configuration, dict):
+            continue
+        bindings = configuration.get("authority_artifacts")
+        if isinstance(bindings, dict):
+            for name, binding in list(bindings.items()):
+                bindings[name] = resolve_binding(
+                    binding,
+                    gate_id=gate_id,
+                    binding_name=f"authority_artifacts.{name}",
+                    directory=False,
+                )
+        if "direct_taskpack" in configuration:
+            configuration["direct_taskpack"] = resolve_binding(
+                configuration["direct_taskpack"],
+                gate_id=gate_id,
+                binding_name="direct_taskpack",
+                directory=True,
+            )
+    return resolved_blueprint, sorted(
+        resolutions,
+        key=lambda item: (item["gate_id"], item["binding"]),
+    )
+
+
+def _blueprint_project_work_root(project_root):
+    project_root = Path(project_root).resolve()
+    profile_path = project_root / ".agentteam" / "profile.json"
+    if (
+        _taskpack_path_contains_symlink(profile_path)
+        or not profile_path.is_file()
+    ):
+        raise TaskpackValidationError(
+            "project profile is required for project_work_root "
+            "authority resolution"
+        )
+    profile = _read_json(profile_path)
+    work_root = (
+        profile.get("work_root")
+        if isinstance(profile, dict)
+        else None
+    )
+    if not isinstance(work_root, str) or not work_root.strip():
+        raise TaskpackValidationError(
+            "project profile work_root is required for authority resolution"
+        )
+    requested = Path(work_root).expanduser()
+    if not requested.is_absolute():
+        raise TaskpackValidationError(
+            "project profile work_root must be absolute"
+        )
+    if _taskpack_path_contains_symlink(requested):
+        raise TaskpackValidationError(
+            "project profile work_root is unsafe"
+        )
+    return requested.resolve()
+
+
+def _snapshot_blueprint_controller_authority(
+    gates,
+    *,
+    taskpack_dir,
+    resolutions,
+):
+    gates = copy.deepcopy(gates)
+    if not resolutions:
+        return gates, []
+    gates_by_id = {
+        gate.get("gate_id"): gate
+        for gate in gates
+        if isinstance(gate, dict)
+    }
+    snapshot_files = []
+    for resolution in resolutions:
+        gate_id = resolution["gate_id"]
+        binding_name = resolution["binding"]
+        gate = gates_by_id.get(gate_id)
+        action_input = (
+            gate.get("controller_action_input")
+            if isinstance(gate, dict)
+            else None
+        )
+        configuration = (
+            action_input.get("configuration")
+            if isinstance(action_input, dict)
+            else None
+        )
+        if not isinstance(configuration, dict):
+            raise TaskpackValidationError(
+                f"{gate_id} controller authority snapshot is unavailable"
+            )
+        if binding_name == "direct_taskpack":
+            binding = configuration.get("direct_taskpack")
+            directory = True
+        else:
+            prefix = "authority_artifacts."
+            if not binding_name.startswith(prefix):
+                raise TaskpackValidationError(
+                    f"{gate_id} controller authority binding is invalid"
+                )
+            authority_name = binding_name[len(prefix):]
+            bindings = configuration.get("authority_artifacts")
+            binding = (
+                bindings.get(authority_name)
+                if isinstance(bindings, dict)
+                else None
+            )
+            directory = False
+        if not isinstance(binding, dict):
+            raise TaskpackValidationError(
+                f"{gate_id} {binding_name} controller authority is invalid"
+            )
+        source_path = Path(binding["path"]).resolve()
+        snapshot_key = hashlib.sha256(
+            f"{gate_id}\0{binding_name}".encode("utf-8")
+        ).hexdigest()[:24]
+        snapshot_root = (
+            Path(taskpack_dir)
+            / "controller_authority"
+            / snapshot_key
+        )
+        if (
+            binding_name
+            == "authority_artifacts.deterministic_calibration_request"
+        ):
+            closure_snapshot = (
+                _snapshot_calibration_request_closure(
+                    source_path,
+                    snapshot_root,
+                    binding["sha256"],
+                )
+            )
+            if closure_snapshot is not None:
+                snapshot_path, closure = closure_snapshot
+                binding["path"] = snapshot_path.relative_to(
+                    taskpack_dir
+                ).as_posix()
+                resolution["calibration_closure"] = closure
+            else:
+                snapshot_path = snapshot_root / "artifact"
+                _copy_digest_verified_file(
+                    source_path,
+                    snapshot_path,
+                    binding["sha256"],
+                )
+                binding["path"] = snapshot_path.relative_to(
+                    taskpack_dir
+                ).as_posix()
+        elif directory:
+            snapshot_path = snapshot_root / "taskpack"
+            shutil.copytree(
+                source_path,
+                snapshot_path,
+                symlinks=True,
+            )
+            verify_frozen_taskpack_digest(
+                snapshot_path,
+                binding["digest_sha256"],
+            )
+            binding["path"] = snapshot_path.relative_to(
+                taskpack_dir
+            ).as_posix()
+        else:
+            snapshot_path = snapshot_root / "artifact"
+            _copy_digest_verified_file(
+                source_path,
+                snapshot_path,
+                binding["sha256"],
+            )
+            binding["path"] = snapshot_path.relative_to(
+                taskpack_dir
+            ).as_posix()
+        for path in snapshot_root.rglob("*"):
+            if path.is_symlink():
+                raise TaskpackValidationError(
+                    f"{gate_id} {binding_name} authority snapshot "
+                    "contains a symlink"
+                )
+            if path.is_file():
+                snapshot_files.append(
+                    path.relative_to(taskpack_dir).as_posix()
+                )
+    return gates, sorted(snapshot_files)
+
+
+def _snapshot_calibration_request_closure(
+    request_path,
+    snapshot_root,
+    expected_sha256,
+):
+    request_bytes = request_path.read_bytes()
+    if hashlib.sha256(request_bytes).hexdigest() != expected_sha256:
+        raise TaskpackValidationError(
+            "deterministic calibration request changed before snapshot"
+        )
+    try:
+        request = json.loads(request_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskpackValidationError(
+            "deterministic calibration request is invalid"
+        ) from exc
+    if (
+        request.get("schema_version")
+        != "phase2_deterministic_calibration_request.v1"
+    ):
+        return None
+    authority_values = request.get("authority_roots")
+    if not isinstance(authority_values, list) or not authority_values:
+        raise TaskpackValidationError(
+            "deterministic calibration authority roots are invalid"
+        )
+    source_roots = []
+    for value in authority_values:
+        source_root = _calibration_source_path(
+            request_path.parent,
+            value,
+        )
+        if (
+            _taskpack_path_contains_symlink(source_root)
+            or not source_root.is_dir()
+            or _path_is_contained_by(snapshot_root, source_root)
+            or _path_is_contained_by(source_root, snapshot_root)
+        ):
+            raise TaskpackValidationError(
+                "deterministic calibration authority root is unsafe"
+            )
+        source_roots.append(source_root)
+    required_paths = [
+        request_path,
+        _calibration_source_path(
+            request_path.parent,
+            request.get("protocol_path"),
+        ),
+        _calibration_source_path(
+            request_path.parent,
+            request.get("projection_root"),
+        ),
+    ]
+    fixture_roots = request.get("fixture_roots")
+    if not isinstance(fixture_roots, dict):
+        raise TaskpackValidationError(
+            "deterministic calibration fixture roots are invalid"
+        )
+    required_paths.extend(
+        _calibration_source_path(request_path.parent, value)
+        for value in fixture_roots.values()
+    )
+    mappings = []
+    for index, source_root in enumerate(source_roots):
+        destination_root = (
+            snapshot_root / "calibration-closure" / f"root-{index}"
+        )
+        destination_root.mkdir(parents=True, exist_ok=False)
+        mappings.append(
+            {
+                "source_root": str(source_root),
+                "snapshot_root": destination_root.relative_to(
+                    snapshot_root.parent.parent
+                ).as_posix(),
+            }
+        )
+    for source in required_paths:
+        if not any(
+            _path_is_contained_by(source, root)
+            for root in source_roots
+        ):
+            raise TaskpackValidationError(
+                "deterministic calibration dependency is outside "
+                "its authority roots"
+            )
+    for index, source_root in enumerate(source_roots):
+        destination_root = (
+            snapshot_root
+            / "calibration-closure"
+            / f"root-{index}"
+        )
+        _copy_calibration_dependency(
+            source_root,
+            destination_root,
+        )
+    for mapping in mappings:
+        root = (
+            snapshot_root.parent.parent
+            / mapping["snapshot_root"]
+        )
+        mapping["tree_sha256"] = _digest_directory_tree(root)
+    request_root_index = next(
+        index
+        for index, root in enumerate(source_roots)
+        if _path_is_contained_by(request_path, root)
+    )
+    request_snapshot = (
+        snapshot_root
+        / "calibration-closure"
+        / f"root-{request_root_index}"
+        / request_path.relative_to(source_roots[request_root_index])
+    )
+    if _sha256_file(request_snapshot) != expected_sha256:
+        raise TaskpackValidationError(
+            "deterministic calibration request snapshot digest mismatch"
+        )
+    return request_snapshot, {
+        "request_origin_path": str(request_path),
+        "path_mappings": mappings,
+    }
+
+
+def _calibration_source_path(root, value):
+    if not isinstance(value, str) or not value:
+        raise TaskpackValidationError(
+            "deterministic calibration dependency path is invalid"
+        )
+    requested = Path(value).expanduser()
+    if not requested.is_absolute():
+        requested = root / requested
+    if _taskpack_path_contains_symlink(requested):
+        raise TaskpackValidationError(
+            "deterministic calibration dependency path is unsafe"
+        )
+    resolved = requested.resolve()
+    if not resolved.exists():
+        raise TaskpackValidationError(
+            "deterministic calibration dependency is unavailable"
+        )
+    return resolved
+
+
+def _copy_calibration_dependency(source, destination):
+    if source.is_dir():
+        shutil.copytree(
+            source,
+            destination,
+            symlinks=True,
+            dirs_exist_ok=True,
+        )
+    elif source.is_file():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination, follow_symlinks=False)
+    else:
+        raise TaskpackValidationError(
+            "deterministic calibration dependency is not regular"
+        )
+    inspected = destination if destination.is_dir() else destination.parent
+    for path in inspected.rglob("*"):
+        if path.is_symlink():
+            raise TaskpackValidationError(
+                "deterministic calibration closure contains a symlink"
+            )
+
+
+def _digest_directory_tree(root):
+    root = Path(root)
+    entries = []
+    for path in sorted(root.rglob("*")):
+        metadata = path.lstat()
+        if stat.S_ISDIR(metadata.st_mode):
+            continue
+        elif stat.S_ISREG(metadata.st_mode):
+            content_digest = hashlib.sha256()
+            content_size = 0
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                descriptor = os.open(path, flags)
+            except OSError as exc:
+                raise TaskpackValidationError(
+                    "deterministic calibration closure file is unsafe"
+                ) from exc
+            with os.fdopen(descriptor, "rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_dev != metadata.st_dev
+                    or opened.st_ino != metadata.st_ino
+                ):
+                    raise TaskpackValidationError(
+                        "deterministic calibration closure changed "
+                        "during digest"
+                    )
+                while True:
+                    chunk = stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    content_size += len(chunk)
+                    content_digest.update(chunk)
+            entries.append(
+                {
+                    "path": path.relative_to(root).as_posix(),
+                    "size": content_size,
+                    "content_sha256": content_digest.hexdigest(),
+                }
+            )
+        else:
+            raise TaskpackValidationError(
+                "deterministic calibration closure contains a symlink "
+                "or special file"
+            )
+    return _sha256_json(
+        {
+            "schema_version": "calibration_closure_tree.v1",
+            "entry_count": len(entries),
+            "entries": entries,
+        }
+    )
+
+
+def _copy_digest_verified_file(source_path, destination_path, expected_sha256):
+    destination_path.parent.mkdir(parents=True, exist_ok=False)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(source_path, flags)
+    except OSError as exc:
+        raise TaskpackValidationError(
+            f"controller authority snapshot source is unsafe: {source_path}"
+        ) from exc
+    digest = hashlib.sha256()
+    try:
+        with os.fdopen(descriptor, "rb") as source, destination_path.open(
+            "xb",
+        ) as destination:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                destination.write(chunk)
+    except Exception:
+        destination_path.unlink(missing_ok=True)
+        raise
+    if digest.hexdigest() != expected_sha256:
+        destination_path.unlink(missing_ok=True)
+        raise TaskpackValidationError(
+            "controller authority changed while creating its snapshot"
+        )
+
+
 def _resolve_companion_artifact_path(taskpack_dir, value, field_name):
     if not isinstance(value, str) or not value:
         raise TaskpackValidationError(f"{field_name} must be a relative path string")
@@ -3947,8 +4595,32 @@ def _require_contained_path(path, root, field_name):
         raise TaskpackValidationError(f"{field_name} must stay inside {root}") from exc
 
 
-def _validate_controller_action_authority(project_root, gates):
+def _path_is_contained_by(path, root):
+    try:
+        Path(path).relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_controller_action_authority(
+    project_root,
+    gates,
+    *,
+    taskpack_root=None,
+):
     project_root = Path(project_root).resolve()
+    allowed_roots = [project_root]
+    if taskpack_root is not None:
+        taskpack_root = Path(taskpack_root).resolve()
+        allowed_roots.append(taskpack_root)
+    else:
+        try:
+            work_root = _blueprint_project_work_root(project_root)
+        except TaskpackValidationError:
+            work_root = None
+        if work_root is not None:
+            allowed_roots.append(work_root)
     if not isinstance(gates, list):
         raise TaskpackValidationError(
             "controller action authority requires gate declarations"
@@ -3961,13 +4633,19 @@ def _validate_controller_action_authority(project_root, gates):
             )
         requested = Path(value).expanduser()
         if not requested.is_absolute():
-            requested = project_root / requested
+            requested = (taskpack_root or project_root) / requested
         if _taskpack_path_contains_symlink(requested):
             raise TaskpackValidationError(
                 f"{label} path is unsafe"
             )
         resolved = requested.resolve()
-        _require_contained_path(resolved, project_root, label)
+        if not any(
+            _path_is_contained_by(resolved, root)
+            for root in allowed_roots
+        ):
+            raise TaskpackValidationError(
+                f"{label} must stay inside an approved authority root"
+            )
         available = (
             resolved.is_dir() if directory else resolved.is_file()
         )
@@ -4192,6 +4870,22 @@ def _build_taskpack_artifact_inventory(taskpack_dir):
     )
     if materialization_manifest.exists() or materialization_manifest.is_symlink():
         artifacts.append(materialization_manifest)
+    controller_authority = files.get("controller_authority", [])
+    if not isinstance(controller_authority, list) or any(
+        not isinstance(item, str) or not item
+        for item in controller_authority
+    ):
+        raise TaskpackValidationError(
+            "files.controller_authority must be a list of relative paths"
+        )
+    artifacts.extend(
+        _resolve_companion_artifact_path(
+            taskpack_dir,
+            item,
+            "files.controller_authority",
+        )
+        for item in controller_authority
+    )
 
     inventory = []
     seen_relative_paths = set()

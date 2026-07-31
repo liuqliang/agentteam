@@ -9117,15 +9117,134 @@ def _phase2_action_authority_roots(
     *,
     extra=(),
 ):
-    return [
-        str(Path(path).resolve())
-        for path in (
-            context["frozen_dir"],
-            context["project_root"],
-            context["run_dir"],
-            *extra,
+    paths = (
+        context["frozen_dir"],
+        context["project_root"],
+        context["run_dir"],
+        *extra,
+    )
+    return list(
+        dict.fromkeys(str(Path(path).resolve()) for path in paths)
+    )
+
+
+def _prepare_phase2_calibration_recompute_authority(
+    context,
+    generated_root,
+):
+    taskpack = context.get("taskpack")
+    taskpack_context = (
+        taskpack.get("context")
+        if isinstance(taskpack, dict)
+        else None
+    )
+    resolutions = (
+        taskpack_context.get("materialized_authority_bindings")
+        if isinstance(taskpack_context, dict)
+        else None
+    )
+    if resolutions is None:
+        return {
+            "request_path": None,
+            "authority_roots": [],
+            "closure_mounts": [],
+        }
+    record = next(
+        (
+            item
+            for item in resolutions or []
+            if (
+                isinstance(item, dict)
+                and item.get("binding")
+                == (
+                    "authority_artifacts."
+                    "deterministic_calibration_request"
+                )
+            )
+        ),
+        None,
+    )
+    closure = (
+        record.get("calibration_closure")
+        if isinstance(record, dict)
+        else None
+    )
+    mappings = (
+        closure.get("path_mappings")
+        if isinstance(closure, dict)
+        else None
+    )
+    origin_path = (
+        closure.get("request_origin_path")
+        if isinstance(closure, dict)
+        else None
+    )
+    if (
+        not isinstance(mappings, list)
+        or not mappings
+        or not isinstance(origin_path, str)
+    ):
+        raise Phase2GateError(
+            "deterministic calibration closure authority is missing"
         )
-    ]
+    frozen_dir = Path(context["frozen_dir"]).resolve()
+    closure_mounts = []
+    from .taskpack import _digest_directory_tree
+
+    for mapping in mappings:
+        if (
+            not isinstance(mapping, dict)
+            or set(mapping) != {
+                "source_root",
+                "snapshot_root",
+                "tree_sha256",
+            }
+        ):
+            raise Phase2GateError(
+                "deterministic calibration closure mapping is invalid"
+            )
+        source_snapshot = (
+            frozen_dir / mapping["snapshot_root"]
+        ).resolve()
+        try:
+            source_snapshot.relative_to(frozen_dir)
+        except ValueError as exc:
+            raise Phase2GateError(
+                "deterministic calibration closure escapes taskpack"
+            ) from exc
+        if (
+            _digest_directory_tree(source_snapshot)
+            != mapping["tree_sha256"]
+        ):
+            raise Phase2GateError(
+                "deterministic calibration frozen closure drifted"
+            )
+        source_root = Path(mapping["source_root"]).expanduser()
+        if (
+            not source_root.is_absolute()
+            or source_root.is_symlink()
+            or not source_root.is_dir()
+        ):
+            raise Phase2GateError(
+                "deterministic calibration mount target is unsafe"
+            )
+        closure_mounts.append(
+            {
+                "source_root": str(source_root.resolve()),
+                "snapshot_root": str(source_snapshot),
+                "tree_sha256": mapping["tree_sha256"],
+            }
+        )
+    request_path = Path(origin_path)
+    if not request_path.is_file():
+        raise Phase2GateError(
+            "deterministic calibration request source is missing"
+        )
+    return {
+        "request_path": str(request_path.resolve()),
+        "authority_roots": [],
+        "closure_mounts": closure_mounts,
+    }
 
 
 def _phase2_action_input(context, declaration):
@@ -9141,7 +9260,44 @@ def _phase2_action_input(context, declaration):
         raise Phase2GateError(
             "Phase 2 controller action configuration is invalid"
         )
+    frozen_value = context.get("frozen_dir")
+    frozen_dir = (
+        Path(frozen_value).resolve()
+        if isinstance(frozen_value, (str, os.PathLike))
+        else None
+    )
+    bindings = configuration.get("authority_artifacts")
+    if isinstance(bindings, dict):
+        for binding in bindings.values():
+            _resolve_frozen_action_binding_path(binding, frozen_dir)
+    direct_taskpack = configuration.get("direct_taskpack")
+    if isinstance(direct_taskpack, dict):
+        _resolve_frozen_action_binding_path(
+            direct_taskpack,
+            frozen_dir,
+        )
     return value
+
+
+def _resolve_frozen_action_binding_path(binding, frozen_dir):
+    path_value = binding.get("path")
+    if not isinstance(path_value, str) or not path_value:
+        return
+    requested = Path(path_value)
+    if requested.is_absolute():
+        return
+    if frozen_dir is None:
+        raise Phase2GateError(
+            "Phase 2 controller authority snapshot has no frozen taskpack"
+        )
+    resolved = (Path(frozen_dir) / requested).resolve()
+    try:
+        resolved.relative_to(frozen_dir)
+    except ValueError as exc:
+        raise Phase2GateError(
+            "Phase 2 controller authority snapshot escapes frozen taskpack"
+        ) from exc
+    binding["path"] = str(resolved)
 
 
 def _publish_phase2_action_epoch(
@@ -9583,6 +9739,12 @@ def _execute_phase2_controller_action(
                 / "acceptance"
                 / "phase2-generated-authority"
             )
+            calibration_recompute = (
+                _prepare_phase2_calibration_recompute_authority(
+                    context,
+                    generated_root,
+                )
+            )
             action = execute_readiness_promotion_action(
                 action_input,
                 {
@@ -9594,6 +9756,13 @@ def _execute_phase2_controller_action(
                             context,
                             extra=(action_worktree,),
                         )
+                    )
+                    + calibration_recompute["authority_roots"],
+                    "calibration_recompute_request_path": (
+                        calibration_recompute["request_path"]
+                    ),
+                    "calibration_closure_mounts": (
+                        calibration_recompute["closure_mounts"]
                     ),
                 },
                 artifact_path=artifact_path,

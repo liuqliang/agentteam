@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import uuid
 from contextlib import contextmanager
@@ -106,6 +107,7 @@ class ExperimentCommonFinalizer:
         self,
         *,
         evaluator_artifact,
+        evaluator_bytes=None,
         runtime_release_identity,
     ):
         evaluator_artifact = Path(evaluator_artifact).resolve(
@@ -118,14 +120,19 @@ class ExperimentCommonFinalizer:
             raise ExperimentModeError(
                 "trusted experiment evaluator is unavailable"
             )
-        evaluator_sha256 = hashlib.sha256(
-            evaluator_artifact.read_bytes()
-        ).hexdigest()
+        if evaluator_bytes is None:
+            evaluator_bytes = evaluator_artifact.read_bytes()
+        if not isinstance(evaluator_bytes, bytes):
+            raise ExperimentModeError(
+                "trusted experiment evaluator bytes are invalid"
+            )
+        evaluator_sha256 = hashlib.sha256(evaluator_bytes).hexdigest()
         if not isinstance(runtime_release_identity, dict):
             raise ExperimentModeError(
                 "runtime release identity is unavailable"
             )
         self.evaluator_artifact = evaluator_artifact
+        self.evaluator_bytes = evaluator_bytes
         self.evaluator_sha256 = evaluator_sha256
         self.runtime_release_identity = copy.deepcopy(
             runtime_release_identity
@@ -162,6 +169,7 @@ class ExperimentCommonFinalizer:
         evaluator_reference = publish_evaluator_reference(
             request.authority_root,
             self.evaluator_artifact,
+            source_bytes=self.evaluator_bytes,
         )
         candidate_sandbox = build_provider_sandbox_descriptor(
             candidate_workspace,
@@ -952,15 +960,39 @@ class AgentTeamDirectModeAdapter:
 
     def preflight(self, request):
         expected = request.protocol["direct_taskpack"]["sha256"]
+        snapshot_root = (
+            Path(request.authority_root)
+            / "direct-taskpack-snapshot"
+        )
         try:
-            return verify_frozen_taskpack_digest(
-                self.frozen_taskpack_dir,
+            if not snapshot_root.exists():
+                staging = snapshot_root.with_name(
+                    snapshot_root.name + f".{uuid.uuid4().hex}.tmp"
+                )
+                try:
+                    shutil.copytree(
+                        self.frozen_taskpack_dir,
+                        staging,
+                        symlinks=True,
+                    )
+                    verify_frozen_taskpack_digest(staging, expected)
+                    staging.rename(snapshot_root)
+                finally:
+                    if staging.exists():
+                        shutil.rmtree(staging)
+                _make_tree_read_only(snapshot_root)
+            verified = verify_frozen_taskpack_digest(
+                snapshot_root,
                 expected,
             )
         except TaskpackValidationError as exc:
             raise ExperimentModeError(
                 f"direct taskpack digest validation failed: {exc}"
             ) from exc
+        return {
+            **verified,
+            "frozen_taskpack_dir": str(snapshot_root.resolve()),
+        }
 
     def execute(self, request):
         verified = self.preflight(request)
@@ -968,7 +1000,7 @@ class AgentTeamDirectModeAdapter:
 
         run_root = Path(request.run_dir) / "agentteam-runtime"
         launched = _run_frozen_taskpack(
-            frozen_taskpack_dir=self.frozen_taskpack_dir,
+            frozen_taskpack_dir=verified["frozen_taskpack_dir"],
             run_root=str(run_root),
             trusted_project_root=request.project_root,
             experiment_runtime_context=(
@@ -1005,6 +1037,21 @@ class AgentTeamDirectModeAdapter:
             },
             "adapter_output": {},
         }
+
+
+def _make_tree_read_only(root):
+    root = Path(root)
+    for path in sorted(
+        root.rglob("*"),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        if path.is_symlink():
+            raise ExperimentModeError(
+                "direct taskpack snapshot contains a symlink"
+            )
+        path.chmod(0o500 if path.is_dir() else 0o400)
+    root.chmod(0o500)
 
 
 class AgentTeamFullModeAdapter:

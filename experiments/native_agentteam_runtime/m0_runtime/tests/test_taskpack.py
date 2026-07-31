@@ -2173,7 +2173,18 @@ class TaskpackTests(unittest.TestCase):
             deterministic_calibration_request = (
                 authority_root / "calibration-request.json"
             )
-            evaluator = authority_root / "evaluator.json"
+            work_root = tmp_path / "project-work-root"
+            work_authority = work_root / "phase2" / "promotion"
+            work_authority.mkdir(parents=True)
+            evaluator = work_authority / "evaluator.json"
+            _write_json(
+                repo / ".agentteam" / "profile.json",
+                {
+                    "profile_schema_version": "agentteam_profile.v1",
+                    "project_key": "fixture",
+                    "work_root": str(work_root),
+                },
+            )
             for path, value in (
                 (protocol_template, {"protocol": "fixture"}),
                 (
@@ -2206,12 +2217,24 @@ class TaskpackTests(unittest.TestCase):
                 "digest_sha256"
             ]
 
-            def authority_binding(path):
+            def late_bound_binding(path):
+                resolved_path = path.resolve()
+                try:
+                    relative_path = resolved_path.relative_to(
+                        repo.resolve()
+                    )
+                except ValueError:
+                    authority_root_name = "project_work_root"
+                    relative_path = resolved_path.relative_to(
+                        work_root.resolve()
+                    )
+                else:
+                    authority_root_name = "project_root"
                 return {
-                    "path": str(path.resolve()),
-                    "sha256": hashlib.sha256(
-                        path.read_bytes()
-                    ).hexdigest(),
+                    "resolve_at_materialization": {
+                        "authority_root": authority_root_name,
+                        "relative_path": relative_path.as_posix(),
+                    }
                 }
 
             gates = [
@@ -2294,15 +2317,15 @@ class TaskpackTests(unittest.TestCase):
                     gate["controller_action_input"]["configuration"][
                         "authority_artifacts"
                     ] = {
-                        "protocol_template": authority_binding(
+                        "protocol_template": late_bound_binding(
                             protocol_template
                         ),
                         "deterministic_calibration_request": (
-                            authority_binding(
+                            late_bound_binding(
                                 deterministic_calibration_request
                             )
                         ),
-                        "deterministic_calibration": authority_binding(
+                        "deterministic_calibration": late_bound_binding(
                             deterministic_calibration
                         ),
                     }
@@ -2310,14 +2333,11 @@ class TaskpackTests(unittest.TestCase):
                     gate["controller_action_input"]["configuration"][
                         "authority_artifacts"
                     ] = {
-                        "evaluator": authority_binding(evaluator),
+                        "evaluator": late_bound_binding(evaluator),
                     }
                     gate["controller_action_input"]["configuration"][
                         "direct_taskpack"
-                    ] = {
-                        "path": str(direct_taskpack_path.resolve()),
-                        "digest_sha256": direct_taskpack_digest,
-                    }
+                    ] = late_bound_binding(direct_taskpack_path)
             blueprint = {
                 "schema_version": "agentteam_taskpack_blueprint.v1",
                 "blueprint_id": "example-blueprint",
@@ -2393,10 +2413,34 @@ class TaskpackTests(unittest.TestCase):
                     blueprint_relative,
                     tmp_path / "drafts",
                 )
+                original_calibration = (
+                    deterministic_calibration.read_bytes()
+                )
+                _write_json(
+                    deterministic_calibration,
+                    {"calibration_status": "drifted"},
+                )
+                with self.assertRaisesRegex(
+                    TaskpackValidationError,
+                    "context changed before freeze",
+                ):
+                    freeze_taskpack(
+                        result["taskpack_dir"],
+                        tmp_path / "frozen",
+                    )
+                deterministic_calibration.write_bytes(
+                    original_calibration
+                )
                 frozen = freeze_taskpack(
                     result["taskpack_dir"],
                     tmp_path / "frozen",
                 )
+            _write_json(
+                deterministic_calibration,
+                {"calibration_status": "changed-after-freeze"},
+            )
+            evaluator.unlink()
+            shutil.rmtree(direct_taskpack_path)
 
             loaded = load_taskpack(frozen["frozen_taskpack_dir"])
             self.assertEqual(
@@ -2413,6 +2457,81 @@ class TaskpackTests(unittest.TestCase):
                     ]
                 ],
                 ["P2-08", "P2-09", "P2-10"],
+            )
+            materialization = loaded["taskpack"]["context"][
+                "materialized_authority_bindings"
+            ]
+            self.assertEqual(len(materialization), 5)
+            frozen_dir = Path(frozen["frozen_taskpack_dir"])
+            calibration_binding = loaded["taskpack"][
+                "post_backlog_gates"
+            ][0]["controller_action_input"]["configuration"][
+                "authority_artifacts"
+            ]["deterministic_calibration"]
+            self.assertFalse(
+                Path(calibration_binding["path"]).is_absolute()
+            )
+            self.assertEqual(
+                (
+                    frozen_dir / calibration_binding["path"]
+                ).read_bytes(),
+                original_calibration,
+            )
+            direct_binding = loaded["taskpack"][
+                "post_backlog_gates"
+            ][1]["controller_action_input"]["configuration"][
+                "direct_taskpack"
+            ]
+            self.assertFalse(Path(direct_binding["path"]).is_absolute())
+            self.assertEqual(
+                direct_binding["digest_sha256"],
+                direct_taskpack_digest,
+            )
+            taskpack_module.verify_frozen_taskpack_digest(
+                frozen_dir / direct_binding["path"],
+                direct_taskpack_digest,
+            )
+            resolved_action = agentteam_module._phase2_action_input(
+                {
+                    "frozen_dir": frozen_dir,
+                },
+                loaded["taskpack"]["post_backlog_gates"][0],
+            )
+            self.assertEqual(
+                resolved_action["configuration"][
+                    "authority_artifacts"
+                ]["deterministic_calibration"]["path"],
+                str(
+                    (
+                        frozen_dir / calibration_binding["path"]
+                    ).resolve()
+                ),
+            )
+            consumed_authority = (
+                experiment_gates_module._action_authority_files(
+                    resolved_action["configuration"][
+                        "authority_artifacts"
+                    ],
+                    required=(
+                        "protocol_template",
+                        "deterministic_calibration_request",
+                        "deterministic_calibration",
+                    ),
+                    authority_roots=[frozen_dir],
+                )
+            )
+            self.assertEqual(
+                Path(
+                    consumed_authority[
+                        "deterministic_calibration"
+                    ]["path"]
+                ).read_bytes(),
+                original_calibration,
+            )
+            taskpack_module._validate_controller_action_authority(
+                repo,
+                loaded["taskpack"]["post_backlog_gates"],
+                taskpack_root=frozen_dir,
             )
             with mock.patch.object(
                 agentteam_module,
@@ -2459,6 +2578,156 @@ class TaskpackTests(unittest.TestCase):
                     root,
                     _phase2_controller_gate_declarations(),
                 )
+
+    def test_late_bound_controller_authority_rejects_unsafe_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            outside = root / "outside.json"
+            outside.write_text("{}\n", encoding="utf-8")
+
+            def blueprint(binding):
+                return {
+                    "post_backlog_gates": [
+                        {
+                            "gate_id": "P2-08",
+                            "controller_action_input": {
+                                "configuration": {
+                                    "authority_artifacts": {
+                                        "fixture": binding,
+                                    }
+                                }
+                            },
+                        }
+                    ]
+                }
+
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "must use resolve_at_materialization",
+            ):
+                taskpack_module._resolve_blueprint_controller_action_inputs(
+                    blueprint(
+                        {
+                            "path": str(outside),
+                            "sha256": hashlib.sha256(
+                                outside.read_bytes()
+                            ).hexdigest(),
+                        }
+                    ),
+                    project_root=repo,
+                )
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "normalized relative path",
+            ):
+                taskpack_module._resolve_blueprint_controller_action_inputs(
+                    blueprint(
+                        {
+                            "resolve_at_materialization": {
+                                "authority_root": "project_root",
+                                "relative_path": "../outside.json",
+                            }
+                        }
+                    ),
+                    project_root=repo,
+                )
+            (repo / "linked.json").symlink_to(outside)
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "path is unsafe",
+            ):
+                taskpack_module._resolve_blueprint_controller_action_inputs(
+                    blueprint(
+                        {
+                            "resolve_at_materialization": {
+                                "authority_root": "project_root",
+                                "relative_path": "linked.json",
+                            }
+                        }
+                    ),
+                    project_root=repo,
+                )
+
+    def test_calibration_closure_rejects_source_snapshot_overlap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            authority_root = Path(tmp) / "authority"
+            authority_root.mkdir()
+            request_path = authority_root / "request.json"
+            request = {
+                "schema_version": (
+                    "phase2_deterministic_calibration_request.v1"
+                ),
+                "authority_roots": [str(authority_root)],
+            }
+            _write_json(request_path, request)
+            expected_sha256 = hashlib.sha256(
+                request_path.read_bytes()
+            ).hexdigest()
+
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "authority root is unsafe",
+            ):
+                taskpack_module._snapshot_calibration_request_closure(
+                    request_path,
+                    authority_root / "generated-taskpack" / "snapshot",
+                    expected_sha256,
+                )
+
+    def test_calibration_closure_digest_has_unambiguous_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            combined = root / "combined"
+            split = root / "split"
+            combined.mkdir()
+            split.mkdir()
+            encoded_second_entry = (
+                len(b"b").to_bytes(8, "big") + b"b" + b"payload"
+            )
+            (combined / "a").write_bytes(encoded_second_entry)
+            (split / "a").write_bytes(b"")
+            (split / "b").write_bytes(b"payload")
+
+            self.assertNotEqual(
+                taskpack_module._digest_directory_tree(combined),
+                taskpack_module._digest_directory_tree(split),
+            )
+            (combined / "link").symlink_to(combined / "a")
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "symlink or special file",
+            ):
+                taskpack_module._digest_directory_tree(combined)
+
+    def test_calibration_closure_digest_normalizes_directory_and_file_modes(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            retained = root / "retained"
+            (source / "nested").mkdir(parents=True)
+            (source / "empty").mkdir()
+            (source / "nested" / "authority.json").write_text(
+                '{"authority":true}\n',
+                encoding="utf-8",
+            )
+            (source / "nested").chmod(0o700)
+            (source / "nested" / "authority.json").chmod(0o600)
+            (retained / "nested").mkdir(parents=True)
+            shutil.copyfile(
+                source / "nested" / "authority.json",
+                retained / "nested" / "authority.json",
+            )
+            (retained / "nested").chmod(0o500)
+            (retained / "nested" / "authority.json").chmod(0o400)
+
+            self.assertEqual(
+                taskpack_module._digest_directory_tree(source),
+                taskpack_module._digest_directory_tree(retained),
+            )
 
     def test_controller_only_taskpack_requires_blueprint_and_fixed_registry(self):
         with tempfile.TemporaryDirectory() as tmp:

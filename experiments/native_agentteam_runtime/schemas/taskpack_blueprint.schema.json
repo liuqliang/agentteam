@@ -259,6 +259,82 @@
       "minLength": 1,
       "pattern": ".*\\S.*"
     },
+    "late_bound_controller_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resolve_at_materialization"
+      ],
+      "properties": {
+        "resolve_at_materialization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "authority_root",
+            "relative_path"
+          ],
+          "properties": {
+            "authority_root": {
+              "enum": [
+                "project_root",
+                "project_work_root"
+              ]
+            },
+            "relative_path": {
+              "$ref": "#/$defs/non_empty_string"
+            }
+          }
+        }
+      }
+    },
+    "controller_authority_binding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/non_empty_string"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/late_bound_controller_artifact"
+        }
+      ]
+    },
+    "controller_direct_taskpack_binding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "digest_sha256"
+          ],
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/non_empty_string"
+            },
+            "digest_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/late_bound_controller_artifact"
+        }
+      ]
+    },
     "controller_action_input": {
       "type": "object",
       "additionalProperties": false,
@@ -279,7 +355,18 @@
           ]
         },
         "configuration": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "authority_artifacts": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/controller_authority_binding"
+              }
+            },
+            "direct_taskpack": {
+              "$ref": "#/$defs/controller_direct_taskpack_binding"
+            }
+          }
         }
       },
       "allOf": [

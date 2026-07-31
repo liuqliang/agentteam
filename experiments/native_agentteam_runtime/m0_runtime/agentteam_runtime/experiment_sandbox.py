@@ -476,6 +476,7 @@ def publish_evaluator_reference(
     evaluator_artifact,
     *,
     reference_id="trusted-evaluator",
+    source_bytes=None,
 ):
     source = _existing_path(
         evaluator_artifact,
@@ -483,7 +484,18 @@ def publish_evaluator_reference(
         require_file=True,
         reject_symlink=True,
     )
-    content = _read_bounded_regular_file(source, max_bytes=4 * 1024 * 1024)
+    content = (
+        _read_bounded_regular_file(
+            source,
+            max_bytes=4 * 1024 * 1024,
+        )
+        if source_bytes is None
+        else source_bytes
+    )
+    if not isinstance(content, bytes) or len(content) > 4 * 1024 * 1024:
+        raise ExperimentSandboxError(
+            "trusted evaluator source bytes are invalid"
+        )
     authority_dir = _experiment_authority_dir(authority_root)
     path = authority_dir / f"{_safe_reference_id(reference_id)}.evaluator"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL

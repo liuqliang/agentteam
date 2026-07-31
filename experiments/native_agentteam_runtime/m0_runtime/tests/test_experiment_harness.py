@@ -176,6 +176,7 @@ from agentteam_runtime.m0_runtime import (
 from agentteam_runtime.taskpack import (
     draft_taskpack_files,
     freeze_taskpack,
+    verify_frozen_taskpack_digest,
 )
 from agentteam_runtime.taskpack_author import (
     _registered_experiment_author_output,
@@ -7264,6 +7265,25 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 launches[0]["run_root"],
                 str(fixture["run_dir"] / "agentteam-runtime"),
             )
+            launched_taskpack = Path(
+                launches[0]["frozen_taskpack_dir"]
+            )
+            self.assertNotEqual(
+                launched_taskpack,
+                Path(frozen["frozen_taskpack_dir"]),
+            )
+            self.assertTrue(
+                launched_taskpack.is_relative_to(
+                    fixture["authority_root"]
+                )
+            )
+            self.assertEqual(
+                verify_frozen_taskpack_digest(
+                    launched_taskpack,
+                    frozen["manifest"]["digest_sha256"],
+                )["digest_sha256"],
+                frozen["manifest"]["digest_sha256"],
+            )
             invalid_fixture = self._fixture(
                 root / "invalid-candidate-mode",
                 "agentteam_direct",
@@ -13712,6 +13732,34 @@ class Phase2GateTests(unittest.TestCase):
                     authority_roots=[linked],
                 )
 
+    def test_action_authority_retains_the_verified_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact = root / "artifact.json"
+            original = b'{"value":"verified"}\n'
+            artifact.write_bytes(original)
+            authority = experiment_gates_module._action_authority_files(
+                {
+                    "fixture": {
+                        "path": str(artifact),
+                        "sha256": hashlib.sha256(original).hexdigest(),
+                    }
+                },
+                required=("fixture",),
+                authority_roots=[root],
+            )
+            replacement = root / "replacement.json"
+            replacement.write_bytes(b'{"value":"replaced"}\n')
+            replacement.replace(artifact)
+            self.assertEqual(authority["fixture"]["bytes"], original)
+            self.assertEqual(
+                experiment_gates_module._json_bytes(
+                    authority["fixture"]["bytes"],
+                    "fixture authority",
+                ),
+                {"value": "verified"},
+            )
+
     def _repository_clone(self, root):
         repository = Path(root) / "repository"
         _git(
@@ -13783,13 +13831,21 @@ class Phase2GateTests(unittest.TestCase):
                 "add",
                 destination.relative_to(repository),
             )
-            _git(
+            staged = _git(
                 repository,
-                "commit",
+                "diff",
+                "--cached",
                 "--quiet",
-                "-m",
-                "add deterministic calibration request schema",
+                check=False,
             )
+            if staged.returncode != 0:
+                _git(
+                    repository,
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "add deterministic calibration request schema",
+                )
         return repository
 
     def test_live_authorization_is_epoch_bound_and_precedes_provider(self):

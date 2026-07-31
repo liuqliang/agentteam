@@ -701,33 +701,58 @@ def validate_deterministic_calibration_report(report):
 def load_deterministic_calibration_report(path):
     path = _regular_file(path, "deterministic calibration report")
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise ExperimentCalibrationError(
+            "deterministic calibration report is unreadable"
+        ) from exc
+    loaded = load_deterministic_calibration_report_bytes(payload)
+    return {
+        **loaded,
+        "path": str(path),
+    }
+
+
+def load_deterministic_calibration_report_bytes(payload):
+    if not isinstance(payload, bytes):
+        raise ExperimentCalibrationError(
+            "deterministic calibration report bytes are invalid"
+        )
+    try:
+        report = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ExperimentCalibrationError(
             "deterministic calibration report is unreadable"
         ) from exc
     validate_deterministic_calibration_report(report)
     expected = canonical_json_sha256(report)
-    if hashlib.sha256(path.read_bytes()).hexdigest() != hashlib.sha256(
-        _canonical_payload(report)
-    ).hexdigest():
+    if payload != _canonical_payload(report):
         raise ExperimentCalibrationError(
             "deterministic calibration report is not canonical"
         )
-    return {"report": report, "report_sha256": expected, "path": str(path)}
+    return {"report": report, "report_sha256": expected}
 
 
 def run_deterministic_calibration_from_manifest(
     manifest_path,
     *,
     output_path=None,
+    manifest_bytes=None,
 ):
     manifest_path = _regular_file(
         manifest_path,
         "deterministic calibration request",
     )
     try:
-        request_bytes = manifest_path.read_bytes()
+        request_bytes = (
+            manifest_path.read_bytes()
+            if manifest_bytes is None
+            else manifest_bytes
+        )
+        if not isinstance(request_bytes, bytes):
+            raise ExperimentCalibrationError(
+                "deterministic calibration request bytes are invalid"
+            )
         if len(request_bytes) > 1024 * 1024:
             raise ExperimentCalibrationError(
                 "deterministic calibration request is oversized"
