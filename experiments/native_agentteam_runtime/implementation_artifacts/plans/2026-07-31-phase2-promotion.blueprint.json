@@ -17,7 +17,7 @@
     "taskpack_id": "phase2-promotion-2687c53-v5",
     "goal_kind": "implementation",
     "milestone": "research-phase-2-promotion",
-    "goal": "Promote the reviewed Phase 2 candidate through deterministic readiness, separately authorized live three-mode calibration, and deterministic finalization.",
+    "goal": "Implement the final Phase 2 promotion sequence through deterministic readiness, separately authorized live three-mode calibration, and deterministic finalization.",
     "overall_risk": "L3",
     "integration_policy": "P2-08 may run without provider access; P2-09 pauses for exact epoch-bound operator authorization; P2-10 finalizes only accepted prior evidence; no main merge or push.",
     "execution_mode": "controller_only"
@@ -44,7 +44,7 @@
     "merge_policy": "No automatic merge to main and no push; finalization produces a reviewed integration head only."
   },
   "approval": {
-    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase2-promotion-contract-review.v1.json",
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase2-promotion-contract-review.v2.json",
     "schema_path": "experiments/native_agentteam_runtime/schemas/phase2_contract_review.schema.json",
     "required_decision": "approved",
     "git_object_format_required": true,
@@ -61,7 +61,7 @@
   "agents": [],
   "verification": {
     "command": [
-      "/usr/bin/python3.12",
+      "python3",
       "-m",
       "unittest",
       "discover",
