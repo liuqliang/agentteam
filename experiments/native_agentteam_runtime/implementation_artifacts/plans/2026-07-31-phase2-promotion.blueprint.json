@@ -1,0 +1,410 @@
+{
+  "schema_version": "agentteam_taskpack_blueprint.v1",
+  "blueprint_id": "phase2-promotion-2687c53-v5",
+  "source_plan": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-27-phase2-experiment-harness-and-calibration.md",
+  "research_authority": "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md",
+  "schema_inventory": [
+    "experiments/native_agentteam_runtime/schemas/experiment_protocol.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_calibration.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_contract_review.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_deterministic_calibration_request.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_finalization.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_live_authorization.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase2_readiness_promotion.schema.json",
+    "experiments/native_agentteam_runtime/schemas/taskpack_blueprint.schema.json"
+  ],
+  "taskpack": {
+    "taskpack_id": "phase2-promotion-2687c53-v5",
+    "goal_kind": "implementation",
+    "milestone": "research-phase-2-promotion",
+    "goal": "Promote the reviewed Phase 2 candidate through deterministic readiness, separately authorized live three-mode calibration, and deterministic finalization.",
+    "overall_risk": "L3",
+    "integration_policy": "P2-08 may run without provider access; P2-09 pauses for exact epoch-bound operator authorization; P2-10 finalizes only accepted prior evidence; no main merge or push.",
+    "execution_mode": "controller_only"
+  },
+  "contract": {
+    "candidate_release_id": "phase2-promotion-v5-2687c53",
+    "candidate_source_commit": "2687c534f659e9c2381a961180605b86a1886ac9",
+    "calibration_authority_root": "phase2/calibration/2687c53-v5",
+    "promotion_authority_root": "phase2/promotion/2687c53-v5",
+    "gate_order": [
+      "P2-08",
+      "P2-09",
+      "P2-10"
+    ],
+    "provider_policy": "Only P2-09 may launch providers and only after current epoch-bound operator authorization.",
+    "provider_network_policy": "provider_access applies only to registered provider launches; canary probes and trusted evaluators remain network isolated.",
+    "calibration_authority_policy": "Same-user control-plane authority is trusted; ordinary path, symlink, inventory, mode, size, and content drift fail closed.",
+    "direct_taskpack_digest": "b4531f465b660ab74d01cb893f515596f25cbb3e4c32084124ae39ad8330f6bd",
+    "protocol_sha256": "b8fc12118f953f129040b36fb65e1550e48b67babfa41f2c4e1438055defaccf",
+    "model": "gpt-5.6-sol",
+    "reasoning_profile": "medium",
+    "max_total_tokens": 600000,
+    "max_wall_time_seconds": 7200,
+    "merge_policy": "No automatic merge to main and no push; finalization produces a reviewed integration head only."
+  },
+  "approval": {
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase2-promotion-contract-review.v1.json",
+    "schema_path": "experiments/native_agentteam_runtime/schemas/phase2_contract_review.schema.json",
+    "required_decision": "approved",
+    "git_object_format_required": true,
+    "runtime_release_binding_required": true,
+    "digest_bindings": [
+      "source_plan",
+      "blueprint",
+      "research_authority",
+      "review_schema",
+      "contract",
+      "schema_inventory"
+    ]
+  },
+  "agents": [],
+  "verification": {
+    "command": [
+      "/usr/bin/python3.12",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "experiments/native_agentteam_runtime/m0_runtime/tests",
+      "-p",
+      "test*.py"
+    ],
+    "success_criteria": [
+      "P2-08 binds the exact candidate release, protocol, deterministic calibration request, deterministic calibration report, and zero-call pilot guard.",
+      "P2-09 cannot launch a provider without current epoch-bound operator authorization.",
+      "Every live run passes trusted acceptance with complete invocation and token coverage.",
+      "P2-10 changes only the Phase 2 report and roadmap and full verification passes.",
+      "No gate merges to main or pushes a remote branch."
+    ]
+  },
+  "policy": {
+    "allow_merge": false,
+    "merge_requires_verified_integration": true,
+    "operator_review_required": true,
+    "bind_runtime_release_before_execution": true,
+    "live_provider_authorization_required": true,
+    "semantic_authority_worker_mutation_forbidden": true
+  },
+  "tasks": [],
+  "post_backlog_gates": [
+    {
+      "gate_id": "P2-08",
+      "depends_on": [],
+      "executor": "deterministic_controller",
+      "evidence_artifact": "acceptance/readiness.json",
+      "evidence_schema": "experiments/native_agentteam_runtime/schemas/phase2_readiness_promotion.schema.json",
+      "required_status_field": "controller_validation_status",
+      "required_status_value": "passed",
+      "controller_entrypoint": "phase2_readiness_controller_v1",
+      "relation_validator": "phase2_readiness_relation_v1",
+      "operator_authorization_required": false,
+      "controller_action_input": {
+        "schema_version": "phase2_gate_action_input.v1",
+        "action": "promote_readiness",
+        "configuration": {
+          "promoted_at": "2026-07-31T08:54:16Z",
+          "readiness_reasons": {
+            "invocation_level_real_usage": "The Phase 1 exact-usage end-to-end fixture passed at candidate commit 2687c53.",
+            "three_mode_experiment_harness": "The immutable three-mode harness, counterbalanced ordering, and deterministic calibration tests passed.",
+            "immutable_experiment_manifest": "Protocol, run allocation, tamper rejection, and resume identity tests passed.",
+            "clean_reset_and_blind_gold_isolation": "Independent snapshot and evaluator-only canary isolation tests passed.",
+            "actual_budget_enforcement": "Provider, scheduler, and integration safe-boundary budget tests passed.",
+            "operator_action_ledger": "Closed-vocabulary, replay, gateway, and stop-ledger tests passed.",
+            "machine_readable_result_bundle": "Atomic result, recovery, and projection rebuild tests passed."
+          },
+          "capability_evidence": {
+            "invocation_level_real_usage": [
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase1_usage_end_to_end.py",
+                "sha256": "96dbf71b24ebfb84e144f98a87c7bf34a360b296f1a7b3f9a7d90f316030a510",
+                "test_id": "tests.test_phase1_usage_end_to_end.Phase1UsageEndToEndTests.test_positive_fixture_has_complete_exact_replay_stable_accounting",
+                "status": "passed"
+              }
+            ],
+            "three_mode_experiment_harness": [
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentContractSchemaTests.test_protocol_requires_complete_three_mode_equal_input_contract",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentModeAdapterTests.test_counterbalanced_mode_order_is_enforced_and_immutable",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentCalibrationTests.test_deterministic_l1_l2_calibration_rebuilds_all_evidence",
+                "status": "passed"
+              }
+            ],
+            "immutable_experiment_manifest": [
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentContractSchemaTests.test_run_manifest_binds_mode_repetition_request_and_protocol",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentAllocationTests.test_tampered_published_protocol_fails_closed_without_provider",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentLeaseAndResumeTests.test_resume_accepts_exact_binding_and_rejects_all_identity_drift",
+                "status": "passed"
+              }
+            ],
+            "clean_reset_and_blind_gold_isolation": [
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentWorkspaceTests.test_allocates_independent_exact_commit_snapshot_and_attestation",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentSandboxTests.test_provider_environment_rejects_canary_content_and_digest",
+                "status": "passed"
+              }
+            ],
+            "actual_budget_enforcement": [
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentBudgetTests.test_token_warning_and_exhaustion_include_exact_boundaries",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentBudgetTests.test_one_lane_terminal_completion_exposes_overshoot",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentProviderBudgetBoundaryTests.test_denied_prelaunch_creates_no_runner_start_or_process",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentProviderBudgetBoundaryTests.test_interruption_resume_preserves_original_remaining_budget",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.TwoPhaseSchedulerExperimentBoundaryTests.test_scheduler_denies_worker_dispatch_after_budget_exhaustion",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.TwoPhaseSchedulerExperimentBoundaryTests.test_preintegration_exhaustion_preserves_patch_and_baseline",
+                "status": "passed"
+              }
+            ],
+            "operator_action_ledger": [
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentOperatorActionLedgerTests.test_supported_inputs_map_to_closed_vocabulary_without_raw_content",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentOperatorActionLedgerTests.test_replay_is_idempotent_and_conflicting_response_fails_closed",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentOperatorActionLedgerTests.test_experiment_gateways_account_before_applying_runtime_input",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentOperatorActionLedgerTests.test_experiment_stop_capability_validates_against_real_ledger",
+                "status": "passed"
+              }
+            ],
+            "machine_readable_result_bundle": [
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentResultBundleTests.test_terminal_bundle_is_atomic_idempotent_and_conflict_safe",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentResultBundleTests.test_recovery_snapshots_are_versioned_and_separate",
+                "status": "passed"
+              },
+              {
+                "artifact_path": "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+                "sha256": "6e837f5d7b3ab8eec98da5705388e7a14e29e2fbda62c91296667f5fd1d14f53",
+                "test_id": "tests.test_experiment_harness.ExperimentResultBundleTests.test_projection_rebuild_preserves_all_outcomes_and_digests",
+                "status": "passed"
+              }
+            ]
+          },
+          "authority_artifacts": {
+            "protocol_template": {
+              "resolve_at_materialization": {
+                "authority_root": "project_work_root",
+                "relative_path": "phase2/promotion/2687c53-v5/protocol-template.json"
+              }
+            },
+            "deterministic_calibration_request": {
+              "resolve_at_materialization": {
+                "authority_root": "project_work_root",
+                "relative_path": "phase2/calibration/2687c53-v5/calibration-request.json"
+              }
+            },
+            "deterministic_calibration": {
+              "resolve_at_materialization": {
+                "authority_root": "project_work_root",
+                "relative_path": "phase2/calibration/2687c53-v5/deterministic-calibration.json"
+              }
+            }
+          },
+          "pilot_mode": "agentteam_full",
+          "pilot_repetition_index": 0,
+          "pilot_stable_request_key": "phase2-pilot-2687c53-v5"
+        }
+      }
+    },
+    {
+      "gate_id": "P2-09",
+      "depends_on": [
+        "P2-08"
+      ],
+      "executor": "deterministic_controller",
+      "evidence_artifact": "acceptance/calibration.json",
+      "evidence_schema": "experiments/native_agentteam_runtime/schemas/phase2_calibration.schema.json",
+      "required_status_field": "controller_validation_status",
+      "required_status_value": "passed",
+      "controller_entrypoint": "phase2_live_calibration_controller_v1",
+      "relation_validator": "phase2_live_calibration_relation_v1",
+      "operator_authorization_required": true,
+      "operator_authorization_schema": "experiments/native_agentteam_runtime/schemas/phase2_live_authorization.schema.json",
+      "operator_authorization_required_decision": "approved",
+      "controller_action_input": {
+        "schema_version": "phase2_gate_action_input.v1",
+        "action": "run_live_calibration",
+        "configuration": {
+          "authority_artifacts": {
+            "evaluator": {
+              "resolve_at_materialization": {
+                "authority_root": "project_work_root",
+                "relative_path": "phase2/promotion/2687c53-v5/evaluator.py"
+              }
+            }
+          },
+          "direct_taskpack": {
+            "resolve_at_materialization": {
+              "authority_root": "project_work_root",
+              "relative_path": "phase2/promotion/2687c53-v5/direct-frozen/phase2-live-l1-direct"
+            }
+          },
+          "repeat_mode": "single_codex",
+          "sandbox_configuration": {
+            "runtime_views": [
+              {
+                "source": "/usr",
+                "target": "/usr"
+              },
+              {
+                "source": "/lib",
+                "target": "/lib"
+              },
+              {
+                "source": "/lib64",
+                "target": "/lib64"
+              },
+              {
+                "source": "/bin",
+                "target": "/bin"
+              },
+              {
+                "source": "/home/liuql/.codex/packages/standalone/releases/0.145.0-x86_64-unknown-linux-musl/bin/codex",
+                "target": "/opt/agentteam/bin/codex"
+              }
+            ],
+            "library_views": [
+              {
+                "source": "/run/systemd/resolve/stub-resolv.conf",
+                "target": "/etc/resolv.conf"
+              },
+              {
+                "source": "/etc/hosts",
+                "target": "/etc/hosts"
+              },
+              {
+                "source": "/etc/nsswitch.conf",
+                "target": "/etc/nsswitch.conf"
+              },
+              {
+                "source": "/etc/gai.conf",
+                "target": "/etc/gai.conf"
+              },
+              {
+                "source": "/etc/ssl/certs",
+                "target": "/etc/ssl/certs"
+              }
+            ],
+            "credential_mounts": [
+              {
+                "source": "/home/liuql/.codex/auth.json",
+                "target": "/run/agentteam-credentials/codex/auth.json"
+              },
+              {
+                "source": "/home/liuql/.local/share/agentteam/agentteam-phase1-preflight/phase2/promotion/2687c53-v5/codex-config.toml",
+                "target": "/run/agentteam-credentials/codex/config.toml"
+              }
+            ],
+            "environment": {
+              "CODEX_HOME": "/run/agentteam-credentials/codex",
+              "PATH": "/opt/agentteam/bin:/usr/bin:/bin"
+            },
+            "canary_path": "/home/liuql/.local/share/agentteam/agentteam-phase1-preflight/phase2/promotion/2687c53-v5/gold-canary"
+          }
+        }
+      }
+    },
+    {
+      "gate_id": "P2-10",
+      "depends_on": [
+        "P2-09"
+      ],
+      "executor": "deterministic_controller",
+      "evidence_artifact": "acceptance/finalization.json",
+      "evidence_schema": "experiments/native_agentteam_runtime/schemas/phase2_finalization.schema.json",
+      "required_status_field": "controller_validation_status",
+      "required_status_value": "passed",
+      "controller_entrypoint": "phase2_finalization_controller_v1",
+      "relation_validator": "phase2_finalization_relation_v1",
+      "operator_authorization_required": false,
+      "controller_action_input": {
+        "schema_version": "phase2_gate_action_input.v1",
+        "action": "finalize_phase2",
+        "configuration": {
+          "finalized_at": "2026-07-31T08:54:16Z"
+        }
+      }
+    }
+  ]
+}
