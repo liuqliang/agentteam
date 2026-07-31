@@ -9011,6 +9011,53 @@ class ExperimentWorkspaceTests(unittest.TestCase):
 
 
 class ExperimentSandboxTests(unittest.TestCase):
+    def test_large_runtime_binary_is_streamed_into_mount_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture_repository(root)
+            repository = fixture["source"]
+            runtime_binary = root / "large-runtime-binary"
+            runtime_binary.write_bytes(b"A" * (65 * 1024 * 1024))
+
+            descriptor = build_provider_sandbox_descriptor(
+                repository,
+                runtime_views=[
+                    {
+                        "source": str(runtime_binary),
+                        "target": "/opt/agentteam/bin/runtime",
+                    }
+                ],
+            )
+
+            self.assertEqual(
+                descriptor["runtime_views"][0]["source_identity"][
+                    "content_sha256"
+                ],
+                hashlib.sha256(runtime_binary.read_bytes()).hexdigest(),
+            )
+
+    def test_runtime_binary_over_streaming_bound_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _fixture_repository(root)
+            runtime_binary = root / "oversized-runtime-binary"
+            with runtime_binary.open("wb") as handle:
+                handle.truncate(513 * 1024 * 1024)
+
+            with self.assertRaisesRegex(
+                ExperimentSandboxUnavailable,
+                "mount source byte bound was exceeded",
+            ):
+                build_provider_sandbox_descriptor(
+                    fixture["source"],
+                    runtime_views=[
+                        {
+                            "source": str(runtime_binary),
+                            "target": "/opt/agentteam/bin/runtime",
+                        }
+                    ],
+                )
+
     def test_historical_loader_accepts_only_receipt_bound_deleted_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = _fixture_repository(tmp)

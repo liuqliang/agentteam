@@ -56,6 +56,7 @@ DEFAULT_MAX_CREDENTIAL_FILES = 32
 DEFAULT_MAX_SCAN_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_SCAN_FILES = 10_000
 DEFAULT_MAX_EVALUATOR_OUTPUT_BYTES = 4 * 1024 * 1024
+DEFAULT_MAX_RUNTIME_FILE_BYTES = 512 * 1024 * 1024
 MAX_EVALUATION_TIMEOUT_SECONDS = 3600
 PRELAUNCH_SOURCE_REVALIDATION_TIMEOUT_SECONDS = 120
 _CREDENTIAL_ROOT = Path("/run/agentteam-credentials")
@@ -4877,12 +4878,11 @@ def _mount_source_identity(path, *, hash_directory=True):
         ) from exc
     if stat.S_ISREG(metadata.st_mode):
         kind = "file"
-        content_sha256 = hashlib.sha256(
-            _read_bounded_regular_file(
-                path,
-                max_bytes=64 * 1024 * 1024,
-            )
-        ).hexdigest()
+        content_sha256 = _sha256_bounded_regular_file(
+            path,
+            max_bytes=DEFAULT_MAX_RUNTIME_FILE_BYTES,
+            expected_metadata=metadata,
+        )
     elif stat.S_ISDIR(metadata.st_mode):
         if not hash_directory:
             kind = "directory_root"
@@ -4909,6 +4909,85 @@ def _mount_source_identity(path, *, hash_directory=True):
         "kind": kind,
         "content_sha256": content_sha256,
     }
+
+
+def _sha256_bounded_regular_file(
+    path,
+    *,
+    max_bytes,
+    expected_metadata,
+):
+    """Hash a large mount source without retaining its bytes in memory."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ExperimentSandboxUnavailable(
+            "sandbox mount source became unavailable"
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        identity_fields = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size < 0
+            or before.st_size > max_bytes
+        ):
+            raise ExperimentSandboxUnavailable(
+                "sandbox mount source byte bound was exceeded"
+            )
+        if any(
+            getattr(expected_metadata, field) != getattr(before, field)
+            for field in identity_fields
+        ):
+            raise ExperimentSandboxUnavailable(
+                "sandbox mount source changed before hashing"
+            )
+        digest = hashlib.sha256()
+        observed_bytes = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            observed_bytes += len(chunk)
+            if observed_bytes > max_bytes:
+                raise ExperimentSandboxUnavailable(
+                    "sandbox mount source byte bound was exceeded"
+                )
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        try:
+            path_after = Path(path).lstat()
+        except OSError as exc:
+            raise ExperimentSandboxUnavailable(
+                "sandbox mount source changed while hashing"
+            ) from exc
+        if (
+            observed_bytes != before.st_size
+            or any(
+                getattr(before, field) != getattr(after, field)
+                for field in identity_fields
+            )
+            or any(
+                getattr(after, field) != getattr(path_after, field)
+                for field in identity_fields
+            )
+        ):
+            raise ExperimentSandboxUnavailable(
+                "sandbox mount source changed while hashing"
+            )
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
 
 
 def _is_privileged_system_tree(path):
