@@ -185,6 +185,9 @@ class ExperimentCommonFinalizer:
             environment=request.sandbox_configuration[
                 "environment"
             ],
+            network_policy=request.protocol["environment"][
+                "network_policy"
+            ],
             repository_identity={
                 "commit": candidate_state["head_commit"],
                 "tree": candidate_state["head_tree"],
@@ -1436,6 +1439,9 @@ def _register_provider_launch(
         library_views=configuration["library_views"],
         credential_mounts=configuration["credential_mounts"],
         environment=configuration["environment"],
+        network_policy=request.protocol["environment"][
+            "network_policy"
+        ],
         repository_identity=_repository_identity(request.protocol),
         forbidden_paths=[configuration["canary_path"]],
     )

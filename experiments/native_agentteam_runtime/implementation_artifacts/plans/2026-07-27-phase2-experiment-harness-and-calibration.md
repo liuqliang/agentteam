@@ -245,6 +245,15 @@ The runtime contract is `unavailable_to_runtime`. P0-B uses the installed
 required runtime binaries and libraries, and a bounded read-only Codex
 credential view. Evaluator and gold state stay outside the provider namespace.
 
+The protocol network policy is closed to `disabled` or `provider_access`.
+Deterministic fixtures use `disabled`. An explicitly authorized live Codex
+calibration uses `provider_access`: the provider launch retains all file,
+credential, capability, PID, IPC, and mount isolation but adds `--share-net`
+after `--unshare-all` so the Codex client can reach its provider. This does not
+mount any additional host path. The pre-launch canary denial probe and trusted
+post-model evaluator always keep the isolated network namespace; the evaluator
+also receives no credential mounts.
+
 Before launch, a random gold canary is stored in evaluator-only state. A probe
 inside the exact worker sandbox must return denied or not found. After the run,
 bounded prompt, taskpack, context, and artifact scans must not contain the

@@ -209,8 +209,10 @@
           "minLength": 1
         },
         "network_policy": {
-          "type": "string",
-          "minLength": 1
+          "enum": [
+            "disabled",
+            "provider_access"
+          ]
         },
         "tool_allowlist": {
           "type": "array",

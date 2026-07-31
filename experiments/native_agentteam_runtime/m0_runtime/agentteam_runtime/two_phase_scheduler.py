@@ -1654,6 +1654,9 @@ class TwoPhaseFileScheduler:
             library_views=configuration["library_views"],
             credential_mounts=configuration["credential_mounts"],
             environment=configuration["environment"],
+            network_policy=context["model_policy"][
+                "network_policy"
+            ],
             repository_identity={
                 field: context["repository_identity"][field]
                 for field in (

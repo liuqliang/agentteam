@@ -60,6 +60,7 @@ MAX_EVALUATION_TIMEOUT_SECONDS = 3600
 PRELAUNCH_SOURCE_REVALIDATION_TIMEOUT_SECONDS = 120
 _CREDENTIAL_ROOT = Path("/run/agentteam-credentials")
 _TRUSTED_BWRAP_PATH = Path("/usr/bin/bwrap")
+_NETWORK_POLICIES = {"disabled", "provider_access"}
 _TRUSTED_ENV_PATH = Path("/usr/bin/env")
 _TRUSTED_GIT_PATH = Path("/usr/bin/git")
 _ENVIRONMENT_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -183,6 +184,7 @@ def build_provider_sandbox_descriptor(
     library_views=(),
     credential_mounts=(),
     environment=None,
+    network_policy="disabled",
     bwrap_path=None,
     repository_target=None,
     repository_identity=None,
@@ -194,7 +196,10 @@ def build_provider_sandbox_descriptor(
     writable host view.  Credentials are read-only, inventory bounded, and
     may only appear below ``/run/agentteam-credentials`` in the namespace.
     Evaluator-only paths are accepted only as negative validation inputs and
-    are deliberately omitted from the returned descriptor.
+    are deliberately omitted from the returned descriptor.  Network access is
+    either disabled or explicitly enabled only for the provider launch; the
+    canary probe and trusted evaluator always retain an isolated network
+    namespace.
     """
 
     repository_source = _existing_path(
@@ -246,6 +251,10 @@ def build_provider_sandbox_descriptor(
                 "evaluator-only material appears in provider environment"
             )
 
+    if network_policy not in _NETWORK_POLICIES:
+        raise ExperimentSandboxError(
+            "provider network policy is invalid"
+        )
     descriptor = {
         "schema_version": PROVIDER_SANDBOX_SCHEMA_VERSION,
         "bwrap_path": str(bwrap),
@@ -269,7 +278,7 @@ def build_provider_sandbox_descriptor(
         "library_views": libraries,
         "credential_views": credentials,
         "environment": bounded_environment,
-        "network_policy": "disabled",
+        "network_policy": network_policy,
         "namespace_evidence": None,
     }
     descriptor["policy_sha256"] = _sandbox_policy_sha256(descriptor)
@@ -1053,8 +1062,8 @@ def _validate_provider_sandbox_descriptor(
         )
     if descriptor["schema_version"] != PROVIDER_SANDBOX_SCHEMA_VERSION:
         raise ExperimentSandboxError("unsupported provider sandbox descriptor")
-    if descriptor["network_policy"] != "disabled":
-        raise ExperimentSandboxError("provider network namespace must be disabled")
+    if descriptor["network_policy"] not in _NETWORK_POLICIES:
+        raise ExperimentSandboxError("provider network policy is invalid")
     if descriptor["policy_sha256"] != _sandbox_policy_sha256(descriptor):
         raise ExperimentSandboxError("provider sandbox policy digest mismatch")
     bwrap = _existing_path(
@@ -1172,6 +1181,9 @@ def prepare_provider_launch(
         cwd=cwd,
         require_namespace_evidence=True,
         include_credentials=include_credentials,
+        allow_network=(
+            descriptor.get("network_policy") == "provider_access"
+        ),
     )
 
 
@@ -1189,6 +1201,7 @@ def _prepare_probe_provider_launch(
         cwd=cwd,
         require_namespace_evidence=False,
         include_credentials=True,
+        allow_network=False,
     )
 
 
@@ -1199,6 +1212,7 @@ def _prepare_provider_launch(
     cwd,
     require_namespace_evidence,
     include_credentials,
+    allow_network,
 ):
     """Build one launch after the caller selects its private/public policy."""
 
@@ -1223,6 +1237,15 @@ def _prepare_provider_launch(
         "--die-with-parent",
         "--new-session",
         "--unshare-all",
+    ]
+    if allow_network:
+        if descriptor["network_policy"] != "provider_access":
+            raise ExperimentSandboxError(
+                "provider launch cannot enable undeclared network access"
+            )
+        arguments.append("--share-net")
+    arguments.extend(
+        [
         "--cap-drop",
         "ALL",
         "--proc",
@@ -1237,7 +1260,8 @@ def _prepare_provider_launch(
         str(_CREDENTIAL_ROOT),
         "--dir",
         "/tmp/agentteam-home",
-    ]
+        ]
+    )
     credential_views = (
         descriptor["credential_views"] if include_credentials else []
     )
@@ -1314,7 +1338,7 @@ def prepare_candidate_evaluation_launch(
             "trusted evaluator digest is invalid"
         )
     loader_python = _probe_python_for_descriptor(descriptor)
-    prepared = prepare_provider_launch(
+    prepared = _prepare_provider_launch(
         descriptor,
         [
             str(loader_python),
@@ -1327,7 +1351,9 @@ def prepare_candidate_evaluation_launch(
             ),
         ],
         cwd=cwd,
+        require_namespace_evidence=True,
         include_credentials=False,
+        allow_network=False,
     )
     repository_source = Path(descriptor["repository"]["source"])
     git_source = _existing_path(
@@ -1496,6 +1522,13 @@ def publish_experiment_launch_registration(
         sandbox_reference,
         authority_root,
     )
+    if (
+        descriptor["network_policy"]
+        != expected_mode_binding["model_policy"]["network_policy"]
+    ):
+        raise ExperimentSandboxError(
+            "sandbox network policy differs from mode authority"
+        )
     validate_provider_authority_separation(
         descriptor,
         authority_root,

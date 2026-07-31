@@ -3114,7 +3114,7 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
                 "service_configuration_sha256": "2" * 64,
                 "sandbox_policy": "workspace-write",
                 "permission_policy": "never",
-                "network_policy": "disabled",
+                "network_policy": "provider_access",
                 "tool_allowlist": ["exec_command", "apply_patch"],
                 "max_inflight_model_invocations": 1,
             }
@@ -3246,6 +3246,14 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
                 inbox.read_text(encoding="utf-8").splitlines()[0]
             )["payload"]
             self.assertTrue(payload["experiment_sandbox_required"])
+            worker_sandbox = load_provider_sandbox_reference(
+                payload["experiment_sandbox_reference"],
+                authority_root,
+            )
+            self.assertEqual(
+                worker_sandbox["network_policy"],
+                "provider_access",
+            )
             self.assertEqual(
                 payload["model"],
                 model_policy["model"],
@@ -9832,6 +9840,125 @@ class ExperimentSandboxTests(unittest.TestCase):
                 ),
             )
 
+    @patch(
+        "agentteam_runtime.experiment_sandbox."
+        "_is_privileged_system_tree",
+        side_effect=_test_privileged_system_tree,
+    )
+    def test_provider_access_network_is_limited_to_provider_launch(
+        self,
+        _privileged_system_tree,
+    ):
+        import agentteam_runtime.experiment_sandbox as sandbox_module
+
+        live_protocol = _protocol()
+        live_protocol["environment"]["network_policy"] = (
+            "provider_access"
+        )
+        validate_experiment_protocol(live_protocol)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = _sandbox_fixture(tmp)
+            base = fixture["uncertified_descriptor"]
+            descriptor = build_provider_sandbox_descriptor(
+                fixture["repository"],
+                runtime_views=[
+                    {
+                        "source": item["source"],
+                        "target": item["target"],
+                    }
+                    for item in base["runtime_views"]
+                ],
+                library_views=[
+                    {
+                        "source": item["source"],
+                        "target": item["target"],
+                    }
+                    for item in base["library_views"]
+                ],
+                credential_mounts=[
+                    {
+                        "source": item["source"],
+                        "target": item["target"],
+                    }
+                    for item in base["credential_views"]
+                ],
+                environment=base["environment"],
+                network_policy="provider_access",
+                repository_identity=fixture["repository_identity"],
+                forbidden_paths=[fixture["canary"]],
+            )
+            certified = _attach_namespace_evidence(
+                descriptor,
+                _successful_namespace_probe(
+                    descriptor,
+                    fixture["canary"],
+                ),
+            )
+            provider = prepare_provider_launch(
+                certified,
+                [
+                    str(Path(sys.executable).resolve()),
+                    "-c",
+                    "print('provider')",
+                ],
+                cwd=fixture["repository"],
+            )
+            provider_command = list(provider.command)
+            self.assertLess(
+                provider_command.index("--unshare-all"),
+                provider_command.index("--share-net"),
+            )
+
+            probe = sandbox_module._prepare_probe_provider_launch(
+                descriptor,
+                [
+                    str(Path(sys.executable).resolve()),
+                    "-c",
+                    "print('probe')",
+                ],
+                cwd=fixture["repository"],
+            )
+            self.assertNotIn("--share-net", probe.command)
+
+            evaluator = Path(tmp) / "trusted-evaluator.py"
+            evaluator.write_text(
+                "#!/usr/bin/python3\nraise SystemExit(0)\n",
+                encoding="utf-8",
+            )
+            evaluator.chmod(0o700)
+            evaluation = prepare_candidate_evaluation_launch(
+                certified,
+                evaluator,
+                hashlib.sha256(evaluator.read_bytes()).hexdigest(),
+                [
+                    str(Path(sys.executable).resolve()),
+                    "-c",
+                    "raise SystemExit(0)",
+                ],
+                cwd=fixture["repository"],
+            )
+            self.assertNotIn("--share-net", evaluation.command)
+            self.assertNotIn(
+                "/run/agentteam-credentials/provider.json",
+                evaluation.command,
+            )
+
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "network policy is invalid",
+            ):
+                build_provider_sandbox_descriptor(
+                    fixture["repository"],
+                    runtime_views=[],
+                    network_policy="unrestricted",
+                )
+
+        invalid_protocol = _protocol()
+        invalid_protocol["environment"]["network_policy"] = "unrestricted"
+        with self.assertRaises(ExperimentContractError):
+            validate_experiment_protocol(invalid_protocol)
+
     def test_candidate_evaluator_revalidates_exact_workspace_content(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -10522,6 +10649,62 @@ class ExperimentSandboxTests(unittest.TestCase):
                     lifecycle_root,
                     context,
                     supported=False,
+                )
+
+            base_descriptor = fixture["uncertified_descriptor"]
+            network_descriptor = build_provider_sandbox_descriptor(
+                fixture["repository"],
+                runtime_views=[
+                    {
+                        "source": item["source"],
+                        "target": item["target"],
+                    }
+                    for item in base_descriptor["runtime_views"]
+                ],
+                credential_mounts=[
+                    {
+                        "source": item["source"],
+                        "target": item["target"],
+                    }
+                    for item in base_descriptor["credential_views"]
+                ],
+                environment=base_descriptor["environment"],
+                network_policy="provider_access",
+                repository_identity=fixture["repository_identity"],
+                forbidden_paths=[fixture["canary"]],
+            )
+            with patch(
+                "agentteam_runtime.experiment_sandbox."
+                "probe_gold_canary_denial",
+                side_effect=_successful_namespace_probe,
+            ):
+                network_reference = (
+                    publish_provider_sandbox_reference(
+                        authority_root,
+                        network_descriptor,
+                        fixture["canary"],
+                        reference_id="network-mismatch",
+                    )
+                )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "network policy differs from mode authority",
+            ):
+                publish_experiment_launch_registration(
+                    authority_root,
+                    lifecycle_root,
+                    experiment_run_id=manifest["experiment_run_id"],
+                    protocol_sha256=manifest["protocol_sha256"],
+                    run_manifest_sha256=canonical_json_sha256(
+                        manifest
+                    ),
+                    mode="single_codex",
+                    usage_stage="single_codex",
+                    taskpack_id="SINGLE-CODEX-NONE",
+                    workspace_root=fixture["repository"],
+                    sandbox_reference=network_reference,
+                    controller_reference=controller.reference,
+                    model_policy=model_policy,
                 )
 
             sandbox_reference = _publish_test_sandbox_reference(
