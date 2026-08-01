@@ -372,9 +372,10 @@ def _phase1_source_checkout():
     manifest_path = release_or_checkout_root / "manifest.json"
     if manifest_path.is_file():
         manifest = _read_json_object(manifest_path, "runtime release manifest")
-        source_root = manifest.get("source_root")
-        if isinstance(source_root, str) and source_root:
-            candidates.append(Path(source_root).expanduser().resolve())
+        for field in ("source_root", "source_repo"):
+            source_root = manifest.get(field)
+            if isinstance(source_root, str) and source_root:
+                candidates.append(Path(source_root).expanduser().resolve())
     for candidate in candidates:
         completed = subprocess.run(
             ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
