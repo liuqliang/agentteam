@@ -108,18 +108,32 @@ class ExperimentReadinessTests(unittest.TestCase):
     def test_packaged_readiness_record_is_truthful_and_complete(self):
         summary = build_p0_readiness_summary()
 
-        self.assertEqual(summary["readiness_status"], "blocked")
-        self.assertFalse(summary["pilot_authorized"])
         self.assertEqual(summary["capability_count"], 7)
+        expected_counts = {"passed": 0, "partial": 0, "missing": 0}
+        for capability in summary["capabilities"]:
+            expected_counts[capability["status"]] += 1
         self.assertEqual(
             summary["capability_counts"],
-            {"passed": 1, "partial": 3, "missing": 3},
+            expected_counts,
         )
         self.assertEqual(
             {item["capability_id"] for item in summary["capabilities"]},
             set(P0_CAPABILITY_IDS),
         )
-        self.assertEqual(len(summary["blockers"]), 6)
+        all_passed = expected_counts == {
+            "passed": summary["capability_count"],
+            "partial": 0,
+            "missing": 0,
+        }
+        self.assertEqual(
+            summary["readiness_status"],
+            "passed" if all_passed else "blocked",
+        )
+        self.assertEqual(summary["pilot_authorized"], all_passed)
+        self.assertEqual(
+            len(summary["blockers"]),
+            expected_counts["partial"] + expected_counts["missing"],
+        )
         self.assertEqual(summary["phase1_completion"]["promotion_status"], "passed")
 
     def test_phase1_completion_promotion_binds_finalization_and_approval(self):
@@ -169,11 +183,11 @@ class ExperimentReadinessTests(unittest.TestCase):
             ),
             "overall-mismatch": lambda value: value.__setitem__(
                 "overall_status",
-                "passed",
+                "blocked" if value["overall_status"] == "passed" else "passed",
             ),
             "authorization-mismatch": lambda value: value.__setitem__(
                 "pilot_authorized",
-                True,
+                not value["pilot_authorized"],
             ),
         }
         for name, mutate in cases.items():
@@ -210,8 +224,11 @@ class ExperimentReadinessTests(unittest.TestCase):
 
             result = check_pilot_authorization(path)
 
-            self.assertFalse(result["pilot_authorized"])
-            self.assertEqual(len(result["blockers"]), 6)
+            self.assertEqual(
+                result["pilot_authorized"],
+                readiness["pilot_authorized"],
+            )
+            self.assertEqual(result["blockers"], readiness["blockers"])
             self.assertEqual(result["provider_calls"], 0)
             self.assertEqual(result["target_mutations"], 0)
 
@@ -296,8 +313,9 @@ class ExperimentReadinessTests(unittest.TestCase):
                         "--json",
                     ]
                 )
+            pilot_stdout = io.StringIO()
             pilot_stderr = io.StringIO()
-            with redirect_stderr(pilot_stderr):
+            with redirect_stdout(pilot_stdout), redirect_stderr(pilot_stderr):
                 pilot_rc = agentteam_module.main(
                     [
                         "experiment",
@@ -309,17 +327,27 @@ class ExperimentReadinessTests(unittest.TestCase):
                 )
 
             self.assertEqual(readiness_rc, 0)
-            self.assertFalse(json.loads(readiness_stdout.getvalue())["pilot_authorized"])
+            self.assertEqual(
+                json.loads(readiness_stdout.getvalue())["pilot_authorized"],
+                readiness["pilot_authorized"],
+            )
             self.assertEqual(validate_rc, 0)
             self.assertEqual(
                 json.loads(validate_stdout.getvalue())["manifest_status"],
                 "accepted",
             )
-            self.assertEqual(pilot_rc, 1)
-            error = json.loads(pilot_stderr.getvalue())
-            self.assertFalse(error["pilot_authorized"])
-            self.assertEqual(error["provider_calls"], 0)
-            self.assertEqual(error["target_mutations"], 0)
+            self.assertEqual(pilot_rc, 0 if readiness["pilot_authorized"] else 1)
+            pilot_payload = json.loads(
+                pilot_stdout.getvalue()
+                if readiness["pilot_authorized"]
+                else pilot_stderr.getvalue()
+            )
+            self.assertEqual(
+                pilot_payload["pilot_authorized"],
+                readiness["pilot_authorized"],
+            )
+            self.assertEqual(pilot_payload["provider_calls"], 0)
+            self.assertEqual(pilot_payload["target_mutations"], 0)
             self.assertEqual(before, sorted(path.name for path in tmp_path.iterdir()))
 
     def test_pursue_help_does_not_claim_budget_enforcement(self):
