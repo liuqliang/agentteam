@@ -1,5 +1,6 @@
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -7,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import agentteam_runtime.agentteam as agentteam_module
+import agentteam_runtime.experiment_readiness as readiness_module
 from agentteam_runtime.experiment_readiness import (
     ExperimentReadinessError,
     P0_CAPABILITY_IDS,
@@ -72,6 +74,37 @@ def _manifest(readiness_sha256):
 
 
 class ExperimentReadinessTests(unittest.TestCase):
+    def test_git_installed_release_resolves_local_source_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_repo = tmp_path / "source"
+            release_root = tmp_path / "release"
+            module_path = (
+                release_root
+                / "experiments"
+                / "native_agentteam_runtime"
+                / "m0_runtime"
+                / "agentteam_runtime"
+                / "experiment_readiness.py"
+            )
+            source_repo.mkdir()
+            subprocess.run(
+                ["git", "init", "-q", str(source_repo)],
+                check=True,
+            )
+            _write_json(
+                release_root / "manifest.json",
+                {
+                    "install_method": "git_ref",
+                    "source_repo": str(source_repo),
+                },
+            )
+
+            with patch.object(readiness_module, "__file__", str(module_path)):
+                resolved = readiness_module._phase1_source_checkout()
+
+            self.assertEqual(resolved, source_repo.resolve())
+
     def test_packaged_readiness_record_is_truthful_and_complete(self):
         summary = build_p0_readiness_summary()
 
