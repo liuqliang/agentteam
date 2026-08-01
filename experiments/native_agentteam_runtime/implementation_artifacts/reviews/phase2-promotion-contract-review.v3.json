@@ -1,8 +1,8 @@
 {
   "schema_version": "phase2_contract_review.v1",
-  "decision": "pending",
-  "reviewer": "pending-operator-liuql",
-  "reviewed_at": "2026-08-01T01:33:51Z",
+  "decision": "approved",
+  "reviewer": "liuql",
+  "reviewed_at": "2026-08-01T02:22:14Z",
   "git_object_format": "sha1",
   "preflight_release_id": "phase2-promotion-v6-b94de47",
   "preflight_release_source_commit": "b94de47a783ad052f5442521dbe1b31f8fede1a3",
@@ -33,8 +33,6 @@
     "Resolved late authority generation versus frozen taskpack immutability by snapshotting project-work-root authority during materialization and covering snapshots with the frozen digest.",
     "Separated governance commits from evaluated implementation by binding the candidate release and live protocol to b94de47 while requiring that commit to remain an ancestor of the tracked promotion contract."
   ],
-  "remaining_escalations": [
-    "The operator must explicitly approve the repaired v3 contract before materialization or freezing."
-  ],
-  "notes": "Supersedes review.v2 only after explicit operator approval. This pending record does not authorize taskpack freezing, P2-09 live providers, main merge, or push."
+  "remaining_escalations": [],
+  "notes": "Supersedes review.v2 for the repaired v6 candidate. It approves materializing and freezing P2-08 through P2-10 but does not provide the separate epoch-bound P2-09 live-provider authorization and does not authorize main merge or push."
 }
