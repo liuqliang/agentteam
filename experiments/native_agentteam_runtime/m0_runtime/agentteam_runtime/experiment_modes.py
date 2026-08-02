@@ -13,6 +13,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .experiment_contract import (
     acquire_controller_lease,
@@ -1009,6 +1010,7 @@ class AgentTeamDirectModeAdapter:
             experiment_runtime_context=(
                 _experiment_runtime_context(request)
             ),
+            inherit_launcher_selection=False,
         )
         result = _normalize_runtime_launcher_output(
             launched,
@@ -1142,6 +1144,7 @@ class AgentTeamFullModeAdapter:
             experiment_runtime_context=(
                 _experiment_runtime_context(request)
             ),
+            inherit_launcher_selection=False,
         )
         result = _normalize_runtime_launcher_output(
             launched,
@@ -1495,7 +1498,48 @@ def _validate_sandbox_configuration(configuration):
         raise ExperimentModeError(
             "experiment sandbox configuration is invalid"
         )
+    _validate_local_proxy_environment(configuration["environment"])
     return configuration
+
+
+def _validate_local_proxy_environment(environment):
+    if not isinstance(environment, dict):
+        raise ExperimentModeError(
+            "experiment sandbox environment is invalid"
+        )
+    proxy_names = {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    }
+    for name in sorted(proxy_names.intersection(environment)):
+        value = environment[name]
+        if not isinstance(value, str):
+            raise ExperimentModeError(
+                "experiment provider proxy must be a string"
+            )
+        parsed = urlsplit(value)
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname not in {"127.0.0.1", "::1"}
+            or port is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ExperimentModeError(
+                "experiment provider proxy must be a credential-free "
+                "loopback HTTP URL"
+            )
 
 
 def _repository_identity(protocol):

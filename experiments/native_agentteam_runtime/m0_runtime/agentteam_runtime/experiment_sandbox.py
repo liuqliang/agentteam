@@ -65,6 +65,19 @@ _NETWORK_POLICIES = {"disabled", "provider_access"}
 _TRUSTED_ENV_PATH = Path("/usr/bin/env")
 _TRUSTED_GIT_PATH = Path("/usr/bin/git")
 _ENVIRONMENT_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_LOWERCASE_PROXY_ENVIRONMENT_NAMES = {
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+}
+_PROXY_ENVIRONMENT_NAMES = {
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    *_LOWERCASE_PROXY_ENVIRONMENT_NAMES,
+}
 _DEFAULT_ENVIRONMENT = {
     "HOME": "/tmp/agentteam-home",
     "LANG": "C.UTF-8",
@@ -1291,6 +1304,9 @@ def _prepare_provider_launch(
         if include_credentials
         else _normalize_environment(None)
     )
+    if not allow_network:
+        for name in _PROXY_ENVIRONMENT_NAMES:
+            launch_environment.pop(name, None)
     arguments.append("--clearenv")
     for name, value in launch_environment.items():
         arguments.extend(["--setenv", name, value])
@@ -4110,7 +4126,10 @@ def _normalize_environment(environment):
         value = values[name]
         if (
             not isinstance(name, str)
-            or _ENVIRONMENT_NAME.fullmatch(name) is None
+            or (
+                _ENVIRONMENT_NAME.fullmatch(name) is None
+                and name not in _LOWERCASE_PROXY_ENVIRONMENT_NAMES
+            )
             or not isinstance(value, str)
             or "\x00" in value
             or len(value) > 4096

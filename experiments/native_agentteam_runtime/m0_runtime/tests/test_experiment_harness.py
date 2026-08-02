@@ -3196,6 +3196,20 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
                 dispatch = scheduler.dispatch_ready()
 
             self.assertEqual(dispatch["dispatch_count"], 1)
+            self.assertEqual(
+                scheduler.state["experiment_run_id"],
+                "RUN-MODE-SCHEDULER",
+            )
+            self.assertEqual(
+                scheduler.state["experiment_run_manifest_sha256"],
+                "3" * 64,
+            )
+            self.assertEqual(
+                scheduler.state["experiment_target_path_sha256"],
+                hashlib.sha256(
+                    str(authority_root.resolve()).encode("utf-8")
+                ).hexdigest(),
+            )
             inflight = scheduler.state["inflight_attempts"][0]
             workspace = Path(inflight["worktree_path"])
             integration_workspace = Path(
@@ -4690,6 +4704,60 @@ class ExperimentOperatorActionLedgerTests(unittest.TestCase):
                 )["scheduler_status"],
                 "stopped",
             )
+
+    def test_scheduler_runtime_context_publishes_stoppable_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root / "controller")
+            manifest = self._manifest(
+                "agentteam_direct",
+                "scheduler-context-stop-binding",
+            )
+            run_dir = root / "run"
+            run_dir.mkdir()
+            scheduler = TwoPhaseFileScheduler.__new__(
+                TwoPhaseFileScheduler
+            )
+            scheduler.output_dir = run_dir
+            scheduler.experiment_runtime_context = {
+                "experiment_run_id": manifest["experiment_run_id"],
+                "run_manifest_sha256": canonical_json_sha256(manifest),
+            }
+            scheduler.state = {"scheduler_status": "running"}
+            scheduler._bind_experiment_runtime_context()
+            scheduler.state[
+                "experiment_controller_reference"
+            ] = controller.reference
+            state_dir = run_dir / "state"
+            state_dir.mkdir()
+            (state_dir / "two_phase_scheduler_state.json").write_text(
+                json.dumps(scheduler.state, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            result = stop_experiment_run(
+                controller,
+                protocol=_protocol(),
+                run_manifest=manifest,
+                run_dir=run_dir,
+                action_request_id="STOP-CONTEXT-BINDING-001",
+                requested_at="2026-07-27T00:00:00Z",
+            )
+
+            self.assertEqual(result["stop_status"], "stopped")
+            self.assertEqual(
+                scheduler.state["experiment_target_path_sha256"],
+                hashlib.sha256(
+                    str(run_dir.resolve()).encode("utf-8")
+                ).hexdigest(),
+            )
+
+            scheduler.state["experiment_run_id"] = "RUN-CHANGED"
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "binding changed",
+            ):
+                scheduler._bind_experiment_runtime_context()
 
     def test_gateway_retry_reuses_authoritative_input_after_runtime_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7273,6 +7341,24 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 launches[0]["run_root"],
                 str(fixture["run_dir"] / "agentteam-runtime"),
             )
+            self.assertFalse(
+                launches[0]["inherit_launcher_selection"]
+            )
+            import agentteam_runtime.agentteam as agentteam_module
+
+            with patch.dict(
+                os.environ,
+                {"AGENTTEAM_LAUNCHER_SELECTION": "outer-selection"},
+            ):
+                nested_environment = (
+                    agentteam_module._runtime_subprocess_env(
+                        inherit_launcher_selection=False,
+                    )
+                )
+            self.assertNotIn(
+                "AGENTTEAM_LAUNCHER_SELECTION",
+                nested_environment,
+            )
             launched_taskpack = Path(
                 launches[0]["frozen_taskpack_dir"]
             )
@@ -7665,6 +7751,39 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 and any(execution_root.glob("*.started.json"))
             )
 
+    def test_mode_accepts_only_credential_free_loopback_proxy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            accepted = self._fixture(root / "accepted", "single_codex")
+            accepted["sandbox_configuration"]["environment"].update(
+                {
+                    "HTTPS_PROXY": "http://127.0.0.1:17890",
+                    "https_proxy": "http://127.0.0.1:17890",
+                    "NO_PROXY": "127.0.0.1,localhost,::1",
+                }
+            )
+            self._controller(accepted)
+
+            for index, proxy in enumerate(
+                (
+                    "http://proxy.example:17890",
+                    "http://user:password@127.0.0.1:17890",
+                    "http://127.0.0.1:not-a-port",
+                )
+            ):
+                rejected = self._fixture(
+                    root / f"rejected-{index}",
+                    "single_codex",
+                )
+                rejected["sandbox_configuration"]["environment"][
+                    "HTTPS_PROXY"
+                ] = proxy
+                with self.assertRaisesRegex(
+                    ExperimentModeError,
+                    "credential-free loopback",
+                ):
+                    self._controller(rejected)
+
     def test_full_mode_authors_without_direct_taskpack_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = self._fixture(tmp, "agentteam_full")
@@ -7747,6 +7866,9 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             self.assertEqual(
                 calls["launch"][0]["run_root"],
                 str(fixture["run_dir"] / "agentteam-runtime"),
+            )
+            self.assertFalse(
+                calls["launch"][0]["inherit_launcher_selection"]
             )
             self.assertNotEqual(
                 calls["author"][0]["project_root"],
@@ -9930,7 +10052,12 @@ class ExperimentSandboxTests(unittest.TestCase):
                     }
                     for item in base["credential_views"]
                 ],
-                environment=base["environment"],
+                environment={
+                    **base["environment"],
+                    "HTTP_PROXY": "http://127.0.0.1:17890",
+                    "http_proxy": "http://127.0.0.1:17890",
+                    "NO_PROXY": "127.0.0.1,localhost,::1",
+                },
                 network_policy="provider_access",
                 repository_identity=fixture["repository_identity"],
                 forbidden_paths=[fixture["canary"]],
@@ -9956,6 +10083,11 @@ class ExperimentSandboxTests(unittest.TestCase):
                 provider_command.index("--unshare-all"),
                 provider_command.index("--share-net"),
             )
+            self.assertEqual(
+                provider.environment["HTTP_PROXY"],
+                "http://127.0.0.1:17890",
+            )
+            self.assertIn("http://127.0.0.1:17890", provider_command)
 
             probe = sandbox_module._prepare_probe_provider_launch(
                 descriptor,
@@ -9967,6 +10099,8 @@ class ExperimentSandboxTests(unittest.TestCase):
                 cwd=fixture["repository"],
             )
             self.assertNotIn("--share-net", probe.command)
+            self.assertNotIn("HTTP_PROXY", probe.environment)
+            self.assertNotIn("http_proxy", probe.environment)
 
             evaluator = Path(tmp) / "trusted-evaluator.py"
             evaluator.write_text(

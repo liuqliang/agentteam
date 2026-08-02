@@ -12945,8 +12945,11 @@ def _prepare_bound_implementation_run(
     frozen_taskpack_dir,
     run_paths,
     work_root,
+    inherit_launcher_selection=True,
 ):
     """Publish or validate the launcher-selected pair before any runtime child."""
+    if not inherit_launcher_selection:
+        return None
     selection = _launcher_runtime_selection()
     if not selection:
         return None
@@ -13127,6 +13130,7 @@ def _run_frozen_taskpack(
     author_lifecycle=None,
     trusted_project_root=None,
     experiment_runtime_context=None,
+    inherit_launcher_selection=True,
 ):
     loaded_taskpack = load_taskpack(frozen_taskpack_dir)["taskpack"]
     controller_only = (
@@ -13159,6 +13163,7 @@ def _run_frozen_taskpack(
         frozen_taskpack_dir=Path(frozen_taskpack_dir).resolve(),
         run_paths=run_paths,
         work_root=inferred_work_root,
+        inherit_launcher_selection=inherit_launcher_selection,
     )
     if author_lifecycle:
         _publish_author_lifecycle_bootstrap(
@@ -13238,7 +13243,9 @@ def _run_frozen_taskpack(
     if feishu_signing_secret_env:
         runtime_args.extend(["--feishu-signing-secret-env", feishu_signing_secret_env])
     command = [sys.executable, "-m", "agentteam_runtime.cli", *runtime_args]
-    env = _runtime_subprocess_env()
+    env = _runtime_subprocess_env(
+        inherit_launcher_selection=inherit_launcher_selection,
+    )
     completed = _run_runtime_command_with_progress(
         command,
         env=env,
@@ -13630,9 +13637,15 @@ def _read_json_progress_safe(path):
         return {}
 
 
-def _runtime_subprocess_env():
+def _runtime_subprocess_env(*, inherit_launcher_selection=True):
     env = os.environ.copy()
-    selection = _launcher_runtime_selection()
+    selection = (
+        _launcher_runtime_selection()
+        if inherit_launcher_selection
+        else None
+    )
+    if not inherit_launcher_selection:
+        env.pop(_LAUNCHER_SELECTION_ENV, None)
     runtime_root = str(
         Path(selection["release"]["runtime_root"]).resolve()
         if selection

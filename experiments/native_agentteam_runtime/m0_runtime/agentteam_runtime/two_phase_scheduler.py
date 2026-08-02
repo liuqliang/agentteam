@@ -239,6 +239,7 @@ class TwoPhaseFileScheduler:
         self.events_path = self.output_dir / "events.jsonl"
         self.run_id = "RUN-TWO-PHASE-SCHEDULER"
         self.state = self._load_or_create_state()
+        self._bind_experiment_runtime_context()
         self._bind_experiment_controller()
 
     def dispatch_ready(self):
@@ -2882,6 +2883,27 @@ class TwoPhaseFileScheduler:
         self.state["experiment_controller_required"] = True
         self._record_experiment_controller_snapshot()
         self._write_state()
+
+    def _bind_experiment_runtime_context(self):
+        if self.experiment_runtime_context is None:
+            return
+        context = self.experiment_runtime_context
+        expected = {
+            "experiment_run_id": context["experiment_run_id"],
+            "experiment_run_manifest_sha256": context[
+                "run_manifest_sha256"
+            ],
+            "experiment_target_path_sha256": hashlib.sha256(
+                str(self.output_dir.resolve()).encode("utf-8")
+            ).hexdigest(),
+        }
+        for key, value in expected.items():
+            persisted = self.state.get(key)
+            if persisted is not None and persisted != value:
+                raise ExperimentControllerIntegrityError(
+                    "scheduler experiment runtime binding changed on restart"
+                )
+            self.state[key] = value
 
     def _write_state(self):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
