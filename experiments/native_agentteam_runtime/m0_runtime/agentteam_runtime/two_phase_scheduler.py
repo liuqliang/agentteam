@@ -768,7 +768,30 @@ class TwoPhaseFileScheduler:
             runtime_input_artifact_producers,
             worktree_path,
         )
+        role_context_fields = _role_context_fields(
+            agent_pool,
+            agent,
+            step_dir,
+            attempt_id,
+            project_root=self.project_root,
+        )
+        repo_context_fields = _repo_context_fields(
+            self.project_root,
+            self.output_dir,
+            task,
+            agent,
+            attempt_id,
+        )
+        provider_io_fields = {}
         if self.experiment_runtime_context is not None:
+            provider_io_fields = self._stage_experiment_provider_io(
+                worktree_path,
+                attempt_id,
+                {
+                    **role_context_fields,
+                    **repo_context_fields,
+                },
+            )
             invocation_context = self._register_experiment_attempt_launch(
                 invocation_context,
                 worktree_path=worktree_path,
@@ -812,20 +835,9 @@ class TwoPhaseFileScheduler:
                 **_operator_guidance_fields(task),
                 **_permission_grant_fields(task),
                 **_role_prompt_fields(agent_pool, agent, task),
-                **_role_context_fields(
-                    agent_pool,
-                    agent,
-                    step_dir,
-                    attempt_id,
-                    project_root=self.project_root,
-                ),
-                **_repo_context_fields(
-                    self.project_root,
-                    self.output_dir,
-                    task,
-                    agent,
-                    attempt_id,
-                ),
+                **role_context_fields,
+                **repo_context_fields,
+                **provider_io_fields,
             },
         }
         _write_dispatch_authority(step_dir, message)
@@ -1707,6 +1719,48 @@ class TwoPhaseFileScheduler:
             }
         )
         return updated
+
+    def _stage_experiment_provider_io(
+        self,
+        worktree_path,
+        attempt_id,
+        context_fields,
+    ):
+        workspace = Path(worktree_path).resolve()
+        git_dir = workspace / ".git"
+        if git_dir.is_symlink() or not git_dir.is_dir():
+            raise ValueError(
+                "experiment provider workspace requires a standalone .git directory"
+            )
+        attempt_key = hashlib.sha256(
+            attempt_id.encode("utf-8")
+        ).hexdigest()[:16]
+        provider_io_dir = (
+            git_dir / "agentteam-provider-io" / attempt_key
+        )
+        provider_io_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
+
+        staged = {}
+        for field, filename in (
+            ("role_context_path", "role-context.json"),
+            ("repo_context_path", "repo-context.json"),
+        ):
+            source_value = context_fields.get(field)
+            if not source_value:
+                continue
+            source = Path(source_value)
+            if source.is_symlink() or not source.is_file():
+                raise ValueError(
+                    f"experiment provider {field} is not a regular file"
+                )
+            destination = provider_io_dir / filename
+            destination.write_bytes(source.read_bytes())
+            staged[field] = str(destination)
+
+        result_path = provider_io_dir / "result.json"
+        result_path.write_bytes(b"")
+        staged["provider_result_path"] = str(result_path)
+        return staged
 
     def _record_integration_baseline_result(self, integration, head_sha):
         self.state["integration_baseline"] = {

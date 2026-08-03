@@ -9593,6 +9593,7 @@ def _run_phase2_candidate_pilot_guard(
     )
     env = dict(os.environ)
     env["PYTHONPATH"] = str(runtime_root)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     completed = subprocess.run(
         [
             sys.executable,
@@ -13652,6 +13653,7 @@ def _read_json_progress_safe(path):
 
 def _runtime_subprocess_env(*, inherit_launcher_selection=True):
     env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     selection = (
         _launcher_runtime_selection()
         if inherit_launcher_selection

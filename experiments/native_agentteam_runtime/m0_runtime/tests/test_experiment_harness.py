@@ -3260,6 +3260,24 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
                 inbox.read_text(encoding="utf-8").splitlines()[0]
             )["payload"]
             self.assertTrue(payload["experiment_sandbox_required"])
+            provider_io_root = (
+                workspace / ".git" / "agentteam-provider-io"
+            ).resolve()
+            repo_context_path = Path(payload["repo_context_path"])
+            provider_result_path = Path(payload["provider_result_path"])
+            self.assertTrue(repo_context_path.is_file())
+            self.assertTrue(provider_result_path.is_file())
+            self.assertEqual(provider_result_path.read_bytes(), b"")
+            self.assertTrue(
+                repo_context_path.resolve().is_relative_to(provider_io_root)
+            )
+            self.assertTrue(
+                provider_result_path.resolve().is_relative_to(provider_io_root)
+            )
+            self.assertEqual(
+                _git(workspace, "status", "--porcelain").stdout,
+                "",
+            )
             worker_sandbox = load_provider_sandbox_reference(
                 payload["experiment_sandbox_reference"],
                 authority_root,
@@ -3268,6 +3286,12 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
                 worker_sandbox["network_policy"],
                 "provider_access",
             )
+            prepared_launch = prepare_provider_launch(
+                worker_sandbox,
+                ["/bin/true"],
+                cwd=workspace,
+            )
+            prepared_launch.revalidate_mutable_sources()
             self.assertEqual(
                 payload["model"],
                 model_policy["model"],
@@ -7358,6 +7382,10 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             self.assertNotIn(
                 "AGENTTEAM_LAUNCHER_SELECTION",
                 nested_environment,
+            )
+            self.assertEqual(
+                nested_environment["PYTHONDONTWRITEBYTECODE"],
+                "1",
             )
             launched_taskpack = Path(
                 launches[0]["frozen_taskpack_dir"]

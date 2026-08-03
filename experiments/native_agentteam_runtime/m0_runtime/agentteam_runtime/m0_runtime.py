@@ -343,11 +343,25 @@ class CodexRuntimeAdapter:
             else None
         )
         temporary_result_dir = None
-        result_path = self._result_path(
-            runtime_worktree_path,
-            message["payload"]["attempt_id"],
-            using_fallback=using_fallback,
-        )
+        try:
+            result_path = self._provider_result_path(
+                message["payload"],
+                runtime_worktree_path,
+            ) or self._result_path(
+                runtime_worktree_path,
+                message["payload"]["attempt_id"],
+                using_fallback=using_fallback,
+            )
+        except ValueError as exc:
+            return {
+                "result_status": "failed",
+                "changed_files": [],
+                "output": {
+                    "adapter": "codex",
+                    "error": "invalid_provider_result_path",
+                    "reason": str(exc),
+                },
+            }
         if result_path is None:
             temporary_result_dir = tempfile.TemporaryDirectory()
             result_path = (
@@ -556,7 +570,7 @@ class CodexRuntimeAdapter:
                     execution,
                 )
 
-            if not result_path.exists():
+            if not result_path.exists() or result_path.stat().st_size == 0:
                 return finish(
                     {
                         "result_status": "failed",
@@ -646,6 +660,36 @@ class CodexRuntimeAdapter:
         if using_fallback:
             return None
         return Path(runtime_worktree_path) / ".agentteam" / f"codex_result_{attempt_id}.json"
+
+    def _provider_result_path(self, payload, runtime_worktree_path):
+        value = payload.get("provider_result_path")
+        if not value:
+            return None
+        workspace = Path(runtime_worktree_path).resolve()
+        git_dir = workspace / ".git"
+        if git_dir.is_symlink() or not git_dir.is_dir():
+            raise ValueError("provider result requires a standalone .git directory")
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            raise ValueError("provider result path must be absolute")
+        if candidate.is_symlink() or not candidate.is_file():
+            raise ValueError("provider result must be a precreated regular file")
+        resolved = candidate.resolve()
+        provider_root = (git_dir / "agentteam-provider-io").resolve()
+        try:
+            resolved.relative_to(provider_root)
+        except ValueError as exc:
+            raise ValueError(
+                "provider result must be inside .git/agentteam-provider-io"
+            ) from exc
+        if (
+            resolved.name != "result.json"
+            or resolved.parent.parent != provider_root
+        ):
+            raise ValueError("provider result path has an invalid layout")
+        if resolved.stat().st_nlink != 1:
+            raise ValueError("provider result file must not be hard linked")
+        return resolved
 
     def _fallback_modification_result(self, runtime_worktree_path, status_before):
         if status_before is None:

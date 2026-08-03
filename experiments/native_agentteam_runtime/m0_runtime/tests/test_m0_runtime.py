@@ -12283,6 +12283,98 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(result["validation_status"], "accepted")
             self.assertTrue((worktree_path / "generated" / "codex_result.json").exists())
 
+    def test_codex_runtime_adapter_uses_staged_provider_result_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            fake_codex = tmp_path / "fake_codex.py"
+            _init_git_repo(repo)
+            _write_fake_codex(
+                fake_codex,
+                changed_file="generated/provider_result.json",
+            )
+            provider_result = (
+                repo
+                / ".git"
+                / "agentteam-provider-io"
+                / "attempt"
+                / "result.json"
+            )
+            provider_result.parent.mkdir(parents=True)
+            provider_result.write_bytes(b"")
+            message = {
+                "payload": {
+                    "task_id": "TASK-001",
+                    "attempt_id": "ATTEMPT-001",
+                    "objective": "Use provider-visible result I/O.",
+                    "read_scope": ["."],
+                    "write_scope": ["generated/"],
+                    "provider_result_path": str(provider_result),
+                }
+            }
+
+            result = CodexRuntimeAdapter(
+                command=[sys.executable, str(fake_codex)]
+            ).run(message, worktree_path=repo)
+
+            self.assertEqual(result["result_status"], "completed")
+            self.assertGreater(provider_result.stat().st_size, 0)
+            self.assertEqual(
+                json.loads(provider_result.read_text(encoding="utf-8"))[
+                    "changed_files"
+                ],
+                ["generated/provider_result.json"],
+            )
+
+    def test_codex_runtime_adapter_rejects_unsafe_provider_result_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_git_repo(repo)
+            provider_root = repo / ".git" / "agentteam-provider-io"
+            provider_root.mkdir()
+            outside = tmp_path / "outside.json"
+            outside.write_bytes(b"")
+            missing = provider_root / "missing.json"
+            symlink = provider_root / "symlink.json"
+            symlink.symlink_to(outside)
+            invalid_layout = provider_root / "unexpected.json"
+            invalid_layout.write_bytes(b"")
+            hardlink = provider_root / "attempt" / "result.json"
+            hardlink.parent.mkdir()
+            hardlink.hardlink_to(outside)
+
+            for candidate in (
+                outside,
+                missing,
+                symlink,
+                invalid_layout,
+                hardlink,
+                Path("relative-result.json"),
+            ):
+                with self.subTest(candidate=candidate.name):
+                    result = CodexRuntimeAdapter(
+                        command=["codex", "exec"]
+                    ).run(
+                        {
+                            "payload": {
+                                "task_id": "TASK-001",
+                                "attempt_id": "ATTEMPT-001",
+                                "objective": "Reject unsafe provider I/O.",
+                                "read_scope": ["."],
+                                "write_scope": [],
+                                "provider_result_path": str(candidate),
+                            }
+                        },
+                        worktree_path=repo,
+                    )
+
+                    self.assertEqual(result["result_status"], "failed")
+                    self.assertEqual(
+                        result["output"]["error"],
+                        "invalid_provider_result_path",
+                    )
+
     def test_codex_runtime_adapter_collects_token_usage_from_json_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
