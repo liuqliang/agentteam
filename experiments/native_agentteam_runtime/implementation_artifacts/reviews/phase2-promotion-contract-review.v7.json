@@ -1,8 +1,8 @@
 {
   "schema_version": "phase2_contract_review.v1",
-  "decision": "pending",
-  "reviewer": "pending-operator",
-  "reviewed_at": "2026-08-03T09:40:00Z",
+  "decision": "approved",
+  "reviewer": "liuql",
+  "reviewed_at": "2026-08-03T10:02:20Z",
   "git_object_format": "sha1",
   "preflight_release_id": "phase2-promotion-v10-cbd4153",
   "preflight_release_source_commit": "cbd4153b40376b93af092dcaa27307ccc31a5084",
@@ -38,8 +38,6 @@
     "Prevented candidate-release bytecode drift by disabling Python bytecode writes in nested runtime and pilot-guard subprocesses.",
     "Preserved the failed v9 run as forensic evidence and requires a fresh v10 taskpack, run identity, epoch, and P2-09 authorization."
   ],
-  "remaining_escalations": [
-    "Operator must review and approve this exact v10 contract before taskpack materialization or any P2-09 provider launch."
-  ],
-  "notes": "Proposed v10 repair contract. Pending approval; it does not authorize taskpack materialization, P2-09 provider access, main merge, or push."
+  "remaining_escalations": [],
+  "notes": "Approved v10 repair contract. This approval authorizes taskpack materialization and freezing only; it does not authorize P2-09 provider access, main merge, or push."
 }
