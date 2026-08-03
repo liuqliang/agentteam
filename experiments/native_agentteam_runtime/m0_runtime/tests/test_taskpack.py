@@ -2566,6 +2566,22 @@ class TaskpackTests(unittest.TestCase):
                 summary["status"],
                 "awaiting_post_backlog_gates",
             )
+            epoch = json.loads(
+                (
+                    tmp_path
+                    / "runs"
+                    / loaded["taskpack"]["taskpack_id"]
+                    / "state"
+                    / "post_backlog_gates"
+                    / "epochs"
+                    / "1"
+                    / "epoch.v1.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                epoch["integration_head_sha"],
+                release_head,
+            )
 
     def test_controller_only_authority_must_exist_before_freeze(self):
         with tempfile.TemporaryDirectory() as tmp:

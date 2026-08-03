@@ -13136,6 +13136,19 @@ def _run_frozen_taskpack(
     controller_only = (
         loaded_taskpack.get("execution_mode") == "controller_only"
     )
+    if controller_only and initial_integration_base_ref is None:
+        context = loaded_taskpack.get("context")
+        if not isinstance(context, dict) or not context.get(
+            "runtime_release_source_commit"
+        ):
+            raise AgentTeamCliError(
+                "controller-only taskpack requires a runtime release source "
+                "commit for its initial integration baseline",
+                taskpack_id=loaded_taskpack.get("taskpack_id"),
+            )
+        initial_integration_base_ref = context[
+            "runtime_release_source_commit"
+        ]
     post_backlog_gates = loaded_taskpack.get("post_backlog_gates")
     if (
         not controller_only
