@@ -437,6 +437,29 @@ class TwoPhaseFileScheduler:
                     }:
                         remaining.append(inflight)
                         continue
+                    if (
+                        reconciliation["reconciliation_status"]
+                        in {"terminal_available", "recovered"}
+                        and not lease_expired
+                        and not self.resume_interrupted_experiment
+                        and not inflight.get(
+                            "terminal_without_outbox_observed"
+                        )
+                    ):
+                        # The invocation terminal is committed before the
+                        # mailbox worker publishes its richer runtime result.
+                        # Give that normal publication one scheduler tick so
+                        # reconciliation cannot discard semantic evidence.
+                        inflight["terminal_without_outbox_observed"] = {
+                            "terminal_path": reconciliation.get(
+                                "terminal_path"
+                            ),
+                            "reconciliation_status": reconciliation.get(
+                                "reconciliation_status"
+                            ),
+                        }
+                        remaining.append(inflight)
+                        continue
                     result = _runtime_result_from_reconciliation(
                         inflight,
                         reconciliation,
