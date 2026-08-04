@@ -1,8 +1,8 @@
 {
   "schema_version": "phase2_contract_review.v1",
-  "decision": "pending",
-  "reviewer": "pending-operator",
-  "reviewed_at": "2026-08-03T14:50:00Z",
+  "decision": "approved",
+  "reviewer": "liuql",
+  "reviewed_at": "2026-08-04T01:15:41Z",
   "git_object_format": "sha1",
   "preflight_release_id": "phase2-promotion-v11-aed3218",
   "preflight_release_source_commit": "aed321842dcc40147f5c739c7d1778f6752f982b",
@@ -37,8 +37,6 @@
     "Regenerated deterministic calibration evidence against aed3218 instead of reusing v10 runtime identity.",
     "Preserved the failed v10 run as immutable forensic evidence and requires a fresh v11 taskpack, run identity, epoch, and P2-09 authorization."
   ],
-  "remaining_escalations": [
-    "Operator must review and approve this exact v11 contract before taskpack materialization or any P2-09 provider launch."
-  ],
-  "notes": "Proposed v11 repair contract. Pending approval; it does not authorize taskpack materialization, P2-09 provider access, main merge, or push."
+  "remaining_escalations": [],
+  "notes": "Approved v11 repair contract. This approval authorizes taskpack materialization and freezing only; it does not authorize P2-09 provider access, main merge, or push."
 }
