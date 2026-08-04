@@ -335,6 +335,27 @@
         }
       ]
     },
+    "capability_evidence_registry_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resolve_from_registry"
+      ],
+      "properties": {
+        "resolve_from_registry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "registry_version"
+          ],
+          "properties": {
+            "registry_version": {
+              "const": "phase2_readiness_capability_registry.v1"
+            }
+          }
+        }
+      }
+    },
     "controller_action_input": {
       "type": "object",
       "additionalProperties": false,
@@ -365,6 +386,21 @@
             },
             "direct_taskpack": {
               "$ref": "#/$defs/controller_direct_taskpack_binding"
+            },
+            "capability_evidence": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/capability_evidence_registry_binding"
+                },
+                {
+                  "type": "object",
+                  "not": {
+                    "required": [
+                      "resolve_from_registry"
+                    ]
+                  }
+                }
+              ]
             }
           }
         }

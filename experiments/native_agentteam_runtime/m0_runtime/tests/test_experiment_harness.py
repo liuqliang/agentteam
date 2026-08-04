@@ -13788,6 +13788,12 @@ class Phase2GateTests(unittest.TestCase):
             "tests.test_experiment_harness."
             "ExperimentResultBundleTests."
             "test_projection_rebuild_preserves_all_outcomes_and_digests",
+            "tests.test_experiment_harness."
+            "TwoPhaseSchedulerExperimentBoundaryTests."
+            "test_provider_terminal_waits_one_tick_for_worker_outbox",
+            "tests.test_experiment_harness."
+            "TwoPhaseSchedulerExperimentBoundaryTests."
+            "test_terminal_without_worker_outbox_reconciles_on_second_tick",
         ),
     }
 

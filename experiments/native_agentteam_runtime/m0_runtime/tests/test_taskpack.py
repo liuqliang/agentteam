@@ -374,6 +374,10 @@ def _write_blueprint_approval(repo, blueprint, decision="approved", escalations=
         "blueprint_sha256": hashlib.sha256(blueprint_path.read_bytes()).hexdigest(),
         "review_schema_sha256": hashlib.sha256(review_schema_path.read_bytes()).hexdigest(),
     }
+    if "contract" in approval["digest_bindings"]:
+        record["contract_decisions_sha256"] = (
+            taskpack_module._sha256_json(blueprint.get("contract"))
+        )
     _write_json(repo / approval["record_path"], record)
     return record
 
@@ -2164,6 +2168,25 @@ class TaskpackTests(unittest.TestCase):
             schema_prefix = (
                 "experiments/native_agentteam_runtime/schemas/"
             )
+            for relative_path in (
+                experiment_gates_module
+                ._CAPABILITY_TEST_ARTIFACT_PATHS.values()
+            ):
+                artifact_path = repo / relative_path
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                artifact_path.write_text(
+                    "# fixed registry fixture\n",
+                    encoding="utf-8",
+                )
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add promotion candidate"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            candidate_commit = _git_head(repo)
             authority_root = repo / "authority"
             authority_root.mkdir()
             protocol_template = authority_root / "protocol.json"
@@ -2315,6 +2338,16 @@ class TaskpackTests(unittest.TestCase):
                 )
                 if gate["gate_id"] == "P2-08":
                     gate["controller_action_input"]["configuration"][
+                        "capability_evidence"
+                    ] = {
+                        "resolve_from_registry": {
+                            "registry_version": (
+                                experiment_gates_module
+                                .READINESS_CAPABILITY_REGISTRY_VERSION
+                            )
+                        }
+                    }
+                    gate["controller_action_input"]["configuration"][
                         "authority_artifacts"
                     ] = {
                         "protocol_template": late_bound_binding(
@@ -2342,6 +2375,9 @@ class TaskpackTests(unittest.TestCase):
                 "schema_version": "agentteam_taskpack_blueprint.v1",
                 "blueprint_id": "example-blueprint",
                 "source_plan": source_plan_relative,
+                "contract": {
+                    "candidate_source_commit": candidate_commit,
+                },
                 "taskpack": {
                     "taskpack_id": "example-blueprint",
                     "goal_kind": "implementation",
@@ -2359,6 +2395,7 @@ class TaskpackTests(unittest.TestCase):
                         "source_plan",
                         "blueprint",
                         "review_schema",
+                        "contract",
                     ],
                 },
                 "agents": [],
@@ -2462,6 +2499,14 @@ class TaskpackTests(unittest.TestCase):
                 "materialized_authority_bindings"
             ]
             self.assertEqual(len(materialization), 5)
+            registry_materialization = loaded["taskpack"]["context"][
+                "materialized_registry_bindings"
+            ]
+            self.assertEqual(len(registry_materialization), 1)
+            self.assertEqual(
+                registry_materialization[0]["candidate_source_commit"],
+                candidate_commit,
+            )
             frozen_dir = Path(frozen["frozen_taskpack_dir"])
             calibration_binding = loaded["taskpack"][
                 "post_backlog_gates"
@@ -2665,6 +2710,191 @@ class TaskpackTests(unittest.TestCase):
                     ),
                     project_root=repo,
                 )
+
+    def test_readiness_capability_evidence_resolves_from_fixed_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Test User"],
+                cwd=repo,
+                check=True,
+            )
+            artifact_contents = {
+                path: f"# {module}\n".encode("utf-8")
+                for module, path in (
+                    experiment_gates_module
+                    ._CAPABILITY_TEST_ARTIFACT_PATHS.items()
+                )
+            }
+            for relative_path, content in artifact_contents.items():
+                path = repo / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "add registry artifacts"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            candidate_commit = _git_head(repo)
+            declaration = {
+                "resolve_from_registry": {
+                    "registry_version": (
+                        experiment_gates_module
+                        .READINESS_CAPABILITY_REGISTRY_VERSION
+                    )
+                }
+            }
+            blueprint = {
+                "contract": {
+                    "candidate_source_commit": candidate_commit,
+                },
+                "post_backlog_gates": [
+                    {
+                        "gate_id": "P2-08",
+                        "controller_action_input": {
+                            "action": "promote_readiness",
+                            "configuration": {
+                                "capability_evidence": declaration,
+                            },
+                        },
+                    }
+                ],
+            }
+
+            resolved, authority_bindings, registry_bindings = (
+                taskpack_module._resolve_blueprint_controller_action_inputs(
+                    blueprint,
+                    project_root=repo,
+                )
+            )
+            evidence = resolved["post_backlog_gates"][0][
+                "controller_action_input"
+            ]["configuration"]["capability_evidence"]
+
+            self.assertEqual(authority_bindings, [])
+            self.assertEqual(len(registry_bindings), 1)
+            self.assertEqual(registry_bindings[0]["capability_count"], 7)
+            self.assertEqual(
+                registry_bindings[0]["test_count"],
+                sum(
+                    len(test_ids)
+                    for test_ids in (
+                        experiment_gates_module
+                        ._CAPABILITY_TEST_IDS.values()
+                    )
+                ),
+            )
+            self.assertEqual(
+                tuple(
+                    item["test_id"]
+                    for item in evidence[
+                        "machine_readable_result_bundle"
+                    ]
+                )[-2:],
+                (
+                    "tests.test_experiment_harness."
+                    "TwoPhaseSchedulerExperimentBoundaryTests."
+                    "test_provider_terminal_waits_one_tick_for_worker_outbox",
+                    "tests.test_experiment_harness."
+                    "TwoPhaseSchedulerExperimentBoundaryTests."
+                    "test_terminal_without_worker_outbox_reconciles_on_second_tick",
+                ),
+            )
+            for entries in evidence.values():
+                for entry in entries:
+                    self.assertEqual(
+                        entry["sha256"],
+                        hashlib.sha256(
+                            artifact_contents[entry["artifact_path"]]
+                        ).hexdigest(),
+                    )
+
+            for relative_path in artifact_contents:
+                (repo / relative_path).write_text(
+                    "dirty working tree\n",
+                    encoding="utf-8",
+                )
+            resolved_again, _, bindings_again = (
+                taskpack_module._resolve_blueprint_controller_action_inputs(
+                    blueprint,
+                    project_root=repo,
+                )
+            )
+            self.assertEqual(
+                resolved_again["post_backlog_gates"][0][
+                    "controller_action_input"
+                ]["configuration"]["capability_evidence"],
+                evidence,
+            )
+            self.assertEqual(bindings_again, registry_bindings)
+
+    def test_readiness_registry_binding_fails_closed(self):
+        blueprint = {
+            "contract": {"candidate_source_commit": "0" * 40},
+            "post_backlog_gates": [
+                {
+                    "gate_id": "P2-08",
+                    "controller_action_input": {
+                        "action": "promote_readiness",
+                        "configuration": {
+                            "capability_evidence": {
+                                "resolve_from_registry": {
+                                    "registry_version": "unknown.v1",
+                                }
+                            }
+                        },
+                    },
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "registry binding is invalid",
+            ):
+                taskpack_module._resolve_blueprint_controller_action_inputs(
+                    blueprint,
+                    project_root=Path(tmp),
+                )
+
+    def test_concrete_readiness_capability_evidence_is_unchanged(self):
+        concrete = {"existing": [{"test_id": "fixture"}]}
+        blueprint = {
+            "post_backlog_gates": [
+                {
+                    "gate_id": "P2-08",
+                    "controller_action_input": {
+                        "action": "promote_readiness",
+                        "configuration": {
+                            "capability_evidence": concrete,
+                        },
+                    },
+                }
+            ],
+        }
+        resolved, authority_bindings, registry_bindings = (
+            taskpack_module._resolve_blueprint_controller_action_inputs(
+                blueprint,
+                project_root=Path.cwd(),
+            )
+        )
+        self.assertEqual(
+            resolved["post_backlog_gates"][0]["controller_action_input"]
+            ["configuration"]["capability_evidence"],
+            concrete,
+        )
+        self.assertEqual(authority_bindings, [])
+        self.assertEqual(registry_bindings, [])
 
     def test_calibration_closure_rejects_source_snapshot_overlap(self):
         with tempfile.TemporaryDirectory() as tmp:

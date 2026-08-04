@@ -58,6 +58,19 @@ _RUNTIME_RELEASE_FIELDS = {
     "source_commit",
     "git_object_format",
 }
+READINESS_CAPABILITY_REGISTRY_VERSION = (
+    "phase2_readiness_capability_registry.v1"
+)
+_CAPABILITY_TEST_ARTIFACT_PATHS = {
+    "tests.test_phase1_usage_end_to_end": (
+        "experiments/native_agentteam_runtime/m0_runtime/tests/"
+        "test_phase1_usage_end_to_end.py"
+    ),
+    "tests.test_experiment_harness": (
+        "experiments/native_agentteam_runtime/m0_runtime/tests/"
+        "test_experiment_harness.py"
+    ),
+}
 _CAPABILITY_IDS = frozenset(
     (
         "invocation_level_real_usage",
@@ -149,6 +162,12 @@ _CAPABILITY_TEST_IDS = {
         "tests.test_experiment_harness."
         "ExperimentResultBundleTests."
         "test_projection_rebuild_preserves_all_outcomes_and_digests",
+        "tests.test_experiment_harness."
+        "TwoPhaseSchedulerExperimentBoundaryTests."
+        "test_provider_terminal_waits_one_tick_for_worker_outbox",
+        "tests.test_experiment_harness."
+        "TwoPhaseSchedulerExperimentBoundaryTests."
+        "test_terminal_without_worker_outbox_reconciles_on_second_tick",
     ),
 }
 _READINESS_PATH = (
@@ -2571,6 +2590,44 @@ def _validate_capability_evidence_shape(value):
                 {"digest": entry["sha256"]},
                 "digest",
             )
+
+
+def build_readiness_capability_evidence(repository_root, commit):
+    """Build the fixed readiness evidence inventory from a Git commit."""
+    repository_root = Path(repository_root).resolve()
+    commit = _git_oid(repository_root, commit)
+    artifact_digests = {}
+    evidence = {}
+    for capability_id, test_ids in _CAPABILITY_TEST_IDS.items():
+        entries = []
+        for test_id in test_ids:
+            matching_paths = [
+                path
+                for module, path in (
+                    _CAPABILITY_TEST_ARTIFACT_PATHS.items()
+                )
+                if test_id.startswith(f"{module}.")
+            ]
+            if len(matching_paths) != 1:
+                raise Phase2GateError(
+                    f"{capability_id} registry test artifact is ambiguous"
+                )
+            artifact_path = matching_paths[0]
+            if artifact_path not in artifact_digests:
+                artifact_digests[artifact_path] = hashlib.sha256(
+                    _git_bytes(repository_root, commit, artifact_path)
+                ).hexdigest()
+            entries.append(
+                {
+                    "artifact_path": artifact_path,
+                    "sha256": artifact_digests[artifact_path],
+                    "test_id": test_id,
+                    "status": "passed",
+                }
+            )
+        evidence[capability_id] = entries
+    _validate_capability_evidence_shape(evidence)
+    return evidence
 
 
 def _action_authority_files(

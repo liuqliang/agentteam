@@ -680,7 +680,7 @@ def materialize_taskpack_blueprint(
     source_blueprint = _read_json(blueprint_path)
     blueprint_relative_path = blueprint_path.relative_to(project_root).as_posix()
     _validate_taskpack_blueprint_schema(source_blueprint)
-    blueprint, authority_resolutions = (
+    blueprint, authority_resolutions, registry_resolutions = (
         _resolve_blueprint_controller_action_inputs(
             source_blueprint,
             project_root=project_root,
@@ -722,6 +722,11 @@ def materialize_taskpack_blueprint(
         )
         context["materialized_authority_bindings_sha256"] = (
             _sha256_json(authority_resolutions)
+        )
+    if registry_resolutions:
+        context["materialized_registry_bindings"] = registry_resolutions
+        context["materialized_registry_bindings_sha256"] = (
+            _sha256_json(registry_resolutions)
         )
     approval_diagnostics = []
     try:
@@ -1776,6 +1781,13 @@ def _generate_taskpack_blueprint(
         ]
         manifest["materialized_authority_bindings_sha256"] = context[
             "materialized_authority_bindings_sha256"
+        ]
+    if context.get("materialized_registry_bindings"):
+        manifest["materialized_registry_bindings"] = context[
+            "materialized_registry_bindings"
+        ]
+        manifest["materialized_registry_bindings_sha256"] = context[
+            "materialized_registry_bindings_sha256"
         ]
     return manifest
 
@@ -3244,7 +3256,7 @@ def _blueprint_taskpack_freeze_source(
     _require_contained_path(blueprint_path, project_root, "context.blueprint_path")
     source_blueprint = _read_json(blueprint_path)
     _validate_taskpack_blueprint_schema(source_blueprint)
-    blueprint, authority_resolutions = (
+    blueprint, authority_resolutions, registry_resolutions = (
         _resolve_blueprint_controller_action_inputs(
             source_blueprint,
             project_root=project_root,
@@ -3262,6 +3274,13 @@ def _blueprint_taskpack_freeze_source(
         )
         current_context["materialized_authority_bindings_sha256"] = (
             _sha256_json(authority_resolutions)
+        )
+    if registry_resolutions:
+        current_context["materialized_registry_bindings"] = (
+            registry_resolutions
+        )
+        current_context["materialized_registry_bindings_sha256"] = (
+            _sha256_json(registry_resolutions)
         )
     approval_context = _validate_taskpack_blueprint_approval(
         source_blueprint,
@@ -3994,6 +4013,7 @@ def _resolve_blueprint_controller_action_inputs(
 ):
     resolved_blueprint = copy.deepcopy(blueprint)
     resolutions = []
+    registry_resolutions = []
     roots = {}
 
     def authority_root(root_name):
@@ -4155,8 +4175,82 @@ def _resolve_blueprint_controller_action_inputs(
                 binding_name="direct_taskpack",
                 directory=True,
             )
+        capability_evidence = configuration.get("capability_evidence")
+        if (
+            isinstance(capability_evidence, dict)
+            and "resolve_from_registry" in capability_evidence
+        ):
+            if (
+                gate_id != "P2-08"
+                or not isinstance(action_input, dict)
+                or action_input.get("action") != "promote_readiness"
+                or set(capability_evidence) != {"resolve_from_registry"}
+            ):
+                raise TaskpackValidationError(
+                    "capability evidence registry binding is only valid "
+                    "for the P2-08 readiness promotion gate"
+                )
+            declaration = capability_evidence["resolve_from_registry"]
+            from .experiment_gates import (
+                Phase2GateError,
+                READINESS_CAPABILITY_REGISTRY_VERSION,
+                build_readiness_capability_evidence,
+            )
+
+            if (
+                not isinstance(declaration, dict)
+                or set(declaration) != {"registry_version"}
+                or declaration.get("registry_version")
+                != READINESS_CAPABILITY_REGISTRY_VERSION
+            ):
+                raise TaskpackValidationError(
+                    "capability evidence registry binding is invalid"
+                )
+            contract = resolved_blueprint.get("contract")
+            candidate_commit = (
+                contract.get("candidate_source_commit")
+                if isinstance(contract, dict)
+                else None
+            )
+            if not isinstance(candidate_commit, str) or not candidate_commit:
+                raise TaskpackValidationError(
+                    "contract.candidate_source_commit is required for "
+                    "capability evidence registry resolution"
+                )
+            try:
+                generated_evidence = build_readiness_capability_evidence(
+                    project_root,
+                    candidate_commit,
+                )
+            except Phase2GateError as exc:
+                raise TaskpackValidationError(
+                    "capability evidence registry resolution failed: "
+                    f"{exc}"
+                ) from exc
+            configuration["capability_evidence"] = generated_evidence
+            registry_resolutions.append(
+                {
+                    "gate_id": gate_id,
+                    "binding": "capability_evidence",
+                    "registry_version": (
+                        READINESS_CAPABILITY_REGISTRY_VERSION
+                    ),
+                    "candidate_source_commit": candidate_commit,
+                    "capability_count": len(generated_evidence),
+                    "test_count": sum(
+                        len(entries)
+                        for entries in generated_evidence.values()
+                    ),
+                    "evidence_sha256": _sha256_json(
+                        generated_evidence
+                    ),
+                }
+            )
     return resolved_blueprint, sorted(
         resolutions,
+        key=lambda item: (item["gate_id"], item["binding"]),
+    ), sorted(
+        registry_resolutions,
         key=lambda item: (item["gate_id"], item["binding"]),
     )
 
