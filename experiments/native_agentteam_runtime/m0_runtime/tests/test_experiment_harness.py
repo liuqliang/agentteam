@@ -2061,6 +2061,45 @@ class ExperimentProviderBudgetBoundaryTests(unittest.TestCase):
             second.finalize("completed", second_execution)
             self.assertEqual(controller.budget_state["total_tokens"], 16)
 
+    def test_model_invocation_retries_transient_provider_lane_contention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = self._controller(root)
+            calls = []
+            invocation = self._call(
+                root,
+                controller,
+                "TRANSIENT-LANE",
+                self._usage_stdout(2, 1),
+                calls,
+            )
+            original_admission = type(controller).prelaunch_admission
+            attempts = 0
+
+            def transient_lane(instance, *args, **kwargs):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise ExperimentProviderLaneBusy(
+                        "transient boundary observation"
+                    )
+                return original_admission(instance, *args, **kwargs)
+
+            with patch.object(
+                type(controller),
+                "prelaunch_admission",
+                transient_lane,
+            ):
+                execution = self._execute(invocation, root)
+            invocation.finalize("completed", execution)
+
+            self.assertEqual(attempts, 2)
+            self.assertEqual(
+                calls,
+                ["constructed", "prepared", "permitted", "cleaned"],
+            )
+            self.assertEqual(controller.budget_state["total_tokens"], 3)
+
     def test_provider_lane_inode_replacement_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3517,6 +3556,28 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
                     "output_type"
                 ],
                 "NoneType",
+            )
+
+    def test_waiting_collection_does_not_append_post_integration_checkpoints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(output_dir, monotonic)
+            scheduler = self._scheduler(root, controller, monotonic)
+            scheduler.dispatch_ready()
+            before = controller.snapshot()["checkpoint_sequence"]
+
+            first = scheduler.collect_ready_results()
+            second = scheduler.collect_ready_results()
+
+            self.assertEqual(first["collected_count"], 0)
+            self.assertEqual(second["collected_count"], 0)
+            self.assertEqual(first["inflight_count"], 1)
+            self.assertEqual(second["inflight_count"], 1)
+            self.assertEqual(
+                controller.snapshot()["checkpoint_sequence"],
+                before,
             )
 
     def test_direct_collect_rejects_unfinished_integration_recovery(self):

@@ -41,6 +41,8 @@ MAX_PROVIDER_STREAM_BYTES = 4 * 1024 * 1024
 HANDSHAKE_TIMEOUT_SECONDS = 30.0
 SYSTEMD_IDENTITY_TIMEOUT_SECONDS = 10.0
 PRELAUNCH_SOURCE_REVALIDATION_TIMEOUT_SECONDS = 120.0
+PROVIDER_LANE_ADMISSION_RETRY_SECONDS = 0.25
+PROVIDER_LANE_ADMISSION_RETRY_INTERVAL_SECONDS = 0.01
 PARENT_DEATH_SIGNAL = signal.SIGKILL
 CANONICAL_LIFECYCLE_EVENT_TYPES = frozenset(
     {
@@ -1190,6 +1192,7 @@ class ModelInvocationCall:
                 ExperimentControllerError,
                 ExperimentControllerIntegrityError,
                 ExperimentProviderAdmissionDenied,
+                ExperimentProviderLaneBusy,
                 discover_experiment_controller_reference,
                 load_experiment_controller,
                 validate_experiment_controller_reference,
@@ -1216,13 +1219,24 @@ class ModelInvocationCall:
                     )
                 return
             controller = load_experiment_controller(reference)
-            admission = controller.prelaunch_admission(
-                {
-                    "invocation_id": self.lifecycle.invocation_id,
-                    "lifecycle_root": str(self.lifecycle.authority_root),
-                    "run_id": self.lifecycle.context["run_id"],
-                }
+            invocation = {
+                "invocation_id": self.lifecycle.invocation_id,
+                "lifecycle_root": str(self.lifecycle.authority_root),
+                "run_id": self.lifecycle.context["run_id"],
+            }
+            retry_deadline = (
+                time.monotonic() + PROVIDER_LANE_ADMISSION_RETRY_SECONDS
             )
+            while True:
+                try:
+                    admission = controller.prelaunch_admission(invocation)
+                    break
+                except ExperimentProviderLaneBusy:
+                    if time.monotonic() >= retry_deadline:
+                        raise
+                    time.sleep(
+                        PROVIDER_LANE_ADMISSION_RETRY_INTERVAL_SECONDS
+                    )
         except ExperimentProviderAdmissionDenied as exc:
             raise ModelInvocationUnavailable(
                 f"experiment provider admission denied: {exc}"

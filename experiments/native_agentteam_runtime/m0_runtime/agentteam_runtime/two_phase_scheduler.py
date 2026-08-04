@@ -475,9 +475,11 @@ class TwoPhaseFileScheduler:
             collected.append(self._collect_result(inflight, result))
 
         self.state["inflight_attempts"] = remaining
-        controller_observation = self._observe_experiment_boundary(
-            "post_integration"
-        )
+        controller_observation = None
+        if collected or not remaining:
+            controller_observation = self._observe_experiment_boundary(
+                "post_integration"
+            )
         self.state["scheduler_status"] = self._status_without_dispatch()
         self._write_state()
         if collected:
@@ -2414,6 +2416,8 @@ class TwoPhaseFileScheduler:
                 reference=self.experiment_controller_reference
             )
             self._record_experiment_controller_snapshot()
+        if self.state["inflight_attempts"]:
+            return None
         observation = self._observe_experiment_boundary(
             "pre_provider_launch"
         )
