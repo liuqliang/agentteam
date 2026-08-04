@@ -1,8 +1,8 @@
 {
   "schema_version": "phase2_contract_review.v1",
-  "decision": "pending",
-  "reviewer": "pending-operator",
-  "reviewed_at": "2026-08-04T04:07:23Z",
+  "decision": "approved",
+  "reviewer": "operator",
+  "reviewed_at": "2026-08-04T09:02:37Z",
   "git_object_format": "sha1",
   "preflight_release_id": "phase2-promotion-v13-9ff06d8",
   "preflight_release_source_commit": "9ff06d895683359cefd62cdd8c4076052d21403c",
@@ -39,8 +39,6 @@
     "Regenerated the Git-installed candidate release, deterministic calibration authority, protocol, and promotion authority for source commit 9ff06d8.",
     "Preserved failed v10 and unmaterialized v11/v12 artifacts as immutable forensic evidence and requires a fresh v13 taskpack, run identity, epoch, and P2-09 authorization."
   ],
-  "remaining_escalations": [
-    "Operator must review and approve this exact v13 registry-generated-evidence contract before taskpack materialization or any P2-09 provider launch."
-  ],
-  "notes": "Proposed v13 registry-generation repair contract. Pending approval; it does not authorize taskpack materialization, P2-09 provider access, main merge, or push."
+  "remaining_escalations": [],
+  "notes": "Approved v13 registry-generation repair contract. This authorizes taskpack materialization and deterministic P2-08 only; P2-09 still requires separate current epoch-bound provider authorization and no gate may merge to main or push."
 }
