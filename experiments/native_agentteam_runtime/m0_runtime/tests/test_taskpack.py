@@ -2867,6 +2867,63 @@ class TaskpackTests(unittest.TestCase):
                     project_root=Path(tmp),
                 )
 
+    def test_promotion_protocol_contract_uses_canonical_json_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            protocol_path = root / "authority" / "protocol.json"
+            _write_json(
+                protocol_path,
+                {
+                    "schema_version": "fixture.v1",
+                    "nested": {"value": 1},
+                },
+            )
+            blueprint = {
+                "contract": {"protocol_sha256": "0" * 64},
+                "post_backlog_gates": [
+                    {
+                        "gate_id": "P2-08",
+                        "controller_action_input": {
+                            "action": "promote_readiness",
+                            "configuration": {
+                                "authority_artifacts": {
+                                    "protocol_template": {
+                                        "resolve_at_materialization": {
+                                            "authority_root": "project_root",
+                                            "relative_path": (
+                                                "authority/protocol.json"
+                                            ),
+                                        }
+                                    }
+                                }
+                            },
+                        },
+                    }
+                ],
+            }
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "canonical protocol template",
+            ):
+                taskpack_module._resolve_blueprint_controller_action_inputs(
+                    blueprint,
+                    project_root=root,
+                )
+
+            blueprint["contract"]["protocol_sha256"] = (
+                taskpack_module._sha256_json(
+                    json.loads(protocol_path.read_text(encoding="utf-8"))
+                )
+            )
+            _, authority_bindings, registry_bindings = (
+                taskpack_module._resolve_blueprint_controller_action_inputs(
+                    blueprint,
+                    project_root=root,
+                )
+            )
+            self.assertEqual(len(authority_bindings), 1)
+            self.assertEqual(registry_bindings, [])
+
     def test_concrete_readiness_capability_evidence_is_unchanged(self):
         concrete = {"existing": [{"test_id": "fixture"}]}
         blueprint = {

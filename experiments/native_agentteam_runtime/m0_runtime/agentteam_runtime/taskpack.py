@@ -4175,6 +4175,39 @@ def _resolve_blueprint_controller_action_inputs(
                 binding_name="direct_taskpack",
                 directory=True,
             )
+        if gate_id == "P2-08":
+            contract = resolved_blueprint.get("contract")
+            expected_protocol_sha256 = (
+                contract.get("protocol_sha256")
+                if isinstance(contract, dict)
+                else None
+            )
+            protocol_binding = (
+                bindings.get("protocol_template")
+                if isinstance(bindings, dict)
+                else None
+            )
+            protocol_path = (
+                protocol_binding.get("path")
+                if isinstance(protocol_binding, dict)
+                else None
+            )
+            if (
+                expected_protocol_sha256 is not None
+                and isinstance(protocol_path, str)
+            ):
+                if (
+                    not re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        str(expected_protocol_sha256),
+                    )
+                    or _sha256_json(_read_json(protocol_path))
+                    != expected_protocol_sha256
+                ):
+                    raise TaskpackValidationError(
+                        "contract.protocol_sha256 does not match the "
+                        "canonical protocol template"
+                    )
         capability_evidence = configuration.get("capability_evidence")
         if (
             isinstance(capability_evidence, dict)
