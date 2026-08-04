@@ -1,8 +1,8 @@
 {
   "schema_version": "phase2_contract_review.v1",
-  "decision": "pending",
-  "reviewer": "pending-operator",
-  "reviewed_at": "2026-08-04T10:20:24Z",
+  "decision": "approved",
+  "reviewer": "operator",
+  "reviewed_at": "2026-08-04T10:40:10Z",
   "git_object_format": "sha1",
   "preflight_release_id": "phase2-promotion-v14-f8f3c92",
   "preflight_release_source_commit": "f8f3c92763a2054b6f7e95e45e8733f09dd4c13a",
@@ -39,8 +39,6 @@
     "Regenerated the candidate release, deterministic calibration authority, protocol template, and promotion authority against source commit f8f3c92.",
     "Requires a fresh v14 taskpack, run identity, gate epoch, and exact P2-09 provider authorization."
   ],
-  "remaining_escalations": [
-    "Operator must review and approve this exact v14 canonical-protocol-binding contract before taskpack materialization or any P2-09 provider launch."
-  ],
-  "notes": "Proposed v14 canonical protocol binding repair contract. Pending approval; it does not authorize taskpack materialization, P2-09 provider access, main merge, or push."
+  "remaining_escalations": [],
+  "notes": "Approved v14 canonical protocol binding repair contract. This authorizes taskpack materialization, freezing, and deterministic P2-08 only; P2-09 still requires separate current epoch-bound provider authorization, and no gate may merge to main or push."
 }
