@@ -1,8 +1,8 @@
 {
   "schema_version": "phase2_contract_review.v1",
-  "decision": "pending",
-  "reviewer": "pending-operator",
-  "reviewed_at": "2026-08-05T07:50:20Z",
+  "decision": "approved",
+  "reviewer": "operator-delegate",
+  "reviewed_at": "2026-08-05T07:59:39Z",
   "git_object_format": "sha1",
   "preflight_release_id": "phase2-promotion-v19-c3dceb9-git",
   "preflight_release_source_commit": "c3dceb952b746458d24a3f2c12f58f7394f2e646",
@@ -49,8 +49,6 @@
     "Regenerated v19 calibration through run_deterministic_calibration_from_manifest, verified that report.calibration_request_sha256 equals the request file's raw SHA-256, and rebuilt fresh release, promotion authority, taskpack, and run identities.",
     "Requires a fresh v19 taskpack, run identity, gate epoch, P2-08 readiness result, and exact P2-09 provider authorization."
   ],
-  "remaining_escalations": [
-    "Operator must review and approve this exact v19 calibration-request binding repair contract before taskpack materialization or any new P2-09 provider launch."
-  ],
-  "notes": "Proposed v19 calibration-request raw-byte binding repair contract. Pending approval; it does not authorize taskpack materialization, P2-09 provider access, main merge, or push."
+  "remaining_escalations": [],
+  "notes": "Approved under the operator's delegated iteration authority for v19 calibration-request repair. This authorizes taskpack materialization, freezing, deterministic P2-08, and a separately recorded exact current epoch-bound P2-09 authorization within the unchanged model, token, wall-time, and concurrency limits; no gate may merge to main or push."
 }
