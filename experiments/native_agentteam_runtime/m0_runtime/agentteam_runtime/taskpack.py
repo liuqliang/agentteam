@@ -4300,6 +4300,50 @@ def _resolve_blueprint_controller_action_inputs(
                     ),
                 }
             )
+    gates_by_id = {
+        gate.get("gate_id"): gate
+        for gate in resolved_blueprint.get("post_backlog_gates", [])
+        if isinstance(gate, dict)
+    }
+    readiness_gate = gates_by_id.get("P2-08")
+    live_gate = gates_by_id.get("P2-09")
+    if isinstance(readiness_gate, dict) and isinstance(live_gate, dict):
+        readiness_configuration = readiness_gate.get(
+            "controller_action_input",
+            {},
+        ).get("configuration", {})
+        live_configuration = live_gate.get(
+            "controller_action_input",
+            {},
+        ).get("configuration", {})
+        protocol_binding = readiness_configuration.get(
+            "authority_artifacts",
+            {},
+        ).get("protocol_template")
+        protocol_path = (
+            protocol_binding.get("path")
+            if isinstance(protocol_binding, dict)
+            else None
+        )
+        if isinstance(protocol_path, str):
+            from .experiment_gates import (
+                Phase2GateError,
+                expected_live_calibration_repeat_mode,
+            )
+
+            try:
+                expected_repeat_mode = (
+                    expected_live_calibration_repeat_mode(
+                        _read_json(protocol_path)
+                    )
+                )
+            except Phase2GateError as exc:
+                raise TaskpackValidationError(str(exc)) from exc
+            if live_configuration.get("repeat_mode") != expected_repeat_mode:
+                raise TaskpackValidationError(
+                    "P2-09 repeat_mode does not match the "
+                    "counterbalanced protocol order"
+                )
     return resolved_blueprint, sorted(
         resolutions,
         key=lambda item: (item["gate_id"], item["binding"]),

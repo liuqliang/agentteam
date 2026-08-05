@@ -837,6 +837,11 @@ trusted override is available only when the experiment controller also binds
 the verified target project root; ordinary taskpack execution continues to use
 the taskpack verification command.
 
+The single drift repeat must be the first mode in repetition index 1 of the
+seeded counterbalanced rotation, which is the second entry in the base mode
+order. Blueprint materialization and the live controller both reject a stale
+`repeat_mode` before any provider allocation.
+
 Host resource diagnostics, including cgroup-inotify watch pressure, are retained
 as operator warnings but are not calibration acceptance criteria. P2-09 still
 fails closed for a nonzero evaluator or acceptance result, a real timeout,

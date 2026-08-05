@@ -932,6 +932,14 @@ def execute_live_calibration_action(
         raise Phase2GateError(
             "live calibration repeat mode is invalid"
         )
+    expected_repeat_mode = expected_live_calibration_repeat_mode(
+        protocol
+    )
+    if repeat_mode != expected_repeat_mode:
+        raise Phase2GateError(
+            "live calibration repeat mode does not match the "
+            "counterbalanced protocol order"
+        )
     sandbox_configuration = configuration.get(
         "sandbox_configuration"
     )
@@ -1177,6 +1185,23 @@ def execute_live_calibration_action(
             "repeat_run_record": relation_repeat,
         },
     }
+
+
+def expected_live_calibration_repeat_mode(protocol):
+    mode_order = protocol.get("mode_order")
+    repetition_policy = protocol.get("repetition_policy")
+    if (
+        not isinstance(mode_order, list)
+        or not mode_order
+        or not all(mode in _MODES for mode in mode_order)
+        or len(set(mode_order)) != len(mode_order)
+        or not isinstance(repetition_policy, dict)
+        or repetition_policy.get("count", 0) < 2
+    ):
+        raise Phase2GateError(
+            "live calibration protocol cannot derive a repeat mode"
+        )
+    return mode_order[1 % len(mode_order)]
 
 
 def execute_phase2_finalization_action(

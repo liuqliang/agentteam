@@ -14878,7 +14878,7 @@ class Phase2GateTests(unittest.TestCase):
                         "path": str(root),
                         "digest_sha256": "5" * 64,
                     },
-                    "repeat_mode": "single_codex",
+                    "repeat_mode": "agentteam_full",
                     "sandbox_configuration": {},
                 },
             }
@@ -14924,6 +14924,28 @@ class Phase2GateTests(unittest.TestCase):
                         artifact_path=root / "drift-calibration.json",
                     )
             drift_allocate.assert_not_called()
+            mismatched_repeat = copy.deepcopy(action_input)
+            mismatched_repeat["configuration"]["repeat_mode"] = (
+                "single_codex"
+            )
+            with patch(
+                "agentteam_runtime.experiment_gates."
+                "allocate_experiment_run"
+            ) as repeat_allocate, patch(
+                "agentteam_runtime.taskpack."
+                "verify_frozen_taskpack_digest",
+                return_value={"digest_sha256": "5" * 64},
+            ):
+                with self.assertRaisesRegex(
+                    Phase2GateError,
+                    "counterbalanced protocol order",
+                ):
+                    execute_live_calibration_action(
+                        mismatched_repeat,
+                        context,
+                        artifact_path=root / "repeat-drift.json",
+                    )
+            repeat_allocate.assert_not_called()
             projection_target = root / "projection-target"
             projection_target.mkdir()
             projection_link = root / "projection-link"

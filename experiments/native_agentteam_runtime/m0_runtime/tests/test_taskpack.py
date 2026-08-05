@@ -2209,7 +2209,18 @@ class TaskpackTests(unittest.TestCase):
                 },
             )
             for path, value in (
-                (protocol_template, {"protocol": "fixture"}),
+                (
+                    protocol_template,
+                    {
+                        "protocol": "fixture",
+                        "mode_order": [
+                            "agentteam_direct",
+                            "single_codex",
+                            "agentteam_full",
+                        ],
+                        "repetition_policy": {"count": 2},
+                    },
+                ),
                 (
                     deterministic_calibration_request,
                     {"request": "fixture"},
@@ -2923,6 +2934,79 @@ class TaskpackTests(unittest.TestCase):
             )
             self.assertEqual(len(authority_bindings), 1)
             self.assertEqual(registry_bindings, [])
+
+    def test_promotion_materialization_rejects_repeat_mode_order_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            protocol_path = root / "authority" / "protocol.json"
+            protocol = {
+                "mode_order": [
+                    "agentteam_direct",
+                    "agentteam_full",
+                    "single_codex",
+                ],
+                "repetition_policy": {"count": 2},
+            }
+            _write_json(protocol_path, protocol)
+            blueprint = {
+                "contract": {
+                    "protocol_sha256": taskpack_module._sha256_json(
+                        protocol
+                    )
+                },
+                "post_backlog_gates": [
+                    {
+                        "gate_id": "P2-08",
+                        "controller_action_input": {
+                            "configuration": {
+                                "authority_artifacts": {
+                                    "protocol_template": {
+                                        "resolve_at_materialization": {
+                                            "authority_root": "project_root",
+                                            "relative_path": (
+                                                "authority/protocol.json"
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    },
+                    {
+                        "gate_id": "P2-09",
+                        "controller_action_input": {
+                            "configuration": {
+                                "repeat_mode": "single_codex"
+                            }
+                        },
+                    },
+                ],
+            }
+
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "counterbalanced protocol order",
+            ):
+                taskpack_module._resolve_blueprint_controller_action_inputs(
+                    blueprint,
+                    project_root=root,
+                )
+
+            blueprint["post_backlog_gates"][1][
+                "controller_action_input"
+            ]["configuration"]["repeat_mode"] = "agentteam_full"
+            resolved, _, _ = (
+                taskpack_module._resolve_blueprint_controller_action_inputs(
+                    blueprint,
+                    project_root=root,
+                )
+            )
+            self.assertEqual(
+                resolved["post_backlog_gates"][1][
+                    "controller_action_input"
+                ]["configuration"]["repeat_mode"],
+                "agentteam_full",
+            )
 
     def test_concrete_readiness_capability_evidence_is_unchanged(self):
         concrete = {"existing": [{"test_id": "fixture"}]}
