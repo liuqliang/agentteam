@@ -7387,6 +7387,62 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("profile", check_names)
             self.assertIn("git_repository", check_names)
             self.assertIn("verification_profile", check_names)
+            self.assertIn("inotify_capacity", check_names)
+
+    def test_doctor_inotify_check_warns_and_reports_top_consumer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc_root = root / "proc"
+            process = proc_root / str(os.getpid())
+            fdinfo = process / "fdinfo"
+            fdinfo.mkdir(parents=True)
+            (process / "comm").write_text("fixture-watcher\n", encoding="utf-8")
+            (process / "cmdline").write_bytes(
+                b"/usr/bin/fixture-watcher\0--watch\0"
+            )
+            (fdinfo / "7").write_text(
+                "pos:\t0\n"
+                + "".join(
+                    f"inotify wd:{index:x} ino:1 sdev:1 mask:1\n"
+                    for index in range(95)
+                ),
+                encoding="utf-8",
+            )
+            max_watches_path = root / "max_user_watches"
+            max_watches_path.write_text("100\n", encoding="utf-8")
+
+            check = agentteam_module._doctor_inotify_check(
+                proc_root=proc_root,
+                max_watches_path=max_watches_path,
+                uid=os.getuid(),
+            )
+
+            self.assertEqual(check["status"], "warning")
+            self.assertEqual(check["current_watches"], 95)
+            self.assertEqual(check["remaining_watches"], 5)
+            self.assertEqual(check["top_consumers"][0]["pid"], os.getpid())
+            self.assertEqual(
+                check["top_consumers"][0]["executable"],
+                "/usr/bin/fixture-watcher",
+            )
+            self.assertNotIn("--watch", json.dumps(check))
+
+    def test_doctor_inotify_check_passes_with_available_capacity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc_root = root / "proc"
+            proc_root.mkdir()
+            max_watches_path = root / "max_user_watches"
+            max_watches_path.write_text("100\n", encoding="utf-8")
+
+            check = agentteam_module._doctor_inotify_check(
+                proc_root=proc_root,
+                max_watches_path=max_watches_path,
+                uid=os.getuid(),
+            )
+
+            self.assertEqual(check["status"], "passed")
+            self.assertEqual(check["usage_ratio"], 0.0)
 
     def test_invocation_supervision_probe_proves_linger_identity_and_cleanup_without_provider(self):
         host = _InvocationProbeFakeHost()

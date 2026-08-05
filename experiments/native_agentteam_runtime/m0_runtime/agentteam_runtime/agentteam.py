@@ -6495,6 +6495,7 @@ def _build_doctor_summary(project_root):
             path=codex_path,
         )
     )
+    checks.append(_doctor_inotify_check())
     counts = _doctor_status_counts(checks)
     return {
         "doctor_status": "failed" if counts["failed"] else "passed",
@@ -6542,6 +6543,125 @@ def _doctor_feishu_check(profile):
         webhook_env=webhook_env,
         webhook_env_set=bool(os.environ.get(webhook_env)),
         signing_secret_env=feishu.get("signing_secret_env"),
+    )
+
+
+def _doctor_inotify_check(
+    *,
+    proc_root=Path("/proc"),
+    max_watches_path=Path("/proc/sys/fs/inotify/max_user_watches"),
+    uid=None,
+):
+    if not sys.platform.startswith("linux"):
+        return _doctor_check(
+            "inotify_capacity",
+            "skipped",
+            "inotify capacity is only available on Linux",
+        )
+    uid = os.getuid() if uid is None else int(uid)
+    try:
+        max_watches = int(max_watches_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return _doctor_check(
+            "inotify_capacity",
+            "skipped",
+            "inotify watch limit is unavailable",
+        )
+    if max_watches <= 0:
+        return _doctor_check(
+            "inotify_capacity",
+            "skipped",
+            "inotify watch limit is invalid",
+        )
+
+    consumers = []
+    total_watches = 0
+    try:
+        process_dirs = list(proc_root.iterdir())
+    except OSError:
+        process_dirs = []
+    for process_dir in process_dirs:
+        if not process_dir.name.isdigit():
+            continue
+        try:
+            if process_dir.stat().st_uid != uid:
+                continue
+            watches = 0
+            for fdinfo_path in (process_dir / "fdinfo").iterdir():
+                try:
+                    with fdinfo_path.open(
+                        "r",
+                        encoding="utf-8",
+                        errors="replace",
+                    ) as stream:
+                        watches += sum(
+                            1
+                            for line in stream
+                            if line.startswith("inotify wd:")
+                        )
+                except OSError:
+                    continue
+            if not watches:
+                continue
+            try:
+                name = (process_dir / "comm").read_text(
+                    encoding="utf-8"
+                ).strip()
+            except OSError:
+                name = "unknown"
+            try:
+                with (process_dir / "cmdline").open("rb") as stream:
+                    executable = stream.read(4096).split(b"\0", 1)[0].decode(
+                        "utf-8", errors="replace"
+                    ).strip()
+            except OSError:
+                executable = ""
+            total_watches += watches
+            consumers.append(
+                {
+                    "pid": int(process_dir.name),
+                    "name": name or "unknown",
+                    "watches": watches,
+                    "executable": executable,
+                }
+            )
+        except OSError:
+            continue
+
+    consumers.sort(key=lambda item: (-item["watches"], item["pid"]))
+    usage_ratio = total_watches / max_watches
+    remaining_watches = max(0, max_watches - total_watches)
+    top = consumers[:5]
+    status = "warning" if usage_ratio >= 0.9 else "passed"
+    if status == "warning":
+        summary = (
+            f"inotify watches near capacity: {total_watches}/{max_watches} "
+            f"({usage_ratio:.1%}); remaining={remaining_watches}"
+        )
+        if top:
+            top_name = (
+                Path(top[0]["executable"]).name
+                if top[0]["executable"]
+                else top[0]["name"]
+            )
+            summary += (
+                f"; top pid={top[0]['pid']} name={top_name} "
+                f"watches={top[0]['watches']}"
+            )
+    else:
+        summary = (
+            f"inotify watch capacity is available: "
+            f"{total_watches}/{max_watches} ({usage_ratio:.1%})"
+        )
+    return _doctor_check(
+        "inotify_capacity",
+        status,
+        summary,
+        current_watches=total_watches,
+        max_watches=max_watches,
+        remaining_watches=remaining_watches,
+        usage_ratio=usage_ratio,
+        top_consumers=top,
     )
 
 
