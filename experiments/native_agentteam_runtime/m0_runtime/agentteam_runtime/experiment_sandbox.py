@@ -3149,6 +3149,7 @@ def _run_bounded_argv(
             raise
         guarded_argv = [
             sys.executable,
+            "-B",
             str(Path(__file__).with_name("model_invocation.py")),
             "_source_guard",
             source_guard_path,
@@ -3171,7 +3172,7 @@ def _run_bounded_argv(
         "--property",
         "KillMode=control-group",
         "--property",
-        "ExitType=cgroup",
+        "ExitType=main",
         "--property",
         "TimeoutStopSec=5s",
         "--property",

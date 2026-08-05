@@ -10428,6 +10428,9 @@ class ExperimentSandboxTests(unittest.TestCase):
             Path(command[guard_index - 1]).name,
             "model_invocation.py",
         )
+        self.assertEqual(command[guard_index - 2], "-B")
+        self.assertIn("ExitType=main", command)
+        self.assertNotIn("ExitType=cgroup", command)
         self.assertEqual(
             captured["authority"],
             authority,
