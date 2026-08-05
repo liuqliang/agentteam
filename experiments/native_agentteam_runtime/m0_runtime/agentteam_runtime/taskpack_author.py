@@ -1538,6 +1538,7 @@ def _author_prompt(
     repo_paths = repo_map["paths"]
     repo_grounding_context = _compact_repo_grounding_context(repo_grounding)
     verification_profile_json = json.dumps(verification_profile or {}, sort_keys=True)
+    authoritative_verification_profile = bool(verification_profile)
     lines = [
         "You are the AgentTeam taskpack author.",
         "",
@@ -1585,6 +1586,20 @@ def _author_prompt(
         ),
         "Project verification profile:",
         verification_profile_json,
+        *(
+            [
+                (
+                    "- This verification profile is authoritative. Copy its correctness command "
+                    "into verification.json exactly as represented by the required-file template."
+                ),
+                (
+                    "- Do not search for, infer, substitute, broaden, or execute alternative "
+                    "verification commands while authoring this taskpack."
+                ),
+            ]
+            if authoritative_verification_profile
+            else []
+        ),
         "",
         "The runtime loader currently reads taskpack.yaml as JSON despite the .yaml suffix.",
         "Use valid JSON for taskpack.yaml, agent_pool.json, backlog.json, and verification.json.",

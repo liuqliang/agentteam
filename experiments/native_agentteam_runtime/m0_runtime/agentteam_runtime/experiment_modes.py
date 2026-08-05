@@ -64,6 +64,7 @@ from .model_invocation import (
 )
 from .taskpack import (
     TaskpackValidationError,
+    _normalize_taskpack_verification_profile,
     verify_frozen_taskpack_digest,
 )
 
@@ -1088,6 +1089,10 @@ class AgentTeamFullModeAdapter:
         )
         draft_root = author_workspace / ".agentteam-author"
         draft_root.mkdir(mode=0o700)
+        verification_profile = _protocol_acceptance_verification_profile(
+            request,
+            project_root=author_workspace,
+        )
         authored = draft_taskpack_from_goal(
             project_root=str(author_workspace),
             goal=_goal_text(request.protocol),
@@ -1095,6 +1100,7 @@ class AgentTeamFullModeAdapter:
             taskpack_id="experiment-full-mode-author",
             author_runtime="codex",
             codex_model=request.model_policy["model"],
+            verification_profile=verification_profile,
             author_invocation_context=_register_provider_launch(
                 request,
                 lifecycle_id="taskpack-author",
@@ -1363,6 +1369,21 @@ def _goal_text(protocol):
             *(f"- {item}" for item in protocol["goal"]["constraints"]),
         ]
     )
+
+
+def _protocol_acceptance_verification_profile(request, *, project_root):
+    command = copy.deepcopy(request.protocol["acceptance"]["command"])
+    profile = {"correctness": {"command": command}}
+    try:
+        _normalize_taskpack_verification_profile(
+            profile,
+            project_root=project_root,
+        )
+    except TaskpackValidationError as exc:
+        raise ExperimentModeError(
+            f"protocol acceptance command is not usable by full-mode author: {exc}"
+        ) from exc
+    return profile
 
 
 def _experiment_invocation_context(

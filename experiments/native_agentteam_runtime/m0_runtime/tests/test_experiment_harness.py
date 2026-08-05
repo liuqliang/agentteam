@@ -175,6 +175,7 @@ from agentteam_runtime.m0_runtime import (
     create_independent_attempt_workspace,
 )
 from agentteam_runtime.taskpack import (
+    TaskpackValidationError,
     draft_taskpack_files,
     freeze_taskpack,
     verify_frozen_taskpack_digest,
@@ -8082,11 +8083,44 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 calls["author"][0]["codex_model"],
                 fixture["protocol"]["environment"]["model"],
             )
+            self.assertEqual(
+                calls["author"][0]["verification_profile"],
+                {
+                    "correctness": {
+                        "command": fixture["protocol"]["acceptance"][
+                            "command"
+                        ]
+                    }
+                },
+            )
             serialized = json.dumps(calls["author"], sort_keys=True)
             self.assertNotIn(
                 fixture["protocol"]["direct_taskpack"]["sha256"],
                 serialized,
             )
+
+    def test_full_mode_rejects_unusable_acceptance_profile_before_provider_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp, "agentteam_full")
+            with self._mode_execution_boundary(), patch(
+                "agentteam_runtime.experiment_modes."
+                "_normalize_taskpack_verification_profile",
+                side_effect=TaskpackValidationError("invalid acceptance"),
+            ), patch(
+                "agentteam_runtime.experiment_modes._register_provider_launch"
+            ) as register, patch(
+                "agentteam_runtime.taskpack_author.draft_taskpack_from_goal"
+            ) as author:
+                with self.assertRaisesRegex(
+                    ExperimentModeError,
+                    "protocol acceptance command is not usable",
+                ):
+                    self._controller(fixture).execute(
+                        AgentTeamFullModeAdapter()
+                    )
+
+            register.assert_not_called()
+            author.assert_not_called()
 
     def test_common_controller_finalizes_registered_outputs_for_each_mode(
         self,

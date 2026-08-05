@@ -17774,6 +17774,42 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("do not request git merge or git push", prompt)
             self.assertIn("open-ended improvement requests", prompt)
 
+    def test_codex_taskpack_author_prompt_treats_supplied_verification_as_authoritative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            taskpack_dir = tmp_path / "drafts" / "protocol-acceptance"
+            author_context_dir = tmp_path / "drafts" / ".protocol-acceptance-author"
+            _init_repo(repo)
+            command = [
+                "python3",
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests",
+            ]
+
+            prompt = _author_prompt(
+                project_root=repo,
+                goal="Implement the bounded fixture change.",
+                taskpack_id="protocol-acceptance",
+                taskpack_dir=taskpack_dir,
+                author_context_dir=author_context_dir,
+                repo_map={
+                    "paths": {
+                        "manifest_path": "manifest.json",
+                        "inventory_path": "inventory.json",
+                        "symbols_path": "symbols.json",
+                    }
+                },
+                verification_profile={"correctness": {"command": command}},
+            )
+
+            self.assertIn(json.dumps(command), prompt)
+            self.assertIn("verification profile is authoritative", prompt)
+            self.assertIn("Do not search for, infer, substitute, broaden, or execute alternative", prompt)
+
     def test_codex_taskpack_author_prompt_hardens_decomposition_quality(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

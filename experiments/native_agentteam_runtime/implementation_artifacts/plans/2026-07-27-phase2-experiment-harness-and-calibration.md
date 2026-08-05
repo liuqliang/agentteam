@@ -837,6 +837,16 @@ trusted override is available only when the experiment controller also binds
 the verified target project root; ordinary taskpack execution continues to use
 the taskpack verification command.
 
+Before `agentteam_full` registers its taskpack-author provider invocation, the
+adapter validates the protocol acceptance argv as a taskpack verification
+profile and injects it into the required-file template and author prompt. The
+profile is authoritative: taskpack authoring must not spend model context
+discovering or substituting another test command, and post-author
+canonicalization mechanically restores the same profile before freezing. An
+unusable profile fails before provider registration. This preserves normal
+model-authored task decomposition and keeps the preregistered direct taskpack
+unavailable to full mode while avoiding duplicate verification discovery.
+
 The single drift repeat must be the first mode in repetition index 1 of the
 seeded counterbalanced rotation, which is the second entry in the base mode
 order. Blueprint materialization and the live controller both reject a stale
