@@ -13985,6 +13985,33 @@ class Phase2GateTests(unittest.TestCase):
         ),
     }
 
+    def test_full_verification_normalizes_only_temporary_git_root(self):
+        first = (
+            "Initialized empty Git repository in "
+            "/tmp/tmp8mahhm9h/repo/.git/\n"
+            "Ran 957 tests in 168.236s\n"
+        )
+        second = (
+            "Initialized empty Git repository in "
+            "/var/tmp/tmpabc_123/repo/.git/\n"
+            "Ran 957 tests in 181.400s\n"
+        )
+
+        self.assertEqual(
+            experiment_gates_module._normalize_verification_output(first),
+            experiment_gates_module._normalize_verification_output(second),
+        )
+        permanent = (
+            "Initialized empty Git repository in "
+            "/srv/agentteam/repo/.git/\n"
+        )
+        self.assertEqual(
+            experiment_gates_module._normalize_verification_output(
+                permanent
+            ),
+            permanent,
+        )
+
     def _action_input(self, gate_id):
         digest = "0" * 64
         binding = {

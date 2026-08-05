@@ -2252,11 +2252,18 @@ def _run_full_verification_command(command, worktree):
 
 
 def _normalize_verification_output(value):
-    return re.sub(
+    normalized = re.sub(
         r"(Ran\s+\d+\s+tests?\s+in\s+)"
         r"\d+(?:\.\d+)?s",
         r"\1<elapsed>",
         value,
+    )
+    return re.sub(
+        r"(?m)^(Initialized empty Git repository in )"
+        r"(?:.*/)?tmp[A-Za-z0-9_-]+"
+        r"(/repo/\.git/)$",
+        r"\1<temporary-directory>\2",
+        normalized,
     )
 
 

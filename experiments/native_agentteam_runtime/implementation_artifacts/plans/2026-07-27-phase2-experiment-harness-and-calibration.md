@@ -855,6 +855,12 @@ second authorization. Run full verification, validate the single-parent Git
 relation and changed-path set, and stop for operator review before merge,
 push, or release activation.
 
+Full-verification replay compares the command, return code, and normalized
+stdout and stderr digests. Normalization removes elapsed test duration and the
+random `TemporaryDirectory` component from Git-init output emitted by tests;
+it does not normalize test counts, status, arbitrary repository paths, or
+failure output.
+
 ## Capability Promotion Rules
 
 - `invocation_level_real_usage` passes only from the validated Phase 1
