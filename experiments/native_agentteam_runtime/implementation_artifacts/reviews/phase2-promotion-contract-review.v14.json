@@ -1,0 +1,53 @@
+{
+  "schema_version": "phase2_contract_review.v1",
+  "decision": "pending",
+  "reviewer": "pending-operator",
+  "reviewed_at": "2026-08-05T03:38:44Z",
+  "git_object_format": "sha1",
+  "preflight_release_id": "phase2-promotion-v17-23df4ac-git",
+  "preflight_release_source_commit": "23df4ac1310a524488899b51b675fc4b635bde72",
+  "plan_sha256": "042f4c0ce1229b2043b8d397b3aa44feb49d128b5a8320ae4496b30425be6e5c",
+  "blueprint_sha256": "81f086c9016d974d4376687635b7fd06444b23835d5ba61399fe3d286f31aeee",
+  "research_authority_sha256": "8dca1748a211b9eaf9df5d392d7d39d755cbe3946a358c11cff2f51c5323d91d",
+  "review_schema_sha256": "cbf009b320d583772a62ba569718d1f61e24c0173a8d6f7e1b9c55314629ed9f",
+  "contract_decisions_sha256": "b8cc874b2089bef0a356143851cfa5b8ed47deef8b91a58c58b9ef01461c9f0e",
+  "schema_inventory_sha256": "c9bc3c1b5396e58f4bf83d1cc08054570795206a845f9c92cf25ff923fdc0c76",
+  "approved_architecture_decisions": [
+    "Use the reviewed Git-installed runtime release phase2-promotion-v17-23df4ac-git at source commit 23df4ac1310a524488899b51b675fc4b635bde72.",
+    "Treat the same Linux user and control-plane account as trusted authority; malicious same-user swap-and-restore during recomputation is outside the threat model.",
+    "Fail closed for ordinary authority drift, missing or extra files, symlinks, special files, path escape, size drift, mode drift, and content drift.",
+    "Allow host network sharing only for registered real provider launches whose immutable protocol declares provider_access.",
+    "Inject only credential-free numeric-loopback HTTP proxy URLs into provider launches; remove all proxy variables from canary probes and trusted evaluator execution.",
+    "Do not inherit the outer AGENTTEAM_LAUNCHER_SELECTION when direct or full experiment adapters launch their nested runtime.",
+    "Persist the experiment run ID, run-manifest digest, target-path digest, and controller reference in scheduler state so operator stop validates against the real ledger.",
+    "Derive a controller-only run's initial integration baseline from the frozen taskpack runtime release source commit unless the caller supplies an explicit baseline.",
+    "Stage provider-readable repo and role context plus the provider result file inside the independent attempt workspace before sealing the sandbox source authority, while keeping those files outside the business Git diff.",
+    "Give the normal worker outbox a bounded two-second publication-priority window after observing a provider terminal, while interrupted resume and lease-expired orphan recovery remain immediately recoverable and fail closed.",
+    "Mount only the selected Codex 0.145.0 binary, bounded authentication file, sanitized configuration, required system runtime paths, DNS files, and TLS certificates.",
+    "Bind the live protocol to model gpt-5.6-sol, medium reasoning, a 600000-token global budget, a 7200-second wall-time budget, and one in-flight provider invocation.",
+    "Run P2-08 before P2-09 and P2-10, and require exact current epoch-bound operator authorization before P2-09 may launch any provider.",
+    "Use the preregistered deterministic L1 taskpack only in agentteam_direct mode and keep it unavailable to agentteam_full mode.",
+    "Do not automatically merge to main or push; P2-10 may only create the reviewed finalization child commit after accepted live evidence and full verification.",
+    "Keep the P2-08 capability registry strict and fail closed; the approved blueprint declares registry version phase2_readiness_capability_registry.v1 and materialization generates the exact test IDs, Git artifact paths, and blob digests from the candidate source commit.",
+    "Bind contract.protocol_sha256 to the canonical JSON digest of the resolved protocol template and reject mismatches during blueprint materialization before freezing or provider authorization.",
+    "Do not publish pre-provider or post-integration boundary observations while an experiment attempt remains inflight; retry transient provider-lane lock contention for at most 250 milliseconds while retaining fail-closed denial for a genuinely occupied lane.",
+    "Start both provider and evaluator source-guard Python processes with -B so live execution cannot add bytecode files to the immutable Git-installed runtime release.",
+    "Use ExitType=main for trusted evaluator transient services while retaining KillMode=control-group, so main-process completion is authoritative and detached descendants are still terminated without depending on empty-cgroup inotify observation."
+  ],
+  "resolved_contradictions": [
+    "Preserved the accepted fixed-registry generation, canonical protocol binding, sandbox, authority, budget, runtime-binding, provider-isolation, provider-lane, and worker-outbox mechanisms.",
+    "Preserved v16 P2-08 as passed initial forensic evidence with zero provider calls and zero target mutations, while recording that later evaluator-path bytecode pollution invalidated its relation for subsequent gates.",
+    "The explicitly authorized v16 P2-09 direct-mode provider invocation completed with 151058 model tokens and produced the correct patch, complete semantic result, and clean provider lifecycle evidence.",
+    "The trusted evaluator ran the deterministic acceptance test twice and both executions reported OK, but its transient service used ExitType=cgroup on a host whose user systemd could not add cgroup inotify watches.",
+    "The evaluator main process exited successfully with status zero and no remaining tasks, yet systemd-run --wait did not observe empty-cgroup completion; the outer 120-second bound killed the wait and falsely recorded evaluator_timeout.",
+    "The evaluator source-guard Python entrypoint lacked -B and created three __pycache__ files in the v16 release at evaluator launch, causing immutable-release relation validation to fail closed.",
+    "No later live mode was launched; the v16 authorization and 151058-token direct evidence remain forensic records and are not accepted or reusable calibration evidence.",
+    "Changed trusted evaluator services to ExitType=main while retaining KillMode=control-group, added -B to the evaluator source guard, and verified detached-child containment with a real systemd regression.",
+    "Regenerated a clean Git-installed v17 candidate release plus deterministic calibration and promotion authority against source commit 23df4ac.",
+    "Requires a fresh v17 taskpack, run identity, gate epoch, P2-08 readiness result, and exact P2-09 provider authorization."
+  ],
+  "remaining_escalations": [
+    "Operator must review and approve this exact v17 evaluator-service and immutable-release repair contract before taskpack materialization or any new P2-09 provider launch."
+  ],
+  "notes": "Proposed v17 evaluator-service completion and immutable-release repair contract. Pending approval; it does not authorize taskpack materialization, P2-09 provider access, main merge, or push."
+}
