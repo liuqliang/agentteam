@@ -602,14 +602,18 @@ authoring, worker, and follow-up lifecycle root to its taskpack and exact
 canary-probed sandbox reference. Each root is sealed before evaluation, and the
 evaluator must be the exact digest-bound executable from the protocol, running
 in a fixed-system-binary systemd cgroup.
-The systemd service starts the certified bwrap command directly. Inside that
-namespace, a fixed runtime loader receives the already digest-checked evaluator
-bytes over a bounded pipe, materializes them in namespace-private tmpfs, and
-executes it as a contract check. Only after that check succeeds does the fixed
-loader independently execute the preregistered acceptance argv, so evaluator
-code cannot silently skip acceptance. Neither a stale evaluator path nor
-evaluator/candidate code can bypass the namespace to read evaluator-only host
-state. The protocol itself is loaded through an immutable authority reference
+The systemd service starts a fixed source guard as its stable main process. The
+guard revalidates mutable launch authority, starts the certified bwrap command,
+and waits for its real result. Inside that namespace, a fixed runtime loader
+receives the already digest-checked evaluator bytes over a bounded pipe,
+materializes them in namespace-private tmpfs, and executes it as a contract
+check. Only after that check succeeds does the fixed loader independently
+execute the preregistered acceptance argv, so evaluator code cannot silently
+skip acceptance. The guard's command result and bounded timeout are authoritative
+for evaluation; host cgroup-inotify capacity is diagnostic evidence only and
+cannot turn a completed zero-exit acceptance into a failed calibration. Neither
+a stale evaluator path nor evaluator/candidate code can bypass the namespace to
+read evaluator-only host state. The protocol itself is loaded through an immutable authority reference
 and must match the sandbox's certified Git baseline. Evaluation rechecks that
 the actual candidate HEAD descends from that baseline, records HEAD/tree/status
 plus bounded workspace-structure and Git-control inventories, overlays `.git`
@@ -824,6 +828,11 @@ only after P2-08 and an explicit `phase2_live_authorization.v1` artifact binds
 the current epoch, protocol, readiness receipt, model, reasoning profile,
 three modes, and immutable token and wall-time budgets. Live calibration makes
 no source commit.
+
+Host resource diagnostics, including cgroup-inotify watch pressure, are retained
+as operator warnings but are not calibration acceptance criteria. P2-09 still
+fails closed for a nonzero evaluator or acceptance result, a real timeout,
+incomplete isolation, leaked descendants, or incomplete evidence.
 
 ### P2-10 Report, Roadmap, And Operator Merge Gate
 

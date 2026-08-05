@@ -2145,13 +2145,32 @@ def _call_with_wall_alarm(callback, argument, timeout_seconds):
             )
 
 
+def _run_source_guard_command(command, command_timeout):
+    try:
+        process = subprocess.Popen(command, env=dict(os.environ))
+    except (OSError, subprocess.SubprocessError):
+        return 126
+    try:
+        return process.wait(timeout=command_timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            return 124
+        return 124
+
+
 def _source_guard_main(
     authority_path,
     authority_sha256,
     command_timeout_seconds,
     command,
 ):
-    """Revalidate a mutable source and immediately replace this process."""
+    """Revalidate mutable source and supervise the guarded command."""
 
     try:
         command_timeout = float(command_timeout_seconds)
@@ -2194,14 +2213,7 @@ def _source_guard_main(
         ValueError,
     ):
         return 125
-    try:
-        signal.setitimer(signal.ITIMER_REAL, command_timeout)
-        os.execvpe(command[0], command, dict(os.environ))
-    except OSError:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        return 126
-    signal.setitimer(signal.ITIMER_REAL, 0)
-    return 126
+    return _run_source_guard_command(command, command_timeout)
 
 
 def _run_bounded_process_with_parent_death_safeguard(spec):

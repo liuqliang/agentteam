@@ -16,7 +16,7 @@ import uuid
 from contextlib import contextmanager, nullcontext, redirect_stdout
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from jsonschema import Draft202012Validator
 
@@ -10471,27 +10471,26 @@ class ExperimentSandboxTests(unittest.TestCase):
                 authority_path.read_bytes()
             ).hexdigest()
             with patch.object(
-                invocation_module.os,
-                "execvpe",
-                return_value=None,
-            ) as exec_mock:
+                invocation_module,
+                "_run_source_guard_command",
+                return_value=0,
+            ) as command_mock:
                 result = invocation_module._source_guard_main(
                     authority_path,
                     authority_sha256,
                     "10",
                     ["/bin/true"],
                 )
-            self.assertEqual(result, 126)
-            exec_mock.assert_called_once()
+            self.assertEqual(result, 0)
+            command_mock.assert_called_once_with(["/bin/true"], 10.0)
 
             (
                 fixture["repository"] / "tracked.txt"
             ).write_text("candidate drift\n", encoding="utf-8")
             with patch.object(
-                invocation_module.os,
-                "execvpe",
-                return_value=None,
-            ) as exec_mock:
+                invocation_module,
+                "_run_source_guard_command",
+            ) as command_mock:
                 result = invocation_module._source_guard_main(
                     authority_path,
                     authority_sha256,
@@ -10499,7 +10498,36 @@ class ExperimentSandboxTests(unittest.TestCase):
                     ["/bin/true"],
                 )
             self.assertEqual(result, 125)
-            exec_mock.assert_not_called()
+            command_mock.assert_not_called()
+
+    def test_source_guard_terminates_timed_out_command(self):
+        import agentteam_runtime.model_invocation as invocation_module
+
+        guarded_process = Mock()
+        guarded_process.wait.side_effect = [
+            subprocess.TimeoutExpired(["/bin/sleep", "60"], 0.1),
+            -9,
+        ]
+        with patch.object(
+            invocation_module.subprocess,
+            "Popen",
+            return_value=guarded_process,
+        ) as popen_mock:
+            result = invocation_module._run_source_guard_command(
+                ["/bin/sleep", "60"],
+                0.1,
+            )
+
+        self.assertEqual(result, 124)
+        popen_mock.assert_called_once_with(
+            ["/bin/sleep", "60"],
+            env=dict(os.environ),
+        )
+        guarded_process.kill.assert_called_once_with()
+        self.assertEqual(
+            guarded_process.wait.call_args_list,
+            [call(timeout=0.1), call(timeout=2)],
+        )
 
     def test_git_object_store_size_is_excluded_but_control_drift_is_bound(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -10756,7 +10784,14 @@ class ExperimentSandboxTests(unittest.TestCase):
             root = Path(tmp)
             fixture = _sandbox_fixture(root)
             evaluator = root / "contract-evaluator.py"
-            evaluator_content = b"#!/usr/bin/python3\nraise SystemExit(0)\n"
+            evaluator_content = (
+                b"#!/usr/bin/python3\n"
+                b"import subprocess\n"
+                b"import sys\n"
+                b"if len(sys.argv) < 3 or sys.argv[1] != '--':\n"
+                b"    raise SystemExit(64)\n"
+                b"raise SystemExit(subprocess.run(sys.argv[2:]).returncode)\n"
+            )
             evaluator.write_bytes(evaluator_content)
             evaluator.chmod(0o700)
             survived_path = fixture["repository"] / "detached-survived"
@@ -10792,11 +10827,62 @@ class ExperimentSandboxTests(unittest.TestCase):
                 cpu_limit=1,
                 memory_limit_bytes=128 * 1024 * 1024,
                 input_bytes=evaluator_content,
+                prelaunch_source_authority=prepared.source_authority(),
             )
             self.assertFalse(execution["timed_out"], execution)
-            self.assertEqual(execution["returncode"], 0, execution)
             time.sleep(2.5)
             self.assertFalse(survived_path.exists())
+
+    def test_real_systemd_bwrap_completed_candidate_succeeds_when_required(self):
+        if (
+            os.environ.get("AGENTTEAM_REQUIRE_SYSTEMD_EVALUATOR") != "1"
+            or os.environ.get("AGENTTEAM_REQUIRE_REAL_BWRAP") != "1"
+        ):
+            self.skipTest("real systemd plus bwrap probe is opt-in")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = _sandbox_fixture(root)
+            evaluator = root / "contract-evaluator.py"
+            evaluator_content = (
+                b"#!/usr/bin/python3\n"
+                b"import subprocess\n"
+                b"import sys\n"
+                b"if len(sys.argv) < 3 or sys.argv[1] != '--':\n"
+                b"    raise SystemExit(64)\n"
+                b"raise SystemExit(subprocess.run(sys.argv[2:]).returncode)\n"
+            )
+            evaluator.write_bytes(evaluator_content)
+            evaluator.chmod(0o700)
+            accepted_path = fixture["repository"] / "accepted"
+            acceptance = [
+                str(Path(sys.executable).resolve()),
+                "-B",
+                "-c",
+                f"import pathlib; pathlib.Path({str(accepted_path)!r}).write_text('1')",
+            ]
+            prepared = prepare_candidate_evaluation_launch(
+                fixture["descriptor"],
+                evaluator,
+                hashlib.sha256(evaluator_content).hexdigest(),
+                acceptance,
+                cwd=fixture["repository"],
+            )
+
+            execution = _run_bounded_argv(
+                list(prepared.command),
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+                timeout_seconds=5,
+                max_output_bytes=4096,
+                cpu_limit=1,
+                memory_limit_bytes=128 * 1024 * 1024,
+                input_bytes=evaluator_content,
+                prelaunch_source_authority=prepared.source_authority(),
+            )
+
+            self.assertFalse(execution["timed_out"], execution)
+            self.assertEqual(execution["returncode"], 0, execution)
+            self.assertEqual(accepted_path.read_text(encoding="utf-8"), "1")
 
     def test_provider_environment_rejects_canary_content_and_digest(self):
         with tempfile.TemporaryDirectory() as tmp:
