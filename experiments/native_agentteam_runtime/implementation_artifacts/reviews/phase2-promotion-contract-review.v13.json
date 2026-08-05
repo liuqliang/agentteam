@@ -1,8 +1,8 @@
 {
   "schema_version": "phase2_contract_review.v1",
-  "decision": "pending",
-  "reviewer": "pending-operator",
-  "reviewed_at": "2026-08-05T02:40:00Z",
+  "decision": "approved",
+  "reviewer": "operator",
+  "reviewed_at": "2026-08-05T02:48:48Z",
   "git_object_format": "sha1",
   "preflight_release_id": "phase2-promotion-v16-cd712a4-git",
   "preflight_release_source_commit": "cd712a4d3ff8bb5fad1d42f722c3e639fefde04d",
@@ -44,8 +44,6 @@
     "Started the systemd-gated supervisor with Python -B and regenerated a clean Git-installed v16 candidate release plus deterministic calibration and promotion authority against source commit cd712a4.",
     "Requires a fresh v16 taskpack, run identity, gate epoch, P2-08 readiness result, and exact P2-09 provider authorization."
   ],
-  "remaining_escalations": [
-    "Operator must review and approve this exact v16 worker-publication and immutable-release repair contract before taskpack materialization or any new P2-09 provider launch."
-  ],
-  "notes": "Proposed v16 worker-publication and immutable-release repair contract. Pending approval; it does not authorize taskpack materialization, P2-09 provider access, main merge, or push."
+  "remaining_escalations": [],
+  "notes": "Approved v16 worker-publication and immutable-release repair contract. This authorizes taskpack materialization, freezing, and deterministic P2-08 only; P2-09 still requires separate current epoch-bound provider authorization, and no gate may merge to main or push."
 }
