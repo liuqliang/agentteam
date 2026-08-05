@@ -1531,3 +1531,12 @@ usage-coverage and reconciliation gates in the linked route note.
 - Evidence digest: `5350114b77a1013d3691e22eb894e0551a8be8def190135f564a149d46f10ec3`
 - Merge recommendation: conditional; wait for the external P1-06E finalization artifact and immutable operator approval.
 <!-- phase1-model-invocation-usage:end -->
+
+<!-- phase2-experiment-harness:start -->
+## Phase 2 Experiment Harness
+
+- Finalized: `2026-08-05T12:40:00Z`
+- Status: `ready_for_operator_review`
+- Live calibration usage coverage: `100%`
+- Next phase: research benchmark execution and comparison.
+<!-- phase2-experiment-harness:end -->
