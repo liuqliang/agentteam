@@ -21866,6 +21866,75 @@ class TaskpackTests(unittest.TestCase):
             self.assertIn("--commit-verified-integration", args)
             self.assertEqual(_arg_value(args, "--runtime"), "codex")
 
+    def test_build_taskpack_runtime_args_uses_trusted_verification_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Build runtime args with protocol-owned verification.",
+                draft_root=drafts,
+                taskpack_id="trusted-verification-runtime-args",
+                write_scope=["src/"],
+                verification_command=["python3", "-m", "unittest"],
+            )
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+            trusted_command = [
+                "/usr/bin/python3.12",
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests",
+            ]
+
+            args = build_taskpack_runtime_args(
+                frozen["frozen_taskpack_dir"],
+                run_root=run_root,
+                trusted_project_root=repo,
+                trusted_verification_command=trusted_command,
+            )
+
+            self.assertEqual(
+                json.loads(
+                    _arg_value(
+                        args,
+                        "--integration-verification-command-json",
+                    )
+                ),
+                trusted_command,
+            )
+
+    def test_build_taskpack_runtime_args_rejects_unbound_trusted_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject an unbound trusted verification command.",
+                draft_root=drafts,
+                taskpack_id="unbound-trusted-verification",
+                write_scope=["src/"],
+            )
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "requires a trusted project root",
+            ):
+                build_taskpack_runtime_args(
+                    frozen["frozen_taskpack_dir"],
+                    run_root=tmp_path / "runs",
+                    trusted_verification_command=["python3", "-m", "unittest"],
+                )
+
     def test_build_taskpack_runtime_args_passes_codex_model_from_runtime_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

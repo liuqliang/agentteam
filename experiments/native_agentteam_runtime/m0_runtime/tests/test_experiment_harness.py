@@ -7518,6 +7518,10 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 str(fixture["snapshot"]),
             )
             self.assertEqual(
+                launches[0]["trusted_verification_command"],
+                fixture["protocol"]["acceptance"]["command"],
+            )
+            self.assertEqual(
                 launches[0]["run_root"],
                 str(fixture["run_dir"] / "agentteam-runtime"),
             )
@@ -8050,6 +8054,10 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             self.assertEqual(
                 calls["launch"][0]["run_root"],
                 str(fixture["run_dir"] / "agentteam-runtime"),
+            )
+            self.assertEqual(
+                calls["launch"][0]["trusted_verification_command"],
+                fixture["protocol"]["acceptance"]["command"],
             )
             self.assertFalse(
                 calls["launch"][0]["inherit_launcher_selection"]

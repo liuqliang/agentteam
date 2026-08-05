@@ -829,6 +829,14 @@ the current epoch, protocol, readiness receipt, model, reasoning profile,
 three modes, and immutable token and wall-time budgets. Live calibration makes
 no source commit.
 
+All three modes use the immutable protocol acceptance argv for final
+integration verification. AgentTeam taskpacks may retain model-authored
+verification commands as worker evidence, but those commands cannot replace
+the protocol-owned acceptance command or change its working repository. The
+trusted override is available only when the experiment controller also binds
+the verified target project root; ordinary taskpack execution continues to use
+the taskpack verification command.
+
 Host resource diagnostics, including cgroup-inotify watch pressure, are retained
 as operator warnings but are not calibration acceptance criteria. P2-09 still
 fails closed for a nonzero evaluator or acceptance result, a real timeout,

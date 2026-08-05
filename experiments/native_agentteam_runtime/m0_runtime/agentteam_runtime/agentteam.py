@@ -13252,6 +13252,7 @@ def _run_frozen_taskpack(
     trusted_project_root=None,
     experiment_runtime_context=None,
     inherit_launcher_selection=True,
+    trusted_verification_command=None,
 ):
     loaded_taskpack = load_taskpack(frozen_taskpack_dir)["taskpack"]
     controller_only = (
@@ -13360,6 +13361,7 @@ def _run_frozen_taskpack(
         commit_verified_integration=commit_verified_integration,
         initial_integration_base_ref=initial_integration_base_ref,
         trusted_project_root=trusted_project_root,
+        trusted_verification_command=trusted_verification_command,
         trusted_model=(
             experiment_runtime_context["model_policy"]["model"]
             if experiment_runtime_context is not None

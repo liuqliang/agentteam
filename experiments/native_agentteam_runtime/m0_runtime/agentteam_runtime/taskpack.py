@@ -3332,6 +3332,7 @@ def build_taskpack_runtime_args(
     initial_integration_base_ref=None,
     trusted_project_root=None,
     trusted_model=None,
+    trusted_verification_command=None,
 ):
     taskpack_dir = Path(frozen_taskpack_dir).resolve()
     loaded = load_taskpack(taskpack_dir)
@@ -3384,13 +3385,33 @@ def build_taskpack_runtime_args(
         if trusted_project_root is not None
         else declared_project_root
     )
-    verification_command = _validate_taskpack_verification_command(loaded.get("verification"))
-    if trusted_project_root is not None:
-        verification_command = _rebase_taskpack_command(
-            verification_command,
-            declared_project_root,
-            project_root,
+    if trusted_verification_command is not None:
+        if trusted_project_root is None:
+            raise TaskpackValidationError(
+                "trusted verification command requires a trusted project root"
+            )
+        if (
+            not isinstance(trusted_verification_command, list)
+            or not trusted_verification_command
+            or not all(
+                isinstance(part, str) and part
+                for part in trusted_verification_command
+            )
+        ):
+            raise TaskpackValidationError(
+                "trusted verification command must be a non-empty string array"
+            )
+        verification_command = list(trusted_verification_command)
+    else:
+        verification_command = _validate_taskpack_verification_command(
+            loaded.get("verification")
         )
+        if trusted_project_root is not None:
+            verification_command = _rebase_taskpack_command(
+                verification_command,
+                declared_project_root,
+                project_root,
+            )
     command_json = json.dumps(verification_command)
 
     run_root = Path(run_root).resolve()

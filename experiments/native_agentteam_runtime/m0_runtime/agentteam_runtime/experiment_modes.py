@@ -1007,6 +1007,9 @@ class AgentTeamDirectModeAdapter:
             frozen_taskpack_dir=verified["frozen_taskpack_dir"],
             run_root=str(run_root),
             trusted_project_root=request.project_root,
+            trusted_verification_command=(
+                request.protocol["acceptance"]["command"]
+            ),
             experiment_runtime_context=(
                 _experiment_runtime_context(request)
             ),
@@ -1141,6 +1144,9 @@ class AgentTeamFullModeAdapter:
             frozen_taskpack_dir=frozen["frozen_taskpack_dir"],
             run_root=str(run_root),
             trusted_project_root=request.project_root,
+            trusted_verification_command=(
+                request.protocol["acceptance"]["command"]
+            ),
             experiment_runtime_context=(
                 _experiment_runtime_context(request)
             ),
