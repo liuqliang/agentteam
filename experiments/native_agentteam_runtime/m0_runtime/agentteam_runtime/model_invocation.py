@@ -1253,6 +1253,25 @@ class ModelInvocationCall:
         self.provider_admission = admission
 
 
+def _systemd_gated_supervisor_command(unit, module_path, spec_path):
+    return [
+        "systemd-run",
+        "--user",
+        "--quiet",
+        "--no-block",
+        f"--unit={unit}",
+        "--property=Type=oneshot",
+        "--property=RemainAfterExit=yes",
+        "--property=KillMode=control-group",
+        "--",
+        sys.executable,
+        "-B",
+        str(module_path),
+        "_supervisor",
+        str(spec_path),
+    ]
+
+
 class SystemdGatedExecution:
     """One exact lingering systemd execution group with a gated supervisor."""
 
@@ -1335,21 +1354,11 @@ class SystemdGatedExecution:
         _exclusive_publish_json(self.spec_path, spec)
         module_path = str(Path(__file__).resolve())
         self._checked_command(
-            [
-                "systemd-run",
-                "--user",
-                "--quiet",
-                "--no-block",
-                f"--unit={self.unit}",
-                "--property=Type=oneshot",
-                "--property=RemainAfterExit=yes",
-                "--property=KillMode=control-group",
-                "--",
-                sys.executable,
+            _systemd_gated_supervisor_command(
+                self.unit,
                 module_path,
-                "_supervisor",
-                str(self.spec_path),
-            ]
+                self.spec_path,
+            )
         )
         try:
             ready = _wait_for_json(

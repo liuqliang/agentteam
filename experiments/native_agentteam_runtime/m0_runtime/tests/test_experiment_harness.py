@@ -160,6 +160,7 @@ from agentteam_runtime.experiment_sandbox import (
     validate_provider_sandbox_descriptor,
 )
 from agentteam_runtime.model_invocation import (
+    _systemd_gated_supervisor_command,
     _validate_registered_codex_command,
     ExecutionGroupIdentity,
     InvocationLifecycle,
@@ -205,6 +206,7 @@ from agentteam_runtime.projection_db import (
 )
 import agentteam_runtime.two_phase_scheduler as two_phase_scheduler_module
 from agentteam_runtime.two_phase_scheduler import (
+    WORKER_OUTBOX_PUBLICATION_GRACE_SECONDS,
     TwoPhaseFileScheduler,
     reconcile_orphaned_invocation,
 )
@@ -3432,10 +3434,10 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
             )
             invocation.finalize("completed", execution)
 
-            waiting = scheduler.collect_ready_results()
-
-            self.assertEqual(waiting["collected_count"], 0)
-            self.assertEqual(waiting["inflight_count"], 1)
+            for _ in range(5):
+                waiting = scheduler.collect_ready_results()
+                self.assertEqual(waiting["collected_count"], 0)
+                self.assertEqual(waiting["inflight_count"], 1)
             self.assertEqual(
                 inflight["terminal_without_outbox_observed"][
                     "reconciliation_status"
@@ -3482,9 +3484,18 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
             invocation.finalize("completed", execution)
 
             waiting = scheduler.collect_ready_results()
+            del inflight["terminal_without_outbox_observed"][
+                "observed_at_monotonic"
+            ]
+            legacy_state_waiting = scheduler.collect_ready_results()
+            still_waiting = scheduler.collect_ready_results()
+            monotonic.advance(WORKER_OUTBOX_PUBLICATION_GRACE_SECONDS)
             recovered = scheduler.collect_ready_results()
 
             self.assertEqual(waiting["collected_count"], 0)
+            self.assertEqual(legacy_state_waiting["collected_count"], 0)
+            self.assertEqual(still_waiting["collected_count"], 0)
+            self.assertEqual(still_waiting["inflight_count"], 1)
             self.assertEqual(recovered["collected_count"], 1)
             self.assertEqual(recovered["inflight_count"], 0)
             self.assertEqual(
@@ -10102,6 +10113,25 @@ class ExperimentSandboxTests(unittest.TestCase):
             self.assertTrue(execution.launch_failed)
             self.assertTrue(RepositoryDriftRunner.permit_called)
             invocation.finalize("failed", execution)
+
+    def test_gated_supervisor_disables_release_bytecode_writes(self):
+        command = _systemd_gated_supervisor_command(
+            "agentteam-inv-test.service",
+            "/immutable/model_invocation.py",
+            "/authority/supervisor-spec.json",
+        )
+
+        separator = command.index("--")
+        self.assertEqual(
+            command[separator + 1 :],
+            [
+                sys.executable,
+                "-B",
+                "/immutable/model_invocation.py",
+                "_supervisor",
+                "/authority/supervisor-spec.json",
+            ],
+        )
 
     def test_real_supervisor_revalidates_release_source_before_exec(self):
         import agentteam_runtime.model_invocation as invocation_module

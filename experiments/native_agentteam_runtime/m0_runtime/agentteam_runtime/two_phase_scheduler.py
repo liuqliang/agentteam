@@ -78,6 +78,7 @@ _RUN_LOOP_TERMINAL_STATUSES = _STOP_SCHEDULER_STATUSES | {
     "budget_stopped",
     "interrupted",
 }
+WORKER_OUTBOX_PUBLICATION_GRACE_SECONDS = 2.0
 WORKER_USAGE_STAGE_BY_ROLE = {
     "task_planner": "planner_or_task_slicer",
     "planner": "planner_or_task_slicer",
@@ -442,24 +443,49 @@ class TwoPhaseFileScheduler:
                         in {"terminal_available", "recovered"}
                         and not lease_expired
                         and not self.resume_interrupted_experiment
-                        and not inflight.get(
+                    ):
+                        observed = inflight.get(
                             "terminal_without_outbox_observed"
                         )
-                    ):
-                        # The invocation terminal is committed before the
-                        # mailbox worker publishes its richer runtime result.
-                        # Give that normal publication one scheduler tick so
-                        # reconciliation cannot discard semantic evidence.
-                        inflight["terminal_without_outbox_observed"] = {
-                            "terminal_path": reconciliation.get(
-                                "terminal_path"
-                            ),
-                            "reconciliation_status": reconciliation.get(
-                                "reconciliation_status"
-                            ),
-                        }
-                        remaining.append(inflight)
-                        continue
+                        terminal_path = reconciliation.get("terminal_path")
+                        now_monotonic = (
+                            self.experiment_controller_monotonic()
+                            if self.experiment_controller_monotonic
+                            is not None
+                            else time.monotonic()
+                        )
+                        if (
+                            not isinstance(observed, dict)
+                            or observed.get("terminal_path")
+                            != terminal_path
+                            or not isinstance(
+                                observed.get("observed_at_monotonic"),
+                                (int, float),
+                            )
+                            or observed["observed_at_monotonic"]
+                            > now_monotonic
+                        ):
+                            observed = {
+                                "terminal_path": terminal_path,
+                                "reconciliation_status": reconciliation.get(
+                                    "reconciliation_status"
+                                ),
+                                "observed_at_monotonic": now_monotonic,
+                            }
+                            inflight[
+                                "terminal_without_outbox_observed"
+                            ] = observed
+                        if (
+                            now_monotonic
+                            - observed["observed_at_monotonic"]
+                            < WORKER_OUTBOX_PUBLICATION_GRACE_SECONDS
+                        ):
+                            # The provider terminal precedes the richer worker
+                            # outbox. Preserve a bounded publication window so
+                            # terminal-only recovery cannot discard semantic
+                            # evidence from a healthy worker.
+                            remaining.append(inflight)
+                            continue
                     result = _runtime_result_from_reconciliation(
                         inflight,
                         reconciliation,
