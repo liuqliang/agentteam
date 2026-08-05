@@ -1,8 +1,8 @@
 {
   "schema_version": "phase2_contract_review.v1",
-  "decision": "pending",
-  "reviewer": "pending-operator",
-  "reviewed_at": "2026-08-04T14:48:06Z",
+  "decision": "approved",
+  "reviewer": "operator",
+  "reviewed_at": "2026-08-05T01:41:05Z",
   "git_object_format": "sha1",
   "preflight_release_id": "phase2-promotion-v15-bd906e0-git",
   "preflight_release_source_commit": "bd906e06c7fc5d7abf06e0c380093405ee1408dd",
@@ -42,8 +42,6 @@
     "Regenerated the Git-installed candidate release, deterministic calibration authority, protocol template, and promotion authority against source commit bd906e0.",
     "Requires a fresh v15 taskpack, run identity, gate epoch, and exact P2-09 provider authorization."
   ],
-  "remaining_escalations": [
-    "Operator must review and approve this exact v15 provider-lane-contention repair contract before taskpack materialization or any new P2-09 provider launch."
-  ],
-  "notes": "Proposed v15 provider-lane-contention repair contract. Pending approval; it does not authorize taskpack materialization, P2-09 provider access, main merge, or push."
+  "remaining_escalations": [],
+  "notes": "Approved v15 provider-lane-contention repair contract. This authorizes taskpack materialization, freezing, and deterministic P2-08 only; P2-09 still requires separate current epoch-bound provider authorization, and no gate may merge to main or push."
 }
