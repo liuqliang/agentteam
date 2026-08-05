@@ -3174,6 +3174,45 @@ class TaskpackTests(unittest.TestCase):
                 "accepted",
             )
 
+            verification = json.loads(
+                (taskpack_dir / "verification.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            verification["command"] = [
+                "env",
+                "PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime",
+                "python3",
+                "-m",
+                "unittest",
+                "discover",
+            ]
+            _write_json(taskpack_dir / "verification.json", verification)
+            self.assertEqual(
+                validate_taskpack(taskpack_dir)["status"],
+                "accepted",
+            )
+            for invalid_assignment in (
+                "HOME=relative",
+                "PYTHONPATH=../../outside",
+                "PYTHONPATH=/absolute/path",
+                f"PYTHONPATH=first{os.pathsep}second",
+            ):
+                verification["command"][1] = invalid_assignment
+                _write_json(
+                    taskpack_dir / "verification.json",
+                    verification,
+                )
+                with self.assertRaisesRegex(
+                    TaskpackValidationError,
+                    "verification command is not allowed: env",
+                ):
+                    validate_taskpack(taskpack_dir)
+            verification["command"][1] = (
+                "PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime"
+            )
+            _write_json(taskpack_dir / "verification.json", verification)
+
             taskpack["authoring_mode"] = "legacy_direct"
             _write_json(taskpack_dir / "taskpack.yaml", taskpack)
             with self.assertRaisesRegex(

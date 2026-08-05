@@ -2398,7 +2398,16 @@ def validate_taskpack(taskpack_dir):
         command = verification.get("command")
     if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
         errors.append("verification.command must be a non-empty string array")
-    elif not _verification_command_allowed(command[0], taskpack.get("project_root")):
+    elif not (
+        _verification_command_allowed(
+            command[0],
+            taskpack.get("project_root"),
+        )
+        or (
+            controller_only
+            and _controller_verification_command_allowed(command)
+        )
+    ):
         errors.append(f"verification command is not allowed: {command[0]}")
     elif controller_only and not _controller_verification_command_allowed(
         command
@@ -2432,7 +2441,14 @@ def _verification_command_allowed(executable, project_root):
 def _controller_verification_command_allowed(command):
     if not isinstance(command, list) or len(command) < 4:
         return False
-    executable = Path(command[0]).name
+    python_index = 0
+    if command[0] == "env":
+        if len(command) < 6 or not _controller_pythonpath_allowed(
+            command[1]
+        ):
+            return False
+        python_index = 2
+    executable = Path(command[python_index]).name
     if not (
         executable in {"python", "python3"}
         or (
@@ -2445,9 +2461,24 @@ def _controller_verification_command_allowed(command):
     ):
         return False
     return (
-        command[1:3] == ["-m", "unittest"]
-        and command[3] == "discover"
-        and "-c" not in command
+        command[python_index + 1 : python_index + 3]
+        == ["-m", "unittest"]
+        and command[python_index + 3] == "discover"
+        and "-c" not in command[python_index + 1 :]
+    )
+
+
+def _controller_pythonpath_allowed(assignment):
+    prefix = "PYTHONPATH="
+    if not isinstance(assignment, str) or not assignment.startswith(prefix):
+        return False
+    value = assignment[len(prefix) :]
+    path = Path(value)
+    return bool(value) and not (
+        path.is_absolute()
+        or value in {".", ".."}
+        or ".." in path.parts
+        or os.pathsep in value
     )
 
 
