@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -3974,6 +3975,24 @@ class TaskpackTests(unittest.TestCase):
             ).stdout.strip()
             record["pre04_integration_commit"] = pre04_integration_commit
             _write_json(repo / blueprint["approval"]["record_path"], record)
+            subprocess.run(
+                [
+                    "git",
+                    "add",
+                    blueprint_path,
+                    blueprint["approval"]["record_path"],
+                ],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "approve release binding"],
+                cwd=repo,
+                env=_test_env(),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
             release_id = record["preflight_release_id"]
             release_source_commit = record["preflight_release_source_commit"]
             _write_json(
@@ -3996,12 +4015,30 @@ class TaskpackTests(unittest.TestCase):
             )
             output_root = tmp_path / "drafts"
 
+            def fail_with_readonly_snapshot(taskpack_dir):
+                readonly_dir = (
+                    Path(taskpack_dir)
+                    / "controller_authority"
+                    / "readonly"
+                )
+                readonly_dir.mkdir(parents=True)
+                readonly_file = readonly_dir / "taskpack.yaml"
+                readonly_file.write_text("{}\n", encoding="utf-8")
+                readonly_file.chmod(stat.S_IRUSR)
+                readonly_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)
+                raise TaskpackValidationError(
+                    "injected generated-package failure"
+                )
+
             with mock.patch.object(
                 taskpack_module,
                 "validate_taskpack",
-                side_effect=TaskpackValidationError("injected generated-package failure"),
+                side_effect=fail_with_readonly_snapshot,
             ):
-                with self.assertRaises(TaskpackValidationError):
+                with self.assertRaisesRegex(
+                    TaskpackValidationError,
+                    "injected generated-package failure",
+                ):
                     taskpack_module.materialize_taskpack_blueprint(
                         repo,
                         blueprint_path,

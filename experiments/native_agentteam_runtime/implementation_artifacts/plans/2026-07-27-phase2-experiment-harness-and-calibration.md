@@ -842,6 +842,13 @@ seeded counterbalanced rotation, which is the second entry in the base mode
 order. Blueprint materialization and the live controller both reject a stale
 `repeat_mode` before any provider allocation.
 
+Frozen full verification must declare repository-local import paths inside an
+allowed verification command and must pass from the integration repository
+root without relying on the operator shell environment. If blueprint
+generation fails after snapshotting read-only controller authority, the
+materializer removes only its own staging tree and preserves the original
+validation error instead of masking it with a cleanup permission failure.
+
 Host resource diagnostics, including cgroup-inotify watch pressure, are retained
 as operator warnings but are not calibration acceptance criteria. P2-09 still
 fails closed for a nonzero evaluator or acceptance result, a real timeout,

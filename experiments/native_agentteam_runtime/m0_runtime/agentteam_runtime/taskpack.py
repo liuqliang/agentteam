@@ -804,25 +804,56 @@ def materialize_taskpack_blueprint(
         staged_manifest_path.rename(manifest_path)
     except Exception:
         if committed_taskpack and taskpack_dir.exists():
-            shutil.rmtree(taskpack_dir)
+            _remove_materialization_tree(taskpack_dir, ignore_errors=True)
         if manifest_path.exists():
             manifest_path.unlink()
         if staging_dir.exists():
-            shutil.rmtree(staging_dir)
+            _remove_materialization_tree(staging_dir, ignore_errors=True)
         if not output_root_existed:
             try:
                 output_root.rmdir()
             except OSError:
                 pass
         raise
-    finally:
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir)
+    if staging_dir.exists():
+        _remove_materialization_tree(staging_dir)
 
     manifest["taskpack_dir"] = str(taskpack_dir)
     manifest["manifest_path"] = str(manifest_path)
     manifest["dry_run"] = False
     return manifest
+
+
+def _remove_materialization_tree(path, *, ignore_errors=False):
+    path = Path(path)
+    try:
+        for root, directories, files in os.walk(
+            path,
+            topdown=True,
+            followlinks=False,
+        ):
+            root_path = Path(root)
+            root_path.chmod(root_path.stat().st_mode | stat.S_IRWXU)
+            for name in directories:
+                candidate = root_path / name
+                if candidate.is_symlink():
+                    continue
+                candidate.chmod(
+                    candidate.stat().st_mode | stat.S_IRWXU
+                )
+            for name in files:
+                candidate = root_path / name
+                if candidate.is_symlink():
+                    continue
+                candidate.chmod(
+                    candidate.stat().st_mode
+                    | stat.S_IRUSR
+                    | stat.S_IWUSR
+                )
+        shutil.rmtree(path)
+    except OSError:
+        if not ignore_errors:
+            raise
 
 
 def _validate_taskpack_blueprint_schema(blueprint):
