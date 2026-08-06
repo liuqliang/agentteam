@@ -1,10 +1,11 @@
 # Decision-Centric Execution Graph
 
 Status: operator-approved architecture and staged migration plan. D0 through
-D2 are implemented at `0ce9fdb`; D3 through D5 remain pending. This document is
-implementation authority for reorganizing AgentTeam recovery, trace, Git state,
-and durable artifacts around decisions. It does not rewrite historical runs or
-change the research claims established by the Phase 2 experiment harness.
+D2 are implemented at `0ce9fdb`; D3 is implemented at `b36714c`; D4 and D5
+remain pending. This document is implementation authority for reorganizing
+AgentTeam recovery, trace, Git state, and durable artifacts around decisions.
+It does not rewrite historical runs or change the research claims established
+by the Phase 2 experiment harness.
 
 ## Decision Summary
 
@@ -302,6 +303,9 @@ and identify missing rationale explicitly.
 
 ### D3: Runtime Propagation
 
+Status: implemented at `b36714c` and verified by the repository-wide suite
+(`974` tests passed, `4` skipped).
+
 - preserve authorship authority: operator or semantic authority creates
   `direction`, the responsible planning/implementation role proposes
   `execution`, and the verification/integration controller creates
@@ -310,6 +314,17 @@ and identify missing rationale explicitly.
   inherited decision;
 - require an acceptance decision before integration;
 - keep legacy runs executable without fabricated rationale.
+
+The implementation uses an explicit `taskpack_decision_contract.v1`. A frozen
+taskpack without that contract follows the legacy path and receives no null or
+synthetic decision fields. A contract-enabled run publishes one immutable
+`run_decision_binding.v1`, verifies that inherited decisions remain active at
+dispatch and acceptance time, and propagates the selected decision through the
+task, attempt, worker message, model invocation lifecycle, and event journal.
+The integration controller writes an idempotent `acceptance` decision before a
+validated result can be queued, applied, or accepted as a verified no-op.
+Projection schema `agentteam_projection.v9` exposes decision-to-run, task,
+attempt, invocation, and event edges through the decision graph query.
 
 ### D4: Git-Backed Recovery
 
