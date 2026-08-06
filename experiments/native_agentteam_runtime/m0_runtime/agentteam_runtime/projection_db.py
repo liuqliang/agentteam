@@ -3606,7 +3606,7 @@ def _artifact_retention_explanations():
     return [
         {
             "retention_policy": "authoritative",
-            "reason": "events, state, reports, patches, and frozen taskpacks are audit records and remain protected",
+            "reason": "events, state, reports, frozen taskpacks, and legacy patches remain protected; decision-bound code state is retained in Git",
         },
         {
             "retention_policy": "protected",
@@ -3614,7 +3614,7 @@ def _artifact_retention_explanations():
         },
         {
             "retention_policy": "rebuildable",
-            "reason": "derived role/repo context artifacts may become future cleanup candidates; M42 only lists them",
+            "reason": "derived role/repo context and terminal transport files are cleanup candidates after decision authority is published",
         },
     ]
 
@@ -4211,6 +4211,17 @@ def _scan_artifacts(work_root, runs, taskpacks):
                 seen,
                 path,
                 "report",
+                run_id=run_id,
+                retention_policy="authoritative",
+                authority="file",
+                source="run",
+            )
+        for path in _iter_files(run_dir / "evidence", suffixes={".json"}):
+            _append_artifact(
+                artifacts,
+                seen,
+                path,
+                "evidence",
                 run_id=run_id,
                 retention_policy="authoritative",
                 authority="file",

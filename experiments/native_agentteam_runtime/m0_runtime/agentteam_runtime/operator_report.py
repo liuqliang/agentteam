@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from .completion_summary import build_completion_summary, compact_text_items
+from .decision_artifact_lifecycle import load_operator_report
 from .projection_db import project_projection_db_path, read_projected_follow_up_lineage
 from .two_phase_scheduler import _operator_report_from_state
 from .token_usage import aggregate_token_usage, format_token_usage
@@ -41,6 +42,13 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
 
     payload = terminal_event.get("payload", {}) if terminal_event else {}
     operator_report = payload.get("operator_report") if isinstance(payload, dict) else None
+    if not isinstance(operator_report, dict) and isinstance(payload, dict):
+        metadata = payload.get("operator_report_artifact")
+        if isinstance(metadata, dict):
+            try:
+                operator_report = load_operator_report(metadata)
+            except RuntimeError:
+                operator_report = None
     if not isinstance(operator_report, dict):
         operator_report = _operator_report_from_state(state) if isinstance(state, dict) else {}
     if not isinstance(operator_report, dict):

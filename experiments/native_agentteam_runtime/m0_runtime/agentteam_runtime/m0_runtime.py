@@ -2628,6 +2628,10 @@ def replay_event_records(events):
                 {
                     "queue_status": queue_status,
                     "patch_path": payload.get("patch_path"),
+                    "code_state_artifact_id": payload.get("code_state_artifact_id"),
+                    "code_state_base_sha": payload.get("code_state_base_sha"),
+                    "code_state_commit_sha": payload.get("code_state_commit_sha"),
+                    "code_state_ref": payload.get("code_state_ref"),
                     "integration_queue_path": payload.get("integration_queue_path"),
                     "integration_status": "not_requested",
                     "integration_verification_status": "not_requested",
@@ -2665,6 +2669,22 @@ def replay_event_records(events):
                 {
                     "queue_status": "applied",
                     "patch_path": payload.get("patch_path", queue_item.get("patch_path")),
+                    "code_state_artifact_id": payload.get(
+                        "code_state_artifact_id",
+                        queue_item.get("code_state_artifact_id"),
+                    ),
+                    "code_state_base_sha": payload.get(
+                        "code_state_base_sha",
+                        queue_item.get("code_state_base_sha"),
+                    ),
+                    "code_state_commit_sha": payload.get(
+                        "code_state_commit_sha",
+                        queue_item.get("code_state_commit_sha"),
+                    ),
+                    "code_state_ref": payload.get(
+                        "code_state_ref",
+                        queue_item.get("code_state_ref"),
+                    ),
                     "integration_status": payload["integration_status"],
                     "integration_branch": payload["integration_branch"],
                     "integration_worktree_path": payload["integration_worktree_path"],

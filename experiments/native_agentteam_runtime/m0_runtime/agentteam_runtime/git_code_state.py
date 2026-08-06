@@ -32,6 +32,10 @@ def attempt_code_state_ref(run_id, task_id, attempt_id):
     )
 
 
+def run_code_state_ref_prefix(run_id):
+    return "refs/agentteam/runs/{}/".format(_ref_component(run_id))
+
+
 def checkpoint_code_state_ref(decision_id, task_id):
     return "refs/agentteam/checkpoints/{}/{}".format(
         _ref_component(decision_id),
@@ -110,6 +114,7 @@ def publish_attempt_code_state(
         "code_state_artifact_id": artifact_id,
         "code_state_decision_id": decision_id,
         "code_state_commit_sha": commit_sha,
+        "code_state_base_sha": _attempt_restore_base(project_root, commit_sha),
         "code_state_ref": retained_ref,
         "checkpoint_ref": checkpoint_ref,
         "git_object_format": "sha256" if algorithm == "git_sha256" else "sha1",
@@ -232,6 +237,7 @@ def resolve_attempt_code_state(
         "code_state_artifact_id": artifact_id,
         "code_state_decision_id": decision_id,
         "code_state_commit_sha": commit_sha,
+        "code_state_base_sha": _attempt_restore_base(project_root, commit_sha),
         "code_state_ref": retained_ref,
         "checkpoint_ref": checkpoint_code_state_ref(decision_id, task_id),
     }

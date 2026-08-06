@@ -135,7 +135,7 @@ def _selected_queue_items(output_dir, queue_statuses):
     return [
         item
         for item in queue["items"]
-        if item.get("queue_status") in allowed and item.get("patch_path")
+        if item.get("queue_status") in allowed and _queue_item_has_change_source(item)
     ]
 
 
@@ -153,7 +153,14 @@ def _base_batch_result(
         "project_root": str(project_root),
         "selected_queue_statuses": list(selected_statuses),
         "queue_item_ids": [item["queue_item_id"] for item in queue_items],
-        "patch_paths": [item["patch_path"] for item in queue_items],
+        "patch_paths": [
+            item["patch_path"] for item in queue_items if item.get("patch_path")
+        ],
+        "code_state_commits": [
+            item["code_state_commit_sha"]
+            for item in queue_items
+            if item.get("code_state_commit_sha")
+        ],
         "verification_command": list(verification_command),
         "batch_branch": None,
         "batch_worktree_path": None,
@@ -212,6 +219,8 @@ def _create_batch_worktree(project_root, output_dir, batch_id):
 
 
 def _apply_queue_patch(batch_worktree_path, item):
+    if not item.get("patch_path"):
+        return _apply_queue_code_state(batch_worktree_path, item)
     completed = subprocess.run(
         [
             "git",
@@ -233,6 +242,64 @@ def _apply_queue_patch(batch_worktree_path, item):
         "patch_apply_stdout": completed.stdout,
         "patch_apply_stderr": completed.stderr,
     }
+
+
+def _apply_queue_code_state(batch_worktree_path, item):
+    base_sha = item.get("code_state_base_sha")
+    commit_sha = item.get("code_state_commit_sha")
+    if not base_sha or not commit_sha:
+        return {
+            "patch_apply_status": "failed",
+            "failed_queue_item_id": item["queue_item_id"],
+            "patch_apply_stdout": "",
+            "patch_apply_stderr": "integration queue item has no change source",
+        }
+    delta = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(batch_worktree_path),
+            "diff",
+            "--binary",
+            base_sha,
+            commit_sha,
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if delta.returncode != 0:
+        return {
+            "patch_apply_status": "failed",
+            "failed_queue_item_id": item["queue_item_id"],
+            "patch_apply_stdout": "",
+            "patch_apply_stderr": delta.stderr.decode("utf-8", errors="replace"),
+        }
+    completed = subprocess.run(
+        ["git", "-C", str(batch_worktree_path), "apply", "--binary", "-"],
+        input=delta.stdout,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return {
+        "patch_apply_status": "applied" if completed.returncode == 0 else "failed",
+        "failed_queue_item_id": (
+            None if completed.returncode == 0 else item["queue_item_id"]
+        ),
+        "patch_apply_stdout": completed.stdout.decode("utf-8", errors="replace"),
+        "patch_apply_stderr": completed.stderr.decode("utf-8", errors="replace"),
+    }
+
+
+def _queue_item_has_change_source(item):
+    return bool(
+        item.get("patch_path")
+        or (
+            item.get("code_state_base_sha")
+            and item.get("code_state_commit_sha")
+        )
+    )
 
 
 def _run_batch_verification(command, batch_worktree_path):

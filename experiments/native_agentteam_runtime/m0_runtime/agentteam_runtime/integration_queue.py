@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 
-INTEGRATION_QUEUE_SCHEMA_VERSION = "integration_queue.v1"
+INTEGRATION_QUEUE_SCHEMA_VERSION = "integration_queue.v2"
 
 
 def integration_queue_path(output_dir):
@@ -55,6 +55,11 @@ def build_integration_queue_item(attempt):
         "attempt_id": attempt["attempt_id"],
         "lease_id": attempt.get("lease_id"),
         "patch_path": attempt.get("patch_path"),
+        "code_state_artifact_id": attempt.get("code_state_artifact_id"),
+        "code_state_status": attempt.get("code_state_status"),
+        "code_state_base_sha": attempt.get("code_state_base_sha"),
+        "code_state_commit_sha": attempt.get("code_state_commit_sha"),
+        "code_state_ref": attempt.get("code_state_ref"),
         "attempt_branch": attempt.get("branch"),
         "attempt_worktree_path": attempt.get("worktree_path"),
         "integration_status": attempt.get("integration_status", "not_requested"),
@@ -109,7 +114,16 @@ def integration_queue_status_for_attempt(attempt):
 
 
 def _attempt_should_be_queued(attempt):
-    return attempt.get("validation_status") == "accepted" and bool(attempt.get("patch_path"))
+    return attempt.get("validation_status") == "accepted" and bool(
+        attempt.get("patch_path")
+        or (
+            attempt.get("code_state_status") != "unchanged"
+            and attempt.get("code_state_base_sha")
+            and attempt.get("code_state_commit_sha")
+            and attempt.get("code_state_base_sha")
+            != attempt.get("code_state_commit_sha")
+        )
+    )
 
 
 def _empty_queue():

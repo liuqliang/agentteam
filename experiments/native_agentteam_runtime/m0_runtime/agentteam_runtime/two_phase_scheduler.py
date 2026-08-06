@@ -37,6 +37,16 @@ from .m0_runtime import (
     write_patch_artifact,
 )
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
+from .decision_artifact_lifecycle import (
+    apply_terminal_retention,
+    compact_event,
+    compact_scheduler_state,
+    load_operator_report,
+    publish_operator_report,
+    publish_attempt_evidence,
+    retire_patch,
+    retire_transport,
+)
 from .git_code_state import (
     publish_attempt_code_state,
     publish_integration_code_state,
@@ -1210,6 +1220,7 @@ class TwoPhaseFileScheduler:
             "post_integration_controller_observation": None,
         }
         result.update(_runtime_evidence_summary(task, runtime_result))
+        code_state = None
         code_state_events = []
         if (
             self.decision_binding is not None
@@ -1308,6 +1319,11 @@ class TwoPhaseFileScheduler:
         projected_task_status = (
             "ready" if retry_allowed else result["task_status"]
         )
+        if self.decision_binding is not None and code_state is not None:
+            result.update(retire_patch(patch_path))
+            patch_path = None
+            if result.get("integration_queue_item_id"):
+                result.update(upsert_integration_queue_item(self.output_dir, result))
         if result["task_status"] == "done" and diff_audit:
             runtime_artifacts = self._persist_runtime_artifacts(
                 task,
@@ -1315,6 +1331,14 @@ class TwoPhaseFileScheduler:
                 diff_audit["runtime_artifact_digests"],
             )
             result["runtime_artifacts"] = runtime_artifacts
+        if self.decision_binding is not None and code_state is not None:
+            evidence_artifact = publish_attempt_evidence(
+                self.decision_binding,
+                self.output_dir,
+                result,
+                created_at=inflight["created_at"],
+            )
+            result.update(evidence_artifact)
         runtime_events = [
                 self._event(
                     "runtime_session_observed",
@@ -1582,6 +1606,10 @@ class TwoPhaseFileScheduler:
                     else []
                 ),
             ]
+        if self.decision_binding is not None:
+            runtime_events = [
+                compact_event(event, result) for event in runtime_events
+            ]
         canonical_events = self._append_events(inflight["step_id"], runtime_events)
         self._notify_canonical_events(inflight["step_id"], canonical_events)
         self._update_task_from_outcome(
@@ -1609,6 +1637,9 @@ class TwoPhaseFileScheduler:
             }
         )
         self._write_state()
+        if self.decision_binding is not None:
+            result.update(retire_transport(inflight.get("outbox_path")))
+            self._write_state()
         if integration_transaction_active:
             self.state["integration_active"] = False
             self.state.pop("integration_attempt_id", None)
@@ -3107,7 +3138,23 @@ class TwoPhaseFileScheduler:
         }
         if run_status != "running":
             operator_report = _operator_report_from_state(self.state)
-            if operator_report["task_reports"]:
+            if run_status == "completed" and self.decision_binding is not None:
+                report_artifact = publish_operator_report(
+                    self.decision_binding,
+                    self.output_dir,
+                    operator_report,
+                    created_at=self.clock.now(),
+                )
+                payload["operator_report_artifact"] = report_artifact
+                payload["artifact_retention"] = apply_terminal_retention(
+                    self.decision_binding,
+                    self.output_dir,
+                    self.state,
+                    project_root=self.project_root,
+                )
+                compact_scheduler_state(self.state, report_artifact)
+                self._write_state()
+            elif operator_report["task_reports"]:
                 payload["operator_report"] = operator_report
         if extra:
             payload.update(extra)
@@ -4084,6 +4131,9 @@ def _is_terminal_backlog_status(task):
 
 
 def _operator_report_from_state(state):
+    report_artifact = state.get("operator_report_artifact")
+    if isinstance(report_artifact, dict):
+        return load_operator_report(report_artifact)
     task_reports = []
     for step in state.get("steps", []):
         if not isinstance(step, dict):

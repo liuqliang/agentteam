@@ -549,15 +549,15 @@ def _concise_event_text(event, run_dir, project):
     if event_type == "backlog_completed":
         lines.append("Milestone: awaiting required post-backlog gates")
         lines.append(f"Next gate action: {payload.get('next_action') or 'agentteam report'}")
+    operator_report = _payload_operator_report(payload)
     task_id = payload.get("task_id")
-    if not task_id and isinstance(payload.get("operator_report"), dict):
-        task_reports = payload["operator_report"].get("task_reports")
+    if not task_id and isinstance(operator_report, dict):
+        task_reports = operator_report.get("task_reports")
         if isinstance(task_reports, list) and task_reports:
             first_task = task_reports[0] if isinstance(task_reports[0], dict) else {}
             task_id = first_task.get("task_id")
     if task_id:
         lines.append(f"Task: {task_id}")
-    operator_report = payload.get("operator_report")
     if isinstance(operator_report, dict):
         report = _notification_report_with_invocation_usage(
             operator_report,
@@ -607,7 +607,7 @@ def _event_text(event, run_dir, project):
     failure = payload.get("failure_category") or payload.get("error_summary")
     if failure:
         lines.append(f"Failure: {failure}")
-    operator_report = payload.get("operator_report")
+    operator_report = _payload_operator_report(payload)
     if isinstance(operator_report, dict):
         report = _notification_report_with_invocation_usage(
             operator_report,
@@ -627,6 +627,21 @@ def _event_text(event, run_dir, project):
         ]
     )
     return "\n".join(lines)
+
+
+def _payload_operator_report(payload):
+    report = payload.get("operator_report")
+    if isinstance(report, dict):
+        return report
+    metadata = payload.get("operator_report_artifact")
+    if not isinstance(metadata, dict):
+        return None
+    try:
+        from .decision_artifact_lifecycle import load_operator_report
+
+        return load_operator_report(metadata)
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 def _backlog_completed_text(event, run_dir, project):

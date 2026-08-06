@@ -38,7 +38,7 @@ compact for terminal use.
 
 | Group | Commands | Purpose |
 | --- | --- | --- |
-| Project setup | `init`, `doctor`, `grounding`, `update`, `db`, `stats`, `gc` | Configure, inspect, and maintain the local AgentTeam installation for a project. |
+| Project setup | `init`, `doctor`, `grounding`, `update`, `db`, `artifacts`, `stats`, `gc` | Configure, inspect, and maintain the local AgentTeam installation for a project. |
 | Run lifecycle | `start`, `next`, `queue`, `pursue`, `continue`, `stop`, `status`, `explain-status`, `watch`, `logs`, `report`, `paths` | Start work, inspect progress, stop safely, and understand completed runs. |
 | Result integration | `integrate` | Merge verified integration-baseline changes back to the target repository. |
 | Notification | `notify` | Test Feishu delivery or resend completion summaries. |
@@ -298,6 +298,34 @@ Important behavior:
   does not depend on manually maintaining `agentteam.db`.
 - M60 does not delete artifacts, does not make `agentteam.db` authoritative,
   and does not add automatic rebuilds to read-only operator commands.
+
+### `agentteam artifacts`
+
+Measures retained run cost or adds decision links for pre-decision history.
+
+Examples:
+
+```bash
+agentteam artifacts cost
+agentteam artifacts cost --taskpack <taskpack-id> --json
+agentteam artifacts migrate-legacy --project-root /path/to/repo
+```
+
+Important behavior:
+
+- `cost` is read-only. It reports retained file count and bytes plus duplicate
+  patch, raw-log, changed-file, runtime-output, and prose-report payloads. It
+  excludes disposable worker and integration worktrees from the measurement.
+- `migrate-legacy` recursively discovers historical run directories, creates
+  deterministic synthetic `legacy execution lineage` decisions, and links
+  known contracts, Git commits, validation summaries, and reports.
+- Migration is additive and idempotent. It does not edit or delete historical
+  taskpacks, runs, events, patches, reports, or state files.
+- Missing historical rationale is recorded as missing; the command does not
+  infer a rationale from later execution output.
+- New decision-bound runs retain Git code-state instead of terminal patch
+  copies. The decision ledger and retained files remain authoritative, while
+  `agentteam.db` remains a rebuildable projection.
 
 ### `agentteam experiment`
 

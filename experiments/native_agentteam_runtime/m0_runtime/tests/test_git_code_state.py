@@ -514,6 +514,11 @@ class GitCodeStateTests(unittest.TestCase):
                 code_events[1]["decision_id"],
                 result["acceptance_decision_id"],
             )
+            self.assertNotIn("code_state_artifact_id", code_events[1]["payload"])
+            self.assertEqual(
+                code_events[1]["payload"]["integration_code_state_artifact_id"],
+                result["integration_code_state_artifact_id"],
+            )
             code_links = [
                 item
                 for item in DecisionLedger(work_root).artifact_links()

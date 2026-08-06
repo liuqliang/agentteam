@@ -40,6 +40,14 @@ _EXPORTS = {
     "build_repository_map": (".repo_map", "build_repository_map"),
     "build_runtime_observability": (".observability", "build_runtime_observability"),
     "build_project_stats": (".projection_db", "build_project_stats"),
+    "artifact_cost_snapshot": (
+        ".decision_artifact_lifecycle",
+        "artifact_cost_snapshot",
+    ),
+    "build_legacy_decision_index": (
+        ".legacy_decision_index",
+        "build_legacy_decision_index",
+    ),
     "DecisionLedger": (".decision_ledger", "DecisionLedger"),
     "build_taskpack_runtime_args": (".taskpack", "build_taskpack_runtime_args"),
     "build_feishu_notification_sink_from_env": (
@@ -102,6 +110,10 @@ _EXPORTS = {
     "rebuild_project_projection_db": (
         ".projection_db",
         "rebuild_project_projection_db",
+    ),
+    "load_operator_report": (
+        ".decision_artifact_lifecycle",
+        "load_operator_report",
     ),
     "resolve_permission_request": (".m0_runtime", "resolve_permission_request"),
     "replay_event_records": (".m0_runtime", "replay_event_records"),

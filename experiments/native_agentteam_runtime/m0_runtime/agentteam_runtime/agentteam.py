@@ -87,6 +87,8 @@ from .experiment_results import (
     render_experiment_result,
 )
 from .repo_grounding import build_repo_grounding, render_repo_grounding_text
+from .decision_artifact_lifecycle import artifact_cost_snapshot
+from .legacy_decision_index import build_legacy_decision_index
 from .semantic_feedback import (
     list_semantic_feedback_proposals,
     render_semantic_feedback_text,
@@ -370,6 +372,18 @@ _HELP_COMMANDS = [
         ],
     },
     {
+        "name": "artifacts",
+        "summary": "Measure decision-bound artifact cost or add a legacy decision index.",
+        "examples": [
+            "agentteam artifacts cost --taskpack <id>",
+            "agentteam artifacts migrate-legacy --project-root <repo>",
+        ],
+        "notes": [
+            "cost is read-only and defaults to the latest run.",
+            "migrate-legacy appends an index and decision links without rewriting historical runs.",
+        ],
+    },
+    {
         "name": "doctor",
         "summary": "Check project profile, git repository, runtime prerequisites, and verification profile.",
         "examples": [
@@ -613,6 +627,7 @@ def _build_parser():
     _add_report_parser(subcommands)
     _add_chat_parser(subcommands)
     _add_db_parser(subcommands)
+    _add_artifacts_parser(subcommands)
     _add_experiment_parser(subcommands)
     _add_doctor_parser(subcommands)
     _add_grounding_parser(subcommands)
@@ -1337,6 +1352,35 @@ def _add_db_parser(subcommands):
     check.add_argument("--project-root", help="Git repository root for the target project. Defaults to cwd.")
     check.add_argument("--json", action="store_true", help="Print check summary as JSON.")
     check.set_defaults(handler=_handle_db)
+
+
+def _add_artifacts_parser(subcommands):
+    parser = subcommands.add_parser(
+        "artifacts",
+        help="Measure retained artifact cost or index legacy history.",
+    )
+    artifact_subcommands = parser.add_subparsers(
+        dest="artifacts_command",
+        required=True,
+        parser_class=JsonArgumentParser,
+    )
+    cost = artifact_subcommands.add_parser(
+        "cost",
+        help="Measure retained files and redundant terminal payloads.",
+    )
+    cost.add_argument("--project-root", help="Target project root. Defaults to cwd.")
+    cost.add_argument("--taskpack", help="Run/taskpack id. Defaults to latest.")
+    cost.add_argument("--run-dir", help="Explicit existing run directory.")
+    cost.add_argument("--json", action="store_true", help="Print JSON output.")
+    cost.set_defaults(handler=_handle_artifacts)
+
+    migrate = artifact_subcommands.add_parser(
+        "migrate-legacy",
+        help="Publish an additive deterministic index for pre-decision runs.",
+    )
+    migrate.add_argument("--project-root", help="Target project root. Defaults to cwd.")
+    migrate.add_argument("--json", action="store_true", help="Print JSON output.")
+    migrate.set_defaults(handler=_handle_artifacts)
 
 
 def _add_experiment_parser(subcommands):
@@ -6083,7 +6127,7 @@ def _gc_artifact_dry_run_explanations(retention_policies):
         {
             "retention_policy": "authoritative",
             "artifact_count": retention_policies.get("authoritative", 0),
-            "reason": "authoritative audit artifacts such as events, state, reports, patches, and frozen taskpacks are not removed by gc.",
+            "reason": "authoritative events, state, reports, frozen taskpacks, and legacy patches are not removed by gc; decision-bound code state is retained in Git.",
         },
         {
             "retention_policy": "protected",
@@ -6093,7 +6137,7 @@ def _gc_artifact_dry_run_explanations(retention_policies):
         {
             "retention_policy": "rebuildable",
             "artifact_count": retention_policies.get("rebuildable", 0),
-            "reason": "rebuildable derived artifacts such as role and repo contexts may become cleanup candidates after explicit retention policy support.",
+            "reason": "rebuildable role/repo contexts and terminal transport files are removed only after decision authority is published.",
         },
     ]
     return [
@@ -6124,6 +6168,61 @@ def _handle_db(args):
         return summary
     _write_db_text(summary)
     return 0
+
+
+def _handle_artifacts(args):
+    project_root = Path(args.project_root or ".").resolve()
+    profile = load_project_profile(project_root)
+    work_root = Path(profile["work_root"]).resolve()
+    if args.artifacts_command == "cost":
+        run_dir = _selected_run_dir(args, profile, "artifacts cost")
+        summary = {
+            "artifact_cost_status": "measured",
+            "project": profile.get("project_key") or "unknown",
+            "run_id": run_dir.name,
+            "run_dir": str(run_dir),
+            **artifact_cost_snapshot(run_dir),
+        }
+    elif args.artifacts_command == "migrate-legacy":
+        summary = {
+            "project": profile.get("project_key") or "unknown",
+            "project_root": str(project_root),
+            "work_root": str(work_root),
+            **build_legacy_decision_index(
+                work_root,
+                project_root=project_root,
+            ),
+        }
+    else:
+        raise AgentTeamCliError(
+            "unsupported artifacts command",
+            artifacts_command=args.artifacts_command,
+        )
+    if args.json:
+        return summary
+    _write_artifact_lifecycle_text(summary)
+    return 0
+
+
+def _write_artifact_lifecycle_text(summary):
+    lines = []
+    for key in (
+        "artifact_cost_status",
+        "index_status",
+        "project",
+        "run_id",
+        "file_count",
+        "total_bytes",
+        "redundant_unit_count",
+        "redundant_bytes",
+        "lineage_count",
+        "index_path",
+        "run_dir",
+    ):
+        if summary.get(key) is not None:
+            lines.append(f"{key}: {summary[key]}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
 
 
 def _handle_experiment(args):
