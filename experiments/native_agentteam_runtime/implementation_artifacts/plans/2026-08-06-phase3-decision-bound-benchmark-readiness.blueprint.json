@@ -38,8 +38,14 @@
         "statement": "Prepare a decision-bound standard benchmark pilot without spending live provider budget.",
         "selected_option": "swe_evo_adapter_and_preregistration_first",
         "alternatives": [
-          "run an unregistered live benchmark",
-          "start recovery or semantic experiments before the standard pilot"
+          {
+            "option": "run an unregistered live benchmark",
+            "rejected_reason": "It would spend claim-bearing budget before instance, fairness, and metric authority is frozen."
+          },
+          {
+            "option": "start recovery or semantic experiments before the standard pilot",
+            "rejected_reason": "Those phases depend on evidence from the normal standard-benchmark path."
+          }
         ],
         "rationale": "Phase 1 and Phase 2 established usage and harness capability; the next claim-bearing step requires a frozen standard-benchmark authority.",
         "scope": [
@@ -69,7 +75,10 @@
         "statement": "Ground Phase 3 work in the current P2 and D5 implementation boundaries.",
         "selected_option": "bounded_repo_map_handoff",
         "alternatives": [
-          "repeat a full repository narrative in every worker prompt"
+          {
+            "option": "repeat a full repository narrative in every worker prompt",
+            "rejected_reason": "It repeats context cost and weakens a shared grounding boundary."
+          }
         ],
         "rationale": "A compact reusable handoff reduces repeated reading while preserving current symbol and test locations.",
         "scope": [
@@ -98,7 +107,10 @@
         "statement": "Implement deterministic SWE-EVO metadata validation and stratified selection before preregistration.",
         "selected_option": "narrow_local_adapter",
         "alternatives": [
-          "embed benchmark-specific behavior throughout the scheduler"
+          {
+            "option": "embed benchmark-specific behavior throughout the scheduler",
+            "rejected_reason": "It would couple the generic runtime to one benchmark."
+          }
         ],
         "rationale": "A narrow adapter preserves the generic runtime and isolates benchmark-specific inputs.",
         "scope": [
@@ -127,7 +139,10 @@
         "statement": "Bind selected instances, fairness controls, budgets, metrics, and thresholds into immutable preregistration authority.",
         "selected_option": "digest_bound_preregistration",
         "alternatives": [
-          "assemble comparison settings after observing results"
+          {
+            "option": "assemble comparison settings after observing results",
+            "rejected_reason": "It permits outcome-dependent protocol changes."
+          }
         ],
         "rationale": "Claim-bearing comparisons require settings to be frozen before outcomes are visible.",
         "scope": [
@@ -156,7 +171,10 @@
         "statement": "Verify Phase 3 adapter and preregistration end to end with fixtures and zero provider calls.",
         "selected_option": "deterministic_readiness_gate",
         "alternatives": [
-          "use a live scored run as the first integration test"
+          {
+            "option": "use a live scored run as the first integration test",
+            "rejected_reason": "Deterministic contract and isolation defects should fail before provider cost is incurred."
+          }
         ],
         "rationale": "Deterministic readiness must fail before expensive or claim-bearing execution begins.",
         "scope": [
