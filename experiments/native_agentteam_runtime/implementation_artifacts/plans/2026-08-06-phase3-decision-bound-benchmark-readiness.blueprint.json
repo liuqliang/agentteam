@@ -1,0 +1,433 @@
+{
+  "schema_version": "agentteam_taskpack_blueprint.v1",
+  "blueprint_id": "phase3-decision-bound-benchmark-readiness",
+  "source_plan": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.md",
+  "research_authority": "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md",
+  "taskpack": {
+    "taskpack_id": "phase3-decision-bound-benchmark-readiness",
+    "goal_kind": "implementation",
+    "milestone": "phase3a-benchmark-readiness",
+    "goal": "Implement a decision-bound, provider-free SWE-EVO adapter and preregistration readiness gate for the later separately authorized Phase 3 pilot.",
+    "overall_risk": "L2",
+    "integration_policy": "verified integration followed by operator review; no live benchmark execution",
+    "execution_mode": "model_workers"
+  },
+  "contract": {
+    "supersedes_unfinished_route": "2026-07-11 Tasks 6 through 8 only",
+    "benchmark": "SWE-EVO complexity-stratified pilot subset",
+    "provider_calls": 0,
+    "gold_visibility": "evaluator_only",
+    "usage_coverage_required": "100% for later scored runs",
+    "live_run_authority": "separate frozen blueprint and operator authorization required",
+    "historical_authority_policy": "P1 and P2 read_only",
+    "merge_policy": "operator_review_required"
+  },
+  "decision_contract": {
+    "schema_version": "taskpack_decision_contract.v1",
+    "root_decision_id": "DEC-P3-readiness-direction",
+    "decisions": [
+      {
+        "schema_version": "decision_record.v1",
+        "decision_id": "DEC-P3-readiness-direction",
+        "revision": 1,
+        "decision_kind": "direction",
+        "subject": "phase3_benchmark_readiness",
+        "authority_level": "L3",
+        "parent_decision_id": null,
+        "supersedes_decision_id": null,
+        "statement": "Prepare a decision-bound standard benchmark pilot without spending live provider budget.",
+        "selected_option": "swe_evo_adapter_and_preregistration_first",
+        "alternatives": [
+          "run an unregistered live benchmark",
+          "start recovery or semantic experiments before the standard pilot"
+        ],
+        "rationale": "Phase 1 and Phase 2 established usage and harness capability; the next claim-bearing step requires a frozen standard-benchmark authority.",
+        "scope": [
+          "phase3 adapter",
+          "instance selection",
+          "preregistration",
+          "provider-free readiness"
+        ],
+        "expected_outcome": "A mechanically accepted readiness artifact suitable as input to a separately authorized live pilot.",
+        "acceptance_refs": [
+          "2026-08-06-phase3-decision-bound-benchmark-readiness.md#acceptance"
+        ],
+        "status": "active",
+        "created_at": "2026-08-06T00:00:00Z",
+        "created_by": "operator-semantic-authority",
+        "previous_revision_sha256": null
+      },
+      {
+        "schema_version": "decision_record.v1",
+        "decision_id": "DEC-P3-repository-grounding",
+        "revision": 1,
+        "decision_kind": "execution",
+        "subject": "repo_map_handoff",
+        "authority_level": "L1",
+        "parent_decision_id": "DEC-P3-readiness-direction",
+        "supersedes_decision_id": null,
+        "statement": "Ground Phase 3 work in the current P2 and D5 implementation boundaries.",
+        "selected_option": "bounded_repo_map_handoff",
+        "alternatives": [
+          "repeat a full repository narrative in every worker prompt"
+        ],
+        "rationale": "A compact reusable handoff reduces repeated reading while preserving current symbol and test locations.",
+        "scope": [
+          "experiment harness",
+          "decision runtime",
+          "usage accounting"
+        ],
+        "expected_outcome": "One compact repository handoff for all Phase 3A implementation tasks.",
+        "acceptance_refs": [
+          "P3-MAP deliverables"
+        ],
+        "status": "active",
+        "created_at": "2026-08-06T00:00:01Z",
+        "created_by": "implementation-planner",
+        "previous_revision_sha256": null
+      },
+      {
+        "schema_version": "decision_record.v1",
+        "decision_id": "DEC-P3-adapter-execution",
+        "revision": 1,
+        "decision_kind": "execution",
+        "subject": "benchmark_adapter",
+        "authority_level": "L2",
+        "parent_decision_id": "DEC-P3-readiness-direction",
+        "supersedes_decision_id": null,
+        "statement": "Implement deterministic SWE-EVO metadata validation and stratified selection before preregistration.",
+        "selected_option": "narrow_local_adapter",
+        "alternatives": [
+          "embed benchmark-specific behavior throughout the scheduler"
+        ],
+        "rationale": "A narrow adapter preserves the generic runtime and isolates benchmark-specific inputs.",
+        "scope": [
+          "benchmark adapter",
+          "selection schema",
+          "adapter tests"
+        ],
+        "expected_outcome": "Stable selection from fixed metadata, filters, and seed without gold visibility.",
+        "acceptance_refs": [
+          "P3-01 acceptance"
+        ],
+        "status": "active",
+        "created_at": "2026-08-06T00:00:02Z",
+        "created_by": "implementation-planner",
+        "previous_revision_sha256": null
+      },
+      {
+        "schema_version": "decision_record.v1",
+        "decision_id": "DEC-P3-preregistration-execution",
+        "revision": 1,
+        "decision_kind": "execution",
+        "subject": "benchmark_preregistration",
+        "authority_level": "L2",
+        "parent_decision_id": "DEC-P3-readiness-direction",
+        "supersedes_decision_id": null,
+        "statement": "Bind selected instances, fairness controls, budgets, metrics, and thresholds into immutable preregistration authority.",
+        "selected_option": "digest_bound_preregistration",
+        "alternatives": [
+          "assemble comparison settings after observing results"
+        ],
+        "rationale": "Claim-bearing comparisons require settings to be frozen before outcomes are visible.",
+        "scope": [
+          "preregistration schema",
+          "fairness validation",
+          "authorization digest"
+        ],
+        "expected_outcome": "A mutation-detecting preregistration contract shared by all three modes.",
+        "acceptance_refs": [
+          "P3-02 acceptance"
+        ],
+        "status": "active",
+        "created_at": "2026-08-06T00:00:03Z",
+        "created_by": "implementation-planner",
+        "previous_revision_sha256": null
+      },
+      {
+        "schema_version": "decision_record.v1",
+        "decision_id": "DEC-P3-readiness-execution",
+        "revision": 1,
+        "decision_kind": "execution",
+        "subject": "provider_free_readiness",
+        "authority_level": "L2",
+        "parent_decision_id": "DEC-P3-readiness-direction",
+        "supersedes_decision_id": null,
+        "statement": "Verify Phase 3 adapter and preregistration end to end with fixtures and zero provider calls.",
+        "selected_option": "deterministic_readiness_gate",
+        "alternatives": [
+          "use a live scored run as the first integration test"
+        ],
+        "rationale": "Deterministic readiness must fail before expensive or claim-bearing execution begins.",
+        "scope": [
+          "end-to-end tests",
+          "readiness receipt",
+          "operator report"
+        ],
+        "expected_outcome": "A passed receipt that can authorize preparation of a separate live-run taskpack.",
+        "acceptance_refs": [
+          "P3-03 acceptance"
+        ],
+        "status": "active",
+        "created_at": "2026-08-06T00:00:04Z",
+        "created_by": "implementation-planner",
+        "previous_revision_sha256": null
+      }
+    ],
+    "task_bindings": {
+      "P3-MAP": "DEC-P3-repository-grounding",
+      "P3-01": "DEC-P3-adapter-execution",
+      "P3-02": "DEC-P3-preregistration-execution",
+      "P3-03": "DEC-P3-readiness-execution"
+    }
+  },
+  "approval": {
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase3-decision-bound-benchmark-readiness-review.v1.json",
+    "schema_path": "experiments/native_agentteam_runtime/schemas/phase3_contract_review.schema.json",
+    "required_decision": "approved",
+    "git_object_format_required": true,
+    "runtime_release_binding_required": false,
+    "digest_bindings": [
+      "source_plan",
+      "blueprint",
+      "research_authority",
+      "review_schema",
+      "contract",
+      "decision_contract"
+    ]
+  },
+  "agents": [
+    {
+      "agent_id": "agent-phase3-repo-map",
+      "role": "repo_map_agent",
+      "runtime_profile": {
+        "adapter": "codex",
+        "model": "medium"
+      }
+    },
+    {
+      "agent_id": "agent-phase3-implementation",
+      "role": "implementation_worker",
+      "runtime_profile": {
+        "adapter": "codex"
+      }
+    }
+  ],
+  "verification": {
+    "command": [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "experiments/native_agentteam_runtime/m0_runtime/tests",
+      "-p",
+      "test*.py"
+    ],
+    "success_criteria": [
+      "The full repository suite passes.",
+      "Artifact lint accepts all new schemas and authorities.",
+      "The readiness receipt records zero live provider calls."
+    ]
+  },
+  "policy": {
+    "allow_merge": false,
+    "merge_requires_verified_integration": true,
+    "operator_review_required": true,
+    "live_provider_calls_allowed": false,
+    "historical_authority_writes_forbidden": true
+  },
+  "tasks": [
+    {
+      "task_id": "P3-MAP",
+      "objective": "Map the current P2 experiment and D5 decision-runtime boundaries and publish one compact Phase 3 repository handoff.",
+      "goal_alignment": "Grounds benchmark readiness work without making each implementation task reread the full repository.",
+      "work_type": "repository_mapping",
+      "required_role": "repo_map_agent",
+      "backlog_status": "ready",
+      "risk_target": "L0",
+      "depends_on": [],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime",
+        "experiments/native_agentteam_runtime/m0_runtime/tests",
+        "experiments/native_agentteam_runtime/schemas"
+      ],
+      "write_scope": [
+        ".agentteam/generated/"
+      ],
+      "expected_output_artifacts": [
+        ".agentteam/generated/repo_map_handoff.json"
+      ],
+      "required_deliverables": [
+        "repository_understanding_summary",
+        "relevant_files_and_entry_points",
+        "repo_map_handoff",
+        "verification_candidates",
+        "implementation_risks"
+      ],
+      "acceptance_criteria": [
+        "The handoff identifies existing reusable P2 and D5 APIs and tests.",
+        "The handoff is compact and contains paths and symbols rather than copied source."
+      ],
+      "stop_condition": "Stop if the current repository does not contain the finalized P2 or D5 implementation boundaries.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.blueprint.json"
+      ],
+      "evidence_paths": [
+        ".agentteam/generated/repo_map_handoff.json"
+      ]
+    },
+    {
+      "task_id": "P3-01",
+      "objective": "Implement a narrow SWE-EVO metadata adapter and deterministic complexity-stratified instance selection from fixed filters and seed.",
+      "goal_alignment": "Creates the benchmark-specific input boundary required before a claim-bearing Phase 3 pilot.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L2",
+      "depends_on": [
+        "P3-MAP"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_contract.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_workspace.py",
+        "experiments/native_agentteam_runtime/schemas/experiment_protocol.schema.json"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/benchmark_adapter.py",
+        "experiments/native_agentteam_runtime/schemas/benchmark_instance_selection.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_benchmark_adapter.py"
+      ],
+      "required_deliverables": [
+        "swe_evo_metadata_validator",
+        "deterministic_stratified_selector",
+        "selection_digest",
+        "gold_visibility_negative_tests"
+      ],
+      "acceptance_criteria": [
+        "Equal metadata revision, filters, and seed produce byte-identical ordered selection.",
+        "Changed inputs change the selection digest.",
+        "Selection cannot inspect gold patches or prior run outcomes."
+      ],
+      "stop_condition": "Stop if implementation requires changing benchmark choice or obtaining restricted data without authorization.",
+      "input_artifacts": [
+        ".agentteam/generated/repo_map_handoff.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.md",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_benchmark_adapter.py"
+      ]
+    },
+    {
+      "task_id": "P3-02",
+      "objective": "Implement immutable Phase 3 preregistration that binds selected instances, equal-input controls, budgets, metrics, thresholds, and repetition rules.",
+      "goal_alignment": "Prevents benchmark settings from being changed after outcomes become visible.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L2",
+      "depends_on": [
+        "P3-MAP",
+        "P3-01"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_contract.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_controller.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/decision_runtime.py",
+        "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/benchmark_preregistration.py",
+        "experiments/native_agentteam_runtime/schemas/benchmark_preregistration.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_benchmark_preregistration.py"
+      ],
+      "required_deliverables": [
+        "preregistration_schema_and_validator",
+        "equal_input_and_budget_bindings",
+        "immutable_authorization_digest",
+        "mutation_and_cross_mode_leakage_tests"
+      ],
+      "acceptance_criteria": [
+        "The preregistration binds all research-authority fairness and repetition fields.",
+        "Mutation after publication is rejected.",
+        "No mode can read another mode's runtime artifacts."
+      ],
+      "stop_condition": "Stop if a required metric or decision threshold is absent from the approved research authority.",
+      "input_artifacts": [
+        ".agentteam/generated/repo_map_handoff.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.md",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_benchmark_preregistration.py"
+      ]
+    },
+    {
+      "task_id": "P3-03",
+      "objective": "Run a provider-free Phase 3 readiness path over fixtures and publish a machine-readable receipt plus concise report.",
+      "goal_alignment": "Proves the complete authority and isolation path before a live scored pilot is separately authorized.",
+      "work_type": "verification",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L2",
+      "depends_on": [
+        "P3-MAP",
+        "P3-02"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_modes.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/schemas/phase3_readiness_receipt.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_benchmark_readiness.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/reports/phase3-benchmark-readiness.md"
+      ],
+      "required_deliverables": [
+        "provider_free_end_to_end_test",
+        "phase3_readiness_receipt",
+        "usage_and_isolation_reconciliation",
+        "operator_readiness_report"
+      ],
+      "acceptance_criteria": [
+        "The receipt records live_provider_calls as zero.",
+        "All three fixture modes share equal visible inputs and budgets.",
+        "Decision binding and replay remain idempotent.",
+        "The full repository suite and artifact lint pass."
+      ],
+      "stop_condition": "Stop before any provider call or scored benchmark execution.",
+      "input_artifacts": [
+        ".agentteam/generated/repo_map_handoff.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.md",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_benchmark_readiness.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/reports/phase3-benchmark-readiness.md"
+      ]
+    }
+  ],
+  "post_backlog_gates": [
+    {
+      "gate_id": "P3-READY",
+      "depends_on": [
+        "P3-03"
+      ],
+      "executor": "deterministic_controller",
+      "evidence_artifact": "acceptance/phase3-readiness.json",
+      "evidence_schema": "experiments/native_agentteam_runtime/schemas/phase3_readiness_receipt.schema.json",
+      "required_status_field": "status",
+      "required_status_value": "passed",
+      "operator_review_required": true,
+      "operator_approval_schema": "experiments/native_agentteam_runtime/schemas/post_backlog_gate_approval.schema.json",
+      "operator_approval_required_decision": "approved"
+    }
+  ]
+}

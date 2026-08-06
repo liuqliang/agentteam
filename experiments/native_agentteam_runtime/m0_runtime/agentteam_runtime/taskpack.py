@@ -1008,6 +1008,42 @@ def _validate_taskpack_blueprint(
     _validate_blueprint_write_scope_cardinality(blueprint, tasks, task_id_set, errors)
     _validate_dependency_graph(dependency_graph, task_id_set, errors)
 
+    decision_contract = blueprint.get("decision_contract")
+    if decision_contract is not None:
+        if "decision_contract" not in blueprint["approval"]["digest_bindings"]:
+            errors.append(
+                "decision-aware blueprint approval must bind decision_contract"
+            )
+        try:
+            validated_contract = validate_taskpack_decision_contract(
+                decision_contract,
+                task_ids=task_id_set,
+            )
+        except DecisionRuntimeError as exc:
+            errors.append(str(exc))
+        else:
+            bindings = validated_contract["task_bindings"]
+            missing_bindings = sorted(task_id_set.difference(bindings))
+            if missing_bindings:
+                errors.append(
+                    "decision-aware blueprint must bind every task: "
+                    + ", ".join(missing_bindings)
+                )
+            decisions_by_id = {
+                item["decision_id"]: item
+                for item in validated_contract["decisions"]
+            }
+            non_execution_bindings = sorted(
+                task_id
+                for task_id, decision_id in bindings.items()
+                if decisions_by_id[decision_id]["decision_kind"] != "execution"
+            )
+            if non_execution_bindings:
+                errors.append(
+                    "decision-aware blueprint tasks must bind execution decisions: "
+                    + ", ".join(non_execution_bindings)
+                )
+
     for field_name in ("source_plan", "research_authority"):
         value = blueprint.get(field_name)
         if value is None:
@@ -1414,6 +1450,10 @@ def _taskpack_blueprint_context(
         context["schema_inventory_sha256"] = _sha256_json(
             context["schema_inventory"]
         )
+    if blueprint.get("decision_contract") is not None:
+        context["decision_contract_sha256"] = _sha256_json(
+            blueprint["decision_contract"]
+        )
     return context
 
 
@@ -1479,6 +1519,7 @@ def _validate_taskpack_blueprint_approval(
             (blueprint.get("contract") or {}).get("stage_vocabulary")
         ),
         "contract": _sha256_json(blueprint.get("contract")),
+        "decision_contract": context.get("decision_contract_sha256"),
         "schema_inventory": context.get("schema_inventory_sha256"),
     }
     digest_record_fields = {
@@ -1488,6 +1529,7 @@ def _validate_taskpack_blueprint_approval(
         "review_schema": "review_schema_sha256",
         "stage_vocabulary": "stage_vocabulary_sha256",
         "contract": "contract_decisions_sha256",
+        "decision_contract": "decision_contract_sha256",
         "schema_inventory": "schema_inventory_sha256",
     }
     for binding in approval["digest_bindings"]:
@@ -1695,6 +1737,10 @@ def _generate_taskpack_blueprint(
     ):
         if field_name in taskpack_declaration:
             taskpack[field_name] = taskpack_declaration[field_name]
+    if "decision_contract" in blueprint:
+        taskpack["decision_contract"] = copy.deepcopy(
+            blueprint["decision_contract"]
+        )
     if "post_backlog_gates" in blueprint:
         gates, authority_snapshot_files = (
             _snapshot_blueprint_controller_authority(
@@ -1810,6 +1856,13 @@ def _generate_taskpack_blueprint(
         "freeze_eligible": bool(freeze_eligible),
         "approval_diagnostics": list(approval_diagnostics),
     }
+    if "decision_contract" in blueprint:
+        manifest["root_decision_id"] = blueprint["decision_contract"][
+            "root_decision_id"
+        ]
+        manifest["decision_contract_sha256"] = context[
+            "decision_contract_sha256"
+        ]
     if context.get("materialized_authority_bindings"):
         manifest["materialized_authority_bindings"] = context[
             "materialized_authority_bindings"

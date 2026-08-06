@@ -56,6 +56,10 @@ from agentteam_runtime.diagnostic_chat import (
     build_runtime_diagnostic_context,
     render_runtime_diagnostic_context,
 )
+from agentteam_runtime.decision_runtime import (
+    load_run_decision_binding,
+    publish_run_decision_binding,
+)
 from agentteam_runtime.goal_memory import build_goal_memory, render_goal_memory_prompt_context
 from agentteam_runtime.notifications import FeishuWebhookNotifier, _permission_request_text
 from agentteam_runtime.operator_report import (
@@ -379,8 +383,55 @@ def _write_blueprint_approval(repo, blueprint, decision="approved", escalations=
         record["contract_decisions_sha256"] = (
             taskpack_module._sha256_json(blueprint.get("contract"))
         )
+    if "decision_contract" in approval["digest_bindings"]:
+        record["decision_contract_sha256"] = (
+            taskpack_module._sha256_json(blueprint.get("decision_contract"))
+        )
     _write_json(repo / approval["record_path"], record)
     return record
+
+
+def _blueprint_decision_contract(task_ids):
+    def decision(decision_id, kind, parent):
+        return {
+            "schema_version": "decision_record.v1",
+            "decision_id": decision_id,
+            "revision": 1,
+            "decision_kind": kind,
+            "subject": (
+                "approved_taskpack_route"
+                if kind == "direction"
+                else "approved_taskpack_execution"
+            ),
+            "authority_level": "L2",
+            "parent_decision_id": parent,
+            "supersedes_decision_id": None,
+            "statement": "Execute the approved decision-aware blueprint.",
+            "selected_option": "bounded_execution",
+            "alternatives": [],
+            "rationale": "The blueprint review approved this bounded route.",
+            "scope": ["taskpack"],
+            "expected_outcome": "Bound tasks complete with declared evidence.",
+            "acceptance_refs": ["verification-command"],
+            "status": "active",
+            "created_at": "2026-08-06T00:00:00Z",
+            "created_by": "taskpack-semantic-authority",
+            "previous_revision_sha256": None,
+        }
+
+    root_id = "DEC-blueprint-direction"
+    execution_id = "DEC-blueprint-execution"
+    return {
+        "schema_version": "taskpack_decision_contract.v1",
+        "root_decision_id": root_id,
+        "decisions": [
+            decision(root_id, "direction", None),
+            decision(execution_id, "execution", root_id),
+        ],
+        "task_bindings": {
+            task_id: execution_id for task_id in task_ids
+        },
+    }
 
 
 class _WebhookCaptureHandler(BaseHTTPRequestHandler):
@@ -3696,6 +3747,154 @@ class TaskpackTests(unittest.TestCase):
                 freeze_taskpack(materialized["taskpack_dir"], tmp_path / "frozen")
 
             self.assertFalse((tmp_path / "frozen" / "example-blueprint").exists())
+
+    def test_decision_aware_blueprint_materializes_and_freezes_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            work_root = tmp_path / "work"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            contract = _blueprint_decision_contract(
+                [task["task_id"] for task in blueprint["tasks"]]
+            )
+            blueprint["decision_contract"] = contract
+            blueprint["approval"]["digest_bindings"].append(
+                "decision_contract"
+            )
+            _write_json(repo / blueprint_path, blueprint)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "bind blueprint decisions"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            _write_blueprint_approval(repo, blueprint)
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "approve blueprint decisions"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            materialized = taskpack_module.materialize_taskpack_blueprint(
+                repo,
+                blueprint_path,
+                work_root / "drafts",
+            )
+            draft = load_taskpack(materialized["taskpack_dir"])["taskpack"]
+            self.assertEqual(draft["decision_contract"], contract)
+            self.assertEqual(
+                materialized["decision_contract_sha256"],
+                taskpack_module._sha256_json(contract),
+            )
+            self.assertEqual(
+                materialized["root_decision_id"],
+                contract["root_decision_id"],
+            )
+
+            frozen = freeze_taskpack(
+                materialized["taskpack_dir"],
+                work_root / "frozen",
+            )
+            frozen_taskpack = load_taskpack(
+                frozen["frozen_taskpack_dir"]
+            )["taskpack"]
+            self.assertEqual(frozen_taskpack["decision_contract"], contract)
+            self.assertEqual(
+                taskpack_module.verify_frozen_taskpack_digest(
+                    frozen["frozen_taskpack_dir"],
+                    frozen["manifest"]["digest_sha256"],
+                )["digest_sha256"],
+                frozen["manifest"]["digest_sha256"],
+            )
+            run_dir = work_root / "runs" / "example-blueprint"
+            first_binding = publish_run_decision_binding(
+                work_root,
+                frozen["frozen_taskpack_dir"],
+                run_dir,
+                frozen_taskpack,
+                task_ids=["T-1", "T-2", "T-3"],
+            )
+            replayed_binding = publish_run_decision_binding(
+                work_root,
+                frozen["frozen_taskpack_dir"],
+                run_dir,
+                frozen_taskpack,
+                task_ids=["T-1", "T-2", "T-3"],
+            )
+            self.assertEqual(replayed_binding, first_binding)
+            self.assertEqual(
+                load_run_decision_binding(run_dir),
+                first_binding,
+            )
+
+    def test_decision_aware_blueprint_requires_complete_execution_bindings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            contract = _blueprint_decision_contract(["T-1", "T-2"])
+            blueprint["decision_contract"] = contract
+            blueprint["approval"]["digest_bindings"].append(
+                "decision_contract"
+            )
+            _write_json(repo / blueprint_path, blueprint)
+            _write_blueprint_approval(repo, blueprint)
+
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "decision-aware blueprint must bind every task: T-3",
+            ):
+                taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_path,
+                    tmp_path / "unused",
+                    dry_run=True,
+                )
+
+            contract["task_bindings"]["T-3"] = contract[
+                "root_decision_id"
+            ]
+            _write_json(repo / blueprint_path, blueprint)
+            _write_blueprint_approval(repo, blueprint)
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "tasks must bind execution decisions: T-3",
+            ):
+                taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_path,
+                    tmp_path / "unused",
+                    dry_run=True,
+                )
+
+    def test_decision_aware_blueprint_requires_approval_digest_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            blueprint["decision_contract"] = _blueprint_decision_contract(
+                [task["task_id"] for task in blueprint["tasks"]]
+            )
+            _write_json(repo / blueprint_path, blueprint)
+
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "approval must bind decision_contract",
+            ):
+                taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_path,
+                    tmp_path / "unused",
+                    dry_run=True,
+                )
 
     def test_blueprint_freeze_rejects_each_drifted_materialized_artifact(self):
         for artifact_name in (

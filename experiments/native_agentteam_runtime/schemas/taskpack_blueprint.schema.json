@@ -87,6 +87,9 @@
     "contract": {
       "type": "object"
     },
+    "decision_contract": {
+      "$ref": "#/$defs/decision_contract"
+    },
     "approval": {
       "type": "object",
       "additionalProperties": false,
@@ -127,6 +130,7 @@
               "review_schema",
               "stage_vocabulary",
               "contract",
+              "decision_contract",
               "schema_inventory"
             ]
           }
@@ -254,6 +258,38 @@
     }
   ],
   "$defs": {
+    "decision_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "root_decision_id",
+        "decisions",
+        "task_bindings"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "taskpack_decision_contract.v1"
+        },
+        "root_decision_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "decisions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "object"
+          }
+        },
+        "task_bindings": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/non_empty_string"
+          }
+        }
+      }
+    },
     "non_empty_string": {
       "type": "string",
       "minLength": 1,
