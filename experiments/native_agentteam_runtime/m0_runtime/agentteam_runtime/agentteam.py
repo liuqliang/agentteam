@@ -85,6 +85,7 @@ from .experiment_results import (
     load_experiment_result_bundle,
     render_experiment_comparison,
     render_experiment_result,
+    validate_experiment_comparison_compatibility,
 )
 from .repo_grounding import build_repo_grounding, render_repo_grounding_text
 from .decision_artifact_lifecycle import artifact_cost_snapshot
@@ -6304,10 +6305,12 @@ def _handle_experiment(args):
                 args.experiment,
                 args.experiment_root,
             )
+            comparison = validate_experiment_comparison_compatibility(results)
             if args.json:
                 return {
                     "experiment_id": args.experiment,
                     "result_count": len(results),
+                    "comparison_compatibility": comparison,
                     "results": results,
                 }
             sys.stdout.write(

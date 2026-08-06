@@ -17,6 +17,10 @@ from .git_code_state import run_code_state_ref_prefix
 
 REPORT_SCHEMA_VERSION = "decision_operator_report.v1"
 DEFAULT_RAW_LOG_RETENTION_BYTES = 64 * 1024
+MAX_PROTECTED_RAW_SPOOL_BYTES = 1024 * 1024
+PHASE1_ACCEPTANCE_RELATIVE = Path(
+    "acceptance/model-invocation-live-smoke.v1.json"
+)
 
 
 class DecisionArtifactLifecycleError(RuntimeError):
@@ -289,6 +293,9 @@ def apply_terminal_retention(
     if isinstance(existing, dict) and existing.get("status") == "applied":
         return existing
     output_dir = Path(output_dir).resolve()
+    protected_spools, compatibility_evidence = (
+        _phase1_compatibility_evidence(binding, output_dir)
+    )
     raw_logs = []
     for terminal_path in sorted(output_dir.rglob("model_invocations/*/terminal.json")):
         terminal = _read_json(terminal_path)
@@ -302,7 +309,13 @@ def apply_terminal_retention(
             original = path.read_bytes()
             action = "retained"
             retained = original
-            if name == "stderr.log" and not original:
+            if path.resolve() in protected_spools:
+                if len(original) > MAX_PROTECTED_RAW_SPOOL_BYTES:
+                    raise DecisionArtifactLifecycleError(
+                        "protected Phase 1 provider spool exceeds 1 MiB"
+                    )
+                action = "retained_evidence"
+            elif name == "stderr.log" and not original:
                 path.unlink()
                 action = "removed_empty"
                 retained = b""
@@ -368,11 +381,89 @@ def apply_terminal_retention(
         "status": "applied",
         "raw_log_limit_bytes": raw_log_limit,
         "raw_logs": raw_logs,
+        "compatibility_evidence": compatibility_evidence,
         "removed_internal_refs": sorted(removed_refs),
         "removed_rebuildable_files": removed_rebuildable,
     }
     state["artifact_retention"] = retention
     return retention
+
+
+def _phase1_compatibility_evidence(binding, output_dir):
+    artifact_path = output_dir / PHASE1_ACCEPTANCE_RELATIVE
+    if not artifact_path.exists():
+        return set(), []
+    artifact = _read_json(artifact_path)
+    if (
+        not isinstance(artifact, dict)
+        or artifact.get("schema_version") != "model_invocation_live_smoke.v1"
+        or artifact.get("controller_validation_status") != "passed"
+    ):
+        raise DecisionArtifactLifecycleError(
+            "Phase 1 acceptance authority is not a passed v1 artifact"
+        )
+    relative_spool = Path(str(artifact.get("bounded_raw_spool_path") or ""))
+    if (
+        not relative_spool.parts
+        or relative_spool.is_absolute()
+        or ".." in relative_spool.parts
+    ):
+        raise DecisionArtifactLifecycleError(
+            "Phase 1 acceptance raw spool path is unsafe"
+        )
+    spool_candidate = output_dir / relative_spool
+    if spool_candidate.is_symlink():
+        raise DecisionArtifactLifecycleError(
+            "Phase 1 acceptance raw spool is a symlink"
+        )
+    spool_path = spool_candidate.resolve()
+    try:
+        spool_path.relative_to(output_dir)
+    except ValueError as exc:
+        raise DecisionArtifactLifecycleError(
+            "Phase 1 acceptance raw spool escapes its run"
+        ) from exc
+    if (
+        not spool_path.is_file()
+        or spool_path.stat().st_size > MAX_PROTECTED_RAW_SPOOL_BYTES
+    ):
+        raise DecisionArtifactLifecycleError(
+            "Phase 1 acceptance raw spool is unavailable or oversized"
+        )
+
+    content = artifact_path.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    work_root = Path(binding["work_root"]).resolve()
+    try:
+        locator_path = artifact_path.resolve().relative_to(work_root)
+    except ValueError as exc:
+        raise DecisionArtifactLifecycleError(
+            "Phase 1 acceptance evidence must be inside the project work root"
+        ) from exc
+    artifact_id = "ART-evidence-phase1-" + digest[:24]
+    link = {
+        "schema_version": "decision_artifact_link.v1",
+        "artifact_id": artifact_id,
+        "decision_id": binding["root_decision_id"],
+        "artifact_kind": "evidence",
+        "locator": "path:" + locator_path.as_posix(),
+        "digest_algorithm": "sha256",
+        "digest": digest,
+        "producer": "phase1-usage-acceptance-controller",
+        "created_at": artifact.get("finished_at"),
+    }
+    DecisionLedger(work_root).append_artifact_link(link)
+    return {spool_path}, [
+        {
+            "artifact_id": artifact_id,
+            "decision_id": binding["root_decision_id"],
+            "artifact_path": str(artifact_path.resolve()),
+            "artifact_sha256": digest,
+            "raw_spool_path": str(spool_path),
+            "raw_spool_size_bytes": spool_path.stat().st_size,
+            "retention_status": "retained_evidence",
+        }
+    ]
 
 
 def artifact_cost_snapshot(run_dir):

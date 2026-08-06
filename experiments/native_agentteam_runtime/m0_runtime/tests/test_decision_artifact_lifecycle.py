@@ -19,6 +19,7 @@ from agentteam_runtime.legacy_decision_index import build_legacy_decision_index
 from agentteam_runtime.m0_runtime import replay_events
 from agentteam_runtime.notifications import _event_text
 from agentteam_runtime.operator_report import build_run_completion_report
+from agentteam_runtime.phase1_usage_acceptance import decode_bounded_provider_spool
 from agentteam_runtime.projection_db import (
     project_projection_db_path,
     read_projected_decision_graph,
@@ -208,10 +209,86 @@ class DecisionArtifactLifecycleTests(unittest.TestCase):
                 "".join(
                     json.dumps({"type": "provider_event", "payload": "x" * 120}) + "\n"
                     for _ in range(1000)
-                ),
+                )
+                + json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {
+                            "input_tokens": 1200,
+                            "cached_input_tokens": 200,
+                            "output_tokens": 260,
+                            "reasoning_tokens": 40,
+                        },
+                    }
+                )
+                + "\n",
                 encoding="utf-8",
             )
             (invocation_dir / "stderr.log").write_text("", encoding="utf-8")
+            ordinary_invocation = run_dir / "model_invocations" / "INV-ORDINARY"
+            ordinary_invocation.mkdir()
+            (ordinary_invocation / "terminal.json").write_text(
+                json.dumps({"terminal_status": "completed"}),
+                encoding="utf-8",
+            )
+            (ordinary_invocation / "stdout.jsonl").write_text(
+                "".join(
+                    json.dumps({"type": "provider_event", "payload": "y" * 120}) + "\n"
+                    for _ in range(1000)
+                ),
+                encoding="utf-8",
+            )
+            acceptance_path = (
+                run_dir / "acceptance" / "model-invocation-live-smoke.v1.json"
+            )
+            acceptance_path.parent.mkdir()
+            acceptance_start = {
+                "start_schema_version": "model_invocation_started.v1",
+                "invocation_id": "INV-D5-ACCEPTANCE",
+                "project": "d5-project",
+                "run_id": "d5-acceptance-run",
+                "taskpack_id": "d5-run",
+                "decision_id": "DEC-d5",
+                "usage_stage": "acceptance_live_smoke",
+                "coverage_class": "supported_model_invocation",
+                "started_at": "2026-08-06T00:01:00Z",
+            }
+            acceptance_terminal = {
+                **acceptance_start,
+                "usage_schema_version": "model_invocation_usage.v1",
+                "usage_event_id": "USAGE-D5-ACCEPTANCE",
+                "terminal_status": "completed",
+                "usage_status": "reported",
+                "input_tokens": 1200,
+                "cached_input_tokens": 200,
+                "output_tokens": 260,
+                "reasoning_tokens": 40,
+                "total_tokens": 1460,
+                "finished_at": "2026-08-06T00:02:00Z",
+            }
+            acceptance_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "model_invocation_live_smoke.v1",
+                        "controller_validation_status": "passed",
+                        "finished_at": "2026-08-06T00:02:00Z",
+                        "bounded_raw_spool_path": (
+                            "model_invocations/INV-D5/stdout.jsonl"
+                        ),
+                        "project": "d5-project",
+                        "run_id": "d5-acceptance-run",
+                        "taskpack_id": "d5-run",
+                        "decision_id": "DEC-d5",
+                        "invocation_start_record": acceptance_start,
+                        "invocation_usage_record": acceptance_terminal,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            protected_size = (invocation_dir / "stdout.jsonl").stat().st_size
+            decoded_usage = decode_bounded_provider_spool(
+                invocation_dir / "stdout.jsonl"
+            )
             orphan_ref = "refs/agentteam/runs/d5-run/orphan/ATTEMPT-ORPHAN"
             self._git(repo, "update-ref", orphan_ref, "HEAD")
             unrelated_ref = "refs/agentteam/runs/another-run/orphan/ATTEMPT-OTHER"
@@ -262,8 +339,16 @@ class DecisionArtifactLifecycleTests(unittest.TestCase):
             self.assertNotIn("changed_files", compact_result)
             self.assertEqual(compact_result["changed_file_count"], 1)
             self.assertFalse(outbox.exists())
-            self.assertLessEqual(
+            self.assertEqual(
                 (invocation_dir / "stdout.jsonl").stat().st_size,
+                protected_size,
+            )
+            self.assertEqual(
+                decode_bounded_provider_spool(invocation_dir / "stdout.jsonl"),
+                decoded_usage,
+            )
+            self.assertLessEqual(
+                (ordinary_invocation / "stdout.jsonl").stat().st_size,
                 64 * 1024,
             )
             self.assertFalse((invocation_dir / "stderr.log").exists())
@@ -314,6 +399,21 @@ class DecisionArtifactLifecycleTests(unittest.TestCase):
             self.assertEqual(
                 report["task_reports"][0]["what_changed"],
                 ["新增由 Git code-state 保存的功能文件。"],
+            )
+            compatibility_evidence = state["artifact_retention"][
+                "compatibility_evidence"
+            ]
+            self.assertEqual(len(compatibility_evidence), 1)
+            self.assertEqual(
+                compatibility_evidence[0]["retention_status"],
+                "retained_evidence",
+            )
+            self.assertTrue(
+                any(
+                    item["artifact_id"]
+                    == compatibility_evidence[0]["artifact_id"]
+                    for item in DecisionLedger(work_root).artifact_links("DEC-d5")
+                )
             )
 
             events = [

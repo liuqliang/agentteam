@@ -751,6 +751,7 @@ def render_experiment_result(bundle, *, bundle_sha256=None):
 
 
 def render_experiment_comparison(results):
+    validate_experiment_comparison_compatibility(results)
     normalized = []
     for result in results:
         bundle = result.get("bundle") if isinstance(result, dict) else None
@@ -803,6 +804,38 @@ def render_experiment_comparison(results):
             )
         )
     return "\n".join(lines)
+
+
+def validate_experiment_comparison_compatibility(results):
+    bundles = []
+    for result in results:
+        bundle = result.get("bundle") if isinstance(result, dict) else None
+        validate_experiment_result_bundle(bundle)
+        bundles.append(bundle)
+    if not bundles:
+        raise ExperimentResultIntegrityError(
+            "experiment comparison requires at least one result"
+        )
+    expected = {
+        "schema_version": bundles[0]["schema_version"],
+        "protocol_sha256": bundles[0]["protocol_sha256"],
+        "source_commit": bundles[0]["source_commit"],
+        "runtime_release_identity": bundles[0]["runtime_release_identity"],
+    }
+    for bundle in bundles[1:]:
+        mismatches = [
+            key for key, value in expected.items() if bundle.get(key) != value
+        ]
+        if mismatches:
+            raise ExperimentResultIntegrityError(
+                "experiment comparison mixes incompatible authority: "
+                + ", ".join(mismatches)
+            )
+    return {
+        "comparison_status": "compatible",
+        "result_count": len(bundles),
+        **copy.deepcopy(expected),
+    }
 
 
 def _projection_identity(bundle):

@@ -1,0 +1,183 @@
+{
+  "schema_version": "agentteam_taskpack_blueprint.v1",
+  "blueprint_id": "phase1-phase2-decision-artifact-compatibility",
+  "source_plan": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase1-phase2-decision-artifact-compatibility.md",
+  "research_authority": "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md",
+  "taskpack": {
+    "taskpack_id": "phase1-phase2-decision-artifact-compatibility",
+    "goal_kind": "audit",
+    "milestone": "decision-artifact-compatibility",
+    "goal": "Audit and repair deterministic compatibility between D5 decision-centric retention and the completed Phase 1 usage plus Phase 2 experiment authority without rewriting historical artifacts or invoking a provider.",
+    "overall_risk": "L2",
+    "integration_policy": "verified compatibility commit followed by operator review",
+    "execution_mode": "model_workers"
+  },
+  "contract": {
+    "historical_authority_policy": "read_only",
+    "provider_calls": 0,
+    "phase1_spool_policy": "passed_acceptance_spool_retained_complete_up_to_existing_1MiB_limit",
+    "phase2_comparison_policy": "same_schema_protocol_source_and_runtime_release",
+    "schema_migration_policy": "additive_only",
+    "merge_policy": "operator_review_required"
+  },
+  "approval": {
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase1-phase2-decision-artifact-compatibility-review.v1.json",
+    "schema_path": "experiments/native_agentteam_runtime/schemas/decision_artifact_compatibility_review.schema.json",
+    "required_decision": "approved",
+    "digest_bindings": [
+      "source_plan",
+      "blueprint",
+      "research_authority",
+      "review_schema",
+      "contract"
+    ]
+  },
+  "agents": [
+    {
+      "agent_id": "agent-compatibility-worker-1",
+      "role": "implementation_worker",
+      "runtime_profile": {
+        "adapter": "codex"
+      }
+    }
+  ],
+  "verification": {
+    "command": [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "experiments/native_agentteam_runtime/m0_runtime/tests",
+      "-p",
+      "test*.py"
+    ],
+    "success_criteria": [
+      "No provider call is made.",
+      "Focused compatibility tests pass.",
+      "The repository-wide suite and artifact lint pass."
+    ]
+  },
+  "policy": {
+    "allow_merge": false,
+    "merge_requires_verified_integration": true,
+    "operator_review_required": true,
+    "historical_authority_writes_forbidden": true
+  },
+  "tasks": [
+    {
+      "task_id": "COMPAT-01",
+      "objective": "Make D5 retention preserve and decision-link a passed Phase 1 acceptance spool while retaining ordinary log compaction.",
+      "goal_alignment": "Preserves independently verifiable token evidence in new decision-bound runs.",
+      "work_type": "compatibility_repair",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/decision_artifact_lifecycle.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase1_usage_acceptance.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/decision_artifact_lifecycle.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_decision_artifact_lifecycle.py"
+      ],
+      "required_deliverables": [
+        "evidence_aware_spool_retention",
+        "decision_artifact_link",
+        "independent_decoder_equivalence_test"
+      ],
+      "acceptance_criteria": [
+        "The fixed passed Phase 1 evidence JSON is linked without modification.",
+        "Its safe spool remains byte-identical and decodes to the same terminal digest and totals.",
+        "An unrelated provider log remains bounded to 64 KiB."
+      ],
+      "stop_condition": "Stop if preserving compatibility requires changing a historical Phase 1 artifact or accepted usage total.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase1-phase2-decision-artifact-compatibility.md"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_decision_artifact_lifecycle.py"
+      ]
+    },
+    {
+      "task_id": "COMPAT-02",
+      "objective": "Reject Phase 2 comparisons that mix protocol, target source, result schema, or runtime release authority.",
+      "goal_alignment": "Prevents D5 and pre-D5 artifact costs from being presented as one controlled comparison.",
+      "work_type": "compatibility_repair",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-07-27-phase2-experiment-harness-and-calibration.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_results.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/agentteam.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ],
+      "required_deliverables": [
+        "comparison_authority_validator",
+        "text_and_json_cli_fence",
+        "mixed_release_regression_test"
+      ],
+      "acceptance_criteria": [
+        "Compatible P2 results continue to render.",
+        "A mixed runtime release fails before text or JSON comparison output.",
+        "No sealed result bundle or schema is rewritten."
+      ],
+      "stop_condition": "Stop if compatibility requires changing an existing sealed Phase 2 result bundle in place.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase1-phase2-decision-artifact-compatibility.md"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py"
+      ]
+    },
+    {
+      "task_id": "COMPAT-03",
+      "objective": "Execute focused and repository-wide compatibility verification and publish the audit result without a provider call.",
+      "goal_alignment": "Closes the compatibility taskpack with deterministic evidence rather than repeating expensive live calibration.",
+      "work_type": "verification",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L1",
+      "depends_on": [
+        "COMPAT-01",
+        "COMPAT-02"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase1-phase2-decision-artifact-compatibility.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/reports/2026-08-06-phase1-phase2-decision-artifact-compatibility.md"
+      ],
+      "required_deliverables": [
+        "focused_test_result",
+        "full_suite_result",
+        "artifact_lint_result",
+        "compatibility_audit_report"
+      ],
+      "acceptance_criteria": [
+        "All declared verification commands pass.",
+        "The audit records provider_calls as zero.",
+        "Historical P1/P2 authority paths are unchanged."
+      ],
+      "stop_condition": "Stop if a regression requires modifying a historical P1/P2 authority file.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-06-phase1-phase2-decision-artifact-compatibility.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/reports/2026-08-06-phase1-phase2-decision-artifact-compatibility.md"
+      ]
+    }
+  ]
+}

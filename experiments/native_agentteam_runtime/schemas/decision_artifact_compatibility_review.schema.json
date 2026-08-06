@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/decision_artifact_compatibility_review.schema.json",
+  "title": "Phase 1/Phase 2 decision-artifact compatibility review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "decision",
+    "reviewer",
+    "reviewed_at",
+    "plan_sha256",
+    "blueprint_sha256",
+    "research_authority_sha256",
+    "review_schema_sha256",
+    "contract_decisions_sha256",
+    "historical_authority_policy",
+    "provider_calls_authorized",
+    "remaining_escalations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "decision_artifact_compatibility_review.v1"
+    },
+    "decision": {
+      "enum": ["pending", "approved", "rejected"]
+    },
+    "reviewer": {"type": "string", "minLength": 1},
+    "reviewed_at": {"type": "string", "format": "date-time"},
+    "plan_sha256": {"$ref": "#/$defs/sha256"},
+    "blueprint_sha256": {"$ref": "#/$defs/sha256"},
+    "research_authority_sha256": {"$ref": "#/$defs/sha256"},
+    "review_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "contract_decisions_sha256": {"$ref": "#/$defs/sha256"},
+    "historical_authority_policy": {"const": "read_only"},
+    "provider_calls_authorized": {"const": 0},
+    "remaining_escalations": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "notes": {"type": "string"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"decision": {"const": "approved"}},
+        "required": ["decision"]
+      },
+      "then": {
+        "properties": {"remaining_escalations": {"maxItems": 0}}
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

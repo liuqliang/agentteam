@@ -6671,6 +6671,28 @@ class ExperimentResultBundleTests(unittest.TestCase):
                 render_experiment_result(completed),
             )
 
+    def test_comparison_rejects_mixed_runtime_release_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = self._fixture(Path(tmp) / "first")["bundle"]
+            second = copy.deepcopy(
+                self._fixture(Path(tmp) / "second")["bundle"]
+            )
+            second["runtime_release_identity"]["release_id"] = "candidate-v2"
+            second["runtime_release_identity"]["release_manifest_sha256"] = (
+                "d" * 64
+            )
+
+            with self.assertRaisesRegex(
+                ExperimentResultIntegrityError,
+                "runtime_release_identity",
+            ):
+                render_experiment_comparison(
+                    [
+                        {"bundle": first, "bundle_sha256": "1" * 64},
+                        {"bundle": second, "bundle_sha256": "2" * 64},
+                    ]
+                )
+
 
 class ExperimentModeAdapterTests(unittest.TestCase):
     @staticmethod
