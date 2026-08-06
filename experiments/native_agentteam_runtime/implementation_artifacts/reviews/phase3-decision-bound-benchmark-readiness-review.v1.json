@@ -2,11 +2,11 @@
   "decision": "approved",
   "remaining_escalations": [],
   "git_object_format": "sha1",
-  "preflight_release_source_commit": "332c58cb3c1826102a16f64d8c7f4bae42b8b0d1",
+  "preflight_release_source_commit": "569d78c877e36836144c95027f1d8c194008769c",
   "plan_sha256": "18588542f82a08b4d4c6ad09adec8288fe4879bd20f6675d147f85cfaefa46ff",
-  "blueprint_sha256": "7007c84b93c1d7ff87aa6b9a009b8f7ae7ef26c02e3ceeb50e83e2998998750a",
+  "blueprint_sha256": "302993c695e0bc25504a19ce3209b311b8037593de08e0f19f4a548a11eb6676",
   "research_authority_sha256": "8dca1748a211b9eaf9df5d392d7d39d755cbe3946a358c11cff2f51c5323d91d",
   "review_schema_sha256": "366456558ebcccbd0b6e1d0746eabacd724dc2a3fe7f56d9b81fb7a751dca264",
   "contract_decisions_sha256": "25f6b0b029d587a06980ce44b7ca1109a52d0a142f3108960c3783263180dd5d",
-  "decision_contract_sha256": "8262d2a4ecc96ddef803d596607548331bfbe490532b305fab9bb6dc488c87b3"
+  "decision_contract_sha256": "18e2aaa2440ea8deb4c7c0f11cc8bef12460ddfca54284ded3aac427033f0ca9"
 }
