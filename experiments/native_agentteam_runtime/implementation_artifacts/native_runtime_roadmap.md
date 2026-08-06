@@ -1563,3 +1563,27 @@ change benchmark claims. New decision-bound runs use Git code-state, bounded
 decision-linked evidence, and one content-addressed report as terminal
 authority; legacy runs remain readable and may receive deterministic additive
 indexes through `agentteam artifacts migrate-legacy`.
+
+### Post-D5 Phase 3 Route
+
+The unfinished route now starts with the decision-bound Phase 3A contract in
+[`2026-08-06-phase3-decision-bound-benchmark-readiness.md`](plans/2026-08-06-phase3-decision-bound-benchmark-readiness.md).
+Its approved blueprint materializes four tasks: one bounded repo-map handoff,
+SWE-EVO adapter and deterministic selection, immutable preregistration, and a
+provider-free readiness gate. The blueprint binds every task to an active
+execution decision and requires a separate authorization for any live scored
+pilot.
+
+Ordered follow-on work is:
+
+1. complete and review Phase 3A readiness;
+2. freeze a separate Phase 3B live-pilot taskpack with actual instances,
+   budgets, mode order, model profile, and operator authorization;
+3. choose Phase 4 ablations from pilot evidence;
+4. run Phase 5 normal resume and fault-injection recovery experiments;
+5. run the Phase 6 semantic-feedback long task;
+6. record a continue, narrow, or archive direction decision.
+
+Do not pre-expand Phase 4 through Phase 6 into worker tasks. Their direction is
+fixed by the research authority, but their execution decisions depend on
+accepted evidence from the preceding phase.

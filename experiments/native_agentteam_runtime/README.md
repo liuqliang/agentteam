@@ -25,6 +25,11 @@ inputs are specified in:
 - [`implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json`](implementation_artifacts/plans/2026-07-23-phase1-model-invocation-usage.blueprint.json)
 - [`implementation_artifacts/plans/2026-07-24-phase1-execution-preflight.md`](implementation_artifacts/plans/2026-07-24-phase1-execution-preflight.md)
 
+The first post-D5 unfinished-work contract is:
+
+- [`implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.md`](implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.md)
+- [`implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.blueprint.json`](implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.blueprint.json)
+
 The Phase 1 invocation-accounting and post-backlog controller surfaces are
 implemented in the candidate runtime. Their presence is not Phase 1 completion
 evidence: the current gate epoch still requires a controller-validated
@@ -465,6 +470,13 @@ and final author status.
 
 Frozen taskpacks are immutable launch inputs. The freezer rejects extra draft
 files and symlinks before copying artifacts and writing `manifest.json`.
+
+An approved blueprint may include `taskpack_decision_contract.v1`. For that
+path, the approval must bind `decision_contract_sha256`, every backlog task
+must bind an active execution decision, and materialization copies the exact
+contract into the taskpack. Freeze and run publication retain the root and task
+bindings; replay is idempotent. Blueprints without this field remain on the
+legacy-compatible path, so completed historical taskpacks are not rewritten.
 
 The taskpack launcher currently translates `fake` and `codex` runtime backends.
 It intentionally rejects `shell` taskpack launches until shell command mapping

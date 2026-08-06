@@ -3896,6 +3896,33 @@ class TaskpackTests(unittest.TestCase):
                     dry_run=True,
                 )
 
+    def test_decision_aware_blueprint_rejects_approval_digest_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            blueprint_path, blueprint = _blueprint_fixture(repo)
+            blueprint["decision_contract"] = _blueprint_decision_contract(
+                [task["task_id"] for task in blueprint["tasks"]]
+            )
+            blueprint["approval"]["digest_bindings"].append(
+                "decision_contract"
+            )
+            _write_json(repo / blueprint_path, blueprint)
+            record = _write_blueprint_approval(repo, blueprint)
+            record["decision_contract_sha256"] = "0" * 64
+            _write_json(repo / blueprint["approval"]["record_path"], record)
+
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "approval digest mismatch for decision_contract",
+            ):
+                taskpack_module.materialize_taskpack_blueprint(
+                    repo,
+                    blueprint_path,
+                    tmp_path / "unused",
+                )
+
     def test_blueprint_freeze_rejects_each_drifted_materialized_artifact(self):
         for artifact_name in (
             "taskpack.yaml",
