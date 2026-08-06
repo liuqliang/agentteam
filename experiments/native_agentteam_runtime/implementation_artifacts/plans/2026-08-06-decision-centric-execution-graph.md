@@ -1,10 +1,10 @@
 # Decision-Centric Execution Graph
 
-Status: operator-approved architecture and staged migration plan. This document
-is implementation authority for reorganizing AgentTeam recovery, trace, Git
-state, and durable artifacts around decisions. It does not rewrite historical
-runs or change the research claims established by the Phase 2 experiment
-harness.
+Status: operator-approved architecture and staged migration plan. D0 through
+D2 are implemented at `0ce9fdb`; D3 through D5 remain pending. This document is
+implementation authority for reorganizing AgentTeam recovery, trace, Git state,
+and durable artifacts around decisions. It does not rewrite historical runs or
+change the research claims established by the Phase 2 experiment harness.
 
 ## Decision Summary
 
@@ -302,6 +302,10 @@ and identify missing rationale explicitly.
 
 ### D3: Runtime Propagation
 
+- preserve authorship authority: operator or semantic authority creates
+  `direction`, the responsible planning/implementation role proposes
+  `execution`, and the verification/integration controller creates
+  `acceptance`; the scheduler must not synthesize missing rationale;
 - bind taskpacks, runs, tasks, attempts, model invocations, and events to an
   inherited decision;
 - require an acceptance decision before integration;

@@ -1543,7 +1543,9 @@ usage-coverage and reconciliation gates in the linked route note.
 
 ### Decision-Centric Execution Graph
 
-Status: architecture approved; staged implementation pending.
+Status: architecture approved; D0-D2 decision authority and projection are
+implemented at `0ce9fdb`; D3-D5 runtime propagation, Git recovery, and measured
+artifact reduction remain pending.
 
 Before expanding long-running benchmark execution, reorganize durable runtime
 state around decisions rather than runs or files. Git becomes code-state
