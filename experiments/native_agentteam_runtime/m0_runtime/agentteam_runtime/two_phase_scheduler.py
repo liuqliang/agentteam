@@ -37,6 +37,11 @@ from .m0_runtime import (
     write_patch_artifact,
 )
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
+from .git_code_state import (
+    publish_attempt_code_state,
+    publish_integration_code_state,
+    restore_attempt_workspace,
+)
 from .decision_runtime import (
     inherited_decision_id,
     load_run_decision_binding,
@@ -1036,6 +1041,7 @@ class TwoPhaseFileScheduler:
             "attempt_id": attempt_id,
             "lease_id": lease_id,
             "lease_expires_at": lease_expires_at,
+            **({"created_at": created_at} if decision_id else {}),
             "message_id": message_id,
             "runtime_session_id": runtime_session_id,
             "agent_id": agent["agent_id"],
@@ -1092,6 +1098,7 @@ class TwoPhaseFileScheduler:
         prior_result = self._completed_attempt_result(inflight)
         if prior_result is not None:
             return prior_result
+        worktree_recovery = self._restore_inflight_worktree_if_missing(inflight)
         self._import_worker_lifecycles(inflight)
         task = self._task_by_id(inflight["task_id"])
         diff_audit = (
@@ -1203,6 +1210,40 @@ class TwoPhaseFileScheduler:
             "post_integration_controller_observation": None,
         }
         result.update(_runtime_evidence_summary(task, runtime_result))
+        code_state_events = []
+        if (
+            self.decision_binding is not None
+            and self.project_root is not None
+            and inflight.get("worktree_path")
+            and diff_audit is not None
+        ):
+            code_state = publish_attempt_code_state(
+                self.decision_binding,
+                project_root=self.project_root,
+                worktree_path=inflight["worktree_path"],
+                run_id=self.output_dir.name,
+                task_id=inflight["task_id"],
+                attempt_id=inflight["attempt_id"],
+                changed_files=diff_audit["actual_changed_files"],
+                created_at=inflight["created_at"],
+                validation_status=outcome["validation_status"],
+            )
+            result.update(code_state)
+            code_state_events.append(
+                self._event(
+                    "code_state_published",
+                    "agent-scheduler",
+                    inflight["agent_id"],
+                    f"code-state:{inflight['attempt_id']}",
+                    inflight["correlation_id"],
+                    {
+                        "task_id": inflight["task_id"],
+                        "attempt_id": inflight["attempt_id"],
+                        "lease_id": inflight["lease_id"],
+                        **code_state,
+                    },
+                )
+            )
         integration_transaction_active = False
         pre_integration_observation = None
         if (
@@ -1371,6 +1412,26 @@ class TwoPhaseFileScheduler:
                         )
                     ]
                     if permission_request
+                    else []
+                ),
+                *code_state_events,
+                *(
+                    [
+                        self._event(
+                            "code_state_recovered",
+                            "recovery-controller",
+                            inflight["agent_id"],
+                            f"code-state-recovered:{inflight['attempt_id']}",
+                            inflight["correlation_id"],
+                            {
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "lease_id": inflight["lease_id"],
+                                **worktree_recovery,
+                            },
+                        )
+                    ]
+                    if worktree_recovery
                     else []
                 ),
                 *integration_events,
@@ -1561,6 +1622,34 @@ class TwoPhaseFileScheduler:
             )
             self._write_state()
         return result
+
+    def _restore_inflight_worktree_if_missing(self, inflight):
+        worktree_path = inflight.get("worktree_path")
+        if (
+            self.decision_binding is None
+            or self.project_root is None
+            or not worktree_path
+            or Path(worktree_path).exists()
+        ):
+            return None
+        recovered = restore_attempt_workspace(
+            self.decision_binding,
+            project_root=self.project_root,
+            destination=worktree_path,
+            run_id=self.output_dir.name,
+            task_id=inflight["task_id"],
+            attempt_id=inflight["attempt_id"],
+            independent=self.independent_attempt_workspaces,
+            events_path=self.events_path,
+        )
+        compact = {
+            key: value
+            for key, value in recovered.items()
+            if key != "event_tail"
+        }
+        inflight["worktree_recovery"] = compact
+        inflight["branch"] = None
+        return compact
 
     def _apply_decomposition_result(self, inflight, runtime_result, result, outcome):
         task = self._task_by_id(inflight["task_id"])
@@ -2058,6 +2147,14 @@ class TwoPhaseFileScheduler:
                     "integration_baseline_commit_reason": "verified_noop",
                 }
             )
+            integration_code_state = self._publish_verified_integration_code_state(
+                inflight,
+                result,
+                acceptance,
+                baseline_head,
+            )
+            if integration_code_state is not None:
+                events.append(integration_code_state)
             events.append(
                 self._event(
                     "integration_noop_verified",
@@ -2378,9 +2475,66 @@ class TwoPhaseFileScheduler:
                     },
                 )
             )
+        integration_code_state = self._publish_verified_integration_code_state(
+            inflight,
+            result,
+            acceptance,
+            result.get("integration_baseline_commit_sha"),
+        )
+        if integration_code_state is not None:
+            events.append(integration_code_state)
         if patch_path:
             result.update(upsert_integration_queue_item(self.output_dir, result))
         return events
+
+    def _publish_verified_integration_code_state(
+        self,
+        inflight,
+        result,
+        acceptance,
+        commit_sha,
+    ):
+        if acceptance is None or self.project_root is None or not commit_sha:
+            return None
+        verified = (
+            result.get("integration_status") == "verified_noop"
+            or result.get("integration_baseline_commit_status") == "committed"
+            or (
+                result.get("integration_recovery_status") == "reused_existing"
+                and result.get("integration_verification_status") == "passed"
+            )
+        )
+        if not verified:
+            return None
+        code_state = publish_integration_code_state(
+            self.decision_binding,
+            project_root=self.project_root,
+            source_repository=(
+                result.get("integration_baseline_worktree_path")
+                or self.project_root
+            ),
+            decision_id=acceptance["decision_id"],
+            commit_sha=commit_sha,
+            run_id=self.output_dir.name,
+            task_id=inflight["task_id"],
+            attempt_id=inflight["attempt_id"],
+            created_at=self.clock.now(),
+        )
+        result.update(code_state)
+        return self._event(
+            "code_state_published",
+            "verification-integration-controller",
+            inflight["agent_id"],
+            f"integration-code-state:{inflight['attempt_id']}",
+            inflight["correlation_id"],
+            {
+                "task_id": inflight["task_id"],
+                "attempt_id": inflight["attempt_id"],
+                "lease_id": inflight["lease_id"],
+                "code_state_decision_id": acceptance["decision_id"],
+                **code_state,
+            },
+        )
 
     def _lease_expired(self, inflight):
         now = _parse_utc_timestamp(self.clock.now())
@@ -2972,7 +3126,10 @@ class TwoPhaseFileScheduler:
         )
 
     def _event(self, event_type, actor, target_agent_id, idempotency_key, correlation_id, payload):
-        decision_id = self._decision_for_task(payload.get("task_id"))
+        decision_id = (
+            payload.get("code_state_decision_id")
+            or self._decision_for_task(payload.get("task_id"))
+        )
         if event_type in {
             "acceptance_decision_recorded",
             "integration_noop_verified",

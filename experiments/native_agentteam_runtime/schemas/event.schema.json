@@ -85,7 +85,9 @@
         "model_invocation_started",
         "model_invocation_writer_revoked",
         "model_invocation_usage_recorded",
-        "acceptance_decision_recorded"
+        "acceptance_decision_recorded",
+        "code_state_published",
+        "code_state_recovered"
       ]
     },
     "actor": {
