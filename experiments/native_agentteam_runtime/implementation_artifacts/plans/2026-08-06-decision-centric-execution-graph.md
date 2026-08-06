@@ -2,7 +2,7 @@
 
 Status: operator-approved architecture and staged migration plan. D0 through
 D2 are implemented at `0ce9fdb`; D3 is implemented at `b36714c`; D4 is
-implemented at `835aee4`; D5 remains pending. This document is implementation
+implemented at `835aee4`; D5 is implemented at `467f073`. This document is implementation
 authority for reorganizing AgentTeam recovery, trace, Git state, and durable
 artifacts around decisions.
 It does not rewrite historical runs or change the research claims established
@@ -361,12 +361,41 @@ redundant copies.
 
 ### D5: Artifact Reduction And Migration
 
+Status: implemented at `467f073` and verified by the repository-wide suite
+(`984` tests passed, `4` skipped).
+
 - create deterministic legacy decision indexes;
 - stop persisting redundant patch, changed-file, and prose trace copies for
   new-format runs;
 - add retention for raw logs and abandoned internal refs;
 - demonstrate equivalent report and recovery outcomes with lower artifact
   count and bytes.
+
+New decision-bound runs now publish one content-addressed operator report and
+one bounded evidence record per terminal attempt, retain code state through
+protected Git commits and refs, and compact repeated runtime output,
+changed-file lists, diff lists, and prose from scheduler state and events. A
+patch may exist transiently inside the collection transaction for compatibility
+with the existing validator, but it is deleted after canonical Git publication
+and is not retained as terminal authority. Deferred integration reconstructs
+the exact binary delta from the retained base and code-state commits.
+
+Terminal retention removes rebuildable role/repo contexts and transport files,
+bounds provider logs to complete JSONL tails, and deletes only current-run
+or otherwise canonically replaced internal refs. It does not remove unrelated
+run refs or an unlinked export ref that may belong to an active publication.
+The report remains available to CLI and notification rendering after scheduler
+state compaction, and recovery succeeds after both the patch and attempt
+worktree have been removed.
+
+`agentteam artifacts migrate-legacy` recursively discovers direct and nested
+pre-decision runs and appends deterministic lineage decisions and links without
+editing historical files or inventing missing rationale. `agentteam artifacts
+cost` measures durable run files outside disposable worktrees. The comparison
+test requires lower retained file count, total bytes, duplicate unit count, and
+duplicate bytes while preserving Git recovery, delayed integration, report
+content, notification content, decision links, and SQLite rebuild/fallback
+equivalence.
 
 ## Acceptance Criteria
 

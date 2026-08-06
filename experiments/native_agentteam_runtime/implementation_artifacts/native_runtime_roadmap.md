@@ -1546,7 +1546,8 @@ usage-coverage and reconciliation gates in the linked route note.
 Status: architecture approved; D0-D2 decision authority and projection are
 implemented at `0ce9fdb`; D3 runtime propagation and the acceptance integration
 gate are implemented at `b36714c`; D4 Git-backed recovery is implemented at
-`835aee4`; D5 measured artifact reduction remains pending.
+`835aee4`; D5 measured artifact reduction and additive legacy indexing are
+implemented at `467f073` and verified by `984` passing tests (`4` skipped).
 
 Before expanding long-running benchmark execution, reorganize durable runtime
 state around decisions rather than runs or files. Git becomes code-state
@@ -1557,6 +1558,8 @@ artifacts.
 
 Implement D0 through D5 in order from
 [`2026-08-06-decision-centric-execution-graph.md`](plans/2026-08-06-decision-centric-execution-graph.md).
-The migration is additive: do not rewrite historical runs, remove legacy
-artifacts, or change benchmark claims until decision projection and Git-backed
-recovery prove equivalent behavior with lower retained artifact cost.
+The completed migration is additive: it does not rewrite historical runs or
+change benchmark claims. New decision-bound runs use Git code-state, bounded
+decision-linked evidence, and one content-addressed report as terminal
+authority; legacy runs remain readable and may receive deterministic additive
+indexes through `agentteam artifacts migrate-legacy`.
