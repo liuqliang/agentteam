@@ -1545,8 +1545,8 @@ usage-coverage and reconciliation gates in the linked route note.
 
 Status: architecture approved; D0-D2 decision authority and projection are
 implemented at `0ce9fdb`; D3 runtime propagation and the acceptance integration
-gate are implemented at `b36714c`; D4 Git recovery and D5 measured artifact
-reduction remain pending.
+gate are implemented at `b36714c`; D4 Git-backed recovery is implemented at
+`835aee4`; D5 measured artifact reduction remains pending.
 
 Before expanding long-running benchmark execution, reorganize durable runtime
 state around decisions rather than runs or files. Git becomes code-state

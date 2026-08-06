@@ -1,9 +1,10 @@
 # Decision-Centric Execution Graph
 
 Status: operator-approved architecture and staged migration plan. D0 through
-D2 are implemented at `0ce9fdb`; D3 is implemented at `b36714c`; D4 and D5
-remain pending. This document is implementation authority for reorganizing
-AgentTeam recovery, trace, Git state, and durable artifacts around decisions.
+D2 are implemented at `0ce9fdb`; D3 is implemented at `b36714c`; D4 is
+implemented at `835aee4`; D5 remains pending. This document is implementation
+authority for reorganizing AgentTeam recovery, trace, Git state, and durable
+artifacts around decisions.
 It does not rewrite historical runs or change the research claims established
 by the Phase 2 experiment harness.
 
@@ -328,11 +329,35 @@ attempt, invocation, and event edges through the decision graph query.
 
 ### D4: Git-Backed Recovery
 
+Status: implemented at `835aee4` and verified by the repository-wide suite
+(`982` tests passed, `4` skipped).
+
 - publish protected attempt/checkpoint refs;
 - recover disposable worktrees from code-state artifacts;
 - replay only the event tail after the selected checkpoint;
 - prove crash, missing-worktree, stale-ref, conflicting-ref, and provider
   session fallback behavior.
+
+The implementation creates deterministic decision-bound commits through a
+temporary Git index, so publishing terminal code state does not mutate the
+worker HEAD, index, or worktree. Immutable attempt refs retain exact results;
+movable checkpoint refs select the latest result for an execution decision;
+verified integration commits are linked to their acceptance decisions.
+Recovery validates the protected ref and decision artifact digest,
+reconstructs a missing shared worktree or independent clone, reapplies the
+attempt delta as uncommitted work for the existing diff audit, and selects only
+the compact event tail after the matching `code_state_published` event.
+
+Ref-first interruption is recoverable: a missing ledger link may be repaired
+only when the retained commit subject and decision/task trailers exactly match
+the active binding. Existing-link disagreement, stale refs, and conflicting
+republication remain hard failures. Worktree restoration runs before the
+existing provider lifecycle reconciliation path, preserving its identity,
+usage-lineage, and fallback fences. Active workers are not committed on a
+timer; D4 publishes terminal states and leaves explicit meaningful L2
+checkpoint scheduling to the worker/controller boundary. Patch files remain a
+compatibility artifact until D5 proves measured equivalence and removes the
+redundant copies.
 
 ### D5: Artifact Reduction And Migration
 
