@@ -1540,3 +1540,20 @@ usage-coverage and reconciliation gates in the linked route note.
 - Live calibration usage coverage: `100%`
 - Next phase: research benchmark execution and comparison.
 <!-- phase2-experiment-harness:end -->
+
+### Decision-Centric Execution Graph
+
+Status: architecture approved; staged implementation pending.
+
+Before expanding long-running benchmark execution, reorganize durable runtime
+state around decisions rather than runs or files. Git becomes code-state
+authority, the compact decision ledger becomes intent-lineage authority,
+events remain execution facts, and SQLite remains a rebuildable projection.
+Only contract, code-state, evidence, and report objects remain durable
+artifacts.
+
+Implement D0 through D5 in order from
+[`2026-08-06-decision-centric-execution-graph.md`](plans/2026-08-06-decision-centric-execution-graph.md).
+The migration is additive: do not rewrite historical runs, remove legacy
+artifacts, or change benchmark claims until decision projection and Git-backed
+recovery prove equivalent behavior with lower retained artifact cost.

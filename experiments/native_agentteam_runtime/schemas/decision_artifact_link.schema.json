@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/native_runtime/decision_artifact_link.schema.json",
+  "title": "AgentTeam decision artifact link",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "decision_id",
+    "artifact_kind",
+    "locator",
+    "digest_algorithm",
+    "digest",
+    "producer",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "decision_artifact_link.v1"},
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^ART-[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "maxLength": 160
+    },
+    "decision_id": {
+      "type": "string",
+      "pattern": "^DEC-[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "maxLength": 160
+    },
+    "artifact_kind": {
+      "enum": ["contract", "code_state", "evidence", "report"]
+    },
+    "locator": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "digest_algorithm": {"enum": ["sha256", "git_sha1", "git_sha256"]},
+    "digest": {"type": "string", "pattern": "^[0-9a-f]+$"},
+    "producer": {"type": "string", "minLength": 1, "maxLength": 200},
+    "created_at": {"type": "string", "format": "date-time"}
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/native_runtime/decision_record.schema.json",
+  "title": "AgentTeam decision revision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "decision_id",
+    "revision",
+    "decision_kind",
+    "subject",
+    "authority_level",
+    "parent_decision_id",
+    "supersedes_decision_id",
+    "statement",
+    "selected_option",
+    "alternatives",
+    "rationale",
+    "scope",
+    "expected_outcome",
+    "acceptance_refs",
+    "status",
+    "created_at",
+    "created_by",
+    "previous_revision_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "decision_record.v1"},
+    "decision_id": {"$ref": "#/$defs/decisionId"},
+    "revision": {"type": "integer", "minimum": 1},
+    "decision_kind": {
+      "enum": ["direction", "execution", "acceptance"]
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "maxLength": 96
+    },
+    "authority_level": {"enum": ["L1", "L2", "L3"]},
+    "parent_decision_id": {
+      "oneOf": [{"$ref": "#/$defs/decisionId"}, {"type": "null"}]
+    },
+    "supersedes_decision_id": {
+      "oneOf": [{"$ref": "#/$defs/decisionId"}, {"type": "null"}]
+    },
+    "statement": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "selected_option": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "alternatives": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["option", "rejected_reason"],
+        "properties": {
+          "option": {"type": "string", "minLength": 1, "maxLength": 500},
+          "rejected_reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        }
+      }
+    },
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "scope": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 500}
+    },
+    "expected_outcome": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "acceptance_refs": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 500}
+    },
+    "status": {
+      "enum": ["proposed", "active", "completed", "rejected", "superseded"]
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "created_by": {"type": "string", "minLength": 1, "maxLength": 200},
+    "previous_revision_sha256": {
+      "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"revision": {"const": 1}}},
+      "then": {"properties": {"previous_revision_sha256": {"type": "null"}}},
+      "else": {"properties": {"previous_revision_sha256": {"$ref": "#/$defs/sha256"}}}
+    }
+  ],
+  "$defs": {
+    "decisionId": {
+      "type": "string",
+      "pattern": "^DEC-[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "maxLength": 160
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

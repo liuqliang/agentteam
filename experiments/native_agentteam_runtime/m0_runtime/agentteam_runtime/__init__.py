@@ -40,6 +40,7 @@ _EXPORTS = {
     "build_repository_map": (".repo_map", "build_repository_map"),
     "build_runtime_observability": (".observability", "build_runtime_observability"),
     "build_project_stats": (".projection_db", "build_project_stats"),
+    "DecisionLedger": (".decision_ledger", "DecisionLedger"),
     "build_taskpack_runtime_args": (".taskpack", "build_taskpack_runtime_args"),
     "build_feishu_notification_sink_from_env": (
         ".notifications",
@@ -89,6 +90,14 @@ _EXPORTS = {
     "read_projected_artifact_retention_plan": (
         ".projection_db",
         "read_projected_artifact_retention_plan",
+    ),
+    "read_projected_decisions": (
+        ".projection_db",
+        "read_projected_decisions",
+    ),
+    "read_projected_decision_graph": (
+        ".projection_db",
+        "read_projected_decision_graph",
     ),
     "rebuild_project_projection_db": (
         ".projection_db",

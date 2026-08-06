@@ -5,6 +5,12 @@ import re
 import sqlite3
 from pathlib import Path
 
+from .decision_ledger import (
+    DecisionLedgerError,
+    decision_ledger_root,
+    decision_record_sha256,
+    load_decision_ledger,
+)
 from .experiment_results import (
     ExperimentResultError,
     load_experiment_result_bundle,
@@ -18,7 +24,7 @@ from .experiment_workspace import (
 )
 from .token_usage import normalize_token_usage, token_usage_from_state
 
-PROJECTION_SCHEMA_VERSION = "agentteam_projection.v7"
+PROJECTION_SCHEMA_VERSION = "agentteam_projection.v8"
 PROJECTION_WARNING_UNAVAILABLE = "projection_db_unavailable"
 PROJECTION_REBUILD_NEXT_ACTION = "run agentteam db rebuild"
 PROJECTION_REBUILD_HINT = "agentteam db rebuild"
@@ -254,6 +260,9 @@ def check_project_projection_db(work_root):
         "experiment_result_digest",
         "experiment_recovery",
         "experiment_recovery_digest",
+        "decisions",
+        "decision_artifacts",
+        "decision_digest",
     ]
     mismatches = [
         key
@@ -375,6 +384,155 @@ def read_projected_taskpacks(work_root, *, include_fallback_status=False):
             }
             for row in rows
         ],
+    }
+
+
+def read_projected_decisions(work_root, *, statuses=None):
+    """Read latest decision revisions and durable links from DB or authority."""
+    work_root = Path(work_root).resolve()
+    statuses = set(statuses or [])
+    unsupported = statuses.difference(
+        {"proposed", "active", "completed", "rejected", "superseded"}
+    )
+    if unsupported:
+        raise ValueError(
+            "unsupported decision status filter: "
+            + ", ".join(sorted(unsupported))
+        )
+    check = check_project_projection_db(work_root)
+    if check["check_status"] == "passed":
+        try:
+            with sqlite3.connect(project_projection_db_path(work_root)) as connection:
+                decision_rows = connection.execute(
+                    """
+                    select decision_id, revision, decision_kind, subject,
+                           authority_level, parent_decision_id,
+                           supersedes_decision_id, statement, selected_option,
+                           alternatives_json, rationale, scope_json,
+                           expected_outcome, acceptance_refs_json, status,
+                           created_at, created_by, previous_revision_sha256,
+                           record_sha256
+                    from decisions
+                    order by decision_id
+                    """
+                ).fetchall()
+                artifact_rows = connection.execute(
+                    """
+                    select artifact_id, decision_id, artifact_kind, locator,
+                           digest_algorithm, digest, producer, created_at
+                    from decision_artifacts
+                    order by artifact_id
+                    """
+                ).fetchall()
+            source = _projection_reader_db_metadata(
+                check,
+                project_projection_db_path(work_root),
+            )
+            decisions = [_decision_payload_from_row(row) for row in decision_rows]
+            artifacts = [
+                _decision_artifact_payload_from_row(row) for row in artifact_rows
+            ]
+        except (sqlite3.DatabaseError, json.JSONDecodeError):
+            decisions, artifacts = _scan_decision_authority(work_root)
+            source = _projection_reader_fallback_status(
+                _with_projection_contract(
+                    {
+                        "check_status": "failed",
+                        "db_path": str(project_projection_db_path(work_root)),
+                        "schema_version": check.get("schema_version"),
+                        "expected": check.get("expected", {}),
+                        "actual": check.get("actual", {}),
+                        "mismatches": ["db_unreadable"],
+                    }
+                )
+            )
+    else:
+        decisions, artifacts = _scan_decision_authority(work_root)
+        source = _projection_reader_fallback_status(check)
+    if statuses:
+        decisions = [item for item in decisions if item["status"] in statuses]
+        selected = {item["decision_id"] for item in decisions}
+        artifacts = [item for item in artifacts if item["decision_id"] in selected]
+    return {
+        **source,
+        "decisions": decisions,
+        "decision_artifacts": artifacts,
+    }
+
+
+def read_projected_decision_graph(work_root, decision_id):
+    projection = read_projected_decisions(work_root)
+    decisions = {
+        item["decision_id"]: item for item in projection["decisions"]
+    }
+    if decision_id not in decisions:
+        return {**projection, "decision_graph": None}
+    children = {}
+    for item in decisions.values():
+        parent = item.get("parent_decision_id")
+        if parent is not None:
+            children.setdefault(parent, []).append(item["decision_id"])
+    artifacts = {}
+    for item in projection["decision_artifacts"]:
+        artifacts.setdefault(item["decision_id"], []).append(item)
+
+    def build(current, seen):
+        if current in seen:
+            raise ProjectionIntegrityError("projected decision graph contains a cycle")
+        return {
+            "decision": decisions[current],
+            "artifacts": sorted(
+                artifacts.get(current, []),
+                key=lambda item: item["artifact_id"],
+            ),
+            "children": [
+                build(child, seen | {current})
+                for child in sorted(children.get(current, []))
+            ],
+        }
+
+    return {
+        **projection,
+        "decision_graph": build(decision_id, set()),
+    }
+
+
+def _decision_payload_from_row(row):
+    return {
+        "schema_version": "decision_record.v1",
+        "decision_id": row[0],
+        "revision": row[1],
+        "decision_kind": row[2],
+        "subject": row[3],
+        "authority_level": row[4],
+        "parent_decision_id": row[5],
+        "supersedes_decision_id": row[6],
+        "statement": row[7],
+        "selected_option": row[8],
+        "alternatives": json.loads(row[9]),
+        "rationale": row[10],
+        "scope": json.loads(row[11]),
+        "expected_outcome": row[12],
+        "acceptance_refs": json.loads(row[13]),
+        "status": row[14],
+        "created_at": row[15],
+        "created_by": row[16],
+        "previous_revision_sha256": row[17],
+        "record_sha256": row[18],
+    }
+
+
+def _decision_artifact_payload_from_row(row):
+    return {
+        "schema_version": "decision_artifact_link.v1",
+        "artifact_id": row[0],
+        "decision_id": row[1],
+        "artifact_kind": row[2],
+        "locator": row[3],
+        "digest_algorithm": row[4],
+        "digest": row[5],
+        "producer": row[6],
+        "created_at": row[7],
     }
 
 
@@ -984,6 +1142,7 @@ def _scan_work_root(work_root, *, explicit_acceptance_artifacts=None):
     artifacts = _scan_artifacts(work_root, runs, taskpacks)
     worker_results = _scan_worker_results(runs)
     integration_outcomes = _scan_integration_outcomes(runs)
+    decisions, decision_artifacts = _scan_decision_authority(work_root)
     return {
         "runs": runs,
         "taskpacks": taskpacks,
@@ -1003,7 +1162,30 @@ def _scan_work_root(work_root, *, explicit_acceptance_artifacts=None):
         ),
         "experiment_results": _scan_experiment_results(runs),
         "experiment_recovery": _scan_experiment_recovery(runs),
+        "decisions": decisions,
+        "decision_artifacts": decision_artifacts,
     }
+
+
+def _scan_decision_authority(work_root):
+    if not decision_ledger_root(work_root).exists():
+        return [], []
+    try:
+        ledger = load_decision_ledger(work_root)
+        decisions = ledger.latest_decisions()
+        artifacts = ledger.artifact_links()
+    except DecisionLedgerError as exc:
+        raise ProjectionIntegrityError("decision authority is invalid") from exc
+    return (
+        [
+            {
+                **record,
+                "record_sha256": decision_record_sha256(record),
+            }
+            for record in decisions
+        ],
+        artifacts,
+    )
 
 
 def _scan_experiment_results(runs):
@@ -2223,6 +2405,64 @@ def _create_projection_schema(connection):
     )
     connection.execute(
         """
+        create table if not exists decisions(
+            decision_id text primary key,
+            revision integer not null,
+            decision_kind text not null,
+            subject text not null,
+            authority_level text not null,
+            parent_decision_id text,
+            supersedes_decision_id text,
+            statement text not null,
+            selected_option text not null,
+            alternatives_json text not null,
+            rationale text not null,
+            scope_json text not null,
+            expected_outcome text not null,
+            acceptance_refs_json text not null,
+            status text not null,
+            created_at text not null,
+            created_by text not null,
+            previous_revision_sha256 text,
+            record_sha256 text not null
+        )
+        """
+    )
+    connection.execute(
+        """
+        create index if not exists decisions_status_kind_idx
+        on decisions(status, decision_kind, authority_level)
+        """
+    )
+    connection.execute(
+        """
+        create index if not exists decisions_parent_idx
+        on decisions(parent_decision_id)
+        """
+    )
+    connection.execute(
+        """
+        create table if not exists decision_artifacts(
+            artifact_id text primary key,
+            decision_id text not null,
+            artifact_kind text not null,
+            locator text not null,
+            digest_algorithm text not null,
+            digest text not null,
+            producer text not null,
+            created_at text not null,
+            foreign key(decision_id) references decisions(decision_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        create index if not exists decision_artifacts_decision_kind_idx
+        on decision_artifacts(decision_id, artifact_kind)
+        """
+    )
+    connection.execute(
+        """
         create table if not exists experiment_results(
             experiment_run_id text primary key,
             run_dir text not null,
@@ -2689,6 +2929,62 @@ def _write_projection_rows(connection, projection):
     )
     connection.executemany(
         """
+        insert into decisions(
+            decision_id, revision, decision_kind, subject, authority_level,
+            parent_decision_id, supersedes_decision_id, statement,
+            selected_option, alternatives_json, rationale, scope_json,
+            expected_outcome, acceptance_refs_json, status, created_at,
+            created_by, previous_revision_sha256, record_sha256
+        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                item["decision_id"],
+                item["revision"],
+                item["decision_kind"],
+                item["subject"],
+                item["authority_level"],
+                item.get("parent_decision_id"),
+                item.get("supersedes_decision_id"),
+                item["statement"],
+                item["selected_option"],
+                _json_dumps(item["alternatives"]),
+                item["rationale"],
+                _json_dumps(item["scope"]),
+                item["expected_outcome"],
+                _json_dumps(item["acceptance_refs"]),
+                item["status"],
+                item["created_at"],
+                item["created_by"],
+                item.get("previous_revision_sha256"),
+                item["record_sha256"],
+            )
+            for item in projection["decisions"]
+        ],
+    )
+    connection.executemany(
+        """
+        insert into decision_artifacts(
+            artifact_id, decision_id, artifact_kind, locator,
+            digest_algorithm, digest, producer, created_at
+        ) values(?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                item["artifact_id"],
+                item["decision_id"],
+                item["artifact_kind"],
+                item["locator"],
+                item["digest_algorithm"],
+                item["digest"],
+                item["producer"],
+                item["created_at"],
+            )
+            for item in projection["decision_artifacts"]
+        ],
+    )
+    connection.executemany(
+        """
         insert into experiment_results(
             experiment_run_id, run_dir, protocol_sha256,
             run_manifest_sha256, mode, repetition_index,
@@ -2824,6 +3120,12 @@ def _projection_counts(projection):
         "experiment_recovery_digest": _experiment_recovery_digest(
             projection["experiment_recovery"]
         ),
+        "decisions": len(projection["decisions"]),
+        "decision_artifacts": len(projection["decision_artifacts"]),
+        "decision_digest": _decision_projection_digest(
+            projection["decisions"],
+            projection["decision_artifacts"],
+        ),
         "evidence": evidence_counts,
     }
 
@@ -2863,8 +3165,70 @@ def _database_counts(db_path):
             "experiment_recovery_digest": (
                 _database_experiment_recovery_digest(connection)
             ),
+            "decisions": _table_count(connection, "decisions"),
+            "decision_artifacts": _table_count(
+                connection,
+                "decision_artifacts",
+            ),
+            "decision_digest": _database_decision_projection_digest(
+                connection
+            ),
             "evidence": _database_evidence_counts(connection),
         }
+
+
+def _decision_projection_digest(decisions, artifacts):
+    normalized = {
+        "decisions": [
+            {key: value for key, value in item.items()}
+            for item in sorted(decisions, key=lambda value: value["decision_id"])
+        ],
+        "artifacts": [
+            {key: value for key, value in item.items()}
+            for item in sorted(artifacts, key=lambda value: value["artifact_id"])
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(
+            normalized,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _database_decision_projection_digest(connection):
+    try:
+        decision_rows = connection.execute(
+            """
+            select decision_id, revision, decision_kind, subject,
+                   authority_level, parent_decision_id,
+                   supersedes_decision_id, statement, selected_option,
+                   alternatives_json, rationale, scope_json,
+                   expected_outcome, acceptance_refs_json, status,
+                   created_at, created_by, previous_revision_sha256,
+                   record_sha256
+            from decisions
+            order by decision_id
+            """
+        ).fetchall()
+        artifact_rows = connection.execute(
+            """
+            select artifact_id, decision_id, artifact_kind, locator,
+                   digest_algorithm, digest, producer, created_at
+            from decision_artifacts
+            order by artifact_id
+            """
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        decision_rows = []
+        artifact_rows = []
+    decisions = [_decision_payload_from_row(row) for row in decision_rows]
+    artifacts = [_decision_artifact_payload_from_row(row) for row in artifact_rows]
+    return _decision_projection_digest(decisions, artifacts)
 
 
 def _database_schema_version(db_path):
