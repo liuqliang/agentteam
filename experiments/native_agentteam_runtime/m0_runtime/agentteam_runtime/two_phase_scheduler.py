@@ -37,6 +37,12 @@ from .m0_runtime import (
     write_patch_artifact,
 )
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
+from .decision_runtime import (
+    inherited_decision_id,
+    load_run_decision_binding,
+    record_integration_acceptance,
+    require_active_inherited_decision,
+)
 from .experiment_controller import (
     ExperimentControllerIntegrityError,
     load_experiment_controller,
@@ -239,6 +245,7 @@ class TwoPhaseFileScheduler:
         self.state_db_path = self.output_dir / "state" / "scheduler_state.sqlite"
         self.events_path = self.output_dir / "events.jsonl"
         self.run_id = "RUN-TWO-PHASE-SCHEDULER"
+        self.decision_binding = load_run_decision_binding(self.output_dir)
         self.state = self._load_or_create_state()
         self._bind_experiment_runtime_context()
         self._bind_experiment_controller()
@@ -697,6 +704,12 @@ class TwoPhaseFileScheduler:
         return self._stopped_tick_result()
 
     def _dispatch_task(self, agent_pool, task):
+        decision_id = require_active_inherited_decision(
+            self.decision_binding,
+            task["task_id"],
+        )
+        if decision_id is not None:
+            task["decision_id"] = decision_id
         step_id = self._next_step_id(task["task_id"])
         step_dir = self.output_dir / "steps" / step_id
         step_dir.mkdir(parents=True, exist_ok=True)
@@ -864,6 +877,7 @@ class TwoPhaseFileScheduler:
             "lease_expires_at": lease_expires_at,
             "payload": {
                 "task_id": task["task_id"],
+                **({"decision_id": decision_id} if decision_id else {}),
                 "attempt_id": attempt_id,
                 "lease_id": lease_id,
                 "worktree_id": worktree_id,
@@ -1017,6 +1031,7 @@ class TwoPhaseFileScheduler:
             "step_id": step_id,
             "step_dir": str(step_dir),
             "task_id": task["task_id"],
+            **({"decision_id": decision_id} if decision_id else {}),
             "attempt_number": attempt_number,
             "attempt_id": attempt_id,
             "lease_id": lease_id,
@@ -1127,6 +1142,11 @@ class TwoPhaseFileScheduler:
         )
         result = {
             "task_id": inflight["task_id"],
+            **(
+                {"decision_id": inflight["decision_id"]}
+                if inflight.get("decision_id")
+                else {}
+            ),
             "attempt_number": inflight["attempt_number"],
             "attempt_id": inflight["attempt_id"],
             "lease_id": inflight["lease_id"],
@@ -1989,7 +2009,38 @@ class TwoPhaseFileScheduler:
                     },
                 ),
             ]
+        acceptance = record_integration_acceptance(
+            self.decision_binding,
+            run_id=self.output_dir.name,
+            task_id=inflight["task_id"],
+            attempt_id=inflight["attempt_id"],
+            created_at=self.clock.now(),
+            evidence_refs=_acceptance_evidence_refs(result),
+        )
         events = []
+        if acceptance is not None:
+            acceptance_id = acceptance["decision_id"]
+            result["acceptance_decision_id"] = acceptance_id
+            self.state.setdefault("acceptance_decisions", {})[
+                inflight["attempt_id"]
+            ] = acceptance_id
+            self._write_state()
+            events.append(
+                self._event(
+                    "acceptance_decision_recorded",
+                    "verification-integration-controller",
+                    inflight["agent_id"],
+                    f"acceptance:{inflight['attempt_id']}",
+                    inflight["correlation_id"],
+                    {
+                        "task_id": inflight["task_id"],
+                        "attempt_id": inflight["attempt_id"],
+                        "lease_id": inflight["lease_id"],
+                        "acceptance_decision_id": acceptance_id,
+                        "accepted_option": acceptance["selected_option"],
+                    },
+                )
+            )
         if not patch_path:
             baseline_head = (
                 self.state.get("integration_baseline", {}).get(
@@ -2007,7 +2058,7 @@ class TwoPhaseFileScheduler:
                     "integration_baseline_commit_reason": "verified_noop",
                 }
             )
-            return [
+            events.append(
                 self._event(
                     "integration_noop_verified",
                     "agent-scheduler",
@@ -2023,7 +2074,8 @@ class TwoPhaseFileScheduler:
                         "integration_baseline_commit_sha": baseline_head,
                     },
                 )
-            ]
+            )
+            return events
         if patch_path:
             queue = upsert_integration_queue_item(self.output_dir, result)
             result.update(queue)
@@ -2920,6 +2972,22 @@ class TwoPhaseFileScheduler:
         )
 
     def _event(self, event_type, actor, target_agent_id, idempotency_key, correlation_id, payload):
+        decision_id = self._decision_for_task(payload.get("task_id"))
+        if event_type in {
+            "acceptance_decision_recorded",
+            "integration_noop_verified",
+            "integration_queued",
+            "patch_integrated",
+            "integration_verified",
+            "integration_commit_evaluated",
+            "integration_baseline_commit_evaluated",
+            "integration_blocked",
+        }:
+            acceptance_id = self.state.get("acceptance_decisions", {}).get(
+                payload.get("attempt_id")
+            )
+            if acceptance_id is not None:
+                decision_id = acceptance_id
         return _event(
             0,
             self.clock.now(),
@@ -2929,7 +2997,11 @@ class TwoPhaseFileScheduler:
             idempotency_key,
             correlation_id,
             payload,
+            decision_id=decision_id,
         )
+
+    def _decision_for_task(self, task_id=None):
+        return inherited_decision_id(self.decision_binding, task_id)
 
     def _load_or_create_state(self):
         if self.state_path.exists():
@@ -2939,6 +3011,7 @@ class TwoPhaseFileScheduler:
             state.setdefault("milestones", {})
             state.setdefault("integration_baseline", {})
             state.setdefault("integration_active", False)
+            state.setdefault("acceptance_decisions", {})
             return state
         return {
             "scheduler_status": "initialized",
@@ -2950,6 +3023,7 @@ class TwoPhaseFileScheduler:
             "milestones": {},
             "integration_baseline": {},
             "integration_active": False,
+            "acceptance_decisions": {},
         }
 
     def _bind_experiment_controller(self):
@@ -3200,6 +3274,8 @@ def _worker_invocation_context(
     }
     if task.get("provider_session_state_root"):
         context["provider_session_state_root"] = task["provider_session_state_root"]
+    if task.get("decision_id"):
+        context["decision_id"] = task["decision_id"]
     return context
 
 
@@ -4099,6 +4175,21 @@ def _agentteam_target_review_required(output, operator_summary):
             elif str(item) == "agentteam_target_review_gate":
                 return True
     return False
+
+
+def _acceptance_evidence_refs(result):
+    refs = [
+        f"attempt:{result.get('attempt_id')}:validation:{result.get('validation_status')}"
+    ]
+    evidence_status = result.get("evidence_status")
+    if evidence_status:
+        refs.append(f"attempt:{result.get('attempt_id')}:evidence:{evidence_status}")
+    refs.extend(
+        item
+        for item in result.get("trace_carrier", [])
+        if isinstance(item, str) and item
+    )
+    return refs
 
 
 def _first_failure_line(text):

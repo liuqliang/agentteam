@@ -80,6 +80,12 @@
     "taskpack_id": {
       "$ref": "#/$defs/identifier"
     },
+    "decision_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^DEC-[A-Za-z0-9][A-Za-z0-9_.:-]*$"}
+      ]
+    },
     "implementation_run_id": {
       "$ref": "#/$defs/nullableIdentifier"
     },

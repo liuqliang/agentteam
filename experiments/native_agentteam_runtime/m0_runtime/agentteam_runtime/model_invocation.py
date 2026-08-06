@@ -2450,6 +2450,7 @@ def _start_context(context):
         "experiment_protocol_sha256",
         "experiment_run_manifest_sha256",
         "reasoning_profile",
+        "decision_id",
     ):
         if context.get(field) is not None:
             result[field] = context[field]
@@ -2491,6 +2492,7 @@ def _terminal_context(context):
         "experiment_protocol_sha256",
         "experiment_run_manifest_sha256",
         "reasoning_profile",
+        "decision_id",
     ):
         if context.get(field) is not None:
             result[field] = context[field]

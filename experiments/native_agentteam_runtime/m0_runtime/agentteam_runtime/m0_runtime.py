@@ -4129,8 +4129,9 @@ def _event(
     idempotency_key,
     correlation_id,
     payload,
+    decision_id=None,
 ):
-    return {
+    event = {
         "event_id": f"EVT-{sequence:04d}",
         "sequence": sequence,
         "time": time,
@@ -4141,6 +4142,9 @@ def _event(
         "correlation_id": correlation_id,
         "payload": payload,
     }
+    if decision_id is not None:
+        event["decision_id"] = decision_id
+    return event
 
 
 def _create_git_worktree(project_root, output_dir, attempt_id, worktree_id, base_ref=None):

@@ -24,7 +24,7 @@ from .experiment_workspace import (
 )
 from .token_usage import normalize_token_usage, token_usage_from_state
 
-PROJECTION_SCHEMA_VERSION = "agentteam_projection.v8"
+PROJECTION_SCHEMA_VERSION = "agentteam_projection.v9"
 PROJECTION_WARNING_UNAVAILABLE = "projection_db_unavailable"
 PROJECTION_REBUILD_NEXT_ACTION = "run agentteam db rebuild"
 PROJECTION_REBUILD_HINT = "agentteam db rebuild"
@@ -53,6 +53,8 @@ _INVOCATION_FILTER_FIELDS = {
     "attempt_id": "attempt_id",
     "backend": "backend",
     "model": "model",
+    "decision": "decision_id",
+    "decision_id": "decision_id",
 }
 _INVOCATION_COLUMNS = (
     "invocation_id",
@@ -67,6 +69,7 @@ _INVOCATION_COLUMNS = (
     "pursue_id",
     "round_index",
     "taskpack_id",
+    "decision_id",
     "task_id",
     "attempt_id",
     "runtime_execution_session_id",
@@ -475,6 +478,11 @@ def read_projected_decision_graph(work_root, decision_id):
     artifacts = {}
     for item in projection["decision_artifacts"]:
         artifacts.setdefault(item["decision_id"], []).append(item)
+    execution = (
+        _decision_execution_edges_from_db(work_root, set(decisions))
+        if projection.get("projection_source") == "db"
+        else {}
+    )
 
     def build(current, seen):
         if current in seen:
@@ -484,6 +492,16 @@ def read_projected_decision_graph(work_root, decision_id):
             "artifacts": sorted(
                 artifacts.get(current, []),
                 key=lambda item: item["artifact_id"],
+            ),
+            "execution": execution.get(
+                current,
+                {
+                    "run_ids": [],
+                    "tasks": [],
+                    "attempts": [],
+                    "invocation_ids": [],
+                    "event_count": 0,
+                },
             ),
             "children": [
                 build(child, seen | {current})
@@ -495,6 +513,74 @@ def read_projected_decision_graph(work_root, decision_id):
         **projection,
         "decision_graph": build(decision_id, set()),
     }
+
+
+def _decision_execution_edges_from_db(work_root, decision_ids):
+    if not decision_ids:
+        return {}
+    db_path = project_projection_db_path(work_root)
+    placeholders = ",".join("?" for _ in decision_ids)
+    parameters = tuple(sorted(decision_ids))
+    result = {
+        decision_id: {
+            "run_ids": [],
+            "tasks": [],
+            "attempts": [],
+            "invocation_ids": [],
+            "event_count": 0,
+        }
+        for decision_id in decision_ids
+    }
+    with sqlite3.connect(db_path) as connection:
+        for decision_id, run_id in connection.execute(
+            f"select decision_id, run_id from runs where decision_id in ({placeholders})",
+            parameters,
+        ):
+            result[decision_id]["run_ids"].append(run_id)
+        for decision_id, run_id, task_id in connection.execute(
+            f"select decision_id, run_id, task_id from tasks "
+            f"where decision_id in ({placeholders})",
+            parameters,
+        ):
+            result[decision_id]["tasks"].append(
+                {"run_id": run_id, "task_id": task_id}
+            )
+        for decision_id, run_id, task_id, attempt_id in connection.execute(
+            f"select decision_id, run_id, task_id, attempt_id from worker_results "
+            f"where decision_id in ({placeholders})",
+            parameters,
+        ):
+            result[decision_id]["attempts"].append(
+                {
+                    "run_id": run_id,
+                    "task_id": task_id,
+                    "attempt_id": attempt_id,
+                }
+            )
+        for decision_id, invocation_id in connection.execute(
+            f"select decision_id, invocation_id from invocations "
+            f"where decision_id in ({placeholders})",
+            parameters,
+        ):
+            result[decision_id]["invocation_ids"].append(invocation_id)
+        for decision_id, count in connection.execute(
+            f"select decision_id, count(*) from events "
+            f"where decision_id in ({placeholders}) group by decision_id",
+            parameters,
+        ):
+            result[decision_id]["event_count"] = count
+    for edges in result.values():
+        edges["run_ids"].sort()
+        edges["tasks"].sort(key=lambda item: (item["run_id"], item["task_id"]))
+        edges["attempts"].sort(
+            key=lambda item: (
+                item["run_id"],
+                item.get("task_id") or "",
+                item["attempt_id"],
+            )
+        )
+        edges["invocation_ids"].sort()
+    return result
 
 
 def _decision_payload_from_row(row):
@@ -1277,6 +1363,9 @@ def _scan_runs(runs_root):
     for run_dir in _projection_run_directories(runs_root):
         events_path = run_dir / "events.jsonl"
         state_path = run_dir / "state" / "two_phase_scheduler_state.json"
+        decision_binding = _read_json_if_exists(
+            run_dir / "state" / "decision-binding.v1.json"
+        )
         events = _read_jsonl(events_path)
         state = _read_json_if_exists(state_path)
         latest_event = _latest_event(events)
@@ -1287,6 +1376,7 @@ def _scan_runs(runs_root):
                 "state_path": str(state_path.resolve()) if state_path.exists() else None,
                 "events_path": str(events_path.resolve()) if events_path.exists() else None,
                 "report_path": _run_report_path(run_dir),
+                "decision_id": decision_binding.get("root_decision_id"),
                 "run_status": _run_status(latest_event, state),
                 "scheduler_status": state.get("scheduler_status"),
                 "event_count": len(events),
@@ -1494,6 +1584,7 @@ def _validate_acceptance_artifact_correlation(
         "project",
         "run_id",
         "taskpack_id",
+        "decision_id",
         "implementation_run_id",
         "gate_epoch",
     ):
@@ -1636,6 +1727,7 @@ def _validate_start_terminal_correlation(start, terminal):
         "pursue_id",
         "round_index",
         "taskpack_id",
+        "decision_id",
         "implementation_run_id",
         "gate_epoch",
         "task_id",
@@ -1720,6 +1812,7 @@ def _invocation_projection_row(
             or acceptance_metadata.get("taskpack_id")
             or run_identity.get("taskpack_id")
         ),
+        "decision_id": value("decision_id"),
         "task_id": value("task_id"),
         "attempt_id": value("attempt_id"),
         "runtime_execution_session_id": value(
@@ -1935,6 +2028,10 @@ def _worker_result_row(run, step, result, codex_result, attempt_id):
     )
     row_payload = {
         "run_id": run["run_id"],
+        "decision_id": (
+            _text_or_none(result.get("decision_id"))
+            or _text_or_none(step.get("decision_id"))
+        ),
         "task_id": task_id,
         "attempt_id": attempt_id,
         "result_status": (
@@ -2211,7 +2308,8 @@ def _create_projection_schema(connection):
             latest_event_time text,
             state_path text,
             events_path text,
-            report_path text
+            report_path text,
+            decision_id text
         )
         """
     )
@@ -2233,6 +2331,7 @@ def _create_projection_schema(connection):
             sequence integer not null,
             event_id text,
             event_type text,
+            decision_id text,
             task_id text,
             attempt_id text,
             lease_id text,
@@ -2249,6 +2348,7 @@ def _create_projection_schema(connection):
         create table if not exists tasks(
             run_id text not null,
             task_id text not null,
+            decision_id text,
             task_status text,
             backlog_status text,
             primary key(run_id, task_id)
@@ -2340,6 +2440,7 @@ def _create_projection_schema(connection):
             run_id text not null,
             task_id text,
             attempt_id text not null,
+            decision_id text,
             result_status text,
             validation_status text,
             failure_category text,
@@ -2523,6 +2624,7 @@ def _create_projection_schema(connection):
             pursue_id text,
             round_index integer,
             taskpack_id text,
+            decision_id text,
             task_id text,
             attempt_id text,
             runtime_execution_session_id text,
@@ -2615,8 +2717,9 @@ def _write_projection_rows(connection, projection):
             latest_event_time,
             state_path,
             events_path,
-            report_path
-        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            report_path,
+            decision_id
+        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -2631,6 +2734,7 @@ def _write_projection_rows(connection, projection):
                 run["state_path"],
                 run["events_path"],
                 run["report_path"],
+                run.get("decision_id"),
             )
             for run in runs
         ],
@@ -2663,6 +2767,7 @@ def _write_projection_rows(connection, projection):
             sequence,
             event_id,
             event_type,
+            decision_id,
             task_id,
             attempt_id,
             lease_id,
@@ -2670,7 +2775,7 @@ def _write_projection_rows(connection, projection):
             time,
             payload_json,
             event_json
-        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [event for run in runs for event in run["events"]],
     )
@@ -2679,9 +2784,10 @@ def _write_projection_rows(connection, projection):
         insert into tasks(
             run_id,
             task_id,
+            decision_id,
             task_status,
             backlog_status
-        ) values(?, ?, ?, ?)
+        ) values(?, ?, ?, ?, ?)
         """,
         [task for run in runs for task in run["tasks"]],
     )
@@ -2800,6 +2906,7 @@ def _write_projection_rows(connection, projection):
             run_id,
             task_id,
             attempt_id,
+            decision_id,
             result_status,
             validation_status,
             failure_category,
@@ -2815,13 +2922,14 @@ def _write_projection_rows(connection, projection):
             source_path,
             content_size_bytes,
             content_sha256
-        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
                 item["run_id"],
                 item.get("task_id"),
                 item["attempt_id"],
+                item.get("decision_id"),
                 item.get("result_status"),
                 item.get("validation_status"),
                 item.get("failure_category"),
@@ -4041,6 +4149,7 @@ def _event_projection(run_id, event):
         int(event.get("sequence", 0)),
         event.get("event_id"),
         event.get("event_type"),
+        event.get("decision_id"),
         payload.get("task_id"),
         payload.get("attempt_id"),
         payload.get("lease_id"),
@@ -4059,6 +4168,7 @@ def _task_projections(run_id, state, events):
         tasks[item["task_id"]] = (
             run_id,
             item["task_id"],
+            item.get("decision_id"),
             item.get("task_status"),
             item.get("backlog_status"),
         )
@@ -4072,6 +4182,7 @@ def _task_projections(run_id, state, events):
         tasks[task_id] = (
             run_id,
             task_id,
+            event.get("decision_id"),
             payload.get("task_status"),
             payload.get("backlog_status"),
         )

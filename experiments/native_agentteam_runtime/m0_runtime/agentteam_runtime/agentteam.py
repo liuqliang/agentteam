@@ -28,6 +28,7 @@ from .diagnostic_chat import (
     render_runtime_diagnostic_context,
     run_runtime_diagnostic_chat,
 )
+from .decision_runtime import publish_run_decision_binding
 from .artifact_repo import snapshot_run_artifacts_safe
 from .m0_runtime import (
     _integration_verification_env,
@@ -13254,7 +13255,8 @@ def _run_frozen_taskpack(
     inherit_launcher_selection=True,
     trusted_verification_command=None,
 ):
-    loaded_taskpack = load_taskpack(frozen_taskpack_dir)["taskpack"]
+    loaded = load_taskpack(frozen_taskpack_dir)
+    loaded_taskpack = loaded["taskpack"]
     controller_only = (
         loaded_taskpack.get("execution_mode") == "controller_only"
     )
@@ -13342,6 +13344,13 @@ def _run_frozen_taskpack(
             raise AgentTeamCliError(
                 "controller-only taskpack cannot run as an experiment model mode"
             )
+        publish_run_decision_binding(
+            inferred_work_root,
+            frozen_taskpack_dir,
+            run_paths["run_dir"],
+            loaded_taskpack,
+            task_ids=[],
+        )
         return _run_controller_only_taskpack(
             loaded_taskpack,
             frozen_taskpack_dir=Path(frozen_taskpack_dir).resolve(),
@@ -13367,6 +13376,17 @@ def _run_frozen_taskpack(
             if experiment_runtime_context is not None
             else None
         ),
+    )
+    publish_run_decision_binding(
+        inferred_work_root,
+        frozen_taskpack_dir,
+        run_paths["run_dir"],
+        loaded_taskpack,
+        task_ids=[
+            item.get("task_id")
+            for item in loaded.get("backlog", {}).get("items", [])
+            if isinstance(item, dict) and item.get("task_id")
+        ],
     )
     _initialize_post_backlog_gate_state(
         {"work_root": str(inferred_work_root)},

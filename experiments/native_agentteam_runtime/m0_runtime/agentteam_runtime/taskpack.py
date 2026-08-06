@@ -10,6 +10,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .decision_runtime import (
+    DecisionRuntimeError,
+    validate_taskpack_decision_contract,
+)
 from .release_manager import AgentTeamReleaseError, _rename_noreplace
 
 
@@ -2101,6 +2105,19 @@ def validate_taskpack(taskpack_dir):
         if isinstance(backlog, dict)
         else None
     )
+    decision_contract = taskpack.get("decision_contract")
+    if decision_contract is not None:
+        try:
+            validate_taskpack_decision_contract(
+                decision_contract,
+                task_ids=[
+                    item.get("task_id")
+                    for item in (declared_items or [])
+                    if isinstance(item, dict) and item.get("task_id")
+                ],
+            )
+        except DecisionRuntimeError as exc:
+            errors.append(str(exc))
     post_backlog_gates = taskpack.get("post_backlog_gates")
     controller_only = (
         taskpack.get("execution_mode") == "controller_only"
