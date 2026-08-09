@@ -10684,11 +10684,27 @@ def _execute_action_free_gate_controller(
         context["run_dir"] / "state" / "decision-binding.v1.json"
     )
     contract_sha256 = canonical_json_sha256(decision_contract)
+    root_decision_id = (
+        decision_contract.get("root_decision_id")
+        if isinstance(decision_contract, dict)
+        else None
+    )
+    readiness_decision = next(
+        (
+            item
+            for item in decision_contract.get("decisions", [])
+            if isinstance(item, dict)
+            and item.get("decision_id")
+            == "DEC-P3-readiness-execution"
+        ),
+        None,
+    ) if isinstance(decision_contract, dict) else None
     if (
         not decision_binding
         or decision_binding.get("contract_sha256") != contract_sha256
-        or decision_binding.get("root_decision_id")
-        != "DEC-P3-readiness-execution"
+        or decision_binding.get("root_decision_id") != root_decision_id
+        or not readiness_decision
+        or readiness_decision.get("status") != "active"
     ):
         raise Phase2GateError(
             "P3-READY run decision binding is missing or stale"
