@@ -668,6 +668,12 @@ class Phase3BenchmarkReadinessTests(unittest.TestCase):
             ).as_posix(),
         )
 
+    def test_action_free_p3_gate_needs_no_action_authority(self):
+        taskpack_module._validate_controller_action_authority(
+            REPOSITORY_ROOT,
+            [{**_p3_gate_declaration(), "depends_on": []}],
+        )
+
     def test_p3_ready_controller_validates_and_seals_relation(self):
         receipt = _minimal_receipt()
         with tempfile.TemporaryDirectory() as temporary:
