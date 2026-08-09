@@ -12210,6 +12210,47 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(summary["inactive_inflight"]["total"], 1)
             self.assertNotIn("agentteam watch", summary.get("next_action", ""))
 
+    def test_agentteam_cli_stop_explicit_run_dir_does_not_require_project_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            run_dir = tmp_path / "standalone-run"
+            _write_json(
+                run_dir / "state" / "two_phase_scheduler_state.json",
+                {
+                    "scheduler_status": "idle",
+                    "inflight_attempts": [],
+                    "steps": [],
+                },
+            )
+            _write_json(
+                run_dir / "state" / "worker_process_registry.json",
+                {"registry_status": "idle", "workers": []},
+            )
+
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "agentteam_runtime.agentteam",
+                    "stop",
+                    "--run-dir",
+                    str(run_dir),
+                    "--json",
+                ],
+                cwd=tmp_path,
+                env=_test_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["stop_status"], "stopped")
+            self.assertEqual(summary["project"], "unknown")
+            self.assertEqual(Path(summary["run_dir"]), run_dir.resolve())
+
     def test_agentteam_cli_status_prefers_active_worker_for_last_worker(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -49,7 +49,11 @@ from agentteam_runtime import (
     verify_integration_batch,
 )
 from agentteam_runtime.agentteam import _run_runtime_command_with_progress
-from agentteam_runtime.cli import _run_supervised_two_phase_scheduler
+from agentteam_runtime.cli import (
+    MAX_RETAINED_SUPERVISION_SNAPSHOTS,
+    _record_supervision_snapshot,
+    _run_supervised_two_phase_scheduler,
+)
 from agentteam_runtime.experiment_controller import create_experiment_controller
 from agentteam_runtime.m0_runtime import (
     apply_patch_to_integration_worktree,
@@ -6127,6 +6131,13 @@ class M0RuntimeTests(unittest.TestCase):
             first_collect = scheduler.collect_ready_results()
             second_dispatch = scheduler.dispatch_ready()
             second_inflight = scheduler.state["inflight_attempts"][0]
+            retry_message = json.loads(
+                Path(second_inflight["step_dir"])
+                .joinpath("mailboxes", "agent-repo-map", "inbox.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[-1]
+            )
+            retry_handoff = retry_message["payload"]["retry_handoff"]
             _append_runtime_result(
                 second_inflight["outbox_path"],
                 second_inflight["message_id"],
@@ -6147,6 +6158,10 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(first_collect["collected_task_ids"], ["TASK-001"])
             self.assertEqual(second_dispatch["dispatched_task_ids"], ["TASK-001"])
             self.assertEqual(second_inflight["attempt_id"], "TASK-001-ATTEMPT-002")
+            self.assertEqual(retry_handoff["schema_version"], "retry_handoff.v1")
+            self.assertEqual(retry_handoff["prior_attempt_id"], "TASK-001-ATTEMPT-001")
+            self.assertEqual(retry_handoff["validation_status"], "rejected")
+            self.assertNotIn("runtime_output", retry_handoff)
             self.assertEqual(second_collect["collected_task_ids"], ["TASK-001"])
             self.assertIn("recovery_routed", {event["event_type"] for event in events})
             self.assertEqual(
@@ -9058,6 +9073,57 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(result["inflight_count"], 0)
             self.assertEqual(worker_pool.supervise_calls, 0)
 
+    def test_stop_inflight_invocations_uses_exact_registered_service_stopper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            backlog_path = _write_backlog(tmp_path, write_scope=[])
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            stopped = []
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                invocation_service_stopper=lambda start: stopped.append(start) or True,
+            )
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            invocation_dir = output_dir / "model_invocations" / "INV-stop-test"
+            invocation_dir.mkdir(parents=True)
+            (invocation_dir / "started.json").write_text(
+                json.dumps(
+                    {
+                        "invocation_id": "INV-stop-test",
+                        "attempt_id": inflight["attempt_id"],
+                        "lifecycle_owner_token": inflight["lease_id"],
+                        "agent_id": inflight["agent_id"],
+                        "systemd_transient_unit": "agentteam-inv-stop-test.service",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = scheduler.stop_inflight_invocations()
+
+            self.assertEqual(result["requested_count"], 1)
+            self.assertEqual(result["stopped_count"], 1)
+            self.assertEqual(result["results"][0]["stop_status"], "stopped")
+            self.assertEqual(stopped[0]["invocation_id"], "INV-stop-test")
+
+    def test_supervision_snapshots_are_bounded_and_keep_latest_observations(self):
+        snapshots = []
+        total = MAX_RETAINED_SUPERVISION_SNAPSHOTS + 7
+        for sequence in range(total):
+            _record_supervision_snapshot(snapshots, {"sequence": sequence})
+
+        self.assertEqual(len(snapshots), MAX_RETAINED_SUPERVISION_SNAPSHOTS)
+        self.assertEqual(
+            [item["sequence"] for item in snapshots],
+            list(range(total - MAX_RETAINED_SUPERVISION_SNAPSHOTS, total)),
+        )
+
     def test_supervised_two_phase_scheduler_waits_past_max_steps_for_running_inflight_worker(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -9101,7 +9167,7 @@ class M0RuntimeTests(unittest.TestCase):
                     }
 
                 def _write_result_after_dispatch(self):
-                    if self.result_written:
+                    if self.result_written or self.calls <= 10:
                         return
                     state_path = output_dir / "state" / "two_phase_scheduler_state.json"
                     if not state_path.exists():
@@ -9152,6 +9218,14 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertGreater(result["tick_count"], 1)
             self.assertEqual(result["processed_task_ids"], ["TASK-001"])
             self.assertEqual(result["inflight_count"], 0)
+            self.assertGreater(
+                result["worker_pool_supervision_observation_count"],
+                MAX_RETAINED_SUPERVISION_SNAPSHOTS,
+            )
+            self.assertEqual(
+                len(result["worker_pool_supervision"]),
+                MAX_RETAINED_SUPERVISION_SNAPSHOTS,
+            )
 
     def test_supervised_two_phase_scheduler_emits_run_lifecycle_notifications(self):
         class RecordingNotificationSink:

@@ -718,6 +718,57 @@ class TwoPhaseFileScheduler:
             return None
         return self._stopped_tick_result()
 
+    def stop_inflight_invocations(self):
+        """Stop exact durable invocation services for every inflight attempt."""
+
+        results = []
+        for inflight in self.state.get("inflight_attempts", []):
+            authority_root = self._inflight_invocation_authority_root(inflight)
+            matches = _matching_invocation_starts(authority_root, inflight)
+            if not matches:
+                results.append(
+                    {
+                        "task_id": inflight["task_id"],
+                        "attempt_id": inflight["attempt_id"],
+                        "stop_status": "no_invocation",
+                    }
+                )
+                continue
+            if len(matches) != 1:
+                results.append(
+                    {
+                        "task_id": inflight["task_id"],
+                        "attempt_id": inflight["attempt_id"],
+                        "stop_status": "ambiguous",
+                        "invocation_ids": [
+                            record.get("invocation_id") for _, record in matches
+                        ],
+                    }
+                )
+                continue
+            started_path, start = matches[0]
+            if started_path.with_name("terminal.json").is_file():
+                stop_status = "already_terminal"
+            else:
+                stopper = self.invocation_service_stopper or _stop_exact_transient_service
+                stop_status = "stopped" if stopper(deepcopy(start)) else "stop_failed"
+            results.append(
+                {
+                    "task_id": inflight["task_id"],
+                    "attempt_id": inflight["attempt_id"],
+                    "invocation_id": start.get("invocation_id"),
+                    "stop_status": stop_status,
+                }
+            )
+        return {
+            "requested_count": len(self.state.get("inflight_attempts", [])),
+            "stopped_count": sum(
+                item["stop_status"] in {"stopped", "already_terminal"}
+                for item in results
+            ),
+            "results": results,
+        }
+
     def _dispatch_task(self, agent_pool, task):
         decision_id = require_active_inherited_decision(
             self.decision_binding,
@@ -881,6 +932,7 @@ class TwoPhaseFileScheduler:
             worktree_path,
             task.get("expected_output_artifacts", []),
         )
+        retry_handoff = self._retry_handoff_for_task(task["task_id"])
 
         message = {
             "message_id": message_id,
@@ -910,6 +962,11 @@ class TwoPhaseFileScheduler:
                 "input_artifacts": task.get("input_artifacts", []),
                 "expected_output_artifacts": task.get("expected_output_artifacts", []),
                 "materialized_input_artifacts": materialized_input_artifacts,
+                **(
+                    {"retry_handoff": retry_handoff}
+                    if retry_handoff is not None
+                    else {}
+                ),
                 **invocation_context,
                 **_evidence_policy_fields(task),
                 **_operator_guidance_fields(task),
@@ -2981,6 +3038,49 @@ class TwoPhaseFileScheduler:
             if item["task_id"] == task_id
         ]
         return max(attempt_numbers, default=0) + 1
+
+    def _retry_handoff_for_task(self, task_id):
+        for step in reversed(self.state.get("steps", [])):
+            if (
+                step.get("task_id") != task_id
+                or step.get("step_status") != "retry_routed"
+            ):
+                continue
+            result = step.get("result")
+            if not isinstance(result, dict):
+                continue
+            runtime_output = result.get("runtime_output")
+            operator_summary = (
+                runtime_output.get("operator_summary")
+                if isinstance(runtime_output, dict)
+                else None
+            )
+            operator_summary = (
+                operator_summary if isinstance(operator_summary, dict) else {}
+            )
+            return {
+                "schema_version": "retry_handoff.v1",
+                "prior_attempt_id": result.get("attempt_id"),
+                "failure_category": result.get("failure_category"),
+                "validation_status": result.get("validation_status"),
+                "evidence_status": result.get("evidence_status"),
+                "missing_evidence": [
+                    str(item)[:1000]
+                    for item in result.get("missing_evidence", [])[:8]
+                ],
+                "changed_files": list(result.get("changed_files", []))[:128],
+                "code_state_ref": result.get("code_state_ref"),
+                "code_state_commit_sha": result.get("code_state_commit_sha"),
+                "evidence_path": result.get("evidence_path"),
+                "evidence_sha256": result.get("evidence_sha256"),
+                "verification_summary": str(
+                    operator_summary.get("verification_summary") or ""
+                )[:2000],
+                "recommended_action": str(
+                    operator_summary.get("next_steps") or ""
+                )[:2000],
+            }
+        return None
 
     def _next_step_id(self, task_id):
         step_number = len(self.state["steps"]) + len(self.state["inflight_attempts"]) + 1

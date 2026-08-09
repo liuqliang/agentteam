@@ -5549,8 +5549,10 @@ def _handle_resume(args):
 
 
 def _handle_stop(args):
-    project_root = Path(args.project_root or ".").resolve()
-    profile = load_project_profile(project_root)
+    profile = None
+    if not args.run_dir or args.authoring:
+        project_root = Path(args.project_root or ".").resolve()
+        profile = load_project_profile(project_root)
     if args.authoring:
         summary = _stop_authoring(profile, grace_seconds=args.grace_seconds, force=args.force, operator=args.operator)
         summary["project"] = profile.get("project_key") or "unknown"
@@ -5558,7 +5560,11 @@ def _handle_stop(args):
         summary = cleanup_stale_runs(profile, operator=args.operator)
         summary["project"] = profile.get("project_key") or "unknown"
     else:
-        run_dir = _selected_run_dir(args, profile, command_name="stop")
+        run_dir = (
+            Path(args.run_dir).resolve()
+            if args.run_dir
+            else _selected_run_dir(args, profile, command_name="stop")
+        )
         if not run_dir.exists():
             raise AgentTeamCliError("run not found", run_dir=str(run_dir))
         summary = stop_run(
@@ -5568,7 +5574,9 @@ def _handle_stop(args):
             stale_only=args.stale,
             operator=args.operator,
         )
-        summary["project"] = profile.get("project_key") or "unknown"
+        summary["project"] = (
+            profile.get("project_key") if isinstance(profile, dict) else None
+        ) or "unknown"
     if args.json:
         return summary
     _write_stop_text(summary)

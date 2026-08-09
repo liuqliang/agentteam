@@ -27,6 +27,9 @@ from .observability import build_runtime_observability
 from .two_phase_scheduler import TwoPhaseFileScheduler
 
 
+MAX_RETAINED_SUPERVISION_SNAPSHOTS = 4
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run the AgentTeam native runtime M0 simulation.")
     parser.add_argument("--agent-pool", help="Path to agent pool JSON.")
@@ -505,6 +508,7 @@ def _run_supervised_two_phase_scheduler(
     )
     stopped = scheduler.stop_if_requested()
     if stopped:
+        invocation_stop = scheduler.stop_inflight_invocations()
         scheduler._emit_run_event_once(
             "run_stopped",
             scheduler._run_event_payload("stopped", {"tick_count": 0}),
@@ -514,7 +518,9 @@ def _run_supervised_two_phase_scheduler(
             "scheduler_status": scheduler.state["scheduler_status"],
             "tick_count": 0,
             "last_tick": stopped,
+            "invocation_stop": invocation_stop,
             "worker_pool_supervision": [],
+            "worker_pool_supervision_observation_count": 0,
             "worker_pool_health": {
                 "pool_status": "stopped",
                 "workers": [],
@@ -526,12 +532,14 @@ def _run_supervised_two_phase_scheduler(
         scheduler._run_event_payload("running", {"max_ticks": args.max_steps}),
     )
     supervision = []
+    supervision_observation_count = 0
     tick_count = 0
     stalled_wait_ticks = 0
     last_tick = None
     while True:
         stopped = scheduler.stop_if_requested()
         if stopped:
+            invocation_stop = scheduler.stop_inflight_invocations()
             scheduler._emit_run_event_once(
                 "run_stopped",
                 scheduler._run_event_payload("stopped", {"tick_count": tick_count}),
@@ -541,16 +549,19 @@ def _run_supervised_two_phase_scheduler(
                 "scheduler_status": scheduler.state["scheduler_status"],
                 "tick_count": tick_count,
                 "last_tick": stopped,
+                "invocation_stop": invocation_stop,
             }
             break
         tick_count += 1
         supervision_result = worker_pool.supervise_once()
-        supervision.append(supervision_result)
+        supervision_observation_count += 1
+        _record_supervision_snapshot(supervision, supervision_result)
         scheduler.set_unavailable_agent_ids(
             _quarantined_agent_ids(supervision_result["after"])
         )
         last_tick = scheduler.tick()
         if last_tick["tick_status"] in {"stopped", "stop_requested"}:
+            invocation_stop = scheduler.stop_inflight_invocations()
             scheduler._emit_run_event_once(
                 "run_stopped",
                 scheduler._run_event_payload("stopped", {"tick_count": tick_count}),
@@ -560,12 +571,14 @@ def _run_supervised_two_phase_scheduler(
                 "scheduler_status": scheduler.state["scheduler_status"],
                 "tick_count": tick_count,
                 "last_tick": last_tick,
+                "invocation_stop": invocation_stop,
             }
             break
         if last_tick["tick_status"] in {
             "budget_stopped",
             "interrupted",
         }:
+            invocation_stop = scheduler.stop_inflight_invocations()
             scheduler._emit_run_event_once(
                 "run_stopped",
                 scheduler._run_event_payload(
@@ -580,9 +593,11 @@ def _run_supervised_two_phase_scheduler(
                 ],
                 "tick_count": tick_count,
                 "last_tick": last_tick,
+                "invocation_stop": invocation_stop,
             }
             break
-        supervision.append(worker_pool.supervise_once())
+        supervision_observation_count += 1
+        _record_supervision_snapshot(supervision, worker_pool.supervise_once())
         if last_tick["tick_status"] == "idle":
             completion = scheduler.complete_verified_backlog(tick_count)
             result = {
@@ -601,6 +616,7 @@ def _run_supervised_two_phase_scheduler(
         if last_tick["tick_status"] == "waiting":
             stalled_wait_ticks += 1
             if stalled_wait_ticks >= args.max_steps:
+                invocation_stop = scheduler.stop_inflight_invocations()
                 scheduler.state["scheduler_status"] = "max_ticks_reached"
                 scheduler._write_state()
                 scheduler._emit_run_event_once(
@@ -612,6 +628,7 @@ def _run_supervised_two_phase_scheduler(
                     "scheduler_status": "max_ticks_reached",
                     "tick_count": tick_count,
                     "last_tick": last_tick,
+                    "invocation_stop": invocation_stop,
                 }
                 break
             time.sleep(0.02)
@@ -629,8 +646,15 @@ def _run_supervised_two_phase_scheduler(
     return {
         **result,
         "worker_pool_supervision": supervision,
+        "worker_pool_supervision_observation_count": supervision_observation_count,
         "worker_pool_health": worker_pool_health,
     }
+
+
+def _record_supervision_snapshot(snapshots, observation):
+    snapshots.append(observation)
+    if len(snapshots) > MAX_RETAINED_SUPERVISION_SNAPSHOTS:
+        del snapshots[0]
 
 
 def _should_wait_for_running_inflight(last_tick, pool_health):
