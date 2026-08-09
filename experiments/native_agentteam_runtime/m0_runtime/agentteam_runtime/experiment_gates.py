@@ -1,4 +1,4 @@
-"""Deterministic Phase 2 gate controllers and relation validators."""
+"""Deterministic gate controllers and relation validators."""
 
 import hashlib
 import json
@@ -42,6 +42,10 @@ from .experiment_modes import (
 from .experiment_results import (
     ExperimentResultError,
     load_experiment_result_bundle,
+)
+from .phase3_readiness import (
+    Phase3ReadinessError,
+    validate_phase3_readiness_receipt,
 )
 
 _MODES = (
@@ -196,6 +200,7 @@ class GateSpec:
     evidence_schema: str
     authorization_required: bool = False
     authorization_schema: str | None = None
+    action_required: bool = True
 
 
 GATE_SPECS = {
@@ -224,6 +229,14 @@ GATE_SPECS = {
         "phase2_finalization_relation_v1",
         "experiments/native_agentteam_runtime/schemas/"
         "phase2_finalization.schema.json",
+    ),
+    "P3-READY": GateSpec(
+        "P3-READY",
+        "phase3_readiness_controller_v1",
+        "phase3_readiness_relation_v1",
+        "experiments/native_agentteam_runtime/schemas/"
+        "phase3_readiness_receipt.schema.json",
+        action_required=False,
     ),
 }
 _CONTROLLER_GATE_DEPENDENCIES = {
@@ -268,7 +281,7 @@ def resolve_gate_spec(declaration):
     gate_id = declaration.get("gate_id")
     spec = GATE_SPECS.get(gate_id)
     if spec is None:
-        raise Phase2GateError("gate is not a registered Phase 2 controller")
+        raise Phase2GateError("gate is not a registered controller")
     expected = {
         "executor": "deterministic_controller",
         "controller_entrypoint": spec.controller_entrypoint,
@@ -297,10 +310,13 @@ def resolve_gate_spec(declaration):
         raise Phase2GateError(
             "gate authorization schema differs from registry"
         )
-    _validate_action_input_structure(
-        declaration.get("controller_action_input"),
-        spec.gate_id,
-    )
+    action_input = declaration.get("controller_action_input")
+    if spec.action_required:
+        _validate_action_input_structure(action_input, spec.gate_id)
+    elif action_input is not None:
+        raise Phase2GateError(
+            f"{spec.gate_id} does not accept controller action input"
+        )
     return spec
 
 
@@ -323,17 +339,46 @@ def validate_gate_relation(spec, artifact_path, context):
             repository_root,
             context,
         )
-    else:
+    elif spec.gate_id == "P2-10":
         details = _validate_finalization_relation(
             artifact,
             repository_root,
             context,
+        )
+    elif spec.gate_id == "P3-READY":
+        details = _validate_phase3_readiness_relation(artifact)
+    else:
+        raise Phase2GateError(
+            f"{spec.gate_id} has no registered relation implementation"
         )
     return {
         "gate_id": spec.gate_id,
         "relation_status": "passed",
         "evidence_sha256": _sha256_file(artifact_path),
         **details,
+    }
+
+
+def _validate_phase3_readiness_relation(artifact):
+    try:
+        receipt = validate_phase3_readiness_receipt(artifact)
+    except Phase3ReadinessError as exc:
+        raise Phase2GateError(str(exc)) from exc
+    if receipt["status"] != "passed":
+        raise Phase2GateError(
+            "P3-READY receipt does not report passed readiness"
+        )
+    usage = receipt["usage_reconciliation"]
+    return {
+        "decision_id": receipt["decision_id"],
+        "ordered_instance_count": len(
+            receipt["bindings"]["ordered_instance_ids"]
+        ),
+        "verification_sha256": receipt["verification"][
+            "verification_sha256"
+        ],
+        "provider_calls": usage["live_provider_calls"],
+        "target_mutations": 0,
     }
 
 
@@ -400,7 +445,11 @@ def run_gate_controller(
                 "P2-09 launcher mutation count differs from sealed evidence"
             )
     payload = {
-        "schema_version": "phase2_gate_controller_result.v1",
+        "schema_version": (
+            "phase2_gate_controller_result.v1"
+            if spec.gate_id.startswith("P2-")
+            else "gate_controller_result.v1"
+        ),
         "gate_id": spec.gate_id,
         "controller_entrypoint": spec.controller_entrypoint,
         "relation_validator": spec.relation_validator,

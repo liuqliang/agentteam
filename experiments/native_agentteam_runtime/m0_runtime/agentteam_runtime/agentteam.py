@@ -8788,6 +8788,48 @@ def _gate_authorization_path(context, epoch, gate_id):
     )
 
 
+def _gate_relation_context(
+    context,
+    current,
+    declaration,
+    prior_decisions,
+    evidence_run,
+    integration_head,
+):
+    """Build trusted relation inputs while preserving Phase 2 sidecars."""
+    if declaration["gate_id"].startswith("P2-"):
+        return _phase2_gate_relation_context(
+            context,
+            current,
+            declaration,
+            prior_decisions,
+            evidence_run,
+            integration_head,
+        )
+    return {
+        "epoch_number": current["record"]["epoch_number"],
+        "epoch_sha256": current["digest"],
+        "integration_head": integration_head,
+        "repository_root": str(
+            _gate_integration_worktree(context, current["record"])
+        ),
+        "evidence_run": str(Path(evidence_run).resolve()),
+        "prior_gate_evidence": {
+            gate_id: decision.get("evidence_sha256")
+            for gate_id, decision in prior_decisions.items()
+            if isinstance(decision, dict)
+            and decision.get("state") == "passed"
+        },
+        "prior_gate_validated_code": {
+            gate_id: decision.get("validated_code_sha")
+            for gate_id, decision in prior_decisions.items()
+            if isinstance(decision, dict)
+            and decision.get("state") == "passed"
+            and decision.get("validated_code_sha")
+        },
+    }
+
+
 def _phase2_gate_relation_context(
     context,
     current,
@@ -11011,7 +11053,7 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
     }
     if any(state != "passed" for state in dependency_states.values()):
         reasons.append("declared gate dependency is not passed")
-    phase2_spec = None
+    gate_spec = None
     if (
         declaration.get("executor") == "deterministic_controller"
         and (
@@ -11020,7 +11062,7 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
         )
     ):
         try:
-            phase2_spec = resolve_gate_spec(declaration)
+            gate_spec = resolve_gate_spec(declaration)
         except Phase2GateError as exc:
             return {
                 "gate_id": gate_id,
@@ -11066,7 +11108,7 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
     try:
         head = _resolved_epoch_integration_head(context["project_root"], current["record"])
         receipt_head = receipt.get("expected_integration_head_sha")
-        if phase2_spec is None:
+        if gate_spec is None:
             if receipt_head != current["record"]["integration_head_sha"]:
                 reasons.append(
                     "receipt integration baseline binding is stale"
@@ -11129,8 +11171,8 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
             artifact,
         )
         evidence_sha256 = _sha256_bytes(artifact_bytes)
-        if phase2_spec is not None:
-            relation_context = _phase2_gate_relation_context(
+        if gate_spec is not None:
+            relation_context = _gate_relation_context(
                 context,
                 current,
                 declaration,
@@ -11140,7 +11182,7 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
             )
             relation_context["current_integration_head"] = head
             if (
-                phase2_spec.authorization_required
+                gate_spec.authorization_required
                 and not Path(
                     relation_context["authorization_path"]
                 ).is_file()
@@ -11157,7 +11199,7 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
                     ],
                 }
             relation = validate_gate_relation(
-                phase2_spec,
+                gate_spec,
                 artifact_path,
                 relation_context,
             )
@@ -11184,7 +11226,7 @@ def _evaluate_one_post_backlog_gate(context, current, declaration, *, prior_deci
                     != current["digest"]
                 ):
                     reasons.append(
-                        "registered Phase 2 controller result is "
+                        "registered gate controller result is "
                         "missing or stale"
                     )
         if artifact.get(declaration["required_status_field"]) != declaration["required_status_value"]:

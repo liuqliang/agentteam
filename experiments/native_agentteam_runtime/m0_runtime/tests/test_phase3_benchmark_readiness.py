@@ -7,13 +7,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema import Draft202012Validator
 
 from agentteam_runtime.benchmark_adapter import (
     BenchmarkAdapterError,
     build_benchmark_instance_selection,
     validate_benchmark_instance_selection,
 )
+from agentteam_runtime import taskpack as taskpack_module
 from agentteam_runtime.benchmark_preregistration import (
     BenchmarkPreregistrationError,
     authorize_mode_runtime_path,
@@ -31,11 +32,24 @@ from agentteam_runtime.experiment_contract import (
     EXPERIMENT_MODES,
     canonical_json_bytes,
     canonical_json_sha256,
-    publish_immutable_json,
+)
+from agentteam_runtime.experiment_gates import (
+    Phase2GateError,
+    resolve_gate_spec,
+    run_gate_controller,
+    validate_gate_relation,
+)
+from agentteam_runtime.phase3_readiness import (
+    Phase3ReadinessError,
+    build_phase3_readiness_receipt,
+    phase3_readiness_receipt_sha256,
+    publish_phase3_readiness_receipt,
+    validate_phase3_readiness_receipt,
 )
 
 
 ROOT = Path(__file__).resolve().parents[2]
+REPOSITORY_ROOT = ROOT.parents[1]
 SCHEMA_PATH = ROOT / "schemas" / "phase3_readiness_receipt.schema.json"
 BLUEPRINT_PATH = (
     ROOT
@@ -185,54 +199,93 @@ def _check(evidence):
     }
 
 
-def _receipt_digest(receipt):
-    content = copy.deepcopy(receipt)
-    content.pop("receipt_sha256", None)
-    return canonical_json_sha256(content)
+def _minimal_receipt():
+    selection = _selection()
+    preregistration = _preregistration(selection)
+    visible_digest = next(
+        iter(
+            preregistration["authorization"]["equal_input_bindings"][
+                "per_mode_visible_input_sha256"
+            ].values()
+        )
+    )
+    mode_bindings = {
+        mode: {
+            "visible_input_sha256": visible_digest,
+            "budget_sha256": canonical_json_sha256(
+                preregistration["authorization"]["budgets"][mode]
+            ),
+            "runtime_root": f"modes/{mode}",
+        }
+        for mode in MODES
+    }
+    results = {
+        name: _check(name)
+        for name in (
+            "selection_replay",
+            "selection_mutation_detection",
+            "preregistration_replay",
+            "preregistration_mutation_detection",
+            "equal_input_binding",
+            "equal_budget_binding",
+            "mode_isolation",
+            "decision_binding_replay",
+            "provider_absence",
+        )
+    }
+    return build_phase3_readiness_receipt(
+        fixture={
+            "kind": "local_fixture",
+            "benchmark": "swe_evo",
+            "metadata_revision": "phase3-readiness-fixture-r1",
+            "metadata_sha256": canonical_json_sha256(_metadata()),
+        },
+        bindings={
+            "selection_sha256": selection["selection_sha256"],
+            "ordered_instance_ids": selection["ordered_instance_ids"],
+            "preregistration_authorization_sha256": preregistration[
+                "authorization_sha256"
+            ],
+            "decision_contract_sha256": "c" * 64,
+            "inherited_decision_id": "DEC-P3-readiness-execution",
+            "decision_replay_status": "idempotent",
+        },
+        mode_reconciliation=mode_bindings,
+        isolation_reconciliation={
+            "gold_visibility": "evaluator_only",
+            "cross_mode_artifact_access": "denied",
+            "independent_runtime_roots": True,
+            "sibling_access_denials": 3,
+        },
+        usage_reconciliation={
+            "live_provider_calls": 0,
+            "scored_mode_executions": 0,
+            "invocations_created": 0,
+            "provider_status": "not_invoked",
+            "terminal_usage_records": 0,
+            "terminal_usage_status": "not_applicable",
+            "token_totals": None,
+        },
+        verification_results=results,
+    )
+
+
+def _p3_gate_declaration():
+    return {
+        "gate_id": "P3-READY",
+        "executor": "deterministic_controller",
+        "controller_entrypoint": "phase3_readiness_controller_v1",
+        "relation_validator": "phase3_readiness_relation_v1",
+        "evidence_schema": (
+            "experiments/native_agentteam_runtime/schemas/"
+            "phase3_readiness_receipt.schema.json"
+        ),
+        "operator_authorization_required": False,
+    }
 
 
 def _read_receipt_schema():
     return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-
-
-def _validate_receipt(receipt):
-    validator = Draft202012Validator(
-        _read_receipt_schema(),
-        format_checker=FormatChecker(),
-    )
-    errors = sorted(validator.iter_errors(receipt), key=lambda item: list(item.path))
-    if errors:
-        first = errors[0]
-        location = ".".join(str(part) for part in first.absolute_path) or "<root>"
-        raise AssertionError(
-            f"phase3 readiness receipt schema error at {location}: {first.message}"
-        )
-    if receipt["receipt_sha256"] != _receipt_digest(receipt):
-        raise AssertionError("receipt_sha256 does not bind canonical receipt content")
-    results = receipt["verification"]["results"]
-    if receipt["verification"]["verification_sha256"] != canonical_json_sha256(
-        results
-    ):
-        raise AssertionError("verification_sha256 does not bind verification results")
-
-    expected_roots = {mode: f"modes/{mode}" for mode in MODES}
-    actual_roots = {
-        mode: receipt["mode_reconciliation"][mode]["runtime_root"]
-        for mode in MODES
-    }
-    if actual_roots != expected_roots:
-        raise AssertionError("mode runtime roots do not match their namespaces")
-    visible = {
-        receipt["mode_reconciliation"][mode]["visible_input_sha256"]
-        for mode in MODES
-    }
-    budgets = {
-        receipt["mode_reconciliation"][mode]["budget_sha256"]
-        for mode in MODES
-    }
-    if len(visible) != 1 or len(budgets) != 1:
-        raise AssertionError("mode input and budget bindings are not equal")
-    return receipt
 
 
 class Phase3BenchmarkReadinessTests(unittest.TestCase):
@@ -402,17 +455,14 @@ class Phase3BenchmarkReadinessTests(unittest.TestCase):
                     {"invocation_artifacts": [], "provider_calls": 0}
                 ),
             }
-            receipt = {
-                "schema_version": "phase3_readiness_receipt.v1",
-                "status": "passed",
-                "decision_id": "DEC-P3-readiness-execution",
-                "fixture": {
+            receipt = build_phase3_readiness_receipt(
+                fixture={
                     "kind": "local_fixture",
                     "benchmark": "swe_evo",
                     "metadata_revision": metadata["metadata_revision"],
                     "metadata_sha256": canonical_json_sha256(metadata),
                 },
-                "bindings": {
+                bindings={
                     "selection_sha256": selection["selection_sha256"],
                     "ordered_instance_ids": selection["ordered_instance_ids"],
                     "preregistration_authorization_sha256": preregistration[
@@ -424,14 +474,14 @@ class Phase3BenchmarkReadinessTests(unittest.TestCase):
                     "inherited_decision_id": inherited,
                     "decision_replay_status": "idempotent",
                 },
-                "mode_reconciliation": mode_bindings,
-                "isolation_reconciliation": {
+                mode_reconciliation=mode_bindings,
+                isolation_reconciliation={
                     "gold_visibility": "evaluator_only",
                     "cross_mode_artifact_access": "denied",
                     "independent_runtime_roots": True,
                     "sibling_access_denials": sibling_denials,
                 },
-                "usage_reconciliation": {
+                usage_reconciliation={
                     "live_provider_calls": 0,
                     "scored_mode_executions": 0,
                     "invocations_created": 0,
@@ -440,24 +490,18 @@ class Phase3BenchmarkReadinessTests(unittest.TestCase):
                     "terminal_usage_status": "not_applicable",
                     "token_totals": None,
                 },
-                "verification": {
-                    "results": results,
-                    "verification_sha256": canonical_json_sha256(results),
-                },
-            }
-            receipt["receipt_sha256"] = _receipt_digest(receipt)
-            self.assertIs(_validate_receipt(receipt), receipt)
+                verification_results=results,
+            )
+            self.assertEqual(
+                validate_phase3_readiness_receipt(receipt), receipt
+            )
 
             receipt_path = root / "acceptance" / "phase3-readiness.json"
-            first_receipt = publish_immutable_json(
-                receipt_path,
-                receipt,
-                label="Phase 3 readiness receipt",
+            first_receipt = publish_phase3_readiness_receipt(
+                receipt_path, receipt
             )
-            replayed_receipt = publish_immutable_json(
-                receipt_path,
-                receipt,
-                label="Phase 3 readiness receipt",
+            replayed_receipt = publish_phase3_readiness_receipt(
+                receipt_path, receipt
             )
             self.assertTrue(first_receipt["created"])
             self.assertFalse(replayed_receipt["created"])
@@ -502,17 +546,14 @@ class Phase3BenchmarkReadinessTests(unittest.TestCase):
                 "provider_absence",
             )
         }
-        receipt = {
-            "schema_version": "phase3_readiness_receipt.v1",
-            "status": "passed",
-            "decision_id": "DEC-P3-readiness-execution",
-            "fixture": {
+        receipt = build_phase3_readiness_receipt(
+            fixture={
                 "kind": "local_fixture",
                 "benchmark": "swe_evo",
                 "metadata_revision": "phase3-readiness-fixture-r1",
                 "metadata_sha256": canonical_json_sha256(_metadata()),
             },
-            "bindings": {
+            bindings={
                 "selection_sha256": selection["selection_sha256"],
                 "ordered_instance_ids": selection["ordered_instance_ids"],
                 "preregistration_authorization_sha256": preregistration[
@@ -522,14 +563,14 @@ class Phase3BenchmarkReadinessTests(unittest.TestCase):
                 "inherited_decision_id": "DEC-P3-readiness-execution",
                 "decision_replay_status": "idempotent",
             },
-            "mode_reconciliation": mode_bindings,
-            "isolation_reconciliation": {
+            mode_reconciliation=mode_bindings,
+            isolation_reconciliation={
                 "gold_visibility": "evaluator_only",
                 "cross_mode_artifact_access": "denied",
                 "independent_runtime_roots": True,
                 "sibling_access_denials": 3,
             },
-            "usage_reconciliation": {
+            usage_reconciliation={
                 "live_provider_calls": 0,
                 "scored_mode_executions": 0,
                 "invocations_created": 0,
@@ -538,13 +579,9 @@ class Phase3BenchmarkReadinessTests(unittest.TestCase):
                 "terminal_usage_status": "not_applicable",
                 "token_totals": None,
             },
-            "verification": {
-                "results": results,
-                "verification_sha256": canonical_json_sha256(results),
-            },
-        }
-        receipt["receipt_sha256"] = _receipt_digest(receipt)
-        _validate_receipt(receipt)
+            verification_results=results,
+        )
+        validate_phase3_readiness_receipt(receipt)
 
         false_zero_claim = copy.deepcopy(receipt)
         false_zero_claim["usage_reconciliation"]["token_totals"] = {
@@ -552,14 +589,107 @@ class Phase3BenchmarkReadinessTests(unittest.TestCase):
             "output_tokens": 0,
             "total_tokens": 0,
         }
-        false_zero_claim["receipt_sha256"] = _receipt_digest(false_zero_claim)
-        with self.assertRaisesRegex(AssertionError, "token_totals"):
-            _validate_receipt(false_zero_claim)
+        false_zero_claim["receipt_sha256"] = (
+            phase3_readiness_receipt_sha256(false_zero_claim)
+        )
+        with self.assertRaisesRegex(Phase3ReadinessError, "token_totals"):
+            validate_phase3_readiness_receipt(false_zero_claim)
 
         changed = copy.deepcopy(receipt)
         changed["bindings"]["ordered_instance_ids"].reverse()
-        with self.assertRaisesRegex(AssertionError, "receipt_sha256"):
-            _validate_receipt(changed)
+        with self.assertRaisesRegex(Phase3ReadinessError, "receipt_sha256"):
+            validate_phase3_readiness_receipt(changed)
+
+        unequal_modes = copy.deepcopy(receipt)
+        unequal_modes["mode_reconciliation"]["agentteam_full"][
+            "visible_input_sha256"
+        ] = "f" * 64
+        unequal_modes["receipt_sha256"] = (
+            phase3_readiness_receipt_sha256(unequal_modes)
+        )
+        with self.assertRaisesRegex(
+            Phase3ReadinessError,
+            "input and budget bindings are not equal",
+        ):
+            validate_phase3_readiness_receipt(unequal_modes)
+
+    def test_p3_ready_gate_registry_is_exact_and_action_free(self):
+        declaration = _p3_gate_declaration()
+        spec = resolve_gate_spec(declaration)
+        self.assertEqual(spec.gate_id, "P3-READY")
+        self.assertFalse(spec.action_required)
+
+        drifted = copy.deepcopy(declaration)
+        drifted["relation_validator"] = "unregistered_relation_v1"
+        with self.assertRaisesRegex(
+            Phase2GateError,
+            "registry binding mismatch",
+        ):
+            resolve_gate_spec(drifted)
+
+        with_action = copy.deepcopy(declaration)
+        with_action["controller_action_input"] = {}
+        with self.assertRaisesRegex(
+            Phase2GateError,
+            "does not accept controller action input",
+        ):
+            resolve_gate_spec(with_action)
+
+    def test_phase3_model_worker_blueprint_accepts_registered_gate(self):
+        blueprint = json.loads(BLUEPRINT_PATH.read_text(encoding="utf-8"))
+        gate = blueprint["post_backlog_gates"][0]
+        gate.update(
+            {
+                "controller_entrypoint": (
+                    "phase3_readiness_controller_v1"
+                ),
+                "relation_validator": "phase3_readiness_relation_v1",
+                "operator_authorization_required": False,
+            }
+        )
+        taskpack_module._validate_taskpack_blueprint_schema(blueprint)
+        taskpack_module._validate_taskpack_blueprint(
+            blueprint,
+            project_root=REPOSITORY_ROOT,
+            blueprint_relative_path=BLUEPRINT_PATH.relative_to(
+                REPOSITORY_ROOT
+            ).as_posix(),
+        )
+
+    def test_p3_ready_controller_validates_and_seals_relation(self):
+        receipt = _minimal_receipt()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact_path = root / "phase3-readiness.json"
+            publish_phase3_readiness_receipt(artifact_path, receipt)
+            context = {
+                "repository_root": str(REPOSITORY_ROOT),
+                "epoch_number": 1,
+                "epoch_sha256": "e" * 64,
+            }
+            spec = resolve_gate_spec(_p3_gate_declaration())
+            relation = validate_gate_relation(
+                spec,
+                artifact_path,
+                context,
+            )
+            self.assertEqual(relation["relation_status"], "passed")
+            self.assertEqual(relation["provider_calls"], 0)
+            self.assertEqual(relation["target_mutations"], 0)
+            self.assertEqual(relation["ordered_instance_count"], 2)
+
+            result = run_gate_controller(
+                spec,
+                artifact_path,
+                context,
+                result_path=root / "controller-result.json",
+            )
+            self.assertEqual(
+                result["schema_version"],
+                "gate_controller_result.v1",
+            )
+            self.assertEqual(result["controller_status"], "passed")
+            self.assertEqual(result["provider_calls"], 0)
 
 
 if __name__ == "__main__":

@@ -1192,6 +1192,9 @@ def _validate_taskpack_blueprint(
                         f"{gate_id} controller-only gate requires "
                         f"{field_name}"
                     )
+        if gate.get("controller_entrypoint") or gate.get(
+            "relation_validator"
+        ):
             try:
                 from .experiment_gates import (
                     Phase2GateError,

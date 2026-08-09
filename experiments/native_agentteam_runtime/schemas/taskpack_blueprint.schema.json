@@ -759,24 +759,6 @@
               "operator_approval_required_decision"
             ]
           }
-        },
-        {
-          "if": {
-            "properties": {
-              "executor": {
-                "const": "deterministic_controller"
-              }
-            },
-            "required": [
-              "executor",
-              "controller_entrypoint"
-            ]
-          },
-          "then": {
-            "required": [
-              "controller_action_input"
-            ]
-          }
         }
       ]
     }

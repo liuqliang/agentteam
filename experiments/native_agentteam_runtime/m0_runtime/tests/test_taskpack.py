@@ -2081,6 +2081,49 @@ class TaskpackTests(unittest.TestCase):
                     "a" * 40,
                 )
 
+    def test_registered_non_phase2_gate_uses_trusted_runtime_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            integration = root / "integration"
+            evidence_run = root / "runs" / "readiness"
+            integration.mkdir()
+            evidence_run.mkdir(parents=True)
+            current = {
+                "record": {"epoch_number": 3},
+                "digest": "3" * 64,
+            }
+            with mock.patch.object(
+                agentteam_module,
+                "_gate_integration_worktree",
+                return_value=integration,
+            ):
+                relation = agentteam_module._gate_relation_context(
+                    {},
+                    current,
+                    {"gate_id": "P3-READY"},
+                    {
+                        "P3-PRIOR": {
+                            "state": "passed",
+                            "evidence_sha256": "4" * 64,
+                            "validated_code_sha": "a" * 40,
+                        }
+                    },
+                    evidence_run,
+                    "b" * 40,
+                )
+            self.assertEqual(relation["epoch_number"], 3)
+            self.assertEqual(relation["integration_head"], "b" * 40)
+            self.assertEqual(
+                relation["repository_root"], str(integration)
+            )
+            self.assertEqual(
+                relation["evidence_run"], str(evidence_run.resolve())
+            )
+            self.assertEqual(
+                relation["prior_gate_evidence"],
+                {"P3-PRIOR": "4" * 64},
+            )
+
     def test_phase2_controller_restarts_dependency_chain_after_epoch_refresh(
         self,
     ):
