@@ -1,0 +1,134 @@
+{
+  "schema_version": "agentteam_taskpack_blueprint.v1",
+  "blueprint_id": "phase3a-readiness-closure-v3",
+  "source_plan": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-09-phase3a-readiness-closure-v3.md",
+  "research_authority": "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md",
+  "schema_inventory": [
+    "experiments/native_agentteam_runtime/schemas/phase3_closure_review_v3.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase3_readiness_receipt.schema.json",
+    "experiments/native_agentteam_runtime/schemas/post_backlog_gate_approval.schema.json",
+    "experiments/native_agentteam_runtime/schemas/taskpack_blueprint.schema.json"
+  ],
+  "taskpack": {
+    "taskpack_id": "phase3a-readiness-closure-v3",
+    "goal_kind": "audit",
+    "milestone": "research-phase-3a-readiness-closure",
+    "goal": "Close P3-READY through deterministic provider-free evidence and operator review.",
+    "overall_risk": "L3",
+    "integration_policy": "No workers, model calls, provider calls, source merge, main mutation, or push; publish run-local evidence only.",
+    "execution_mode": "controller_only"
+  },
+  "contract": {
+    "candidate_release_id": "phase3a-closure-bafe6de",
+    "candidate_source_commit": "bafe6de93ffdb84eee5af7a6c53cbc2fa82503be",
+    "gate_order": ["P3-READY"],
+    "provider_policy": "Provider launch and provider authorization are forbidden.",
+    "evidence_policy": "The fixed local fixture, full-suite output digests, readiness receipt, and operator approval are run-local authority.",
+    "merge_policy": "No automatic merge to main and no push."
+  },
+  "decision_contract": {
+    "schema_version": "taskpack_decision_contract.v1",
+    "root_decision_id": "DEC-P3-readiness-execution",
+    "decisions": [
+      {
+        "schema_version": "decision_record.v1",
+        "decision_id": "DEC-P3-readiness-execution",
+        "revision": 1,
+        "decision_kind": "direction",
+        "subject": "provider_free_readiness_closure",
+        "authority_level": "L3",
+        "parent_decision_id": null,
+        "supersedes_decision_id": null,
+        "statement": "Close Phase 3A using deterministic provider-free readiness evidence.",
+        "selected_option": "controller_only_readiness_closure",
+        "alternatives": [
+          {
+            "option": "run a live scored benchmark before readiness closes",
+            "rejected_reason": "It would spend claim-bearing provider budget before the readiness authority passes."
+          },
+          {
+            "option": "use a model worker to author the receipt",
+            "rejected_reason": "The receipt is deterministic and must be produced by registered runtime code."
+          }
+        ],
+        "rationale": "The implemented adapter and preregistration path require one retained, machine-validated readiness receipt before Phase 3B planning.",
+        "scope": [
+          "full verification",
+          "fixed local readiness fixture",
+          "P3-READY operator review"
+        ],
+        "expected_outcome": "A passed P3-READY gate with zero provider calls and no benchmark score.",
+        "acceptance_refs": [
+          "2026-08-09-phase3a-readiness-closure-v3.md#acceptance"
+        ],
+        "status": "active",
+        "created_at": "2026-08-09T00:00:00Z",
+        "created_by": "operator-semantic-authority",
+        "previous_revision_sha256": null
+      }
+    ],
+    "task_bindings": {}
+  },
+  "approval": {
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase3a-readiness-closure-review.v3.json",
+    "schema_path": "experiments/native_agentteam_runtime/schemas/phase3_closure_review_v3.schema.json",
+    "required_decision": "approved",
+    "git_object_format_required": true,
+    "runtime_release_binding_required": true,
+    "digest_bindings": [
+      "source_plan",
+      "blueprint",
+      "research_authority",
+      "review_schema",
+      "contract",
+      "decision_contract"
+    ]
+  },
+  "agents": [],
+  "verification": {
+    "command": [
+      "env",
+      "PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime",
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "experiments/native_agentteam_runtime/m0_runtime/tests",
+      "-p",
+      "test*.py"
+    ],
+    "success_criteria": [
+      "The complete runtime test suite passes at the sealed integration head.",
+      "The fixed readiness fixture replays selection and preregistration and rejects mutations.",
+      "The readiness receipt reports zero live provider calls and no token totals.",
+      "P3-READY passes its registered relation validator before operator approval."
+    ]
+  },
+  "policy": {
+    "allow_merge": false,
+    "merge_requires_verified_integration": true,
+    "operator_review_required": true,
+    "bind_runtime_release_before_execution": true,
+    "live_provider_authorization_required": false,
+    "semantic_authority_worker_mutation_forbidden": true
+  },
+  "tasks": [],
+  "post_backlog_gates": [
+    {
+      "gate_id": "P3-READY",
+      "depends_on": [],
+      "executor": "deterministic_controller",
+      "evidence_artifact": "acceptance/phase3-readiness.json",
+      "evidence_schema": "experiments/native_agentteam_runtime/schemas/phase3_readiness_receipt.schema.json",
+      "required_status_field": "status",
+      "required_status_value": "passed",
+      "controller_entrypoint": "phase3_readiness_controller_v1",
+      "relation_validator": "phase3_readiness_relation_v1",
+      "operator_authorization_required": false,
+      "operator_review_required": true,
+      "operator_approval_schema": "experiments/native_agentteam_runtime/schemas/post_backlog_gate_approval.schema.json",
+      "operator_approval_required_decision": "approved"
+    }
+  ]
+}
