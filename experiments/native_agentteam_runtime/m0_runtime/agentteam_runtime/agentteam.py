@@ -10668,27 +10668,15 @@ def _execute_action_free_gate_controller(
     )
     worktree = _gate_integration_worktree(context, current["record"])
     command = _frozen_gate_verification_command(context)
-    completed = subprocess.run(
-        command,
-        cwd=worktree,
-        env=_integration_verification_env(worktree),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-        timeout=900,
-    )
-    normalized_stdout = _normalize_gate_verification_output(
-        completed.stdout
-    )
-    normalized_stderr = _normalize_gate_verification_output(
-        completed.stderr
-    )
-    if completed.returncode != 0:
+    if (
+        current["record"].get("validated_code_sha")
+        != integration_head
+        or current["record"].get("verification_command_sha256")
+        != canonical_json_sha256(command)
+        or not current["record"].get("verification_result_sha256")
+    ):
         raise Phase2GateError(
-            normalized_stderr.strip()
-            or normalized_stdout.strip()
-            or "P3-READY frozen verification failed"
+            "P3-READY sealed verification authority is missing or stale"
         )
     taskpack = context["taskpack"]
     decision_contract = taskpack.get("decision_contract")
@@ -10747,13 +10735,10 @@ def _execute_action_free_gate_controller(
         ),
         verification_evidence={
             "command_sha256": canonical_json_sha256(command),
-            "stdout_sha256": _sha256_bytes(
-                normalized_stdout.encode("utf-8")
-            ),
-            "stderr_sha256": _sha256_bytes(
-                normalized_stderr.encode("utf-8")
-            ),
-            "returncode": completed.returncode,
+            "result_sha256": current["record"][
+                "verification_result_sha256"
+            ],
+            "validated_code_sha": integration_head,
         },
     )
     _publish_registered_gate_receipt(
