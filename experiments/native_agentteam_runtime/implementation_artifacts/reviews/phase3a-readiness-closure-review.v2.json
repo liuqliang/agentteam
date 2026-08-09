@@ -1,0 +1,13 @@
+{
+  "decision": "approved",
+  "remaining_escalations": [],
+  "git_object_format": "sha1",
+  "preflight_release_id": "phase3a-closure-bc21683",
+  "preflight_release_source_commit": "bc216831439545cc4dd38ca96f44f6c9fc5f5af2",
+  "plan_sha256": "d90316c41a663876f559f242a70c8164a4f526939b4c42e2e67f52e571765a01",
+  "blueprint_sha256": "c43fe646058c49d50f0abcf9e195b83f9e554db7f85f390aaf0572ca5eeae587",
+  "research_authority_sha256": "8dca1748a211b9eaf9df5d392d7d39d755cbe3946a358c11cff2f51c5323d91d",
+  "review_schema_sha256": "abb85e19139993fae892542ae1048fa736801822dece9cda70f330b296760a5c",
+  "contract_decisions_sha256": "bb0bb91096d73498b09677d88826f7db399d60042a8c0993d3aec0c16c3d4d14",
+  "decision_contract_sha256": "ddbe80523c57bfdda9e51db3548211e5b47026412014b422fc002ac65cdc8682"
+}
