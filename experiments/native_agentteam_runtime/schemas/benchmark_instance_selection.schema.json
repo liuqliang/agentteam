@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/benchmark_instance_selection.schema.json",
+  "title": "Deterministic SWE-EVO benchmark instance selection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "benchmark",
+    "metadata_revision",
+    "metadata_sha256",
+    "filters",
+    "seed",
+    "stratum_quotas",
+    "eligible_counts_by_stratum",
+    "ordered_instance_ids",
+    "ordered_instances",
+    "selection_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "benchmark_instance_selection.v1"
+    },
+    "benchmark": {
+      "const": "swe_evo"
+    },
+    "metadata_revision": {
+      "$ref": "#/$defs/safe_id"
+    },
+    "metadata_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "filters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repositories",
+        "languages",
+        "required_tags",
+        "excluded_instance_ids"
+      ],
+      "properties": {
+        "repositories": {
+          "$ref": "#/$defs/unique_non_empty_strings"
+        },
+        "languages": {
+          "$ref": "#/$defs/unique_safe_ids"
+        },
+        "required_tags": {
+          "$ref": "#/$defs/unique_safe_ids"
+        },
+        "excluded_instance_ids": {
+          "$ref": "#/$defs/unique_safe_ids"
+        }
+      }
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "stratum_quotas": {
+      "$ref": "#/$defs/counts"
+    },
+    "eligible_counts_by_stratum": {
+      "$ref": "#/$defs/non_negative_counts"
+    },
+    "ordered_instance_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/safe_id"
+      }
+    },
+    "ordered_instances": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "instance_id",
+          "complexity_stratum"
+        ],
+        "properties": {
+          "instance_id": {
+            "$ref": "#/$defs/safe_id"
+          },
+          "complexity_stratum": {
+            "$ref": "#/$defs/safe_id"
+          }
+        }
+      }
+    },
+    "selection_sha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "unique_safe_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/safe_id"
+      }
+    },
+    "unique_non_empty_strings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^\\S(?:.*\\S)?$"
+      }
+    },
+    "counts": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[A-Za-z0-9][A-Za-z0-9_.-]*$": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "non_negative_counts": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[A-Za-z0-9][A-Za-z0-9_.-]*$": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
