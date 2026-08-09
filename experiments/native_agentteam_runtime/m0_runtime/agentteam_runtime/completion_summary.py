@@ -99,6 +99,7 @@ def build_completion_summary(
             blocked_count,
             integration_baseline,
             merge_recommendations,
+            integration,
         ),
         "next_steps": next_steps,
         "merge_recommendations": merge_recommendations,
@@ -227,6 +228,12 @@ def _follow_up_recommendation(run_id, run_status, blocked_count, integration_bas
             "reason": "A blocked or failed task needs operator review before follow-up work.",
             "report_command": f"agentteam report --taskpack {run_id}",
         }
+    if summary.get("integration") == "not_applicable":
+        return {
+            "action": "review_report",
+            "reason": "本次运行已完成，且没有需要集成的源码变更。",
+            "report_command": f"agentteam report --taskpack {run_id}",
+        }
     if has_integration and next_step:
         return {
             "action": "integrate_then_next",
@@ -349,13 +356,28 @@ def _changed_files_note(task_reports, changed_files):
         return None
     if not _all_reports_are_explicit_no_change(task_reports):
         return None
+    if _all_reports_are_controller_only(task_reports):
+        return (
+            "No source files changed; this controller-only run published "
+            "run-local evidence."
+        )
     return "No source files changed; this task was completed as a no-change investigation."
 
 
 def _changed_files_note_zh(note):
     if not note:
         return None
+    if "controller-only" in note:
+        return "未修改源文件；本次 controller-only 运行仅发布运行证据。"
     return "未修改源文件；该任务是无需代码变更的调查任务。"
+
+
+def _all_reports_are_controller_only(task_reports):
+    reports = [task for task in task_reports or [] if isinstance(task, dict)]
+    return bool(reports) and all(
+        str(task.get("work_type") or "").strip().lower() == "controller_only"
+        for task in reports
+    )
 
 
 def _all_reports_are_explicit_no_change(task_reports):
@@ -449,6 +471,8 @@ def _completion_integration_details(task_reports):
 
 def _integration_digest_values(summary):
     details = _text_items(summary.get("integration_details"))
+    if details == ["not_applicable"]:
+        return ["无需集成"]
     informative = [
         detail
         for detail in details
@@ -459,9 +483,17 @@ def _integration_digest_values(summary):
     return None
 
 
-def _integration_recommendation(run_id, blocked_count, integration_baseline, merge_recommendations):
+def _integration_recommendation(
+    run_id,
+    blocked_count,
+    integration_baseline,
+    merge_recommendations,
+    integration,
+):
     if blocked_count:
         return "Do not merge until integration passes."
+    if integration == "not_applicable":
+        return "无需执行源码集成。"
     branch = integration_baseline.get("branch")
     if branch:
         return (

@@ -64,6 +64,7 @@ from agentteam_runtime.goal_memory import build_goal_memory, render_goal_memory_
 from agentteam_runtime.notifications import FeishuWebhookNotifier, _permission_request_text
 from agentteam_runtime.operator_report import (
     aggregate_model_invocation_usage,
+    build_run_completion_report,
     compact_model_invocation_usage_lines,
     concise_report_lines,
 )
@@ -5996,6 +5997,133 @@ class TaskpackTests(unittest.TestCase):
             summary["chinese_operator_brief"],
         )
 
+    def test_controller_only_report_uses_gate_evidence_without_fake_worker_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_root = Path(tmp) / "work"
+            run_dir = work_root / "runs" / "controller-run"
+            _write_json(
+                work_root / "frozen" / "controller-run" / "taskpack.yaml",
+                {
+                    "taskpack_id": "controller-run",
+                    "execution_mode": "controller_only",
+                    "post_backlog_gates": [
+                        {
+                            "gate_id": "P3-READY",
+                            "operator_review_required": True,
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                run_dir / "state" / "two_phase_scheduler_state.json",
+                {
+                    "scheduler_status": "completed",
+                    "backlog": {"items": []},
+                    "inflight_attempts": [],
+                    "steps": [],
+                    "integration_baseline": {
+                        "integration_baseline_status": "ready",
+                        "integration_baseline_branch": (
+                            "agentteam/run/controller-run/integration"
+                        ),
+                        "integration_baseline_head_sha": "a" * 40,
+                    },
+                },
+            )
+            _write_jsonl(
+                run_dir / "events.jsonl",
+                [
+                    {
+                        "event_id": "EVT-0001",
+                        "event_type": "run_completed",
+                        "sequence": 1,
+                        "payload": {
+                            "run_status": "completed",
+                            "scheduler_status": "completed",
+                            "operator_report": {
+                                "report_schema_version": "operator_run_report.v1",
+                                "task_count": 0,
+                                "blocked_count": 0,
+                                "task_reports": [],
+                            },
+                        },
+                    }
+                ],
+            )
+            epoch_dir = (
+                run_dir / "state" / "post_backlog_gates" / "epochs" / "1"
+            )
+            _write_json(
+                epoch_dir
+                / "controller_results"
+                / "P3-READY.controller-result.v1.json",
+                {
+                    "schema_version": "gate_controller_result.v1",
+                    "gate_id": "P3-READY",
+                    "controller_entrypoint": "phase3_readiness_controller_v1",
+                    "controller_status": "passed",
+                    "relation_validator": "phase3_readiness_relation_v1",
+                    "evidence_sha256": "b" * 64,
+                    "provider_calls": 0,
+                    "target_mutations": 0,
+                },
+            )
+            _write_json(
+                epoch_dir / "approvals" / "P3-READY.approval.v1.json",
+                {"gate_id": "P3-READY", "decision": "approved"},
+            )
+
+            report = build_run_completion_report(run_dir, write_files=False)
+            summary = report["completion_summary"]
+
+            self.assertEqual(report["task_count"], 0)
+            self.assertEqual(report["execution_mode"], "controller_only")
+            self.assertEqual(report["controller_report"]["status"], "passed")
+            self.assertEqual(report["token_usage"]["usage_status"], "not_applicable")
+            self.assertEqual(summary["integration"], "not_applicable")
+            self.assertEqual(
+                summary["changed_files_note_zh"],
+                "未修改源文件；本次 controller-only 运行仅发布运行证据。",
+            )
+            self.assertEqual(summary["evidence_gaps"], [])
+            self.assertEqual(
+                summary["follow_up_recommendation"]["action"],
+                "review_report",
+            )
+            self.assertNotIn(
+                "No task-level operator report was found",
+                json.dumps(summary, ensure_ascii=False),
+            )
+            self.assertNotIn("agentteam integrate", json.dumps(summary))
+            self.assertIn("P3-READY", summary["what_changed"][0])
+            self.assertIn("provider_calls=0", summary["measured_results"][0])
+
+            guided = agentteam_module._apply_post_backlog_gate_report_guidance(
+                report,
+                {
+                    "all_passed": True,
+                    "state": "passed",
+                    "gates": [{"gate_id": "P3-READY", "state": "passed"}],
+                    "operator_view": {
+                        "gate_epoch": 1,
+                        "integration_baseline": {
+                            "branch": "agentteam/run/controller-run/integration",
+                            "base_sha": "a" * 40,
+                            "head_sha": "a" * 40,
+                        },
+                        "review_commands": {
+                            "report": "agentteam report --taskpack controller-run",
+                            "paths": "agentteam paths --taskpack controller-run",
+                            "integrate": "agentteam integrate --taskpack controller-run",
+                        },
+                    },
+                },
+            )
+            guided_summary = guided["completion_summary"]
+            self.assertEqual(guided_summary["review_gate"]["status"], "passed")
+            self.assertNotIn("integrate_command", guided_summary["review_gate"])
+            self.assertNotIn("agentteam integrate", json.dumps(guided_summary))
+
     def test_completion_summary_reports_evidence_status_counts(self):
         summary = build_completion_summary(
             run_id="evidence-run",
@@ -6569,6 +6697,8 @@ class TaskpackTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             summary = json.loads(completed.stdout)
             self.assertProjectionFallbackMetadata(summary, "stale")
+            self.assertEqual(summary["projection_check_status"], "failed")
+            self.assertNotIn("check_status", summary)
             self.assertIsNone(summary["projection_run"])
 
             text_completed = subprocess.run(

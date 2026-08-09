@@ -67,6 +67,25 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         if isinstance(operator_report.get("task_reports"), list)
         else []
     )
+    execution_mode = _run_execution_mode(run_dir)
+    controller_report = _controller_only_report(
+        run_dir,
+        execution_mode=execution_mode,
+        task_reports=task_reports,
+    )
+    if controller_report and not task_reports:
+        token_usage = aggregate_token_usage(
+            [
+                {
+                    "usage_status": "not_applicable",
+                    "reason": "controller_only_no_model_invocations",
+                }
+            ],
+            expected_count=1,
+        )
+    summary_reports = list(task_reports)
+    if controller_report:
+        summary_reports.append(_controller_summary_report(controller_report))
     blocked_count = _effective_blocked_count(
         operator_report.get("blocked_count", 0),
         task_reports,
@@ -104,6 +123,8 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
         "run_status": run_status,
         "run_outcome": run_outcome,
         "scheduler_status": scheduler_status,
+        "execution_mode": execution_mode,
+        "controller_report": controller_report,
         "task_count": operator_report.get("task_count", 0),
         "blocked_count": blocked_count,
         "token_usage": token_usage,
@@ -118,7 +139,7 @@ def build_run_completion_report(run_dir, project=None, write_files=True):
             run_status=run_status,
             task_count=operator_report.get("task_count", 0),
             blocked_count=blocked_count,
-            task_reports=task_reports,
+            task_reports=summary_reports,
             integration_baseline=integration_baseline,
         ),
         "pursue_recap": pursue_recap,
@@ -641,17 +662,47 @@ def render_run_completion_report(report):
 
     _extend_worker_diagnostic_lines(lines, report.get("worker_diagnostics"))
 
+    controller_report = (
+        report.get("controller_report")
+        if isinstance(report.get("controller_report"), dict)
+        else {}
+    )
+    if controller_report:
+        lines.extend(
+            [
+                "",
+                "## Controller Results",
+                f"- Status: {controller_report.get('status') or 'unknown'}",
+                f"- Gate epoch: {controller_report.get('gate_epoch') or 'not started'}",
+            ]
+        )
+        for result in controller_report.get("results") or []:
+            lines.append(
+                f"- {result.get('gate_id') or 'unknown'}: "
+                f"controller={result.get('controller_status') or 'unknown'} "
+                f"operator_review={result.get('approval_decision') or 'not_recorded'} "
+                f"provider_calls={result.get('provider_calls')} "
+                f"target_mutations={result.get('target_mutations')}"
+            )
+            if result.get("evidence_sha256"):
+                lines.append(f"  - evidence_sha256: {result['evidence_sha256']}")
+
     task_reports = (
         report.get("operator_report", {}).get("task_reports", [])
         if isinstance(report.get("operator_report"), dict)
         else []
     )
     if not task_reports:
+        no_task_message = (
+            "- 本次为 controller-only 运行，按合同未启动 worker task。"
+            if controller_report
+            else "- No operator task reports were found in this run."
+        )
         lines.extend(
             [
                 "",
                 "## Task Reports",
-                "- No operator task reports were found in this run.",
+                no_task_message,
             ]
         )
         return "\n".join(lines) + "\n"
@@ -1675,6 +1726,141 @@ def _scheduler_status(payload, state):
     if isinstance(state, dict) and state.get("scheduler_status"):
         return state["scheduler_status"]
     return "unknown"
+
+
+def _run_execution_mode(run_dir):
+    taskpack = _run_taskpack(run_dir)
+    mode = taskpack.get("execution_mode") if isinstance(taskpack, dict) else None
+    return mode if isinstance(mode, str) and mode else None
+
+
+def _run_taskpack(run_dir):
+    run_dir = Path(run_dir).resolve()
+    return _read_json_if_exists(
+        run_dir.parent.parent / "frozen" / run_dir.name / "taskpack.yaml"
+    )
+
+
+def _controller_only_report(run_dir, *, execution_mode, task_reports):
+    if execution_mode != "controller_only" or task_reports:
+        return {}
+    epoch_root = (
+        Path(run_dir)
+        / "state"
+        / "post_backlog_gates"
+        / "epochs"
+    )
+    epochs = sorted(
+        (
+            path
+            for path in epoch_root.iterdir()
+            if path.is_dir() and path.name.isdigit()
+        ),
+        key=lambda path: int(path.name),
+    ) if epoch_root.exists() else []
+    if not epochs:
+        return {
+            "execution_mode": "controller_only",
+            "gate_epoch": None,
+            "status": "not_started",
+            "results": [],
+        }
+    epoch_dir = epochs[-1]
+    taskpack = _run_taskpack(run_dir)
+    declarations = {
+        item.get("gate_id"): item
+        for item in taskpack.get("post_backlog_gates", [])
+        if isinstance(item, dict) and item.get("gate_id")
+    } if isinstance(taskpack, dict) else {}
+    results = []
+    result_root = epoch_dir / "controller_results"
+    for path in sorted(result_root.glob("*.json")) if result_root.exists() else []:
+        result = _read_json_if_exists(path)
+        if not isinstance(result, dict) or not result.get("gate_id"):
+            continue
+        gate_id = result["gate_id"]
+        declaration = declarations.get(gate_id) or {}
+        approval = _read_json_if_exists(
+            epoch_dir / "approvals" / f"{gate_id}.approval.v1.json"
+        )
+        results.append(
+            {
+                "gate_id": gate_id,
+                "controller_entrypoint": result.get("controller_entrypoint"),
+                "controller_status": result.get("controller_status"),
+                "relation_validator": result.get("relation_validator"),
+                "evidence_sha256": result.get("evidence_sha256"),
+                "provider_calls": result.get("provider_calls"),
+                "target_mutations": result.get("target_mutations"),
+                "approval_decision": (
+                    approval.get("decision")
+                    if isinstance(approval, dict)
+                    else None
+                ),
+                "operator_review_required": bool(
+                    declaration.get("operator_review_required")
+                ),
+            }
+        )
+    all_controller_passed = bool(results) and all(
+        item.get("controller_status") == "passed" for item in results
+    )
+    required_approvals_passed = all(
+        not item.get("operator_review_required")
+        or item.get("approval_decision") == "approved"
+        for item in results
+    )
+    if all_controller_passed and required_approvals_passed:
+        status = "passed"
+    elif all_controller_passed:
+        status = "awaiting_operator_review"
+    else:
+        status = "failed" if results else "not_started"
+    return {
+        "execution_mode": "controller_only",
+        "gate_epoch": int(epoch_dir.name),
+        "status": status,
+        "results": results,
+    }
+
+
+def _controller_summary_report(controller_report):
+    results = controller_report.get("results") or []
+    gate_ids = [str(item.get("gate_id")) for item in results if item.get("gate_id")]
+    gate_text = ", ".join(gate_ids) if gate_ids else "未发现 gate 结果"
+    verification = []
+    measured_results = []
+    for item in results:
+        gate_id = item.get("gate_id") or "unknown"
+        approval = item.get("approval_decision") or "not_recorded"
+        verification.append(
+            f"{gate_id}：controller={item.get('controller_status') or 'unknown'}，"
+            f"operator_review={approval}"
+        )
+        measurements = []
+        if item.get("provider_calls") is not None:
+            measurements.append(f"provider_calls={item['provider_calls']}")
+        if item.get("target_mutations") is not None:
+            measurements.append(f"target_mutations={item['target_mutations']}")
+        if item.get("evidence_sha256"):
+            measurements.append(f"evidence_sha256={item['evidence_sha256']}")
+        if measurements:
+            measured_results.append(f"{gate_id}：" + "，".join(measurements))
+    return {
+        "task_id": "controller-only",
+        "status": controller_report.get("status") or "unknown",
+        "work_type": "controller_only",
+        "why": ["该运行按冻结合同仅执行确定性 controller，不启动 worker。"],
+        "what_changed": [f"执行 controller-only gate 流程并保留运行证据：{gate_text}。"],
+        "changed_files": [],
+        "no_source_changes_required": True,
+        "verification": verification,
+        "measured_results": measured_results,
+        "integration": "not_applicable",
+        "evidence_status": (
+            "complete" if controller_report.get("status") == "passed" else "incomplete"
+        ),
+    }
 
 
 def _integration_baseline_summary(run_dir, state):

@@ -2327,6 +2327,14 @@ def _projection_check_metadata(work_root):
     return _projection_output_metadata(check_project_projection_db(work_root))
 
 
+def _report_projection_metadata(metadata):
+    metadata = dict(metadata or {})
+    check_status = metadata.pop("check_status", None)
+    if check_status:
+        metadata["projection_check_status"] = check_status
+    return metadata
+
+
 def _frozen_taskpack_list_summary(profile):
     work_root = Path(profile["work_root"]).resolve()
     frozen_root = work_root / "frozen"
@@ -5618,7 +5626,7 @@ def _handle_report(args):
         work_root,
         run_dir.name,
     )
-    projection_metadata = (
+    projection_metadata = _report_projection_metadata(
         _projection_output_metadata(projected_run)
         if projected_run is not None
         else _projection_check_metadata(work_root)
@@ -5762,6 +5770,37 @@ def _apply_post_backlog_gate_report_guidance(report, gate_summary):
     }
     report["completion_summary"] = completion
     if gate_summary.get("all_passed"):
+        if (
+            report.get("execution_mode") == "controller_only"
+            and completion.get("integration") == "not_applicable"
+        ):
+            gate_ids = [
+                gate.get("gate_id")
+                for gate in gate_summary.get("gates") or []
+                if isinstance(gate, dict) and gate.get("gate_id")
+            ]
+            completion["integration_recommendation"] = (
+                "无需执行源码集成；controller-only 运行已通过声明的 gate。"
+            )
+            completion["follow_up_recommendation"] = {
+                "action": "review_report",
+                "reason": "controller-only gate 已通过，且没有需要集成的源码变更。",
+                "report_command": commands.get("report")
+                or f"agentteam report --taskpack {report.get('run_id')}",
+            }
+            completion["review_gate"] = {
+                "status": "passed",
+                "gate_epoch": operator_view.get("gate_epoch"),
+                "gate_id": ",".join(gate_ids) if gate_ids else None,
+                "report_command": commands.get("report"),
+                "paths_command": commands.get("paths"),
+            }
+            completion["review_gate"] = {
+                key: value
+                for key, value in completion["review_gate"].items()
+                if value is not None
+            }
+            return report
         completion["integration_recommendation"] = (
             "Review the fresh gate-bound report and diff, then run "
             f"`{commands.get('integrate')}`."

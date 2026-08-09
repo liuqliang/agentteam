@@ -11,6 +11,7 @@ INTEGRATION_STATUS_ZH = {
     "passed": "已通过",
     "blocked": "受阻",
     "not recorded": "未记录",
+    "not_applicable": "无需集成",
 }
 
 
