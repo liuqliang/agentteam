@@ -4307,16 +4307,6 @@ def _resolve_blueprint_controller_action_inputs(
         if not isinstance(gate, dict):
             continue
         gate_id = gate.get("gate_id") or "<unknown>"
-        try:
-            from .experiment_gates import resolve_gate_spec
-
-            gate_spec = resolve_gate_spec(gate)
-        except Exception as exc:
-            raise TaskpackValidationError(
-                f"{gate_id} controller registry validation failed: {exc}"
-            ) from exc
-        if not gate_spec.action_required:
-            continue
         action_input = gate.get("controller_action_input")
         configuration = (
             action_input.get("configuration")
