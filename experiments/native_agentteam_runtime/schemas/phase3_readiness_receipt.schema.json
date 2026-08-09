@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase3_readiness_receipt.schema.json",
+  "title": "Provider-free Phase 3 benchmark readiness receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "decision_id",
+    "fixture",
+    "bindings",
+    "mode_reconciliation",
+    "isolation_reconciliation",
+    "usage_reconciliation",
+    "verification",
+    "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase3_readiness_receipt.v1"
+    },
+    "status": {
+      "enum": ["passed", "failed"]
+    },
+    "decision_id": {
+      "const": "DEC-P3-readiness-execution"
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "benchmark", "metadata_revision", "metadata_sha256"],
+      "properties": {
+        "kind": {"const": "local_fixture"},
+        "benchmark": {"const": "swe_evo"},
+        "metadata_revision": {"$ref": "#/$defs/safe_id"},
+        "metadata_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection_sha256",
+        "ordered_instance_ids",
+        "preregistration_authorization_sha256",
+        "decision_contract_sha256",
+        "inherited_decision_id",
+        "decision_replay_status"
+      ],
+      "properties": {
+        "selection_sha256": {"$ref": "#/$defs/sha256"},
+        "ordered_instance_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/safe_id"}
+        },
+        "preregistration_authorization_sha256": {"$ref": "#/$defs/sha256"},
+        "decision_contract_sha256": {"$ref": "#/$defs/sha256"},
+        "inherited_decision_id": {"const": "DEC-P3-readiness-execution"},
+        "decision_replay_status": {"const": "idempotent"}
+      }
+    },
+    "mode_reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["single_codex", "agentteam_direct", "agentteam_full"],
+      "properties": {
+        "single_codex": {"$ref": "#/$defs/mode_binding"},
+        "agentteam_direct": {"$ref": "#/$defs/mode_binding"},
+        "agentteam_full": {"$ref": "#/$defs/mode_binding"}
+      }
+    },
+    "isolation_reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gold_visibility",
+        "cross_mode_artifact_access",
+        "independent_runtime_roots",
+        "sibling_access_denials"
+      ],
+      "properties": {
+        "gold_visibility": {"const": "evaluator_only"},
+        "cross_mode_artifact_access": {"const": "denied"},
+        "independent_runtime_roots": {"const": true},
+        "sibling_access_denials": {"type": "integer", "minimum": 3}
+      }
+    },
+    "usage_reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "live_provider_calls",
+        "scored_mode_executions",
+        "invocations_created",
+        "provider_status",
+        "terminal_usage_records",
+        "terminal_usage_status",
+        "token_totals"
+      ],
+      "properties": {
+        "live_provider_calls": {"const": 0},
+        "scored_mode_executions": {"const": 0},
+        "invocations_created": {"const": 0},
+        "provider_status": {"const": "not_invoked"},
+        "terminal_usage_records": {"const": 0},
+        "terminal_usage_status": {"const": "not_applicable"},
+        "token_totals": {"type": "null"}
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["results", "verification_sha256"],
+      "properties": {
+        "results": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "selection_replay",
+            "selection_mutation_detection",
+            "preregistration_replay",
+            "preregistration_mutation_detection",
+            "equal_input_binding",
+            "equal_budget_binding",
+            "mode_isolation",
+            "decision_binding_replay",
+            "provider_absence"
+          ],
+          "properties": {
+            "selection_replay": {"$ref": "#/$defs/check"},
+            "selection_mutation_detection": {"$ref": "#/$defs/check"},
+            "preregistration_replay": {"$ref": "#/$defs/check"},
+            "preregistration_mutation_detection": {"$ref": "#/$defs/check"},
+            "equal_input_binding": {"$ref": "#/$defs/check"},
+            "equal_budget_binding": {"$ref": "#/$defs/check"},
+            "mode_isolation": {"$ref": "#/$defs/check"},
+            "decision_binding_replay": {"$ref": "#/$defs/check"},
+            "provider_absence": {"$ref": "#/$defs/check"}
+          }
+        },
+        "verification_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "safe_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "mode_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visible_input_sha256", "budget_sha256", "runtime_root"],
+      "properties": {
+        "visible_input_sha256": {"$ref": "#/$defs/sha256"},
+        "budget_sha256": {"$ref": "#/$defs/sha256"},
+        "runtime_root": {
+          "type": "string",
+          "pattern": "^modes/(single_codex|agentteam_direct|agentteam_full)$"
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "evidence_sha256"],
+      "properties": {
+        "status": {"const": "passed"},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}
