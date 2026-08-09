@@ -37,12 +37,14 @@ from agentteam_runtime.experiment_gates import (
     Phase2GateError,
     resolve_gate_spec,
     run_gate_controller,
+    validate_controller_gate_graph,
     validate_gate_relation,
 )
 from agentteam_runtime.phase3_readiness import (
     Phase3ReadinessError,
     build_phase3_readiness_receipt,
     phase3_readiness_receipt_sha256,
+    produce_phase3_readiness_fixture,
     publish_phase3_readiness_receipt,
     validate_phase3_readiness_receipt,
 )
@@ -618,6 +620,16 @@ class Phase3BenchmarkReadinessTests(unittest.TestCase):
         spec = resolve_gate_spec(declaration)
         self.assertEqual(spec.gate_id, "P3-READY")
         self.assertFalse(spec.action_required)
+        graph_declaration = {**declaration, "depends_on": []}
+        self.assertEqual(
+            [
+                item.gate_id
+                for item in validate_controller_gate_graph(
+                    [graph_declaration]
+                )
+            ],
+            ["P3-READY"],
+        )
 
         drifted = copy.deepcopy(declaration)
         drifted["relation_validator"] = "unregistered_relation_v1"
@@ -690,6 +702,50 @@ class Phase3BenchmarkReadinessTests(unittest.TestCase):
             )
             self.assertEqual(result["controller_status"], "passed")
             self.assertEqual(result["provider_calls"], 0)
+
+    def test_production_fixture_producer_is_provider_free_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "runs" / "phase3-closure"
+            repository_binding = {
+                "source": "local:phase3-closure",
+                "commit": "1" * 40,
+                "tree": "2" * 40,
+                "git_object_format": "sha1",
+            }
+            arguments = {
+                "repository_binding": repository_binding,
+                "decision_contract_sha256": "3" * 64,
+                "inherited_decision_id": (
+                    "DEC-P3-readiness-execution"
+                ),
+                "research_authority_sha256": "4" * 64,
+                "verification_evidence": {
+                    "command_sha256": "5" * 64,
+                    "output_sha256": "6" * 64,
+                    "returncode": 0,
+                },
+            }
+            first = produce_phase3_readiness_fixture(
+                run_dir,
+                **arguments,
+            )
+            second = produce_phase3_readiness_fixture(
+                run_dir,
+                **arguments,
+            )
+            self.assertTrue(first["created"])
+            self.assertFalse(second["created"])
+            self.assertEqual(first["receipt"], second["receipt"])
+            self.assertEqual(
+                first["receipt"]["usage_reconciliation"][
+                    "live_provider_calls"
+                ],
+                0,
+            )
+            self.assertEqual(
+                list(run_dir.rglob("model_invocations/*/started.json")),
+                [],
+            )
 
 
 if __name__ == "__main__":

@@ -76,6 +76,7 @@ from .experiment_gates import (
     validate_gate_relation,
 )
 from .experiment_contract import canonical_json_sha256
+from .phase3_readiness import produce_phase3_readiness_fixture
 from .experiment_calibration import (
     ExperimentCalibrationError,
     run_deterministic_calibration_from_manifest,
@@ -10535,11 +10536,19 @@ def _run_one_available_phase2_gate_controller(
     )
     if not receipt:
         try:
-            action = _execute_phase2_controller_action(
-                context,
-                current,
-                declaration,
-                prior_decisions,
+            action = (
+                _execute_phase2_controller_action(
+                    context,
+                    current,
+                    declaration,
+                    prior_decisions,
+                )
+                if spec.action_required
+                else _execute_action_free_gate_controller(
+                    context,
+                    current,
+                    declaration,
+                )
             )
         except Exception as exc:
             return {
@@ -10573,7 +10582,7 @@ def _run_one_available_phase2_gate_controller(
                 "gate_id": gate_id,
                 "state": "failed",
                 "reason": (
-                    "Phase 2 action completed without publishing a receipt"
+                    "gate controller completed without publishing a receipt"
                 ),
             }
     try:
@@ -10589,7 +10598,7 @@ def _run_one_available_phase2_gate_controller(
         artifact_path = (
             evidence_run / declaration["evidence_artifact"]
         ).resolve()
-        relation_context = _phase2_gate_relation_context(
+        relation_context = _gate_relation_context(
             context,
             current,
             declaration,
@@ -10642,6 +10651,173 @@ def _run_one_available_phase2_gate_controller(
         ).get("validated_code_sha"),
         "evidence_sha256": result.get("evidence_sha256"),
     }
+
+
+def _execute_action_free_gate_controller(
+    context,
+    current,
+    declaration,
+):
+    if declaration["gate_id"] != "P3-READY":
+        raise Phase2GateError(
+            "registered action-free gate has no deterministic producer"
+        )
+    integration_head = _require_sealed_epoch_integration_head(
+        context["project_root"],
+        current["record"],
+    )
+    worktree = _gate_integration_worktree(context, current["record"])
+    command = _frozen_gate_verification_command(context)
+    completed = subprocess.run(
+        command,
+        cwd=worktree,
+        env=_integration_verification_env(worktree),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        timeout=900,
+    )
+    normalized_stdout = _normalize_gate_verification_output(
+        completed.stdout
+    )
+    normalized_stderr = _normalize_gate_verification_output(
+        completed.stderr
+    )
+    if completed.returncode != 0:
+        raise Phase2GateError(
+            normalized_stderr.strip()
+            or normalized_stdout.strip()
+            or "P3-READY frozen verification failed"
+        )
+    taskpack = context["taskpack"]
+    decision_contract = taskpack.get("decision_contract")
+    decision_binding = _read_json_if_exists(
+        context["run_dir"] / "state" / "decision-binding.v1.json"
+    )
+    contract_sha256 = canonical_json_sha256(decision_contract)
+    if (
+        not decision_binding
+        or decision_binding.get("contract_sha256") != contract_sha256
+        or decision_binding.get("root_decision_id")
+        != "DEC-P3-readiness-execution"
+    ):
+        raise Phase2GateError(
+            "P3-READY run decision binding is missing or stale"
+        )
+    relative_authority = Path(
+        taskpack.get("context", {}).get("research_authority") or ""
+    )
+    if (
+        relative_authority.is_absolute()
+        or ".." in relative_authority.parts
+        or not relative_authority.parts
+    ):
+        raise Phase2GateError(
+            "P3-READY research authority path is unsafe"
+        )
+    research_authority = (worktree / relative_authority).resolve()
+    _require_path_within(
+        research_authority,
+        worktree,
+        "P3-READY research authority",
+    )
+    if research_authority.is_symlink() or not research_authority.is_file():
+        raise Phase2GateError(
+            "P3-READY research authority is unavailable"
+        )
+    tree = _git_stdout(
+        context["project_root"],
+        ["rev-parse", f"{integration_head}^{{tree}}"],
+    )
+    publication = produce_phase3_readiness_fixture(
+        context["run_dir"],
+        repository_binding={
+            "source": "local:agentteam-phase3-readiness",
+            "commit": integration_head,
+            "tree": tree,
+            "git_object_format": current["record"][
+                "git_object_format"
+            ],
+        },
+        decision_contract_sha256=contract_sha256,
+        inherited_decision_id="DEC-P3-readiness-execution",
+        research_authority_sha256=_sha256_bytes(
+            research_authority.read_bytes()
+        ),
+        verification_evidence={
+            "command_sha256": canonical_json_sha256(command),
+            "stdout_sha256": _sha256_bytes(
+                normalized_stdout.encode("utf-8")
+            ),
+            "stderr_sha256": _sha256_bytes(
+                normalized_stderr.encode("utf-8")
+            ),
+            "returncode": completed.returncode,
+        },
+    )
+    _publish_registered_gate_receipt(
+        context,
+        current,
+        declaration,
+        integration_head=integration_head,
+    )
+    return {
+        "gate_id": declaration["gate_id"],
+        "action_status": "completed",
+        "provider_calls": 0,
+        "target_mutations": 0,
+        "artifact_path": publication["path"],
+        "artifact_sha256": publication["sha256"],
+        "epoch_refreshed": False,
+    }
+
+
+def _publish_registered_gate_receipt(
+    context,
+    current,
+    declaration,
+    *,
+    integration_head,
+):
+    receipt_path = _gate_receipt_path(
+        context,
+        current["record"],
+        declaration["gate_id"],
+    )
+    expected = {
+        "implementation_run_id": context["run_dir"].name,
+        "epoch_number": current["record"]["epoch_number"],
+        "epoch_sha256": current["digest"],
+        "gate_id": declaration["gate_id"],
+        "evidence_run_id": context["run_dir"].name,
+        "evidence_run_relative_path": context["run_dir"].relative_to(
+            context["work_root"]
+        ).as_posix(),
+        "expected_integration_head_sha": integration_head,
+        "git_object_format": current["record"]["git_object_format"],
+        "evidence_artifact": declaration["evidence_artifact"],
+        "evidence_schema": declaration["evidence_schema"],
+        "attempt_history": [],
+    }
+    existing = _read_json_if_exists(receipt_path)
+    if existing:
+        if any(existing.get(key) != value for key, value in expected.items()):
+            raise Phase2GateError(
+                "registered gate receipt conflicts with existing evidence"
+            )
+        return existing
+    receipt = {
+        "schema_version": "post_backlog_gate_receipt.v1",
+        **expected,
+        "registered_at": _format_utc_timestamp(datetime.now(UTC)),
+    }
+    _validate_gate_record_schema(
+        "post_backlog_gate_receipt.schema.json",
+        receipt,
+    )
+    _atomic_write_json(receipt_path, receipt, replace=False)
+    return receipt
 
 
 def _open_gate_controller_invocations(context, gate_id=None):

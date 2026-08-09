@@ -260,14 +260,19 @@ def validate_controller_gate_graph(declarations):
         item.get("gate_id") if isinstance(item, dict) else None
         for item in declarations
     ]
-    if gate_ids != list(_CONTROLLER_GATE_DEPENDENCIES):
+    if gate_ids == list(_CONTROLLER_GATE_DEPENDENCIES):
+        dependencies = _CONTROLLER_GATE_DEPENDENCIES
+    elif gate_ids == ["P3-READY"]:
+        dependencies = {"P3-READY": []}
+    else:
         raise Phase2GateError(
-            "controller-only gate order must be P2-08, P2-09, P2-10"
+            "controller-only gate graph must be the Phase 2 chain or "
+            "standalone P3-READY"
         )
     for declaration in declarations:
         spec = resolve_gate_spec(declaration)
         if declaration.get("depends_on") != (
-            _CONTROLLER_GATE_DEPENDENCIES[spec.gate_id]
+            dependencies[spec.gate_id]
         ):
             raise Phase2GateError(
                 f"{spec.gate_id} dependency topology is invalid"
