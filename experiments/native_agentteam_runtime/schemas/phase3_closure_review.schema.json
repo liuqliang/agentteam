@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Phase 3A Readiness Closure Review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "remaining_escalations",
+    "git_object_format",
+    "preflight_release_id",
+    "preflight_release_source_commit",
+    "plan_sha256",
+    "blueprint_sha256",
+    "research_authority_sha256",
+    "review_schema_sha256",
+    "contract_decisions_sha256",
+    "decision_contract_sha256"
+  ],
+  "properties": {
+    "decision": {"const": "approved"},
+    "remaining_escalations": {"type": "array", "maxItems": 0},
+    "git_object_format": {"enum": ["sha1", "sha256"]},
+    "preflight_release_id": {
+      "const": "phase3a-closure-be882a8"
+    },
+    "preflight_release_source_commit": {"$ref": "#/$defs/git_oid"},
+    "plan_sha256": {"$ref": "#/$defs/sha256"},
+    "blueprint_sha256": {"$ref": "#/$defs/sha256"},
+    "research_authority_sha256": {"$ref": "#/$defs/sha256"},
+    "review_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "contract_decisions_sha256": {"$ref": "#/$defs/sha256"},
+    "decision_contract_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "git_oid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    }
+  }
+}
