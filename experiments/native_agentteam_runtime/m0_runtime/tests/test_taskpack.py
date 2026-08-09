@@ -3758,6 +3758,12 @@ class TaskpackTests(unittest.TestCase):
             contract = _blueprint_decision_contract(
                 [task["task_id"] for task in blueprint["tasks"]]
             )
+            blueprint["agents"][0]["runtime_profile"].update(
+                {
+                    "model": "gpt-5.6-sol",
+                    "reasoning_profile": "medium",
+                }
+            )
             blueprint["decision_contract"] = contract
             blueprint["approval"]["digest_bindings"].append(
                 "decision_contract"
@@ -3787,7 +3793,16 @@ class TaskpackTests(unittest.TestCase):
                 work_root / "drafts",
             )
             draft = load_taskpack(materialized["taskpack_dir"])["taskpack"]
+            materialized_agent_pool = load_taskpack(
+                materialized["taskpack_dir"]
+            )["agent_pool"]
             self.assertEqual(draft["decision_contract"], contract)
+            self.assertEqual(
+                materialized_agent_pool["role_runtime_profiles"][
+                    "implementation_worker"
+                ]["reasoning_profile"],
+                "medium",
+            )
             self.assertEqual(
                 materialized["decision_contract_sha256"],
                 taskpack_module._sha256_json(contract),
@@ -22022,6 +22037,17 @@ class TaskpackTests(unittest.TestCase):
                 validate_taskpack(result["taskpack_dir"])
 
             self.assertIn("role_runtime_profiles", str(raised.exception))
+
+            agent_pool["role_runtime_profiles"]["implementation_worker"] = {
+                "adapter": "codex",
+                "reasoning_profile": 3,
+            }
+            agent_pool_path.write_text(json.dumps(agent_pool), encoding="utf-8")
+            with self.assertRaisesRegex(
+                TaskpackValidationError,
+                "reasoning_profile must be a non-empty string",
+            ):
+                validate_taskpack(result["taskpack_dir"])
 
     def test_validate_taskpack_rejects_taskpack_runtime_profile_launch_commands(self):
         cases = [

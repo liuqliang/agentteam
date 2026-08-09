@@ -5125,6 +5125,14 @@ def _validate_taskpack_runtime_profile(profile, label, errors):
     if model is not None and not _is_non_empty_string(model):
         errors.append(f"{label}.model must be a non-empty string")
 
+    reasoning_profile = profile.get("reasoning_profile")
+    if reasoning_profile is not None and not _is_non_empty_string(
+        reasoning_profile
+    ):
+        errors.append(
+            f"{label}.reasoning_profile must be a non-empty string"
+        )
+
     sandbox = profile.get("sandbox")
     if sandbox is not None and not _is_non_empty_string(sandbox):
         errors.append(f"{label}.sandbox must be a non-empty string")

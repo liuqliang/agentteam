@@ -705,6 +705,7 @@ class FileMailboxWorkerProcessSupervisor:
         runtime="fake",
         codex_command=None,
         codex_model=None,
+        codex_reasoning_profile=None,
         codex_sandbox="workspace-write",
         codex_timeout_seconds=300,
         codex_fallback_worktree_path=None,
@@ -724,6 +725,7 @@ class FileMailboxWorkerProcessSupervisor:
         self.runtime = runtime
         self.codex_command = list(codex_command) if codex_command else None
         self.codex_model = codex_model
+        self.codex_reasoning_profile = codex_reasoning_profile
         self.codex_sandbox = codex_sandbox
         self.codex_timeout_seconds = codex_timeout_seconds
         self.codex_fallback_worktree_path = codex_fallback_worktree_path
@@ -773,6 +775,13 @@ class FileMailboxWorkerProcessSupervisor:
             )
             if self.codex_model:
                 command.extend(["--codex-model", self.codex_model])
+            if self.codex_reasoning_profile:
+                command.extend(
+                    [
+                        "--codex-reasoning-profile",
+                        self.codex_reasoning_profile,
+                    ]
+                )
             if self.codex_command:
                 command.extend(["--codex-command-json", json.dumps(self.codex_command)])
             if self.codex_fallback_worktree_path:
@@ -1624,6 +1633,10 @@ def main(argv=None):
     )
     parser.add_argument("--codex-model", help="Optional model passed to CodexRuntimeAdapter.")
     parser.add_argument(
+        "--codex-reasoning-profile",
+        help="Optional reasoning effort passed to CodexRuntimeAdapter.",
+    )
+    parser.add_argument(
         "--codex-sandbox",
         default="workspace-write",
         help="Sandbox mode passed to CodexRuntimeAdapter.",
@@ -1698,6 +1711,7 @@ def _runtime_adapter_from_args(parser, args):
         if (
             args.codex_command_json
             or args.codex_model
+            or args.codex_reasoning_profile
             or args.codex_sandbox != "workspace-write"
             or args.codex_timeout_seconds != 300
             or args.codex_resume_session_id
@@ -1713,6 +1727,7 @@ def _runtime_adapter_from_args(parser, args):
         return CodexRuntimeAdapter(
             command=_parse_command_json(parser, args.codex_command_json),
             model=args.codex_model,
+            reasoning_profile=args.codex_reasoning_profile,
             sandbox=args.codex_sandbox,
             timeout_seconds=args.codex_timeout_seconds,
             fallback_worktree_path=args.codex_fallback_worktree_path,

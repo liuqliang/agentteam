@@ -286,6 +286,7 @@ class CodexRuntimeAdapter:
         self,
         command=None,
         model=None,
+        reasoning_profile=None,
         sandbox="workspace-write",
         timeout_seconds=300,
         extra_args=None,
@@ -300,6 +301,7 @@ class CodexRuntimeAdapter:
             raise ValueError("resume_session_id and resume_last are mutually exclusive")
         self.command = list(command or ["codex", "exec"])
         self.model = model
+        self.reasoning_profile = reasoning_profile
         self.sandbox = sandbox
         self.timeout_seconds = timeout_seconds
         self.extra_args = list(extra_args or [])
@@ -316,6 +318,7 @@ class CodexRuntimeAdapter:
         return CodexRuntimeAdapter(
             command=self.command,
             model=self.model,
+            reasoning_profile=self.reasoning_profile,
             sandbox=self.sandbox,
             timeout_seconds=self.timeout_seconds,
             extra_args=self.extra_args,
@@ -377,6 +380,10 @@ class CodexRuntimeAdapter:
                 model=self.model,
                 backend="codex",
             )
+            if self.reasoning_profile and not context.get(
+                "reasoning_profile"
+            ):
+                context["reasoning_profile"] = self.reasoning_profile
             command = _with_codex_reasoning_profile(
                 self._build_command(
                     runtime_worktree_path,
@@ -3149,6 +3156,10 @@ def _runtime_adapter_from_profile(profile, defaults=None, project_root=None):
         return CodexRuntimeAdapter(
             command=command or None,
             model=profile.get("model", defaults.get("model")),
+            reasoning_profile=profile.get(
+                "reasoning_profile",
+                defaults.get("reasoning_profile"),
+            ),
             sandbox=profile.get("sandbox", defaults.get("sandbox", "workspace-write")),
             timeout_seconds=timeout_seconds,
             fallback_worktree_path=profile.get(
@@ -3169,6 +3180,11 @@ def _runtime_adapter_metadata(runtime_adapter):
     return {
         "runtime_adapter": runtime_adapter.__class__.__name__,
         "runtime_model": getattr(runtime_adapter, "model", None),
+        "runtime_reasoning_profile": getattr(
+            runtime_adapter,
+            "reasoning_profile",
+            None,
+        ),
         "runtime_sandbox": getattr(runtime_adapter, "sandbox", None),
         "runtime_timeout_seconds": getattr(runtime_adapter, "timeout_seconds", None),
     }

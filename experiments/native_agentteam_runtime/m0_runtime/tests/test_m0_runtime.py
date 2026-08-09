@@ -4254,6 +4254,38 @@ class M0RuntimeTests(unittest.TestCase):
             self.assertEqual(session["runtime_sandbox"], "read-only")
             self.assertEqual(session["runtime_timeout_seconds"], 30)
 
+    def test_role_runtime_profile_propagates_codex_reasoning_effort(self):
+        from agentteam_runtime.m0_runtime import (
+            _runtime_adapter_from_profile,
+            _with_codex_reasoning_profile,
+        )
+
+        adapter = _runtime_adapter_from_profile(
+            {
+                "adapter": "codex",
+                "model": "gpt-5.6-sol",
+                "reasoning_profile": "medium",
+            },
+            project_root="/tmp/agentteam-reasoning-profile-test",
+        )
+
+        self.assertEqual(adapter.model, "gpt-5.6-sol")
+        self.assertEqual(adapter.reasoning_profile, "medium")
+        self.assertEqual(
+            _with_codex_reasoning_profile(
+                ["codex", "exec", "--json", "-"],
+                adapter.reasoning_profile,
+            ),
+            [
+                "codex",
+                "exec",
+                "--json",
+                "-c",
+                "model_reasoning_effort=medium",
+                "-",
+            ],
+        )
+
     def test_scheduler_core_uses_agent_runtime_profile_without_cli_factory(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

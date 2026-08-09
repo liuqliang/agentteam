@@ -551,6 +551,9 @@
         "model": {
           "$ref": "#/$defs/non_empty_string"
         },
+        "reasoning_profile": {
+          "$ref": "#/$defs/non_empty_string"
+        },
         "sandbox": {
           "$ref": "#/$defs/non_empty_string"
         },

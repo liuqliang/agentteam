@@ -182,6 +182,10 @@ class FileMailboxWorkerPoolSupervisor:
             runtime=runtime,
             codex_command=_codex_command_from_profile(profile, defaults),
             codex_model=profile.get("model", defaults.get("model")),
+            codex_reasoning_profile=profile.get(
+                "reasoning_profile",
+                defaults.get("reasoning_profile"),
+            ),
             codex_sandbox=profile.get(
                 "sandbox",
                 defaults.get("sandbox", "workspace-write"),
