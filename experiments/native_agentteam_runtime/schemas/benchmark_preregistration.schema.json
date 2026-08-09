@@ -1,0 +1,630 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "benchmark_preregistration.schema.json",
+  "title": "Immutable Phase 3 Benchmark Preregistration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "authorization",
+    "authorization_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "benchmark_preregistration.v1"
+    },
+    "authorization": {
+      "$ref": "#/$defs/authorization"
+    },
+    "authorization_sha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nonempty_string": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "git_object_id": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "research_authority",
+        "benchmark",
+        "selection",
+        "modes",
+        "equal_input_bindings",
+        "budgets",
+        "mode_controls",
+        "metrics",
+        "thresholds",
+        "repetition_policy",
+        "isolation"
+      ],
+      "properties": {
+        "decision_id": {
+          "const": "DEC-P3-preregistration-execution"
+        },
+        "research_authority": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "const": "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "benchmark": {
+          "const": "SWE-EVO"
+        },
+        "selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["selection_sha256", "ordered_instance_ids"],
+          "properties": {
+            "selection_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "ordered_instance_ids": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 10000,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,511}$"
+              }
+            }
+          }
+        },
+        "modes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {"const": "single_codex"},
+            {"const": "agentteam_direct"},
+            {"const": "agentteam_full"}
+          ]
+        },
+        "equal_input_bindings": {
+          "$ref": "#/$defs/equal_input_bindings"
+        },
+        "budgets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "single_codex",
+            "agentteam_direct",
+            "agentteam_full"
+          ],
+          "properties": {
+            "single_codex": {"$ref": "#/$defs/budget"},
+            "agentteam_direct": {"$ref": "#/$defs/budget"},
+            "agentteam_full": {"$ref": "#/$defs/budget"}
+          }
+        },
+        "mode_controls": {
+          "$ref": "#/$defs/mode_controls"
+        },
+        "metrics": {
+          "$ref": "#/$defs/metrics"
+        },
+        "thresholds": {
+          "$ref": "#/$defs/thresholds"
+        },
+        "repetition_policy": {
+          "$ref": "#/$defs/repetition_policy"
+        },
+        "isolation": {
+          "$ref": "#/$defs/isolation"
+        }
+      }
+    },
+    "equal_input_bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shared_visible_inputs",
+        "per_mode_visible_input_sha256"
+      ],
+      "properties": {
+        "shared_visible_inputs": {
+          "$ref": "#/$defs/shared_visible_inputs"
+        },
+        "per_mode_visible_input_sha256": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "single_codex",
+            "agentteam_direct",
+            "agentteam_full"
+          ],
+          "properties": {
+            "single_codex": {"$ref": "#/$defs/sha256"},
+            "agentteam_direct": {"$ref": "#/$defs/sha256"},
+            "agentteam_full": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    },
+    "shared_visible_inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "runtime",
+        "task",
+        "model",
+        "execution"
+      ],
+      "properties": {
+        "repository": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "commit", "tree", "git_object_format"],
+          "properties": {
+            "source": {"$ref": "#/$defs/nonempty_string"},
+            "commit": {"$ref": "#/$defs/git_object_id"},
+            "tree": {"$ref": "#/$defs/git_object_id"},
+            "git_object_format": {"enum": ["sha1", "sha256"]}
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "agentteam_release_commit",
+            "codex_cli_version",
+            "environment_version"
+          ],
+          "properties": {
+            "agentteam_release_commit": {"$ref": "#/$defs/git_object_id"},
+            "codex_cli_version": {"$ref": "#/$defs/nonempty_string"},
+            "environment_version": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "task": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "goal",
+            "constraints",
+            "non_goals",
+            "acceptance_commands"
+          ],
+          "properties": {
+            "goal": {"$ref": "#/$defs/nonempty_string"},
+            "constraints": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/nonempty_string"}
+            },
+            "non_goals": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/nonempty_string"}
+            },
+            "acceptance_commands": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"$ref": "#/$defs/nonempty_string"}
+              }
+            }
+          }
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "model",
+            "reasoning_profile",
+            "service_configuration_sha256"
+          ],
+          "properties": {
+            "model": {"$ref": "#/$defs/nonempty_string"},
+            "reasoning_profile": {"$ref": "#/$defs/nonempty_string"},
+            "service_configuration_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tools_sha256",
+            "network_policy",
+            "sandbox_policy_sha256",
+            "permission_policy_sha256",
+            "host_class",
+            "cpu_limit",
+            "memory_limit_bytes",
+            "external_services_sha256",
+            "benchmark_visible_tests_sha256",
+            "termination_policy_sha256",
+            "shared_dependency_cache_sha256"
+          ],
+          "properties": {
+            "tools_sha256": {"$ref": "#/$defs/sha256"},
+            "network_policy": {"$ref": "#/$defs/nonempty_string"},
+            "sandbox_policy_sha256": {"$ref": "#/$defs/sha256"},
+            "permission_policy_sha256": {"$ref": "#/$defs/sha256"},
+            "host_class": {"$ref": "#/$defs/nonempty_string"},
+            "cpu_limit": {"type": "integer", "minimum": 1},
+            "memory_limit_bytes": {"type": "integer", "minimum": 1},
+            "external_services_sha256": {"$ref": "#/$defs/sha256"},
+            "benchmark_visible_tests_sha256": {"$ref": "#/$defs/sha256"},
+            "termination_policy_sha256": {"$ref": "#/$defs/sha256"},
+            "shared_dependency_cache_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_total_tokens",
+        "max_wall_time_seconds",
+        "max_operator_interactions",
+        "allowed_operator_input_types"
+      ],
+      "properties": {
+        "max_total_tokens": {"type": "integer", "minimum": 1},
+        "max_wall_time_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "max_operator_interactions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "allowed_operator_input_types": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "expected_operator_action",
+              "corrective_intervention",
+              "decision_escalation"
+            ]
+          }
+        }
+      }
+    },
+    "mode_controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "single_codex",
+        "agentteam_direct",
+        "agentteam_full"
+      ],
+      "properties": {
+        "single_codex": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agentteam_artifact_visibility", "counted_stages"],
+          "properties": {
+            "agentteam_artifact_visibility": {"const": "forbidden"},
+            "counted_stages": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "prefixItems": [{"const": "model_execution"}]
+            }
+          }
+        },
+        "agentteam_direct": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "taskpack_sha256_by_instance",
+            "taskpack_frozen_before_gold",
+            "reuse_same_taskpack_across_repetitions",
+            "live_authoring",
+            "counted_stages"
+          ],
+          "properties": {
+            "taskpack_sha256_by_instance": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 10000,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,511}$"
+              },
+              "additionalProperties": {"$ref": "#/$defs/sha256"}
+            },
+            "taskpack_frozen_before_gold": {"const": true},
+            "reuse_same_taskpack_across_repetitions": {"const": true},
+            "live_authoring": {"const": false},
+            "counted_stages": {
+              "const": [
+                "routing",
+                "worker",
+                "verification",
+                "integration",
+                "report"
+              ]
+            }
+          }
+        },
+        "agentteam_full": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["live_authoring", "counted_stages"],
+          "properties": {
+            "live_authoring": {"const": true},
+            "counted_stages": {
+              "const": [
+                "authoring",
+                "planning",
+                "repo_mapping",
+                "worker",
+                "review",
+                "follow_up",
+                "verification",
+                "integration",
+                "report"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary",
+        "secondary",
+        "partial_score",
+        "final_score_authority",
+        "reasoning_token_policy",
+        "uncached_work_formula"
+      ],
+      "properties": {
+        "primary": {"const": "final_mechanical_acceptance"},
+        "secondary": {
+          "type": "array",
+          "minItems": 20,
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "benchmark_native_partial_score",
+              "swe_style_partial_score",
+              "verified_milestones_completed",
+              "accepted_attempts",
+              "rejected_attempts",
+              "regressions",
+              "expected_operator_actions",
+              "corrective_operator_interventions",
+              "decision_escalations",
+              "wall_time_seconds",
+              "input_tokens",
+              "cached_input_tokens",
+              "output_tokens",
+              "reasoning_tokens",
+              "total_tokens",
+              "uncached_work_tokens",
+              "artifact_bytes",
+              "repeated_reading_cost",
+              "retry_cost",
+              "recovery_cost"
+            ]
+          }
+        },
+        "partial_score": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["benchmark_native", "swe_style"],
+          "properties": {
+            "benchmark_native": {"const": true},
+            "swe_style": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "f2p_weight_percent",
+                "p2p_weight_percent",
+                "patch_application_scope_basic_verification_weight_percent"
+              ],
+              "properties": {
+                "f2p_weight_percent": {"const": 70},
+                "p2p_weight_percent": {"const": 20},
+                "patch_application_scope_basic_verification_weight_percent": {
+                  "const": 10
+                }
+              }
+            }
+          }
+        },
+        "final_score_authority": {
+          "const": "benchmark_evaluator_only"
+        },
+        "reasoning_token_policy": {
+          "const": "report_only_when_provider_declares_non_overlapping"
+        },
+        "uncached_work_formula": {
+          "const": "max(input-cached_input,0)+output"
+        }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_usage_coverage_percent",
+        "third_repetition_variance_percent",
+        "non_inferiority_margin",
+        "acceptable_cost",
+        "continuation"
+      ],
+      "properties": {
+        "provider_usage_coverage_percent": {"const": 100},
+        "third_repetition_variance_percent": {"const": 30},
+        "non_inferiority_margin": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "acceptable_cost": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_token_ratio", "max_wall_time_ratio"],
+          "properties": {
+            "max_token_ratio": {"type": "number", "exclusiveMinimum": 0},
+            "max_wall_time_ratio": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
+        "continuation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "primary_improvement_or_noninferiority_with_benefit",
+            "preselected_secondary_benefit_metric"
+          ],
+          "properties": {
+            "primary_improvement_or_noninferiority_with_benefit": {
+              "const": true
+            },
+            "preselected_secondary_benefit_metric": {
+              "enum": [
+                "corrective_operator_interventions",
+                "regressions",
+                "recovery_cost"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "repetition_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "initial_repetitions",
+        "max_repetitions",
+        "run_third_on_outcome_disagreement",
+        "run_third_on_token_or_wall_variance_percent",
+        "retain_all_terminal_outcomes",
+        "paired_per_task_reporting",
+        "mode_order"
+      ],
+      "properties": {
+        "initial_repetitions": {"const": 2},
+        "max_repetitions": {"const": 3},
+        "run_third_on_outcome_disagreement": {"const": true},
+        "run_third_on_token_or_wall_variance_percent": {"const": 30},
+        "retain_all_terminal_outcomes": {"const": true},
+        "paired_per_task_reporting": {"const": true},
+        "mode_order": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "single_codex",
+                "agentteam_direct",
+                "agentteam_full"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gold_visibility",
+        "fresh_model_session_per_run",
+        "isolated_work_root_per_run",
+        "cross_mode_artifact_access",
+        "shared_cache_policy",
+        "mode_runtime_roots",
+        "forbidden_visible_inputs"
+      ],
+      "properties": {
+        "gold_visibility": {"const": "evaluator_only"},
+        "fresh_model_session_per_run": {"const": true},
+        "isolated_work_root_per_run": {"const": true},
+        "cross_mode_artifact_access": {"const": "forbidden"},
+        "shared_cache_policy": {"const": "declared_and_equal_only"},
+        "mode_runtime_roots": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "single_codex",
+            "agentteam_direct",
+            "agentteam_full"
+          ],
+          "properties": {
+            "single_codex": {"const": "modes/single_codex"},
+            "agentteam_direct": {"const": "modes/agentteam_direct"},
+            "agentteam_full": {"const": "modes/agentteam_full"}
+          }
+        },
+        "forbidden_visible_inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "single_codex",
+            "agentteam_direct",
+            "agentteam_full"
+          ],
+          "properties": {
+            "single_codex": {"$ref": "#/$defs/forbidden_input_list"},
+            "agentteam_direct": {"$ref": "#/$defs/forbidden_input_list"},
+            "agentteam_full": {"$ref": "#/$defs/forbidden_input_list"}
+          }
+        }
+      }
+    },
+    "forbidden_input_list": {
+      "type": "array",
+      "minItems": 9,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "gold_patch",
+          "evaluator_gold",
+          "prior_outcomes",
+          "sibling_mode_artifacts",
+          "sibling_mode_taskpack",
+          "sibling_mode_transcript",
+          "sibling_mode_report",
+          "sibling_mode_patch",
+          "sibling_mode_cache_artifact",
+          "agentteam_taskpack",
+          "repo_map_handoff",
+          "planner_output"
+        ]
+      }
+    }
+  }
+}
