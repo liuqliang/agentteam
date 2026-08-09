@@ -1566,23 +1566,29 @@ indexes through `agentteam artifacts migrate-legacy`.
 
 ### Post-D5 Phase 3 Route
 
-The unfinished route now starts with the decision-bound Phase 3A contract in
+Phase 3A is complete. Its decision-bound contract is in
 [`2026-08-06-phase3-decision-bound-benchmark-readiness.md`](plans/2026-08-06-phase3-decision-bound-benchmark-readiness.md).
-Its approved blueprint materializes four tasks: one bounded repo-map handoff,
+Its approved blueprint materialized four tasks: one bounded repo-map handoff,
 SWE-EVO adapter and deterministic selection, immutable preregistration, and a
 provider-free readiness gate. The blueprint binds every task to an active
 execution decision and requires a separate authorization for any live scored
 pilot.
 
+The controller-only `phase3a-readiness-closure-v4` run passed `P3-READY` at
+gate epoch `1` against integration head `ebce7b10a0ab7b2f9dc3e3936df3f7c2e1e77a02`.
+The retained evidence digest is
+`d87486c41ef79707d52408215b05d22b52d736d16380001590d031c4fb483af7`;
+provider calls and scored executions were both zero. This closes readiness,
+not the later live benchmark.
+
 Ordered follow-on work is:
 
-1. complete and review Phase 3A readiness;
-2. freeze a separate Phase 3B live-pilot taskpack with actual instances,
+1. freeze a separate Phase 3B live-pilot taskpack with actual instances,
    budgets, mode order, model profile, and operator authorization;
-3. choose Phase 4 ablations from pilot evidence;
-4. run Phase 5 normal resume and fault-injection recovery experiments;
-5. run the Phase 6 semantic-feedback long task;
-6. record a continue, narrow, or archive direction decision.
+2. choose Phase 4 ablations from pilot evidence;
+3. run Phase 5 normal resume and fault-injection recovery experiments;
+4. run the Phase 6 semantic-feedback long task;
+5. record a continue, narrow, or archive direction decision.
 
 Do not pre-expand Phase 4 through Phase 6 into worker tasks. Their direction is
 fixed by the research authority, but their execution decisions depend on

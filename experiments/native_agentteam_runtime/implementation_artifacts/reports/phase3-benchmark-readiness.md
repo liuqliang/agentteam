@@ -1,8 +1,32 @@
 # Phase 3 Benchmark Readiness
 
-Status: **provider-free implementation and host integration checks passed**.
-This result does not authorize a scored benchmark run or close the `P3-READY`
-post-backlog gate.
+Status: **Phase 3A closed; `P3-READY` passed operator review**.
+This result does not authorize a scored benchmark run.
+
+## Retained gate execution
+
+The controller-only `phase3a-readiness-closure-v4` run completed against
+release `phase3a-closure-ebce7b1` and integration head
+`ebce7b10a0ab7b2f9dc3e3936df3f7c2e1e77a02`. Gate epoch `1` retained the
+canonical receipt at `acceptance/phase3-readiness.json`; its complete evidence
+digest is
+`d87486c41ef79707d52408215b05d22b52d736d16380001590d031c4fb483af7`,
+and its receipt-content digest is
+`5fa7ff18044f2fcf5c01ee7d33b2592091d6af91bd09c1de641eeffe3a0bfc9d`.
+
+The registered relation validator passed before interactive approval. The
+approval is bound to gate epoch `1`, the evidence digest above, and the exact
+integration head. The run then transitioned from
+`awaiting_operator_review` to `completed`. It started no worker pool and
+retained no model invocation start record; the receipt reports zero provider
+calls, zero scored executions, zero invocation and terminal-usage records,
+and `token_totals: null`.
+
+An earlier closure attempt published an incorrectly identified execution
+decision into its append-only experimental ledger before failing. That old
+work root remains unchanged as failure evidence. The accepted v4 run used a
+fresh authority namespace and replayed the original Phase 3 direction and
+readiness-execution decisions without changing their identity or revision.
 
 ## What was verified
 
@@ -57,16 +81,16 @@ pre-author an acceptance decision or commit mutable run evidence.
 
 ## Verification
 
-- Focused readiness and gate-registry suite: `6` tests passed.
+- Focused readiness and gate-registry suite: `8` tests passed.
 - P3-01/P3-02 dependency suite: `24` tests passed.
 - Selected P2/D5/usage regressions: `17` tests passed.
 - Schema validation: Draft 2020-12 schema accepted.
 - Artifact lint: passed (`145` JSON files, `1` JSONL file, `0` errors).
 - Worker-sandbox runtime suite: `1017` tests ran, `5` skipped, with `1` failure
   and `2` errors caused by the sandbox denying local socket binding.
-- Current host integration runtime suite: `1024` tests passed with `4` skipped.
-  The earlier P3-03 rerun used the same code state in an environment that
-  permits the local Unix and loopback HTTP fixtures.
+- The accepted v4 sealed command discovered `1026` tests and passed at the
+  bound integration head. Its result digest is
+  `11d69be35f1eb6033bf7e753aa63e216befff62b096d6a10bc6119f2b4081ea1`.
 
 Commands:
 
@@ -79,13 +103,10 @@ python3 -m unittest discover -s tests -p 'test*.py'
 
 ## Operator decision
 
-The implementation is eligible for operator-reviewed integration because the
-host suite passed. Future taskpacks that use `P3-READY` must bind
+Phase 3A is complete. Future taskpacks that use `P3-READY` must bind
 `phase3_readiness_controller_v1` and `phase3_readiness_relation_v1`; historical
-frozen taskpacks remain unchanged. Closing Phase 3A still requires publishing
-the retained receipt from a concrete evidence run, registering it against the
-sealed gate epoch, and completing operator review. A later Phase 3B taskpack
-must separately reference the passed retained receipt and freeze its actual
-instance list, budgets, mode order, and live-run authority. Do not interpret
+frozen taskpacks remain unchanged. A Phase 3B taskpack must separately
+reference the passed retained receipt and freeze its actual instance list,
+budgets, mode order, model profile, and live-run authority. Do not interpret
 this readiness result as a benchmark score, provider-usage claim, or
 superiority claim.
