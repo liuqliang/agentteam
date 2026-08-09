@@ -1,7 +1,8 @@
 # Phase 3 Benchmark Readiness
 
-Status: **implementation checks passed; integration evidence incomplete**.
-This result does not authorize a scored benchmark run or integration.
+Status: **provider-free implementation and host integration checks passed**.
+This result does not authorize a scored benchmark run or close the `P3-READY`
+post-backlog gate.
 
 ## What was verified
 
@@ -57,12 +58,11 @@ acceptance decision or commit mutable run evidence.
 - Selected P2/D5/usage regressions: `17` tests passed.
 - Schema validation: Draft 2020-12 schema accepted.
 - Artifact lint: passed (`145` JSON files, `1` JSONL file, `0` errors).
-- Complete runtime suite: `1017` tests ran, `5` skipped, `1` failure and
-  `2` errors. The three non-passing tests require socket binding, which this
-  execution sandbox denies with `PermissionError: [Errno 1] Operation not
-  permitted`: one Unix supervisor readiness test and two local HTTP webhook
-  tests. An independent probe reproduced `unix_bind_denied errno=1`; Internet
-  socket creation is denied as well.
+- Worker-sandbox runtime suite: `1017` tests ran, `5` skipped, with `1` failure
+  and `2` errors caused by the sandbox denying local socket binding.
+- Host integration runtime suite: `1017` tests passed with `4` skipped. This
+  rerun used the same P3-03 code state in an environment that permits the local
+  Unix and loopback HTTP fixtures.
 
 Commands:
 
@@ -75,10 +75,12 @@ python3 -m unittest discover -s tests -p 'test*.py'
 
 ## Operator decision
 
-Do not integrate this patch until the complete suite is rerun in a host that
-permits its local socket fixtures and passes. Merge only through verified
-integration followed by operator review. A later
-Phase 3B taskpack must separately reference the passed retained receipt and
-freeze its actual instance list, budgets, mode order, and live-run authority.
-Do not interpret this readiness result as a benchmark score, provider-usage
-claim, or superiority claim.
+The implementation is eligible for operator-reviewed integration because the
+host suite passed. The configured `P3-READY` gate still lacks a registered
+deterministic controller that creates and retains
+`acceptance/phase3-readiness.json`; the current test publishes only to a
+temporary fixture root. Implement and verify that controller before closing
+Phase 3A. A later Phase 3B taskpack must separately reference the passed
+retained receipt and freeze its actual instance list, budgets, mode order, and
+live-run authority. Do not interpret this readiness result as a benchmark
+score, provider-usage claim, or superiority claim.
