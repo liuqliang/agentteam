@@ -19,8 +19,8 @@
     "execution_mode": "controller_only"
   },
   "contract": {
-    "candidate_release_id": "phase3a-closure-be882a8",
-    "candidate_source_commit": "be882a873fd6e434561909400ee558bf527bcd34",
+    "candidate_release_id": "phase3a-closure-96333ee",
+    "candidate_source_commit": "96333ee6514fcaeccf5716420830c125110662b1",
     "gate_order": ["P3-READY"],
     "provider_policy": "Provider launch and provider authorization are forbidden.",
     "evidence_policy": "The fixed local fixture, full-suite output digests, readiness receipt, and operator approval are run-local authority.",
@@ -34,7 +34,7 @@
         "schema_version": "decision_record.v1",
         "decision_id": "DEC-P3-readiness-execution",
         "revision": 1,
-        "decision_kind": "execution",
+        "decision_kind": "direction",
         "subject": "provider_free_readiness_closure",
         "authority_level": "L3",
         "parent_decision_id": null,

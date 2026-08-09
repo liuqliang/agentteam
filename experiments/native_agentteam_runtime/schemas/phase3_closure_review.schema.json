@@ -21,7 +21,7 @@
     "remaining_escalations": {"type": "array", "maxItems": 0},
     "git_object_format": {"enum": ["sha1", "sha256"]},
     "preflight_release_id": {
-      "const": "phase3a-closure-be882a8"
+      "const": "phase3a-closure-96333ee"
     },
     "preflight_release_source_commit": {"$ref": "#/$defs/git_oid"},
     "plan_sha256": {"$ref": "#/$defs/sha256"},

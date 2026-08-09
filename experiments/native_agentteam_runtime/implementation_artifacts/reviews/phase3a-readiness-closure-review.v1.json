@@ -2,12 +2,12 @@
   "decision": "approved",
   "remaining_escalations": [],
   "git_object_format": "sha1",
-  "preflight_release_id": "phase3a-closure-be882a8",
-  "preflight_release_source_commit": "be882a873fd6e434561909400ee558bf527bcd34",
-  "plan_sha256": "904186de2f7250e791f190bca52116e655fdd8810187a72b39f71eef457dcb20",
-  "blueprint_sha256": "07b5ce209ae1b650a39b02cc4a080fbd1f7fa7403eb67104d0e67fe7af63434b",
+  "preflight_release_id": "phase3a-closure-96333ee",
+  "preflight_release_source_commit": "96333ee6514fcaeccf5716420830c125110662b1",
+  "plan_sha256": "eea4d92b8d045734305e735c48ee52465501dd48cc3a2a45d3b86a7175ab95ca",
+  "blueprint_sha256": "f668a4fcd3b82813615f16b2aa8f96409ecec2cc52a0e790c5d8718af8283d17",
   "research_authority_sha256": "8dca1748a211b9eaf9df5d392d7d39d755cbe3946a358c11cff2f51c5323d91d",
-  "review_schema_sha256": "6eb57773966869e0029c5d9b2cc59794b4e8ef4b871f2298e30ba61d1ee1b28a",
-  "contract_decisions_sha256": "303c21047ff3562e37405df1a3dba3e200bbb56116ea1311a5206033362f7e32",
-  "decision_contract_sha256": "3e3bc748f09739d968d3bdbfa919efff86050de266106b4330251f3dbf1dc39b"
+  "review_schema_sha256": "09b3dab4faaf2e37e9391bd491a1a439f025e169f7fe6f026fd1ef0df98987b3",
+  "contract_decisions_sha256": "2ac8072bf71523f2472b99beed8bc8c8d1ef2ae82def0b880ee40a61e6b05575",
+  "decision_contract_sha256": "3218882b6aed8e4fc7c4f9097cece5828888593c2732abb7cf3ed46546e478e6"
 }

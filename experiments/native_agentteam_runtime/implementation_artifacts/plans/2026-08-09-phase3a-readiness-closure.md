@@ -3,7 +3,7 @@
 ## Decision
 
 Close Phase 3A with one controller-only `P3-READY` run bound to runtime release
-`phase3a-closure-be882a8`. The controller must execute the frozen full test
+`phase3a-closure-96333ee`. The controller must execute the frozen full test
 suite, exercise the fixed local SWE-EVO readiness fixture, retain the canonical
 receipt, and report zero provider calls before operator review.
 
