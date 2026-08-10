@@ -29,6 +29,7 @@ The first post-D5 unfinished-work contract is:
 
 - [`implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.md`](implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.md)
 - [`implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.blueprint.json`](implementation_artifacts/plans/2026-08-06-phase3-decision-bound-benchmark-readiness.blueprint.json)
+- [`implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md`](implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md)
 
 The Phase 1 invocation-accounting and post-backlog controller surfaces are
 implemented in the candidate runtime. Their presence is not Phase 1 completion

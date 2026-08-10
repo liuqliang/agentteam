@@ -1583,8 +1583,11 @@ not the later live benchmark.
 
 Ordered follow-on work is:
 
-1. freeze a separate Phase 3B live-pilot taskpack with actual instances,
-   budgets, mode order, model profile, and operator authorization;
+1. prepare and then freeze a separate Phase 3B live-pilot taskpack with actual
+   instances, per-instance preregistrations, aggregate budgets, mode order,
+   model profile, and epoch-bound operator authorization; the provider-free
+   preparation contract is
+   [`2026-08-10-phase3b-live-pilot-preparation.md`](plans/2026-08-10-phase3b-live-pilot-preparation.md);
 2. choose Phase 4 ablations from pilot evidence;
 3. run Phase 5 normal resume and fault-injection recovery experiments;
 4. run the Phase 6 semantic-feedback long task;

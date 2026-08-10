@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase3_pilot_contract.schema.json",
+  "title": "Phase 3B provider-free pilot contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "contract", "contract_sha256"],
+  "properties": {
+    "schema_version": {"const": "phase3_pilot_contract.v1"},
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "provider_calls_authorized",
+        "readiness_binding",
+        "dataset_binding",
+        "selection",
+        "instance_bindings",
+        "modes",
+        "execution_profile",
+        "mode_order",
+        "retry_policy",
+        "abort_conditions",
+        "aggregate_budget_ceiling",
+        "live_authorization"
+      ],
+      "properties": {
+        "decision_id": {"const": "DEC-P3B-live-pilot-execution"},
+        "provider_calls_authorized": {"const": false},
+        "readiness_binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "gate_id",
+            "controller_id",
+            "relation_id",
+            "evidence_sha256",
+            "receipt_content_sha256",
+            "integration_head"
+          ],
+          "properties": {
+            "gate_id": {"const": "P3-READY"},
+            "controller_id": {"const": "phase3_readiness_controller_v1"},
+            "relation_id": {"const": "phase3_readiness_relation_v1"},
+            "evidence_sha256": {"$ref": "#/$defs/sha256"},
+            "receipt_content_sha256": {"$ref": "#/$defs/sha256"},
+            "integration_head": {"$ref": "#/$defs/git_object_id"}
+          }
+        },
+        "dataset_binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "benchmark",
+            "source_repository",
+            "source_commit",
+            "artifact_path",
+            "artifact_sha256",
+            "split",
+            "row_count"
+          ],
+          "properties": {
+            "benchmark": {"const": "swe_evo"},
+            "source_repository": {"type": "string", "minLength": 1},
+            "source_commit": {"$ref": "#/$defs/git_object_id"},
+            "artifact_path": {"type": "string", "minLength": 1},
+            "artifact_sha256": {"$ref": "#/$defs/sha256"},
+            "split": {"const": "test"},
+            "row_count": {"const": 48}
+          }
+        },
+        "selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["selection_sha256", "ordered_instance_ids"],
+          "properties": {
+            "selection_sha256": {"$ref": "#/$defs/sha256"},
+            "ordered_instance_ids": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/nonempty_string"}
+            }
+          }
+        },
+        "instance_bindings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "instance_id",
+              "preregistration_authorization_sha256",
+              "maximum_total_tokens",
+              "maximum_wall_time_seconds"
+            ],
+            "properties": {
+              "instance_id": {"$ref": "#/$defs/nonempty_string"},
+              "preregistration_authorization_sha256": {"$ref": "#/$defs/sha256"},
+              "maximum_total_tokens": {"type": "integer", "minimum": 1},
+              "maximum_wall_time_seconds": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            }
+          }
+        },
+        "modes": {"$ref": "#/$defs/modes"},
+        "execution_profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runtime", "model", "execution"],
+          "properties": {
+            "runtime": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "agentteam_release_commit",
+                "codex_cli_version",
+                "environment_version"
+              ],
+              "properties": {
+                "agentteam_release_commit": {"$ref": "#/$defs/git_object_id"},
+                "codex_cli_version": {"$ref": "#/$defs/nonempty_string"},
+                "environment_version": {"$ref": "#/$defs/nonempty_string"}
+              }
+            },
+            "model": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["model", "reasoning_profile", "service_configuration_sha256"],
+              "properties": {
+                "model": {"$ref": "#/$defs/nonempty_string"},
+                "reasoning_profile": {"$ref": "#/$defs/nonempty_string"},
+                "service_configuration_sha256": {"$ref": "#/$defs/sha256"}
+              }
+            },
+            "execution": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "tools_sha256",
+                "network_policy",
+                "sandbox_policy_sha256",
+                "permission_policy_sha256",
+                "host_class",
+                "cpu_limit",
+                "memory_limit_bytes",
+                "external_services_sha256",
+                "benchmark_visible_tests_sha256",
+                "termination_policy_sha256",
+                "shared_dependency_cache_sha256"
+              ],
+              "properties": {
+                "tools_sha256": {"$ref": "#/$defs/sha256"},
+                "network_policy": {"$ref": "#/$defs/nonempty_string"},
+                "sandbox_policy_sha256": {"$ref": "#/$defs/sha256"},
+                "permission_policy_sha256": {"$ref": "#/$defs/sha256"},
+                "host_class": {"$ref": "#/$defs/nonempty_string"},
+                "cpu_limit": {"type": "integer", "minimum": 1},
+                "memory_limit_bytes": {"type": "integer", "minimum": 1},
+                "external_services_sha256": {"$ref": "#/$defs/sha256"},
+                "benchmark_visible_tests_sha256": {"$ref": "#/$defs/sha256"},
+                "termination_policy_sha256": {"$ref": "#/$defs/sha256"},
+                "shared_dependency_cache_sha256": {"$ref": "#/$defs/sha256"}
+              }
+            }
+          }
+        },
+        "mode_order": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/mode_permutation"}
+        },
+        "retry_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider_retry_limit", "retryable_failures", "budget_accounting"],
+          "properties": {
+            "provider_retry_limit": {"type": "integer", "minimum": 0, "maximum": 2},
+            "retryable_failures": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "enum": ["provider_transport_error", "provider_rate_limit"]
+              }
+            },
+            "budget_accounting": {
+              "const": "all_reported_usage_and_wall_time_count_toward_instance_budget"
+            }
+          }
+        },
+        "abort_conditions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "usage_coverage_below_percent",
+            "cross_mode_isolation_violation",
+            "gold_visibility_violation",
+            "contract_digest_mismatch",
+            "budget_ceiling_reached"
+          ],
+          "properties": {
+            "usage_coverage_below_percent": {"const": 100},
+            "cross_mode_isolation_violation": {"const": true},
+            "gold_visibility_violation": {"const": true},
+            "contract_digest_mismatch": {"const": true},
+            "budget_ceiling_reached": {"const": true}
+          }
+        },
+        "aggregate_budget_ceiling": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "maximum_total_tokens",
+            "maximum_wall_time_seconds",
+            "max_inflight_model_invocations"
+          ],
+          "properties": {
+            "maximum_total_tokens": {"type": "integer", "minimum": 1},
+            "maximum_wall_time_seconds": {"type": "number", "exclusiveMinimum": 0},
+            "max_inflight_model_invocations": {"const": 1}
+          }
+        },
+        "live_authorization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required", "gate_id", "status"],
+          "properties": {
+            "required": {"const": true},
+            "gate_id": {"const": "P3-LIVE"},
+            "status": {"const": "not_authorized"}
+          }
+        }
+      }
+    },
+    "contract_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "git_object_id": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "nonempty_string": {"type": "string", "minLength": 1},
+    "modes": {
+      "type": "array",
+      "prefixItems": [
+        {"const": "single_codex"},
+        {"const": "agentteam_direct"},
+        {"const": "agentteam_full"}
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "mode_permutation": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["single_codex", "agentteam_direct", "agentteam_full"]
+      }
+    }
+  }
+}
