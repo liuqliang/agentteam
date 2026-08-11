@@ -12,7 +12,7 @@ result and the research authority; it does not reopen Phase 1 usage counting,
 Phase 2 mode fairness, or D0-D5 artifact authority.
 
 The tracked
-[`2026-08-10-phase3b-provider-free-preparation-v2.blueprint.json`](2026-08-10-phase3b-provider-free-preparation-v2.blueprint.json)
+[`2026-08-10-phase3b-provider-free-preparation-v3.blueprint.json`](2026-08-10-phase3b-provider-free-preparation-v3.blueprint.json)
 implements the deterministic preparation machinery for `P3B-00` through
 `P3B-03`. It may validate fixtures and emit a blocked decision-input report,
 but it may not guess unresolved experiment parameters, publish live

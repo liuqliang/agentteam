@@ -1,0 +1,73 @@
+{
+  "schema_version": "repo_map_handoff.v1",
+  "task_id": "P3B-00",
+  "status": "operator_accepted_with_corrections",
+  "code_state_commit": "89acbfe0aab29d6576a8f600543055bfee6a5a28",
+  "objective": "Bind the fixed SWE-EVO inventory to a gold-blind allowlisted routing manifest.",
+  "fixed_inventory_binding": {
+    "source_commit": "9b83d5af943ba7a17567336f5b18239f73960219",
+    "dataset_artifact_sha256": "74e7c63160ada4ceba71d5d89a9bb7c9794f4574b384458d546eb65cdb730520",
+    "split": "test",
+    "row_count": 48
+  },
+  "implementation": {
+    "module": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_pilot_preparation.py",
+    "manifest_schema": "experiments/native_agentteam_runtime/schemas/phase3_routing_manifest.schema.json",
+    "tests": "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py",
+    "public_apis": [
+      "fixed_dataset_binding",
+      "convert_swe_evo_inventory",
+      "build_gold_blind_routing_manifest",
+      "validate_routing_manifest",
+      "routing_manifest_bytes"
+    ],
+    "allowlisted_routing_fields": [
+      "instance_id",
+      "repository",
+      "complexity_stratum",
+      "language",
+      "tags"
+    ],
+    "fail_closed_invariants": [
+      "fixed source repository, commit, artifact path, and artifact digest",
+      "exactly 48 routing rows",
+      "exact ordered routing field allowlist",
+      "no evaluator, prior-result, or unknown fields",
+      "canonical manifest digest"
+    ]
+  },
+  "reusable_phase3a_apis": [
+    {
+      "path": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/benchmark_adapter.py",
+      "apis": [
+        "validate_swe_evo_metadata",
+        "validate_benchmark_instance_selection",
+        "canonical digest and deterministic selection"
+      ]
+    },
+    {
+      "path": "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_pilot.py",
+      "apis": [
+        "build_phase3_pilot_contract",
+        "validate_phase3_pilot_contract"
+      ]
+    }
+  ],
+  "evidence_summary": {
+    "evidence_level": "L2",
+    "evidence_status": "complete",
+    "trace_carrier": [
+      {
+        "type": "command",
+        "command": "python3 -m unittest test_phase3_pilot_preparation test_benchmark_adapter test_phase3_pilot",
+        "result": "26 tests passed"
+      },
+      {
+        "type": "command",
+        "command": "scripts/test-native-runtime.sh integration",
+        "result": "701 tests passed, 2 skipped"
+      }
+    ],
+    "missing_evidence": []
+  }
+}
