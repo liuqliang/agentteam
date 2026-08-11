@@ -18,6 +18,11 @@ from .benchmark_adapter import (
     validate_benchmark_instance_selection,
     validate_swe_evo_metadata,
 )
+from .benchmark_preregistration import (
+    BenchmarkPreregistrationError,
+    build_benchmark_preregistration,
+    validate_benchmark_preregistration,
+)
 from .experiment_contract import (
     ExperimentContractError,
     canonical_json_bytes,
@@ -35,6 +40,8 @@ ROUTING_MANIFEST_SCHEMA_VERSION = "phase3_routing_manifest.v1"
 PILOT_DECISIONS_SCHEMA_VERSION = "phase3_pilot_decisions.v1"
 DECISION_INPUT_REPORT_SCHEMA_VERSION = "phase3_decision_input_report.v1"
 SELECTION_AUTHORITY_SCHEMA_VERSION = "phase3_selection_authority.v1"
+DIRECT_TASKPACK_SCHEMA_VERSION = "phase3_direct_taskpack.v1"
+INSTANCE_MATERIALIZATION_SCHEMA_VERSION = "phase3_instance_materialization.v1"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 ROUTING_FIELDS = (
@@ -424,6 +431,450 @@ def validate_phase3_selection_authority(
                 "selection authority does not bind the decision input"
             )
     return value
+
+
+def build_phase3_instance_visible_input(
+    *,
+    instance_id,
+    selection_authority,
+    decisions,
+    task_input,
+    execution_profile,
+):
+    """Build one runtime-visible input from explicit, approved authorities.
+
+    ``task_input`` contains only the instance-specific ``repository`` and
+    ``task`` sections. ``execution_profile`` contains the common ``runtime``,
+    ``model``, and ``execution`` sections. The model and reasoning profile are
+    checked against the approved decision input rather than inferred here.
+    """
+
+    authority = validate_phase3_selection_authority(
+        selection_authority,
+        decisions=decisions,
+    )
+    decision = validate_phase3_pilot_decisions(decisions)
+    _require_selected_instance(authority, instance_id)
+    task_value = _require_exact_object(
+        task_input,
+        {"repository", "task"},
+        "task_input",
+    )
+    profile = _require_exact_object(
+        execution_profile,
+        {"runtime", "model", "execution"},
+        "execution_profile",
+    )
+    model = profile["model"]
+    if not isinstance(model, dict):
+        raise Phase3PreparationError("execution_profile.model must be an object")
+    if model.get("model") != decision["execution"]["model"]:
+        raise Phase3PreparationError(
+            "execution profile model does not match the approved decision input"
+        )
+    if model.get("reasoning_profile") != decision["execution"][
+        "reasoning_profile"
+    ]:
+        raise Phase3PreparationError(
+            "execution profile reasoning_profile does not match the approved decision input"
+        )
+    visible = {
+        "repository": task_value["repository"],
+        "runtime": profile["runtime"],
+        "task": task_value["task"],
+        "model": model,
+        "execution": profile["execution"],
+    }
+    return _validate_preregistration_definition(
+        "shared_visible_inputs",
+        visible,
+    )
+
+
+build_per_instance_visible_input = build_phase3_instance_visible_input
+
+
+def build_phase3_instance_direct_taskpack(
+    *,
+    instance_id,
+    selection_authority,
+    decisions,
+    visible_inputs,
+    shared_budget,
+):
+    """Build a deterministic, frozen direct-mode taskpack for one instance."""
+
+    authority = validate_phase3_selection_authority(
+        selection_authority,
+        decisions=decisions,
+    )
+    decision = validate_phase3_pilot_decisions(decisions)
+    _require_selected_instance(authority, instance_id)
+    visible = _validate_preregistration_definition(
+        "shared_visible_inputs",
+        visible_inputs,
+    )
+    budget = _validate_approved_budget(shared_budget, decision)
+    body = {
+        "taskpack_id": (
+            "phase3b-direct-"
+            + canonical_json_sha256(
+                {
+                    "instance_id": instance_id,
+                    "selection_authority_sha256": authority[
+                        "selection_authority_sha256"
+                    ],
+                }
+            )[:20]
+        ),
+        "instance_id": instance_id,
+        "status": "frozen",
+        "execution_mode": "agentteam_direct",
+        "live_authoring": False,
+        "selection_authority_sha256": authority[
+            "selection_authority_sha256"
+        ],
+        "visible_inputs": visible,
+        "shared_budget": budget,
+        "tasks": [
+            {
+                "task_id": "implementation",
+                "objective": visible["task"]["goal"],
+                "constraints": visible["task"]["constraints"],
+                "non_goals": visible["task"]["non_goals"],
+                "acceptance_commands": visible["task"][
+                    "acceptance_commands"
+                ],
+            }
+        ],
+        "policy": {
+            "gold_visibility": "evaluator_only",
+            "cross_mode_artifact_access": "forbidden",
+        },
+    }
+    taskpack = {
+        "schema_version": DIRECT_TASKPACK_SCHEMA_VERSION,
+        "taskpack": body,
+        "taskpack_sha256": canonical_json_sha256(body),
+    }
+    return validate_phase3_instance_direct_taskpack(
+        taskpack,
+        instance_id=instance_id,
+        selection_authority=authority,
+        visible_inputs=visible,
+        shared_budget=budget,
+    )
+
+
+build_per_instance_direct_taskpack = build_phase3_instance_direct_taskpack
+
+
+def validate_phase3_instance_direct_taskpack(
+    taskpack,
+    *,
+    instance_id=None,
+    selection_authority=None,
+    visible_inputs=None,
+    shared_budget=None,
+):
+    """Validate a sealed per-instance direct taskpack and optional sources."""
+
+    value = _require_exact_object(
+        taskpack,
+        {"schema_version", "taskpack", "taskpack_sha256"},
+        "direct taskpack",
+    )
+    if value["schema_version"] != DIRECT_TASKPACK_SCHEMA_VERSION:
+        raise Phase3PreparationError("unsupported direct taskpack schema_version")
+    body = _require_exact_object(
+        value["taskpack"],
+        {
+            "taskpack_id",
+            "instance_id",
+            "status",
+            "execution_mode",
+            "live_authoring",
+            "selection_authority_sha256",
+            "visible_inputs",
+            "shared_budget",
+            "tasks",
+            "policy",
+        },
+        "direct taskpack body",
+    )
+    if value["taskpack_sha256"] != canonical_json_sha256(body):
+        raise Phase3PreparationError(
+            "taskpack_sha256 does not bind canonical direct taskpack content"
+        )
+    if (
+        body["status"] != "frozen"
+        or body["execution_mode"] != "agentteam_direct"
+        or body["live_authoring"] is not False
+    ):
+        raise Phase3PreparationError("direct taskpack must be frozen before gold")
+    if not isinstance(body["taskpack_id"], str) or _SAFE_ID.fullmatch(
+        body["taskpack_id"]
+    ) is None:
+        raise Phase3PreparationError("direct taskpack_id must be a safe identifier")
+    visible = _validate_preregistration_definition(
+        "shared_visible_inputs",
+        body["visible_inputs"],
+    )
+    _validate_preregistration_definition("budget", body["shared_budget"])
+    expected_tasks = [
+        {
+            "task_id": "implementation",
+            "objective": visible["task"]["goal"],
+            "constraints": visible["task"]["constraints"],
+            "non_goals": visible["task"]["non_goals"],
+            "acceptance_commands": visible["task"]["acceptance_commands"],
+        }
+    ]
+    if body["tasks"] != expected_tasks:
+        raise Phase3PreparationError(
+            "direct taskpack task does not match the runtime-visible task"
+        )
+    if body["policy"] != {
+        "gold_visibility": "evaluator_only",
+        "cross_mode_artifact_access": "forbidden",
+    }:
+        raise Phase3PreparationError("direct taskpack visibility policy changed")
+    if instance_id is not None and body["instance_id"] != instance_id:
+        raise Phase3PreparationError("direct taskpack instance_id mismatch")
+    if selection_authority is not None:
+        authority = validate_phase3_selection_authority(selection_authority)
+        _require_selected_instance(authority, body["instance_id"])
+        if body["selection_authority_sha256"] != authority[
+            "selection_authority_sha256"
+        ]:
+            raise Phase3PreparationError(
+                "direct taskpack does not bind the selection authority"
+            )
+    if visible_inputs is not None and canonical_json_bytes(
+        visible
+    ) != canonical_json_bytes(
+        _validate_preregistration_definition(
+            "shared_visible_inputs",
+            visible_inputs,
+        )
+    ):
+        raise Phase3PreparationError("direct taskpack visible input mismatch")
+    if shared_budget is not None and canonical_json_bytes(
+        body["shared_budget"]
+    ) != canonical_json_bytes(
+        _validate_preregistration_definition("budget", shared_budget)
+    ):
+        raise Phase3PreparationError("direct taskpack budget mismatch")
+    return value
+
+
+def build_phase3_instance_preregistration(
+    *,
+    instance_id,
+    selection_authority,
+    decisions,
+    visible_inputs,
+    direct_taskpack,
+    shared_budget,
+    research_authority_sha256,
+    mode_order,
+):
+    """Build one immutable v1 preregistration for exactly one instance."""
+
+    authority = validate_phase3_selection_authority(
+        selection_authority,
+        decisions=decisions,
+    )
+    decision = validate_phase3_pilot_decisions(decisions)
+    _require_selected_instance(authority, instance_id)
+    visible = _validate_preregistration_definition(
+        "shared_visible_inputs",
+        visible_inputs,
+    )
+    budget = _validate_approved_budget(shared_budget, decision)
+    taskpack = validate_phase3_instance_direct_taskpack(
+        direct_taskpack,
+        instance_id=instance_id,
+        selection_authority=authority,
+        visible_inputs=visible,
+        shared_budget=budget,
+    )
+    try:
+        preregistration = build_benchmark_preregistration(
+            research_authority_sha256=research_authority_sha256,
+            selection_sha256=authority["selection"]["selection_sha256"],
+            ordered_instance_ids=[instance_id],
+            shared_visible_inputs=visible,
+            shared_budget=budget,
+            direct_taskpack_sha256_by_instance={
+                instance_id: taskpack["taskpack_sha256"]
+            },
+            non_inferiority_margin=decision["thresholds"][
+                "non_inferiority_margin"
+            ],
+            max_token_cost_ratio=decision["thresholds"][
+                "max_token_cost_ratio"
+            ],
+            max_wall_time_cost_ratio=decision["thresholds"][
+                "max_wall_time_cost_ratio"
+            ],
+            preselected_secondary_benefit_metric=decision["thresholds"][
+                "preselected_secondary_benefit_metric"
+            ],
+            mode_order=mode_order,
+        )
+    except BenchmarkPreregistrationError as exc:
+        raise Phase3PreparationError(str(exc)) from exc
+    return validate_benchmark_preregistration(preregistration)
+
+
+build_per_instance_preregistration = build_phase3_instance_preregistration
+
+
+def materialize_phase3_instance_authorities(
+    *,
+    selection_authority,
+    decisions,
+    task_inputs_by_instance,
+    execution_profile,
+    shared_budget,
+    research_authority_sha256,
+    mode_order,
+):
+    """Materialize visible inputs, direct taskpacks, and preregistrations.
+
+    The three maps cover the frozen selection exactly and preserve selection
+    order in their insertion order. Distinct instances are forbidden from
+    reusing one canonical visible-input authority.
+    """
+
+    authority = validate_phase3_selection_authority(
+        selection_authority,
+        decisions=decisions,
+    )
+    decision = validate_phase3_pilot_decisions(decisions)
+    task_inputs = _json_object_snapshot(task_inputs_by_instance)
+    if task_inputs is None:
+        raise Phase3PreparationError("task_inputs_by_instance must be an object")
+    ordered_ids = authority["selection"]["ordered_instance_ids"]
+    if set(task_inputs) != set(ordered_ids):
+        raise Phase3PreparationError(
+            "per-instance task inputs must cover the selection exactly"
+        )
+    budget = _validate_approved_budget(shared_budget, decision)
+    visible_by_instance = {}
+    taskpacks_by_instance = {}
+    preregistrations_by_instance = {}
+    visible_digests = set()
+    for instance_id in ordered_ids:
+        visible = build_phase3_instance_visible_input(
+            instance_id=instance_id,
+            selection_authority=authority,
+            decisions=decision,
+            task_input=task_inputs[instance_id],
+            execution_profile=execution_profile,
+        )
+        visible_digest = canonical_json_sha256(visible)
+        if visible_digest in visible_digests:
+            raise Phase3PreparationError(
+                "different instances cannot reuse shared_visible_inputs authority"
+            )
+        visible_digests.add(visible_digest)
+        taskpack = build_phase3_instance_direct_taskpack(
+            instance_id=instance_id,
+            selection_authority=authority,
+            decisions=decision,
+            visible_inputs=visible,
+            shared_budget=budget,
+        )
+        preregistration = build_phase3_instance_preregistration(
+            instance_id=instance_id,
+            selection_authority=authority,
+            decisions=decision,
+            visible_inputs=visible,
+            direct_taskpack=taskpack,
+            shared_budget=budget,
+            research_authority_sha256=research_authority_sha256,
+            mode_order=mode_order,
+        )
+        visible_by_instance[instance_id] = visible
+        taskpacks_by_instance[instance_id] = taskpack
+        preregistrations_by_instance[instance_id] = preregistration
+    materialization = {
+        "schema_version": INSTANCE_MATERIALIZATION_SCHEMA_VERSION,
+        "selection_authority_sha256": authority[
+            "selection_authority_sha256"
+        ],
+        "ordered_instance_ids": list(ordered_ids),
+        "visible_inputs_by_instance": visible_by_instance,
+        "direct_taskpacks_by_instance": taskpacks_by_instance,
+        "preregistrations_by_instance": preregistrations_by_instance,
+    }
+    materialization["materialization_sha256"] = canonical_json_sha256(
+        materialization
+    )
+    return materialization
+
+
+materialize_per_instance_preregistrations = materialize_phase3_instance_authorities
+
+
+def _require_selected_instance(authority, instance_id):
+    if not isinstance(instance_id, str) or not instance_id:
+        raise Phase3PreparationError("instance_id must be a non-empty string")
+    if instance_id not in authority["selection"]["ordered_instance_ids"]:
+        raise Phase3PreparationError("instance_id is not in the frozen selection")
+
+
+def _require_exact_object(value, fields, label):
+    snapshot = _json_object_snapshot(value)
+    if snapshot is None:
+        raise Phase3PreparationError(f"{label} must be a JSON object")
+    if set(snapshot) != set(fields):
+        raise Phase3PreparationError(f"{label} fields do not match the fixed allowlist")
+    return snapshot
+
+
+def _validate_preregistration_definition(definition, value):
+    snapshot = _json_object_snapshot(value)
+    if snapshot is None:
+        raise Phase3PreparationError(f"{definition} must be a JSON object")
+    schema = json.loads(
+        schema_path("benchmark_preregistration.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    definition_schema = {
+        "$ref": f"#/$defs/{definition}",
+        "$defs": schema["$defs"],
+    }
+    errors = sorted(
+        Draft202012Validator(definition_schema).iter_errors(snapshot),
+        key=lambda error: [str(part) for part in error.absolute_path],
+    )
+    if errors:
+        location = ".".join(str(part) for part in errors[0].absolute_path)
+        raise Phase3PreparationError(
+            f"{definition} validation failed at {location or '<root>'}: "
+            f"{errors[0].message}"
+        )
+    return snapshot
+
+
+def _validate_approved_budget(shared_budget, decisions):
+    budget = _validate_preregistration_definition("budget", shared_budget)
+    approved = decisions["execution"]["per_instance_budget"]
+    if budget["max_total_tokens"] != approved["max_total_tokens"]:
+        raise Phase3PreparationError(
+            "shared budget max_total_tokens does not match the approved decision"
+        )
+    if budget["max_wall_time_seconds"] != approved[
+        "max_wall_time_seconds"
+    ]:
+        raise Phase3PreparationError(
+            "shared budget max_wall_time_seconds does not match the approved decision"
+        )
+    return budget
 
 
 def _missing_decision_paths(decisions):
