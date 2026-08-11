@@ -5,6 +5,45 @@ except ImportError:
 
 
 class SchedulerMixin:
+    def test_two_phase_scheduler_state_write_preserves_previous_snapshot_on_replace_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "run"
+            backlog_path = _write_backlog(tmp_path, write_scope=["generated/"])
+            scheduler = TwoPhaseFileScheduler(
+                FIXTURES / "sample_agent_pool.json",
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                max_attempts=1,
+            )
+            state_path = output_dir / "state" / "two_phase_scheduler_state.json"
+            scheduler._write_state()
+            previous = state_path.read_bytes()
+            scheduler.state["atomic_write_probe"] = "new-value"
+
+            with mock.patch(
+                "agentteam_runtime.two_phase_scheduler.os.replace",
+                side_effect=OSError("simulated interrupted replacement"),
+            ):
+                with self.assertRaisesRegex(OSError, "interrupted replacement"):
+                    scheduler._write_state()
+
+            self.assertEqual(state_path.read_bytes(), previous)
+            self.assertNotIn("atomic_write_probe", json.loads(previous))
+            self.assertEqual(
+                list(state_path.parent.glob(f".{state_path.name}.tmp-*")),
+                [],
+            )
+
+            scheduler._write_state()
+            self.assertEqual(
+                json.loads(state_path.read_text(encoding="utf-8"))[
+                    "atomic_write_probe"
+                ],
+                "new-value",
+            )
+
     def test_two_phase_scheduler_notifies_manual_gate_after_canonical_event(self):
         class RecordingNotificationSink:
             def __init__(self):

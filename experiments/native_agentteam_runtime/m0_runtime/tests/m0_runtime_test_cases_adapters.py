@@ -926,6 +926,10 @@ class AdaptersMixin:
         self.assertIn("operator_summary", prompt)
         self.assertIn("what_changed", prompt)
         self.assertIn("operator_summary natural-language fields must be written in Chinese", prompt)
+        self.assertIn(
+            "verification_additions command runs from the repository root",
+            prompt,
+        )
 
 
     def test_codex_runtime_adapter_includes_evidence_policy_contract(self):

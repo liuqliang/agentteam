@@ -772,6 +772,7 @@ class CodexRuntimeAdapter:
                 "operator_summary natural-language fields must be written in Chinese (zh-CN); keep code symbols, file paths, commands, and metric names literal.",
                 "If you add or modify tests, include output.verification_additions as a list of objects with label, command, and reason.",
                 "Each verification_additions command must be a JSON list such as [\"python3\",\"-m\",\"unittest\",\"tests.test_example\"], not a shell string.",
+                "Each verification_additions command runs from the repository root; make every path and module name valid from that directory.",
                 "Allowed verification_additions executables are python, python3, python3.x, and pytest.",
                 "If mailbox payload has required_deliverables, operator_summary.deliverables must be a list of objects.",
                 "Each deliverables item must use the exact required deliverable string in its deliverable field and include summary plus evidence.",

@@ -2187,7 +2187,12 @@ class TwoPhaseFileScheduler:
             retryable = True
         elif result.get("integration_verification_status") == "failed":
             failure_category = "integration_verification_failed"
-            retryable = True
+            retryable = result.get(
+                "integration_verification_failure_reason"
+            ) not in {
+                "verification_addition_failed",
+                "verification_addition_rejected",
+            }
         elif result.get("integration_block_reason") == "evidence_incomplete":
             failure_category = "integration_evidence_incomplete"
             retryable = False
@@ -3492,7 +3497,25 @@ class TwoPhaseFileScheduler:
 
     def _write_state(self):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(self.state, sort_keys=True), encoding="utf-8")
+        temporary = self.state_path.with_name(
+            f".{self.state_path.name}.tmp-{os.getpid()}-{time.time_ns()}"
+        )
+        try:
+            with temporary.open("x", encoding="utf-8") as stream:
+                stream.write(json.dumps(self.state, sort_keys=True))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.state_path)
+            descriptor = os.open(
+                self.state_path.parent,
+                os.O_RDONLY | os.O_DIRECTORY,
+            )
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _apply_run_stop_request(self):
         request = read_run_stop_request(self.output_dir)

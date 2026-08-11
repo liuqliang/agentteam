@@ -63,9 +63,11 @@ denial_reason: mandatory_operator_review_and_epoch_authorization_required
 
 ## Verification
 
-- `python3 -m unittest discover -s tests -p 'test_phase3_pilot_preparation.py' -v`:
+- From `experiments/native_agentteam_runtime/m0_runtime`,
+  `python3 -m unittest discover -s tests -p 'test_phase3_pilot_preparation.py' -v`:
   `26` tests passed.
-- `python3 -m unittest discover -s tests -p 'test_phase3_pilot*.py' -v`:
+- From `experiments/native_agentteam_runtime/m0_runtime`,
+  `python3 -m unittest discover -s tests -p 'test_phase3_pilot*.py' -v`:
   `33` tests passed.
 - `python3 -m agentteam_runtime.artifact_lint --root ..`:
   `167` JSON files and `1` JSONL file checked, `0` errors.
@@ -81,3 +83,22 @@ authorized task must supply the actual approved experiment decisions, review
 the materialized instance authorities and aggregate ceiling, open a fresh
 `P3-LIVE` epoch, and publish an exactly matching operator authorization before
 any scored execution. This report must not be used as that authorization.
+
+## Operator dogfood decision
+
+The scheduler's primary integration command passed after applying P3B-03, but
+the worker-supplied focused command was interpreted from the repository root
+and used the wrong relative `tests` path. This was a verification-description
+failure, not an implementation failure. The operator therefore accepted the
+preserved code-state commit after independently rerunning the focused and
+integration lanes, and made these control-plane decisions:
+
+- scheduler state snapshots use fsync-backed atomic replacement so an
+  interrupted write cannot truncate the last valid snapshot;
+- worker verification additions are explicitly repository-root relative;
+- a failed or rejected worker verification addition blocks for review and
+  preserves the patch instead of automatically spending another model call.
+
+The independent post-review integration lane passed `702` tests with `2`
+skips. The accidentally launched retry produced no terminal result or token
+usage record and was stopped before further scheduling.

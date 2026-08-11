@@ -325,6 +325,20 @@ class WorkersMixin:
             self.assertFalse((baseline_worktree / "generated" / "failing_added_check.json").exists())
             self.assertEqual(result["integration_commit_status"], "skipped")
             self.assertEqual(blocked[0]["payload"]["block_reason"], "verification_failed")
+            self.assertEqual(result["task_status"], "blocked")
+            self.assertFalse(result["retryable"])
+            self.assertFalse(result["retry_allowed"])
+            self.assertEqual(result["retry_decision"]["action"], "review_required")
+            self.assertEqual(scheduler.dispatch_ready()["dispatch_count"], 0)
+            events = [
+                json.loads(line)
+                for line in (output_dir / "events.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertFalse(
+                any(event["event_type"] == "recovery_routed" for event in events)
+            )
 
 
     def test_two_phase_worker_verification_addition_rejects_unallowed_command(self):
