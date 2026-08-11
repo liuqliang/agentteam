@@ -1,6 +1,6 @@
 {
   "schema_version": "agentteam_taskpack_blueprint.v1",
-  "blueprint_id": "phase3b-provider-free-preparation-v1",
+  "blueprint_id": "phase3b-provider-free-preparation-v2",
   "source_plan": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md",
   "research_authority": "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md",
   "schema_inventory": [
@@ -11,7 +11,7 @@
     "experiments/native_agentteam_runtime/schemas/taskpack_blueprint.schema.json"
   ],
   "taskpack": {
-    "taskpack_id": "phase3b-provider-free-preparation-v1",
+    "taskpack_id": "phase3b-provider-free-preparation-v2",
     "goal_kind": "implementation",
     "milestone": "research-phase-3b-provider-free-preparation",
     "goal": "Implement the deterministic, gold-blind Phase 3B preparation path through aggregate preflight without authorizing or executing a scored model call.",
@@ -120,7 +120,7 @@
     }
   },
   "approval": {
-    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase3b-provider-free-preparation-review.v1.json",
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase3b-provider-free-preparation-review.v2.json",
     "schema_path": "experiments/native_agentteam_runtime/schemas/phase3b_preparation_review.schema.json",
     "required_decision": "approved",
     "git_object_format_required": true,
@@ -220,7 +220,7 @@
       ],
       "stop_condition": "Stop if conversion requires exposing evaluator-only fields or silently installing an undeclared runtime dependency.",
       "input_artifacts": [
-        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v1.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v2.blueprint.json",
         "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md",
         "experiments/native_agentteam_runtime/implementation_artifacts/reports/phase3-benchmark-readiness.md"
       ],
@@ -266,7 +266,7 @@
       ],
       "stop_condition": "Stop and report the missing decision rather than choosing a complexity rule, quota, model, budget, metric, or threshold.",
       "input_artifacts": [
-        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v1.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v2.blueprint.json",
         "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md",
         ".agentteam/generated/repo_map_handoff.json"
       ],
@@ -310,7 +310,7 @@
       ],
       "stop_condition": "Stop if an instance lacks a visible goal, repository commit, acceptance command, or approved budget.",
       "input_artifacts": [
-        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v1.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v2.blueprint.json",
         "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md",
         "experiments/native_agentteam_runtime/schemas/benchmark_preregistration.schema.json",
         ".agentteam/generated/repo_map_handoff.json"
@@ -358,7 +358,7 @@
       ],
       "stop_condition": "Stop before publishing phase3_live_authorization.v1, admitting P3-LIVE, invoking a scored model, merging source, pushing, or activating a release.",
       "input_artifacts": [
-        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v1.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v2.blueprint.json",
         "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md",
         "experiments/native_agentteam_runtime/schemas/phase3_pilot_contract.schema.json",
         "experiments/native_agentteam_runtime/schemas/phase3_live_authorization.schema.json",
