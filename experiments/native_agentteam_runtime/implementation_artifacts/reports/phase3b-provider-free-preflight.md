@@ -97,8 +97,12 @@ integration lanes, and made these control-plane decisions:
   interrupted write cannot truncate the last valid snapshot;
 - worker verification additions are explicitly repository-root relative;
 - a failed or rejected worker verification addition blocks for review and
-  preserves the patch instead of automatically spending another model call.
+  preserves the patch instead of automatically spending another model call;
+- consumed outputs of frozen `done` prerequisites are imported from the clean,
+  tracked Git baseline into the run-local artifact store; missing, untracked,
+  or non-regular Git entries fail before worker dispatch, and unrelated
+  worktree dirt is never imported.
 
-The independent post-review integration lane passed `702` tests with `2`
+The independent post-review integration lane passed `706` tests with `2`
 skips. The accidentally launched retry produced no terminal result or token
 usage record and was stopped before further scheduling.

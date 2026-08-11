@@ -77,6 +77,7 @@ from .notifications import DEFAULT_NOTIFICATION_EVENT_TYPES
 from .operator_control import read_run_stop_request
 from .planner_context import build_planner_context
 from .runtime_artifacts import (
+    bootstrap_completed_runtime_artifacts,
     materialize_runtime_input_artifacts,
     persist_runtime_artifacts,
     runtime_input_artifact_producers,
@@ -264,6 +265,12 @@ class TwoPhaseFileScheduler:
         self.run_id = "RUN-TWO-PHASE-SCHEDULER"
         self.decision_binding = load_run_decision_binding(self.output_dir)
         self.state = self._load_or_create_state()
+        bootstrap_completed_runtime_artifacts(
+            self.output_dir,
+            self.project_root,
+            self.state["backlog"],
+            source_ref=self.initial_integration_base_ref or "HEAD",
+        )
         self._bind_experiment_runtime_context()
         self._bind_experiment_controller()
 

@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -52,6 +53,94 @@ def persist_runtime_artifacts(
             persisted.append(record)
         _write_json_atomically(manifest_path, manifest)
         return persisted
+
+
+def bootstrap_completed_runtime_artifacts(
+    output_dir,
+    project_root,
+    backlog,
+    *,
+    source_ref="HEAD",
+):
+    """Import consumed outputs of completed tasks from the frozen Git baseline."""
+
+    if project_root is None:
+        return []
+    items = backlog.get("items", []) if isinstance(backlog, dict) else []
+    tasks_by_id = {
+        item.get("task_id"): item
+        for item in items
+        if isinstance(item, dict) and item.get("task_id")
+    }
+    required = {}
+    for consumer in items:
+        if not isinstance(consumer, dict) or consumer.get("backlog_status") == "done":
+            continue
+        for artifact_path, producer_id in runtime_input_artifact_producers(
+            backlog,
+            consumer,
+        ).items():
+            producer = tasks_by_id.get(producer_id, {})
+            if producer.get("backlog_status") == "done":
+                required[artifact_path] = producer_id
+    if not required:
+        return []
+
+    project_root = Path(project_root)
+    source_commit = _git_output(
+        project_root,
+        ["rev-parse", source_ref],
+    ).decode("ascii").strip()
+    store_root = Path(output_dir) / "runtime_artifacts"
+    manifest_path = store_root / "manifest.json"
+    with _runtime_artifact_store_lock(store_root, exclusive=True):
+        manifest = _read_runtime_artifact_manifest(manifest_path)
+        records = manifest.setdefault("artifacts", {})
+        imported = []
+        for relative_path, producer_id in sorted(required.items()):
+            existing = records.get(relative_path)
+            if existing is not None:
+                _validate_runtime_input_artifacts_unlocked(
+                    store_root,
+                    {relative_path: producer_id},
+                )
+                imported.append(existing)
+                continue
+            tree_entry = _git_output(
+                project_root,
+                ["ls-tree", source_commit, "--", relative_path],
+                artifact_path=relative_path,
+            ).decode("utf-8", errors="replace")
+            if not tree_entry or tree_entry.split(None, 1)[0] not in {
+                "100644",
+                "100755",
+            }:
+                raise RuntimeError(
+                    "completed prerequisite artifact is not a regular Git "
+                    f"blob: {relative_path}"
+                )
+            baseline_bytes = _git_output(
+                project_root,
+                ["show", f"{source_commit}:{relative_path}"],
+                artifact_path=relative_path,
+            )
+            stored = _store_runtime_artifact_bytes(
+                baseline_bytes,
+                store_root / "objects",
+            )
+            record = {
+                "artifact_path": relative_path,
+                "attempt_id": f"BASELINE-{source_commit[:12]}",
+                "byte_count": stored["byte_count"],
+                "sha256": stored["sha256"],
+                "task_id": producer_id,
+                "artifact_origin": "completed_prerequisite_baseline",
+                "source_commit_sha": source_commit,
+            }
+            records[relative_path] = record
+            imported.append(record)
+        _write_json_atomically(manifest_path, manifest)
+        return imported
 
 
 def materialize_runtime_input_artifacts(
@@ -278,6 +367,26 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
+def _git_output(project_root, arguments, *, artifact_path=None):
+    completed = subprocess.run(
+        ["git", "-C", str(project_root), *arguments],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0:
+        if artifact_path is not None:
+            raise RuntimeError(
+                "completed prerequisite artifact is not tracked at the Git "
+                f"baseline: {artifact_path}"
+            )
+        raise RuntimeError(
+            "completed prerequisite Git baseline is unavailable: "
+            + completed.stderr.decode("utf-8", errors="replace").strip()
+        )
+    return completed.stdout
+
+
 @contextmanager
 def _runtime_artifact_store_lock(store_root, *, exclusive):
     store_root = Path(store_root)
@@ -322,6 +431,21 @@ def _store_runtime_artifact_object(source, objects_root):
         }
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _store_runtime_artifact_bytes(content, objects_root):
+    objects_root = Path(objects_root)
+    staging = objects_root.parent / (
+        f".baseline-artifact.tmp-{os.getpid()}-{time.time_ns()}"
+    )
+    try:
+        with staging.open("xb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return _store_runtime_artifact_object(staging, objects_root)
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 def _copy_file_atomically(source, destination):

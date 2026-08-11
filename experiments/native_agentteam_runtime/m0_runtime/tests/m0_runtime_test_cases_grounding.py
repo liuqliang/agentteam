@@ -5,6 +5,239 @@ except ImportError:
 
 
 class GroundingMixin:
+    def test_completed_prerequisite_artifact_bootstraps_from_clean_git_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            artifact_path = ".agentteam/generated/repo_map_handoff.json"
+            artifact = repo / artifact_path
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text('{"schema_version":"repo_map_handoff.v1"}\n', encoding="utf-8")
+            subprocess.run(["git", "add", artifact_path], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "freeze prerequisite handoff"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            producer = _backlog_task(
+                "TASK-REPO-MAP",
+                write_scope=[".agentteam/generated/"],
+            )
+            producer["backlog_status"] = "done"
+            producer["expected_output_artifacts"] = [artifact_path]
+            consumer = _backlog_task(
+                "TASK-IMPLEMENT",
+                write_scope=["generated/"],
+                depends_on=["TASK-REPO-MAP"],
+            )
+            consumer["input_artifacts"] = [artifact_path]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[producer, consumer],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+            )
+            dispatch = scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            message = _read_first_jsonl(
+                Path(inflight["outbox_path"]).with_name("inbox.jsonl")
+            )
+            manifest = json.loads(
+                (output_dir / "runtime_artifacts" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            record = manifest["artifacts"][artifact_path]
+
+            self.assertEqual(dispatch["dispatched_task_ids"], ["TASK-IMPLEMENT"])
+            self.assertEqual(record["task_id"], "TASK-REPO-MAP")
+            self.assertEqual(
+                record["artifact_origin"],
+                "completed_prerequisite_baseline",
+            )
+            self.assertEqual(record["source_commit_sha"], _git_rev_parse(repo, "HEAD"))
+            self.assertEqual(
+                message["payload"]["materialized_input_artifacts"][0][
+                    "materialization_status"
+                ],
+                "already_present",
+            )
+            restarted = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+            )
+            self.assertEqual(
+                restarted.state["inflight_attempts"][0]["task_id"],
+                "TASK-IMPLEMENT",
+            )
+
+    def test_completed_prerequisite_artifact_ignores_dirty_worktree_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            artifact_path = "generated/handoff.json"
+            artifact = repo / artifact_path
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text('{"revision":1}\n', encoding="utf-8")
+            subprocess.run(["git", "add", artifact_path], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "freeze prerequisite handoff"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            artifact.write_text('{"revision":2}\n', encoding="utf-8")
+            producer = _backlog_task("TASK-PRODUCER", write_scope=["generated/"])
+            producer["backlog_status"] = "done"
+            producer["expected_output_artifacts"] = [artifact_path]
+            consumer = _backlog_task(
+                "TASK-CONSUMER",
+                write_scope=["generated/"],
+                depends_on=["TASK-PRODUCER"],
+            )
+            consumer["input_artifacts"] = [artifact_path]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[producer, consumer],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+
+            TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+            )
+            manifest = json.loads(
+                (output_dir / "runtime_artifacts" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            record = manifest["artifacts"][artifact_path]
+            stored = output_dir / "runtime_artifacts" / "objects" / record["sha256"]
+            self.assertEqual(stored.read_text(encoding="utf-8"), '{"revision":1}\n')
+
+    def test_completed_prerequisite_artifact_rejects_untracked_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            artifact_path = "generated/untracked-handoff.json"
+            artifact = repo / artifact_path
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text('{"untracked":true}\n', encoding="utf-8")
+            producer = _backlog_task("TASK-PRODUCER", write_scope=["generated/"])
+            producer["backlog_status"] = "done"
+            producer["expected_output_artifacts"] = [artifact_path]
+            consumer = _backlog_task(
+                "TASK-CONSUMER",
+                write_scope=["generated/"],
+                depends_on=["TASK-PRODUCER"],
+            )
+            consumer["input_artifacts"] = [artifact_path]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[producer, consumer],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+
+            with self.assertRaisesRegex(RuntimeError, "not a regular Git blob"):
+                TwoPhaseFileScheduler(
+                    agent_pool_path,
+                    backlog_path,
+                    output_dir,
+                    clock=FixedClock(),
+                    project_root=repo,
+                )
+
+    def test_completed_prerequisite_artifact_binds_initial_integration_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            artifact_path = "generated/versioned-handoff.json"
+            artifact = repo / artifact_path
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text('{"revision":1}\n', encoding="utf-8")
+            subprocess.run(["git", "add", artifact_path], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "freeze first handoff"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            frozen_ref = _git_rev_parse(repo, "HEAD")
+            artifact.write_text('{"revision":2}\n', encoding="utf-8")
+            subprocess.run(["git", "add", artifact_path], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "advance handoff"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            producer = _backlog_task("TASK-PRODUCER", write_scope=["generated/"])
+            producer["backlog_status"] = "done"
+            producer["expected_output_artifacts"] = [artifact_path]
+            consumer = _backlog_task(
+                "TASK-CONSUMER",
+                write_scope=["generated/"],
+                depends_on=["TASK-PRODUCER"],
+            )
+            consumer["input_artifacts"] = [artifact_path]
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[producer, consumer],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                integrate_accepted_patch=True,
+                initial_integration_base_ref=frozen_ref,
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            self.assertEqual(
+                (Path(inflight["worktree_path"]) / artifact_path).read_text(
+                    encoding="utf-8"
+                ),
+                '{"revision":1}\n',
+            )
+
     def test_build_planner_context_includes_bounded_artifact_summaries(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
