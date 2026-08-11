@@ -1854,6 +1854,11 @@ def invocation_context_from_message(message, *, model=None, backend="codex"):
         "reasoning_profile": _nullable_text(
             payload.get("reasoning_profile")
         ),
+        "model_routing": (
+            dict(payload.get("model_routing"))
+            if isinstance(payload.get("model_routing"), dict)
+            else None
+        ),
         "coverage_class": payload.get("coverage_class"),
         "provider_usage_scope": payload.get("provider_usage_scope"),
         "provider_session_lock_held": payload.get(
@@ -2450,6 +2455,7 @@ def _start_context(context):
         "experiment_protocol_sha256",
         "experiment_run_manifest_sha256",
         "reasoning_profile",
+        "model_routing",
         "decision_id",
     ):
         if context.get(field) is not None:
@@ -2492,6 +2498,7 @@ def _terminal_context(context):
         "experiment_protocol_sha256",
         "experiment_run_manifest_sha256",
         "reasoning_profile",
+        "model_routing",
         "decision_id",
     ):
         if context.get(field) is not None:

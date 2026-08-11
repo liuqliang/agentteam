@@ -136,6 +136,10 @@ from .notifications import (
     build_feishu_notification_sink_from_env,
     diagnose_feishu_webhook_delivery,
 )
+from .model_routing import (
+    author_model_route,
+    default_model_routing_policy,
+)
 from .taskpack import (
     REPO_MAP_HANDOFF_PATH,
     TaskpackValidationError,
@@ -1045,6 +1049,14 @@ def _add_codex_model_arg(parser, help_text=None):
         "--codex-model",
         help=help_text or "Codex model used by worker runtimes for newly generated taskpacks.",
     )
+    parser.add_argument(
+        "--reasoning-profile",
+        choices=["none", "low", "medium", "high", "xhigh", "max"],
+        help=(
+            "Reasoning effort for an explicitly fixed --codex-model. "
+            "Defaults to high when a fixed model is supplied."
+        ),
+    )
 
 
 def _add_taskpack_validate_parser(subcommands):
@@ -1783,7 +1795,26 @@ def _add_update_parser(subcommands):
 
 
 def _handle_taskpack_draft(args):
-    return draft_taskpack_from_goal(
+    requested_model = getattr(args, "codex_model", None)
+    requested_reasoning = getattr(args, "reasoning_profile", None)
+    model_routing_policy = None
+    if args.author_runtime == "codex":
+        model_routing_policy = default_model_routing_policy(
+            fixed_profile=(
+                {
+                    "model": requested_model,
+                    "reasoning_profile": requested_reasoning or "high",
+                }
+                if requested_model
+                else None
+            )
+        )
+    author_route = (
+        author_model_route(model_routing_policy)
+        if model_routing_policy is not None
+        else None
+    )
+    result = draft_taskpack_from_goal(
         project_root=args.project_root,
         goal=args.goal,
         draft_root=args.draft_root,
@@ -1791,12 +1822,26 @@ def _handle_taskpack_draft(args):
         taskpack_id=args.taskpack_id,
         codex_command=args.codex_command,
         codex_timeout_seconds=args.codex_timeout_seconds,
-        codex_model=getattr(args, "codex_model", None),
+        codex_model=(author_route["model"] if author_route else requested_model),
         author_invocation_context={
             "project": default_project_key(Path(args.project_root).resolve()),
             "usage_stage": "taskpack_author",
+            **(
+                {
+                    "reasoning_profile": author_route["reasoning_profile"],
+                    "model_routing": author_route,
+                }
+                if author_route is not None
+                else {}
+            ),
         },
     )
+    _set_taskpack_model_routing_policy(
+        result["taskpack_dir"],
+        model_routing_policy,
+        runtime_backend="codex",
+    )
+    return result
 
 
 def _handle_help(args):
@@ -1891,6 +1936,13 @@ def _handle_taskpack_new(args):
         args.verification_command_json,
         default=default_verification_command,
     )
+    requested_model = (
+        getattr(args, "codex_model", None) or profile.get("codex_model")
+    )
+    requested_reasoning = (
+        getattr(args, "reasoning_profile", None)
+        or profile.get("reasoning_profile")
+    )
     draft = draft_taskpack_files(
         project_root=project_root,
         goal=goal,
@@ -1902,7 +1954,20 @@ def _handle_taskpack_new(args):
         verification_profile=verification_profile,
         allow_merge=args.allow_merge,
         codex_timeout_seconds=args.codex_timeout_seconds,
-        codex_model=getattr(args, "codex_model", None) or profile.get("codex_model"),
+        codex_model=requested_model,
+    )
+    _set_taskpack_model_routing_policy(
+        draft["taskpack_dir"],
+        default_model_routing_policy(
+            fixed_profile=(
+                {
+                    "model": requested_model,
+                    "reasoning_profile": requested_reasoning or "high",
+                }
+                if requested_model
+                else None
+            )
+        ),
     )
     validation = validate_taskpack(draft["taskpack_dir"])
     frozen = None
@@ -3105,6 +3170,45 @@ def _handle_submit(args):
     run_root = work_root / "runs"
     runtime_backend = _submit_runtime_backend(args.runtime, args.author_runtime)
     progress = bool(getattr(args, "progress", False))
+    requested_model = getattr(args, "codex_model", None)
+    requested_reasoning = getattr(args, "reasoning_profile", None)
+    author_model_routing_policy, model_routing_policy = (
+        _submit_model_routing_policies(
+            author_runtime=args.author_runtime,
+            runtime_backend=runtime_backend,
+            requested_model=requested_model,
+            requested_reasoning=requested_reasoning,
+        )
+    )
+    author_context = dict(
+        getattr(args, "author_invocation_context", None)
+        or {
+            "project": (
+                args.notification_project
+                or default_project_key(Path(args.project_root).resolve())
+            ),
+            "usage_stage": "taskpack_author",
+        }
+    )
+    author_route = (
+        author_model_route(
+            author_model_routing_policy,
+            role=(
+                "follow_up_author"
+                if author_context.get("usage_stage") == "follow_up_author"
+                else "taskpack_author"
+            ),
+        )
+        if author_model_routing_policy is not None
+        else None
+    )
+    if author_route is not None:
+        author_context.update(
+            {
+                "reasoning_profile": author_route["reasoning_profile"],
+                "model_routing": author_route,
+            }
+        )
 
     _progress(progress, f"authoring taskpack with {args.author_runtime}")
     draft = draft_taskpack_from_goal(
@@ -3117,24 +3221,20 @@ def _handle_submit(args):
         codex_timeout_seconds=args.codex_timeout_seconds,
         verification_profile=getattr(args, "verification_profile", None),
         progress_callback=_author_progress_callback(progress),
-        codex_model=getattr(args, "codex_model", None),
-        author_invocation_context=(
-            getattr(args, "author_invocation_context", None)
-            or {
-                "project": (
-                    args.notification_project
-                    or default_project_key(Path(args.project_root).resolve())
-                ),
-                "usage_stage": "taskpack_author",
-            }
-        ),
+        codex_model=(author_route["model"] if author_route else requested_model),
+        author_invocation_context=author_context,
     )
     _progress(progress, f"draft accepted: {draft['taskpack_id']}")
     taskpack_dir = Path(draft["taskpack_dir"])
     _set_taskpack_runtime_backend(taskpack_dir, runtime_backend)
     _set_taskpack_codex_model(
         taskpack_dir,
-        getattr(args, "codex_model", None),
+        requested_model,
+        runtime_backend=runtime_backend,
+    )
+    _set_taskpack_model_routing_policy(
+        taskpack_dir,
+        model_routing_policy,
         runtime_backend=runtime_backend,
     )
     repo_map_handoff_reuse = None
@@ -3229,6 +3329,29 @@ def _handle_submit(args):
     if repo_map_handoff_reuse is not None:
         result["repo_map_handoff_reuse"] = repo_map_handoff_reuse
     return result
+
+
+def _submit_model_routing_policies(
+    *,
+    author_runtime,
+    runtime_backend,
+    requested_model=None,
+    requested_reasoning=None,
+):
+    author_policy = None
+    if author_runtime == "codex":
+        author_policy = default_model_routing_policy(
+            fixed_profile=(
+                {
+                    "model": requested_model,
+                    "reasoning_profile": requested_reasoning or "high",
+                }
+                if requested_model
+                else None
+            )
+        )
+    worker_policy = author_policy if runtime_backend == "codex" else None
+    return author_policy, worker_policy
 
 
 def _handle_run(args):
@@ -13307,6 +13430,7 @@ def _profile_from_args(args, project_root):
         author_runtime=args.author_runtime,
         default_runtime=args.runtime,
         codex_model=getattr(args, "codex_model", None),
+        reasoning_profile=getattr(args, "reasoning_profile", None),
         one_shot=args.one_shot,
         max_inflight=args.max_inflight,
         max_attempts=args.max_attempts,
@@ -13374,6 +13498,7 @@ def _prompt_project_profile(args, project_root):
         author_runtime=author_runtime,
         default_runtime=runtime,
         codex_model=codex_model,
+        reasoning_profile=getattr(args, "reasoning_profile", None),
         one_shot=one_shot,
         max_inflight=args.max_inflight or 2,
         max_attempts=args.max_attempts or 1,
@@ -13399,6 +13524,10 @@ def _submit_args_from_profile(args, project_root, profile):
         runtime=args.runtime or profile.get("default_runtime", "auto"),
         codex_timeout_seconds=args.codex_timeout_seconds,
         codex_model=getattr(args, "codex_model", None) or profile.get("codex_model"),
+        reasoning_profile=(
+            getattr(args, "reasoning_profile", None)
+            or profile.get("reasoning_profile")
+        ),
         one_shot=_override_or_profile(args.one_shot, profile.get("one_shot", False)),
         max_inflight=args.max_inflight or profile.get("max_inflight", 2),
         max_attempts=args.max_attempts or profile.get("max_attempts", 1),
@@ -14245,6 +14374,25 @@ def _set_taskpack_codex_model(taskpack_dir, codex_model, runtime_backend="codex"
     agent_pool = json.loads(agent_pool_path.read_text(encoding="utf-8"))
     for profile in _runtime_profiles(agent_pool):
         profile["model"] = codex_model
+    _write_json(agent_pool_path, agent_pool)
+
+
+def _set_taskpack_model_routing_policy(
+    taskpack_dir,
+    model_routing_policy,
+    runtime_backend="codex",
+):
+    if runtime_backend != "codex" or model_routing_policy is None:
+        return
+    taskpack_dir = Path(taskpack_dir)
+    taskpack_path = taskpack_dir / "taskpack.yaml"
+    taskpack = json.loads(taskpack_path.read_text(encoding="utf-8"))
+    files = taskpack.get("files", {})
+    if not isinstance(files, dict):
+        files = {}
+    agent_pool_path = taskpack_dir / files.get("agent_pool", "agent_pool.json")
+    agent_pool = json.loads(agent_pool_path.read_text(encoding="utf-8"))
+    agent_pool["model_routing_policy"] = model_routing_policy
     _write_json(agent_pool_path, agent_pool)
 
 

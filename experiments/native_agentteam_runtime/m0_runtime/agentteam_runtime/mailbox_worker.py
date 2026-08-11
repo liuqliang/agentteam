@@ -13,6 +13,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from .m0_runtime import CodexRuntimeAdapter, FakeRuntimeAdapter, SystemClock
+from .model_routing import validate_model_route
 
 
 IDLE_HEARTBEAT_MIN_INTERVAL_SECONDS = 15
@@ -39,6 +40,7 @@ MODEL_INVOCATION_CONTEXT_FIELDS = (
     "agent_role",
     "required_role",
     "usage_stage",
+    "model_routing",
     "provider_usage_scope",
     "provider_session_lock_held",
     "provider_project_binding_valid",
@@ -219,9 +221,14 @@ class FileMailboxWorker:
                 worktree_path=worktree_path,
             )
 
+        runtime_adapter = _runtime_adapter_for_dispatch(
+            self.runtime_adapter,
+            message,
+        )
+
         authority_root = _invocation_authority_root(
             message,
-            self.runtime_adapter,
+            runtime_adapter,
             self.output_dir,
         )
         replay = _replay_model_invocation_result(
@@ -254,11 +261,11 @@ class FileMailboxWorker:
                 )
                 with coordinator.prepare_message(
                     message,
-                    self.runtime_adapter,
+                    runtime_adapter,
                     authority_root=authority_root,
                 ) as runtime_message:
                     runtime_result = _run_runtime_adapter(
-                        self.runtime_adapter,
+                        runtime_adapter,
                         runtime_message,
                         worktree_path=worktree_path,
                         progress_callback=progress_callback,
@@ -298,7 +305,6 @@ class FileMailboxWorker:
             "changed_files": runtime_result["changed_files"],
             "outbox_path": str(self.outbox_path),
         }
-
     def _write_heartbeat(
         self,
         *,
@@ -451,6 +457,28 @@ class FileMailboxWorker:
             "poll_status": "idle",
             "reason": "no_dispatch_message",
         }
+
+
+def _runtime_adapter_for_dispatch(runtime_adapter, message):
+    route = validate_model_route(
+        (message.get("payload") or {}).get("model_routing")
+    )
+    if route is None or not isinstance(runtime_adapter, CodexRuntimeAdapter):
+        return runtime_adapter
+    return CodexRuntimeAdapter(
+        command=runtime_adapter.command,
+        model=route["model"],
+        reasoning_profile=route["reasoning_profile"],
+        sandbox=runtime_adapter.sandbox,
+        timeout_seconds=runtime_adapter.timeout_seconds,
+        extra_args=runtime_adapter.extra_args,
+        fallback_worktree_path=runtime_adapter.fallback_worktree_path,
+        output_dir=runtime_adapter.output_dir,
+        progress_interval_seconds=runtime_adapter.progress_interval_seconds,
+        resume_session_id=runtime_adapter.resume_session_id,
+        resume_last=runtime_adapter.resume_last,
+        systemd_runner_factory=runtime_adapter.systemd_runner_factory,
+    )
 
 
 class FileMailboxRuntimeAdapter:

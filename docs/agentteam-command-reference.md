@@ -75,6 +75,11 @@ Important options:
 - `--work-root`: where drafts, frozen taskpacks, runs, artifacts, and releases are stored.
 - `--author-runtime`: taskpack author runtime, currently `fake` or `codex`.
 - `--runtime`: worker runtime, currently `auto`, `fake`, or `codex`.
+- `--codex-model`: pin one model for taskpack authoring and workers. Supplying
+  it selects fixed routing instead of the ordinary adaptive policy.
+- `--reasoning-profile`: reasoning effort for a pinned model. Supported values
+  are `none`, `low`, `medium`, `high`, `xhigh`, and `max`; fixed mode defaults
+  to `high` when omitted.
 - `--verification-command-json`: correctness verification command recorded in the project profile.
 - `--performance-command-json`: benchmark command recorded in the project profile.
 - `--metric`: tracked metric name. Repeat for multiple metrics.
@@ -85,6 +90,32 @@ Side effects:
 
 - Writes `.agentteam/profile.json`.
 - Adds `.agentteam/` to `.git/info/exclude` when possible.
+
+#### Model routing
+
+When no fixed `--codex-model` is configured, ordinary Codex taskpacks use the
+built-in `gpt-5.6-cost-aware.v1` policy:
+
+| Role or risk | Model | Reasoning |
+|---|---|---|
+| Taskpack author, planner, context builder, reviewer | `gpt-5.6-terra` | `medium` |
+| Repo map and L0 implementation | `gpt-5.6-luna` | `medium` |
+| L1 implementation | `gpt-5.6-terra` | `medium` |
+| L2/L3 implementation and semantic authority | `gpt-5.6-sol` | `high` |
+
+A retryable failure does not automatically escalate. The scheduler first
+records a structured retry decision. Timeouts and transient provider failures
+retry the same profile; environment and contract failures stop for repair or
+review; only model-output failures and verification failures attributable to a
+known-clean baseline may escalate once from Luna to Terra, Terra to Sol/high,
+or Sol/high to Sol/xhigh. The
+scheduler freezes the choice in each dispatch and records its reason in
+invocation evidence. Existing frozen taskpacks without a routing policy keep
+their previous behavior.
+
+Benchmark taskpacks must pin a fixed profile or use their separately frozen
+experiment model contract. Adaptive production routing must not silently alter
+a controlled comparison.
 
 ### `agentteam doctor`
 

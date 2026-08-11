@@ -1593,6 +1593,18 @@ Ordered follow-on work is:
 4. run the Phase 6 semantic-feedback long task;
 5. record a continue, narrow, or archive direction decision.
 
+Ordinary non-benchmark Codex execution now uses the implemented
+`gpt-5.6-cost-aware.v1` role-risk routing policy documented in
+[`2026-08-10-cost-aware-model-routing.md`](designs/2026-08-10-cost-aware-model-routing.md).
+Phase 3 scored runs remain outside that adaptive policy: their model and
+reasoning profile are frozen by experiment authority so routing cannot become
+an uncontrolled variable.
+
+Adaptive retry routing is scheduler-owned through
+`agentteam_retry_decision.v1`. It separates same-model retry, bounded model
+escalation, environment repair, integration repair, replanning, review, and
+blocking; attempt count alone never authorizes an upgrade.
+
 Do not pre-expand Phase 4 through Phase 6 into worker tasks. Their direction is
 fixed by the research authority, but their execution decisions depend on
 accepted evidence from the preceding phase.

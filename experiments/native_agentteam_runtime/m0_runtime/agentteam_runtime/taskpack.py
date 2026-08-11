@@ -14,6 +14,7 @@ from .decision_runtime import (
     DecisionRuntimeError,
     validate_taskpack_decision_contract,
 )
+from .model_routing import validate_model_routing_policy
 from .release_manager import AgentTeamReleaseError, _rename_noreplace
 
 
@@ -2205,6 +2206,7 @@ def validate_taskpack(taskpack_dir):
                 "role_runtime_profiles",
                 "role_prompt_contracts",
                 "role_context_packages",
+                "model_routing_policy",
             ):
                 value = agent_pool.get(field_name)
                 if value is not None and value != {}:
@@ -5083,6 +5085,7 @@ def _validate_agent_pool(agent_pool, errors, *, allow_empty=False):
         return idle_agent_roles
 
     _validate_role_runtime_profiles(agent_pool.get("role_runtime_profiles"), errors)
+    _validate_model_routing_policy(agent_pool.get("model_routing_policy"), errors)
     _validate_optional_role_object_map(agent_pool.get("role_prompt_contracts"), "role_prompt_contracts", errors)
     _validate_optional_role_object_map(agent_pool.get("role_context_packages"), "role_context_packages", errors)
 
@@ -5115,6 +5118,15 @@ def _validate_role_runtime_profiles(role_runtime_profiles, errors):
             continue
 
         _validate_taskpack_runtime_profile(profile, label, errors)
+
+
+def _validate_model_routing_policy(policy, errors):
+    if policy is None:
+        return
+    try:
+        validate_model_routing_policy(policy)
+    except ValueError as exc:
+        errors.append(str(exc))
 
 
 def _validate_taskpack_runtime_profile(profile, label, errors):

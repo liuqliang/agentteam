@@ -36,6 +36,8 @@ from .m0_runtime import (
     snapshot_runtime_artifacts,
     write_patch_artifact,
 )
+from .model_routing import default_model_routing_policy, select_model_route
+from .retry_decision import decide_retry
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
 from .decision_artifact_lifecycle import (
     apply_terminal_retention,
@@ -817,6 +819,12 @@ class TwoPhaseFileScheduler:
         integration_baseline = None
         correlation_id = f"{task['task_id']}:{attempt_id}"
         created_at = self.clock.now()
+        retry_handoff = self._retry_handoff_for_task(task["task_id"])
+        prior_retry_decision = (
+            retry_handoff.get("retry_decision")
+            if isinstance(retry_handoff, dict)
+            else None
+        )
         lease_expires_at = _timestamp_after(
             created_at,
             self.state["lease_timeout_seconds"],
@@ -843,6 +851,39 @@ class TwoPhaseFileScheduler:
                 else None
             ),
         )
+        model_route = select_model_route(
+            agent_pool.get("model_routing_policy"),
+            role=agent.get("role") or task.get("required_role"),
+            risk_target=task.get("risk_target") or "L1",
+            attempt_number=attempt_number,
+            retry_decision=prior_retry_decision,
+        )
+        if self.experiment_runtime_context is not None:
+            experiment_model_policy = self.experiment_runtime_context[
+                "model_policy"
+            ]
+            model_route = select_model_route(
+                default_model_routing_policy(
+                    fixed_profile={
+                        "model": experiment_model_policy["model"],
+                        "reasoning_profile": experiment_model_policy[
+                            "reasoning_profile"
+                        ],
+                    }
+                ),
+                role=agent.get("role") or task.get("required_role"),
+                risk_target=task.get("risk_target") or "L1",
+                attempt_number=attempt_number,
+                retry_decision=prior_retry_decision,
+            )
+        if model_route is not None:
+            invocation_context.update(
+                {
+                    "model": model_route["model"],
+                    "reasoning_profile": model_route["reasoning_profile"],
+                    "model_routing": model_route,
+                }
+            )
         invocation_context = hydrate_provider_predecessor_context(
             invocation_context,
             self.events_path,
@@ -932,8 +973,6 @@ class TwoPhaseFileScheduler:
             worktree_path,
             task.get("expected_output_artifacts", []),
         )
-        retry_handoff = self._retry_handoff_for_task(task["task_id"])
-
         message = {
             "message_id": message_id,
             "from_agent": agent_pool["scheduler_agent_id"],
@@ -975,6 +1014,15 @@ class TwoPhaseFileScheduler:
                 **role_context_fields,
                 **repo_context_fields,
                 **provider_io_fields,
+                **(
+                    {
+                        "model": model_route["model"],
+                        "reasoning_profile": model_route["reasoning_profile"],
+                        "model_routing": model_route,
+                    }
+                    if model_route is not None
+                    else {}
+                ),
             },
         }
         _write_dispatch_authority(step_dir, message)
@@ -989,10 +1037,21 @@ class TwoPhaseFileScheduler:
         else:
             metadata = {
                 "runtime_adapter": "FileMailboxExternalRuntimeAdapter",
-                "runtime_model": None,
+                "runtime_model": (
+                    model_route["model"] if model_route is not None else None
+                ),
+                "runtime_reasoning_profile": (
+                    model_route["reasoning_profile"]
+                    if model_route is not None
+                    else None
+                ),
                 "runtime_sandbox": None,
                 "runtime_timeout_seconds": None,
-                "runtime_profile_source": "external_mailbox_adapter",
+                "runtime_profile_source": (
+                    "dispatch_model_routing"
+                    if model_route is not None
+                    else "external_mailbox_adapter"
+                ),
             }
         self._append_events(
             step_id,
@@ -1090,6 +1149,11 @@ class TwoPhaseFileScheduler:
                         "lease_id": lease_id,
                         "runtime_session_id": runtime_session_id,
                         **metadata,
+                        **(
+                            {"model_routing": model_route}
+                            if model_route is not None
+                            else {}
+                        ),
                         "worktree_id": worktree_id,
                         "worktree_path": str(worktree_path) if worktree_path else None,
                         **_integration_baseline_event_fields(integration_baseline),
@@ -1111,6 +1175,7 @@ class TwoPhaseFileScheduler:
             **({"created_at": created_at} if decision_id else {}),
             "message_id": message_id,
             "runtime_session_id": runtime_session_id,
+            **({"model_routing": model_route} if model_route is not None else {}),
             "agent_id": agent["agent_id"],
             "outbox_path": str(step_dir / agent["outbox_path"]),
             "worktree_id": worktree_id,
@@ -1366,8 +1431,19 @@ class TwoPhaseFileScheduler:
             outcome,
         )
         result.update(transition)
+        retry_decision = None
+        if result["task_status"] != "done":
+            retry_decision = decide_retry(
+                attempt_id=inflight["attempt_id"],
+                failure_category=result["failure_category"],
+                retryable=result["retryable"],
+                runtime_result=runtime_result,
+                attempt_result=result,
+            )
+        result["retry_decision"] = retry_decision
         retry_allowed = (
-            transition["retryable"]
+            retry_decision is not None
+            and retry_decision["auto_retry"]
             and inflight["attempt_number"] < self.state["max_attempts"]
         )
         result["retry_allowed"] = retry_allowed
@@ -1520,6 +1596,25 @@ class TwoPhaseFileScheduler:
                 *(
                     [
                         self._event(
+                            "retry_decision_recorded",
+                            "agent-scheduler",
+                            inflight["agent_id"],
+                            f"retry-decision:{inflight['attempt_id']}",
+                            inflight["correlation_id"],
+                            {
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "lease_id": inflight["lease_id"],
+                                "retry_decision": retry_decision,
+                            },
+                        )
+                    ]
+                    if retry_decision is not None
+                    else []
+                ),
+                *(
+                    [
+                        self._event(
                             "backlog_updated",
                             "agent-scheduler",
                             None,
@@ -1655,7 +1750,10 @@ class TwoPhaseFileScheduler:
                                 "lease_id": inflight["lease_id"],
                                 "failure_category": result["failure_category"],
                                 "next_attempt_id": next_attempt_id,
-                                "recovery_action": "retry",
+                                "recovery_action": retry_decision["action"],
+                                "retry_decision_id": retry_decision[
+                                    "decision_id"
+                                ],
                             },
                         )
                     ]
@@ -1690,6 +1788,7 @@ class TwoPhaseFileScheduler:
                 "validation_status": outcome["validation_status"],
                 "failure_category": result["failure_category"],
                 "retryable": result["retryable"],
+                "retry_decision": retry_decision,
                 "result": result,
             }
         )
@@ -3079,6 +3178,7 @@ class TwoPhaseFileScheduler:
                 "recommended_action": str(
                     operator_summary.get("next_steps") or ""
                 )[:2000],
+                "retry_decision": result.get("retry_decision"),
             }
         return None
 

@@ -18,6 +18,8 @@ from .model_invocation import (
     invocation_context_from_message,
     is_supported_codex_command,
 )
+from .model_routing import select_model_route
+from .retry_decision import decide_retry
 from .planner_context import build_artifact_context
 from .repo_map import (
     build_repo_context,
@@ -1009,6 +1011,7 @@ def run_simulation(
         sequence += 1
 
     final_attempt = None
+    prior_retry_decision = None
     for attempt_number in range(1, max_attempts + 1):
         attempt_id = _scoped_attempt_id(attempt_number, attempt_id_prefix)
         lease_id = _scoped_id("LEASE", attempt_number, attempt_id_prefix)
@@ -1018,6 +1021,22 @@ def run_simulation(
         worktree_path = None
         branch = None
         correlation_id = f"{task['task_id']}:{attempt_id}"
+        model_route = select_model_route(
+            agent_pool.get("model_routing_policy"),
+            role=agent.get("role") or task.get("required_role"),
+            risk_target=task.get("risk_target") or "L1",
+            attempt_number=attempt_number,
+            retry_decision=prior_retry_decision,
+        )
+        attempt_runtime_adapter = _runtime_adapter_with_model_route(
+            runtime_adapter,
+            model_route,
+        )
+        attempt_runtime_profile_source = (
+            "dispatch_model_routing"
+            if model_route is not None
+            else runtime_profile_source
+        )
 
         if project_root and worktree_id:
             worktree_path, branch = _create_git_worktree(
@@ -1080,6 +1099,20 @@ def run_simulation(
                 "input_artifacts": task.get("input_artifacts", []),
                 "expected_output_artifacts": task.get("expected_output_artifacts", []),
                 "materialized_input_artifacts": materialized_input_artifacts,
+                **(
+                    {
+                        "model": model_route["model"],
+                        "reasoning_profile": model_route["reasoning_profile"],
+                        "model_routing": model_route,
+                    }
+                    if model_route is not None
+                    else {}
+                ),
+                **(
+                    {"retry_decision": prior_retry_decision}
+                    if prior_retry_decision is not None
+                    else {}
+                ),
                 **_role_prompt_fields(agent_pool, agent, task),
                 **_role_context_fields(
                     agent_pool,
@@ -1157,14 +1190,22 @@ def run_simulation(
                 "attempt_id": attempt_id,
                 "lease_id": lease_id,
                 "runtime_session_id": runtime_session_id,
-                **_runtime_adapter_metadata(runtime_adapter),
-                "runtime_profile_source": runtime_profile_source,
+                **_runtime_adapter_metadata(attempt_runtime_adapter),
+                "runtime_profile_source": attempt_runtime_profile_source,
+                **(
+                    {"model_routing": model_route}
+                    if model_route is not None
+                    else {}
+                ),
                 "worktree_id": worktree_id,
                 "worktree_path": str(worktree_path) if worktree_path else None,
                 "session_status": "started",
             },
         )
-        runtime_adapter_for_attempt = _bind_runtime_adapter_output_dir(runtime_adapter, output_dir)
+        runtime_adapter_for_attempt = _bind_runtime_adapter_output_dir(
+            attempt_runtime_adapter,
+            output_dir,
+        )
         runtime_result = runtime_adapter_for_attempt.run(message, worktree_path=worktree_path)
         append_event(
             "runtime_session_observed",
@@ -1276,6 +1317,7 @@ def run_simulation(
             "validation_status": outcome["validation_status"],
             "failure_category": outcome["failure_category"],
             "retryable": outcome["retryable"],
+            "retry_decision": None,
             "semantic_validation": outcome.get("semantic_validation"),
             "diff_audit": diff_audit,
             "patch_path": str(patch_path) if patch_path else None,
@@ -1491,7 +1533,32 @@ def run_simulation(
             )
             break
 
-        if outcome["retryable"] and attempt_number < max_attempts:
+        retry_decision = decide_retry(
+            attempt_id=attempt_id,
+            failure_category=outcome["failure_category"],
+            retryable=outcome["retryable"],
+            runtime_result=runtime_result,
+            attempt_result=final_attempt,
+        )
+        final_attempt["retry_decision"] = retry_decision
+        append_event(
+            "retry_decision_recorded",
+            agent_pool["scheduler_agent_id"],
+            agent["agent_id"],
+            f"retry-decision:{attempt_id}",
+            correlation_id,
+            {
+                "task_id": task["task_id"],
+                "attempt_id": attempt_id,
+                "lease_id": lease_id,
+                "retry_decision": retry_decision,
+            },
+        )
+        retry_allowed = (
+            retry_decision["auto_retry"] and attempt_number < max_attempts
+        )
+        final_attempt["retry_allowed"] = retry_allowed
+        if retry_allowed:
             append_event(
                 "recovery_routed",
                 agent_pool["scheduler_agent_id"],
@@ -1507,9 +1574,11 @@ def run_simulation(
                         attempt_number + 1,
                         attempt_id_prefix,
                     ),
-                    "recovery_action": "retry",
+                    "recovery_action": retry_decision["action"],
+                    "retry_decision_id": retry_decision["decision_id"],
                 },
             )
+            prior_retry_decision = retry_decision
             continue
         break
 
@@ -1528,6 +1597,8 @@ def run_simulation(
         "validation_status": final_attempt["validation_status"],
         "failure_category": final_attempt["failure_category"],
         "retryable": final_attempt["retryable"],
+        "retry_allowed": final_attempt.get("retry_allowed", False),
+        "retry_decision": final_attempt.get("retry_decision"),
         "diff_audit": final_attempt["diff_audit"],
         "patch_path": final_attempt["patch_path"],
         "integration_status": final_attempt["integration_status"],
@@ -2569,6 +2640,10 @@ def replay_event_records(events):
             )
             if lease_id in snapshot["leases"]:
                 snapshot["leases"][lease_id]["lease_status"] = "released"
+        elif event["event_type"] == "retry_decision_recorded":
+            snapshot["attempts"].setdefault(attempt_id, {})[
+                "retry_decision"
+            ] = payload.get("retry_decision")
         elif event["event_type"] == "manual_gate_required":
             question_id = payload["question_id"]
             snapshot["manual_gates"][question_id] = {
@@ -3195,6 +3270,25 @@ def _bind_runtime_adapter_output_dir(runtime_adapter, output_dir):
     if not binder:
         return runtime_adapter
     return binder(output_dir)
+
+
+def _runtime_adapter_with_model_route(runtime_adapter, route):
+    if route is None or not isinstance(runtime_adapter, CodexRuntimeAdapter):
+        return runtime_adapter
+    return CodexRuntimeAdapter(
+        command=runtime_adapter.command,
+        model=route["model"],
+        reasoning_profile=route["reasoning_profile"],
+        sandbox=runtime_adapter.sandbox,
+        timeout_seconds=runtime_adapter.timeout_seconds,
+        extra_args=runtime_adapter.extra_args,
+        fallback_worktree_path=runtime_adapter.fallback_worktree_path,
+        output_dir=runtime_adapter.output_dir,
+        progress_interval_seconds=runtime_adapter.progress_interval_seconds,
+        resume_session_id=runtime_adapter.resume_session_id,
+        resume_last=runtime_adapter.resume_last,
+        systemd_runner_factory=runtime_adapter.systemd_runner_factory,
+    )
 
 
 def _fake_changed_files(write_scope):

@@ -33,6 +33,10 @@
             "type": "string",
             "minLength": 1
           },
+          "reasoning_profile": {
+            "type": "string",
+            "enum": ["none", "low", "medium", "high", "xhigh", "max"]
+          },
           "sandbox": {
             "type": "string",
             "minLength": 1
@@ -52,6 +56,41 @@
           "fallback_worktree_path": {
             "type": "string",
             "minLength": 1
+          }
+        }
+      }
+    },
+    "model_routing_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "policy_id",
+        "mode",
+        "retry_escalation"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "agentteam_model_routing.v1"
+        },
+        "policy_id": {
+          "const": "gpt-5.6-cost-aware.v1"
+        },
+        "mode": {
+          "enum": ["adaptive", "fixed"]
+        },
+        "retry_escalation": {
+          "type": "boolean"
+        },
+        "fixed_profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["model", "reasoning_profile"],
+          "properties": {
+            "model": {"type": "string", "minLength": 1},
+            "reasoning_profile": {
+              "enum": ["none", "low", "medium", "high", "xhigh", "max"]
+            }
           }
         }
       }

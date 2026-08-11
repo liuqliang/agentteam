@@ -10197,6 +10197,10 @@ class ExperimentSandboxTests(unittest.TestCase):
             ],
         )
 
+    @unittest.skipUnless(
+        os.environ.get("AGENTTEAM_HOST_TESTS") == "1",
+        "requires Unix socket access; run the host test lane",
+    )
     def test_real_supervisor_revalidates_release_source_before_exec(self):
         import agentteam_runtime.model_invocation as invocation_module
 

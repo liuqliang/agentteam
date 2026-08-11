@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/native_runtime/retry_decision.schema.json",
+  "title": "AgentTeam Retry Decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "decision_id",
+    "authority",
+    "action",
+    "reason_code",
+    "failure_category",
+    "auto_retry",
+    "model_escalation",
+    "evidence"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "agentteam_retry_decision.v1"
+    },
+    "decision_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authority": {
+      "const": "scheduler"
+    },
+    "action": {
+      "enum": [
+        "retry_same_model",
+        "escalate_model",
+        "repair_environment",
+        "repair_integration",
+        "replan_task",
+        "review_required",
+        "block"
+      ]
+    },
+    "reason_code": {
+      "type": "string",
+      "minLength": 1
+    },
+    "failure_category": {
+      "type": ["string", "null"]
+    },
+    "auto_retry": {
+      "type": "boolean"
+    },
+    "model_escalation": {
+      "type": "boolean"
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result_status",
+        "runtime_error_code",
+        "integration_status",
+        "integration_verification_status",
+        "baseline_verification_status"
+      ],
+      "properties": {
+        "result_status": {"type": ["string", "null"]},
+        "runtime_error_code": {"type": ["string", "null"]},
+        "integration_status": {"type": ["string", "null"]},
+        "integration_verification_status": {"type": ["string", "null"]},
+        "baseline_verification_status": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

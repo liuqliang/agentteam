@@ -81,6 +81,7 @@
         "notification_failed",
         "attempt_timed_out",
         "attempt_cancelled",
+        "retry_decision_recorded",
         "recovery_routed",
         "model_invocation_started",
         "model_invocation_writer_revoked",

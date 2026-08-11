@@ -983,6 +983,7 @@ def _author_model_invocation_context(
         "backend": "codex",
         "model": model,
         "reasoning_profile": supplied.get("reasoning_profile"),
+        "model_routing": supplied.get("model_routing"),
         "coverage_class": (
             "supported_model_invocation"
             if supported

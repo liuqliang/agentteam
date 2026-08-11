@@ -155,6 +155,9 @@
     "reasoning_profile": {
       "$ref": "#/$defs/nullableIdentifier"
     },
+    "model_routing": {
+      "type": "object"
+    },
     "experiment_run_id": {
       "$ref": "#/$defs/nullableIdentifier"
     },

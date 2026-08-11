@@ -40,6 +40,7 @@ def build_project_profile(
     author_runtime="codex",
     default_runtime="auto",
     codex_model=None,
+    reasoning_profile=None,
     one_shot=False,
     max_inflight=2,
     max_attempts=1,
@@ -56,6 +57,25 @@ def build_project_profile(
     if default_runtime not in {"auto", "fake", "codex"}:
         raise AgentTeamProfileError("default_runtime must be auto, fake, or codex")
     codex_model = _optional_non_empty_string(codex_model, "codex_model")
+    reasoning_profile = _optional_non_empty_string(
+        reasoning_profile,
+        "reasoning_profile",
+    )
+    if codex_model is not None and reasoning_profile is None:
+        reasoning_profile = "high"
+    if reasoning_profile is not None and reasoning_profile not in {
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    }:
+        raise AgentTeamProfileError("reasoning_profile is unsupported")
+    if reasoning_profile is not None and codex_model is None:
+        raise AgentTeamProfileError(
+            "reasoning_profile requires codex_model for a fixed profile"
+        )
     if max_inflight < 1:
         raise AgentTeamProfileError("max_inflight must be at least 1")
     if max_attempts < 1:
@@ -70,6 +90,7 @@ def build_project_profile(
         "author_runtime": author_runtime,
         "default_runtime": default_runtime,
         "codex_model": codex_model,
+        "reasoning_profile": reasoning_profile,
         "one_shot": bool(one_shot),
         "max_inflight": max_inflight,
         "max_attempts": max_attempts,
