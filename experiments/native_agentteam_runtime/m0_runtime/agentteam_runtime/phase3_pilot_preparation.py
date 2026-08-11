@@ -16,6 +16,13 @@ FIXED_DATASET_ROW_COUNT = 48
 FIXED_DATASET_ARTIFACT_PATH = "hf_out/hf_dataset/test/data-00000-of-00001.arrow"
 FIXED_SOURCE_REPOSITORY = "https://github.com/SWE-EVO/SWE-EVO.git"
 ROUTING_MANIFEST_SCHEMA_VERSION = "phase3_routing_manifest.v1"
+ROUTING_FIELDS = (
+    "instance_id",
+    "repository",
+    "complexity_stratum",
+    "language",
+    "tags",
+)
 
 
 class Phase3PreparationError(BenchmarkAdapterError):
@@ -60,9 +67,14 @@ def convert_swe_evo_inventory(inventory, *, metadata_revision="swe-evo-fixed-r1"
     rows = inventory.get("instances", inventory.get("rows"))
     if not isinstance(rows, list):
         raise Phase3PreparationError("upstream inventory must contain instances or rows")
+    if len(rows) != FIXED_DATASET_ROW_COUNT:
+        raise Phase3PreparationError(
+            "fixed inventory row count mismatch: "
+            f"expected {FIXED_DATASET_ROW_COUNT}, got {len(rows)}"
+        )
     # Reject before projection: silently dropping gold would make the boundary
     # ambiguous and could permit a caller to believe it was routed.
-    allowed_row_fields = {"instance_id", "repository", "complexity_stratum", "language", "tags"}
+    allowed_row_fields = set(ROUTING_FIELDS)
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             raise Phase3PreparationError(f"inventory row {index} must be an object")
@@ -83,7 +95,7 @@ def convert_swe_evo_inventory(inventory, *, metadata_revision="swe-evo-fixed-r1"
         "dataset": binding,
         "metadata": metadata,
         "gold_visibility": "evaluator_only",
-        "allowlisted_fields": ["instance_id", "repository", "complexity_stratum", "language", "tags"],
+        "allowlisted_fields": list(ROUTING_FIELDS),
     }
     manifest = {
         "schema_version": ROUTING_MANIFEST_SCHEMA_VERSION,
@@ -106,7 +118,17 @@ def validate_routing_manifest(manifest):
         raise Phase3PreparationError(f"routing manifest schema validation failed: {errors[0].message}")
     if value["manifest_sha256"] != canonical_json_sha256(value["manifest"]):
         raise Phase3PreparationError("manifest_sha256 does not bind canonical content")
-    validate_swe_evo_metadata(value["manifest"]["metadata"], expected_revision=value["manifest"]["metadata"]["metadata_revision"])
+    body = value["manifest"]
+    if body["dataset"] != fixed_dataset_binding():
+        raise Phase3PreparationError("routing manifest dataset binding is not fixed")
+    if body["allowlisted_fields"] != list(ROUTING_FIELDS):
+        raise Phase3PreparationError("routing manifest allowlisted_fields are not fixed")
+    metadata = validate_swe_evo_metadata(
+        body["metadata"],
+        expected_revision=body["metadata"]["metadata_revision"],
+    )
+    if len(metadata["instances"]) != FIXED_DATASET_ROW_COUNT:
+        raise Phase3PreparationError("routing manifest row count is not fixed")
     return value
 
 

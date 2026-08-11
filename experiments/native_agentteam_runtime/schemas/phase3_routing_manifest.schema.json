@@ -15,9 +15,9 @@
           "type": "object", "additionalProperties": false,
           "required": ["benchmark", "source_repository", "source_commit", "artifact_path", "artifact_sha256", "split", "row_count"],
           "properties": {
-            "benchmark": {"const": "swe_evo"}, "source_repository": {"type": "string"},
-            "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-            "artifact_path": {"type": "string"}, "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "benchmark": {"const": "swe_evo"}, "source_repository": {"const": "https://github.com/SWE-EVO/SWE-EVO.git"},
+            "source_commit": {"const": "9b83d5af943ba7a17567336f5b18239f73960219"},
+            "artifact_path": {"const": "hf_out/hf_dataset/test/data-00000-of-00001.arrow"}, "artifact_sha256": {"const": "74e7c63160ada4ceba71d5d89a9bb7c9794f4574b384458d546eb65cdb730520"},
             "split": {"const": "test"}, "row_count": {"const": 48}
           }
         },
@@ -27,7 +27,7 @@
           "properties": {
             "schema_version": {"const": "swe_evo_metadata.v1"}, "benchmark": {"const": "swe_evo"},
             "metadata_revision": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
-            "instances": {"type": "array", "minItems": 1, "items": {
+            "instances": {"type": "array", "minItems": 48, "maxItems": 48, "items": {
               "type": "object", "additionalProperties": false,
               "required": ["instance_id", "repository", "complexity_stratum", "language", "tags"],
               "properties": {
@@ -41,7 +41,19 @@
           }
         },
         "gold_visibility": {"const": "evaluator_only"},
-        "allowlisted_fields": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+        "allowlisted_fields": {
+          "type": "array",
+          "prefixItems": [
+            {"const": "instance_id"},
+            {"const": "repository"},
+            {"const": "complexity_stratum"},
+            {"const": "language"},
+            {"const": "tags"}
+          ],
+          "items": false,
+          "minItems": 5,
+          "maxItems": 5
+        }
       }
     }
   }
