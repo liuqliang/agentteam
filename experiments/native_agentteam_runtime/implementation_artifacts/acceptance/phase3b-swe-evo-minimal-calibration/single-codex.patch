@@ -1,0 +1,28 @@
+diff --git a/requests/utils.py b/requests/utils.py
+index 1c2ae4e0eb180c9030626926c9a92220ca20e554..ea80309ce0af8a12be0a272cff1cecbc7763df31 100644
+--- a/requests/utils.py
++++ b/requests/utils.py
+@@ -971,6 +971,8 @@ def prepend_scheme_if_needed(url, new_scheme):
+     # netloc and path. Due to a lack of tests on the original defect, this is
+     # maintained with parse_url for backwards compatibility.
+     netloc = parsed.netloc
++    if auth:
++        netloc = '@'.join([auth, netloc])
+     if not netloc:
+         netloc, path = path, netloc
+ 
+diff --git a/tests/test_utils.py b/tests/test_utils.py
+index c2186b885feed9923eebf6de736d708b7b62b137..7f888557ed3d7004639d419e0c30b99f225a06bc 100644
+--- a/tests/test_utils.py
++++ b/tests/test_utils.py
+@@ -602,6 +602,10 @@ def test_parse_header_links(value, expected):
+         ('example.com/path', 'http://example.com/path'),
+         ('//example.com/path', 'http://example.com/path'),
+         ('example.com:80', 'http://example.com:80'),
++        (
++            'http://user:pass@example.com/path?query',
++            'http://user:pass@example.com/path?query'
++        ),
+     ))
+ def test_prepend_scheme_if_needed(value, expected):
+     assert prepend_scheme_if_needed(value, 'http') == expected

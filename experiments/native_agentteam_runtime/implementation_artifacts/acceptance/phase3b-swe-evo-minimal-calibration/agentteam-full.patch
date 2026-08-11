@@ -1,0 +1,33 @@
+diff --git a/requests/utils.py b/requests/utils.py
+index 1c2ae4e0eb180c9030626926c9a92220ca20e554..e0c1a697c03a22d72cb94e04ee37759afcf3519f 100644
+--- a/requests/utils.py
++++ b/requests/utils.py
+@@ -974,6 +974,9 @@ def prepend_scheme_if_needed(url, new_scheme):
+     if not netloc:
+         netloc, path = path, netloc
+ 
++    if auth:
++        netloc = '@'.join([auth, netloc])
++
+     if scheme is None:
+         scheme = new_scheme
+     if path is None:
+diff --git a/tests/test_utils.py b/tests/test_utils.py
+index c2186b885feed9923eebf6de736d708b7b62b137..65b741f36b6e08d224083650919ed9dcb2489b5c 100644
+--- a/tests/test_utils.py
++++ b/tests/test_utils.py
+@@ -602,6 +602,14 @@ def test_parse_header_links(value, expected):
+         ('example.com/path', 'http://example.com/path'),
+         ('//example.com/path', 'http://example.com/path'),
+         ('example.com:80', 'http://example.com:80'),
++        (
++            'http://user:pass@proxy.example.com:8080/path',
++            'http://user:pass@proxy.example.com:8080/path',
++        ),
++        (
++            'https://user:pa%40ss@proxy.example.com/path',
++            'https://user:pa%40ss@proxy.example.com/path',
++        ),
+     ))
+ def test_prepend_scheme_if_needed(value, expected):
+     assert prepend_scheme_if_needed(value, 'http') == expected
