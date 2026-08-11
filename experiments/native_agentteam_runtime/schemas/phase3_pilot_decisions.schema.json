@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase3_pilot_decisions.schema.json",
+  "title": "Explicit operator-owned Phase 3B pilot decisions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "authority",
+    "complexity",
+    "selection",
+    "execution",
+    "thresholds"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase3_pilot_decisions.v1"
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "revision",
+        "status",
+        "decided_by",
+        "decided_at"
+      ],
+      "properties": {
+        "decision_id": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "const": "approved"
+        },
+        "decided_by": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "decided_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "complexity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proxy",
+        "gold_blind",
+        "stratum_boundaries"
+      ],
+      "properties": {
+        "proxy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "source",
+            "extraction_rule",
+            "source_fields"
+          ],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/non_empty_string"
+            },
+            "source": {
+              "$ref": "#/$defs/non_empty_string"
+            },
+            "extraction_rule": {
+              "$ref": "#/$defs/non_empty_string"
+            },
+            "source_fields": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "instance_id",
+                  "repository",
+                  "complexity_stratum",
+                  "language",
+                  "tags"
+                ]
+              }
+            }
+          }
+        },
+        "gold_blind": {
+          "const": true
+        },
+        "stratum_boundaries": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stratum",
+              "boundary_rule"
+            ],
+            "properties": {
+              "stratum": {
+                "$ref": "#/$defs/safe_id"
+              },
+              "boundary_rule": {
+                "$ref": "#/$defs/non_empty_string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metadata_revision",
+        "filters",
+        "seed",
+        "stratum_quotas",
+        "sample_size"
+      ],
+      "properties": {
+        "metadata_revision": {
+          "$ref": "#/$defs/safe_id"
+        },
+        "filters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repositories",
+            "languages",
+            "required_tags",
+            "excluded_instance_ids"
+          ],
+          "properties": {
+            "repositories": {
+              "$ref": "#/$defs/unique_non_empty_strings"
+            },
+            "languages": {
+              "$ref": "#/$defs/unique_safe_ids"
+            },
+            "required_tags": {
+              "$ref": "#/$defs/unique_safe_ids"
+            },
+            "excluded_instance_ids": {
+              "$ref": "#/$defs/unique_safe_ids"
+            }
+          }
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "stratum_quotas": {
+          "$ref": "#/$defs/positive_counts"
+        },
+        "sample_size": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "reasoning_profile",
+        "per_instance_budget"
+      ],
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "reasoning_profile": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "per_instance_budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_total_tokens",
+            "max_wall_time_seconds"
+          ],
+          "properties": {
+            "max_total_tokens": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_wall_time_seconds": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "non_inferiority_margin",
+        "max_token_cost_ratio",
+        "max_wall_time_cost_ratio",
+        "preselected_secondary_benefit_metric"
+      ],
+      "properties": {
+        "non_inferiority_margin": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "max_token_cost_ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "max_wall_time_cost_ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "preselected_secondary_benefit_metric": {
+          "enum": [
+            "corrective_operator_interventions",
+            "regressions",
+            "recovery_cost"
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    },
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "unique_safe_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/safe_id"
+      }
+    },
+    "unique_non_empty_strings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/non_empty_string"
+      }
+    },
+    "positive_counts": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[A-Za-z0-9][A-Za-z0-9_.-]*$": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

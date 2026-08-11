@@ -7,9 +7,15 @@ from agentteam_runtime.phase3_pilot_preparation import (
     FIXED_SOURCE_COMMIT,
     Phase3PreparationError,
     convert_swe_evo_inventory,
+    decision_input_report,
     fixed_dataset_binding,
+    prepare_phase3_pilot_selection,
+    replay_phase3_pilot_selection,
     routing_manifest_bytes,
+    selection_authority_bytes,
     validate_routing_manifest,
+    validate_phase3_pilot_decisions,
+    validate_phase3_selection_authority,
 )
 from agentteam_runtime.experiment_contract import canonical_json_sha256
 
@@ -27,6 +33,62 @@ def _inventory():
             }
             for index in range(FIXED_DATASET_ROW_COUNT)
         ],
+    }
+
+
+def _decisions():
+    return {
+        "schema_version": "phase3_pilot_decisions.v1",
+        "authority": {
+            "decision_id": "DEC-P3B-pilot-parameters",
+            "revision": 1,
+            "status": "approved",
+            "decided_by": "operator-semantic-authority",
+            "decided_at": "2026-08-11T00:00:00Z",
+        },
+        "complexity": {
+            "proxy": {
+                "name": "reviewed-visible-stratum",
+                "source": "fixed routing manifest",
+                "extraction_rule": "Use the reviewed complexity_stratum field.",
+                "source_fields": ["complexity_stratum"],
+            },
+            "gold_blind": True,
+            "stratum_boundaries": [
+                {
+                    "stratum": "lower",
+                    "boundary_rule": "reviewed lower-complexity boundary",
+                }
+            ],
+        },
+        "selection": {
+            "metadata_revision": "swe-evo-fixed-r1",
+            "filters": {
+                "repositories": [],
+                "languages": ["python"],
+                "required_tags": ["pilot"],
+                "excluded_instance_ids": [],
+            },
+            "seed": 20260811,
+            "stratum_quotas": {"lower": 3},
+            "sample_size": 3,
+        },
+        "execution": {
+            "model": "operator-selected-codex-model",
+            "reasoning_profile": "high",
+            "per_instance_budget": {
+                "max_total_tokens": 1000,
+                "max_wall_time_seconds": 120,
+            },
+        },
+        "thresholds": {
+            "non_inferiority_margin": 0.05,
+            "max_token_cost_ratio": 1.25,
+            "max_wall_time_cost_ratio": 1.25,
+            "preselected_secondary_benefit_metric": (
+                "corrective_operator_interventions"
+            ),
+        },
     }
 
 
@@ -95,6 +157,146 @@ class Phase3PilotPreparationTests(unittest.TestCase):
         manifest["manifest_sha256"] = canonical_json_sha256(manifest["manifest"])
         with self.assertRaises(Phase3PreparationError):
             validate_routing_manifest(manifest)
+
+    def test_missing_decision_reports_exact_paths_and_does_not_select(self):
+        decisions = _decisions()
+        del decisions["selection"]["seed"]
+        del decisions["execution"]["model"]
+
+        report = prepare_phase3_pilot_selection(
+            convert_swe_evo_inventory(_inventory()),
+            decisions,
+        )
+
+        self.assertEqual(report["status"], "decision_input_required")
+        self.assertEqual(report["selection_freeze"], "blocked")
+        self.assertEqual(
+            report["missing_decisions"],
+            ["selection.seed", "execution.model"],
+        )
+        self.assertNotIn("selection", report)
+
+    def test_missing_decisions_are_not_defaulted(self):
+        report = decision_input_report({})
+        self.assertEqual(report["status"], "decision_input_required")
+        self.assertIn("selection.seed", report["missing_decisions"])
+        self.assertIn("selection.stratum_quotas", report["missing_decisions"])
+        self.assertIn("execution.model", report["missing_decisions"])
+        self.assertIn(
+            "thresholds.non_inferiority_margin",
+            report["missing_decisions"],
+        )
+
+    def test_invalid_or_unapproved_decisions_block_selection(self):
+        cases = []
+        unapproved = _decisions()
+        unapproved["authority"]["status"] = "draft"
+        cases.append(unapproved)
+        inconsistent_sample = _decisions()
+        inconsistent_sample["selection"]["sample_size"] = 4
+        cases.append(inconsistent_sample)
+        not_gold_blind = _decisions()
+        not_gold_blind["complexity"]["gold_blind"] = False
+        cases.append(not_gold_blind)
+        unknown_gold_field = _decisions()
+        unknown_gold_field["selection"]["prior_score"] = 1
+        cases.append(unknown_gold_field)
+
+        manifest = convert_swe_evo_inventory(_inventory())
+        for decisions in cases:
+            with self.subTest(decisions=decisions):
+                report = prepare_phase3_pilot_selection(manifest, decisions)
+                self.assertEqual(report["status"], "decision_input_required")
+                self.assertNotIn("selection", report)
+                self.assertTrue(report["invalid_decisions"])
+
+    def test_complete_decisions_validate_without_mutation(self):
+        decisions = _decisions()
+        before = copy.deepcopy(decisions)
+        validated = validate_phase3_pilot_decisions(decisions)
+        self.assertEqual(validated, before)
+        self.assertEqual(decisions, before)
+
+    def test_selection_is_byte_stable_and_replayable(self):
+        manifest = convert_swe_evo_inventory(_inventory())
+        decisions = _decisions()
+        first = prepare_phase3_pilot_selection(manifest, decisions)
+        second = prepare_phase3_pilot_selection(
+            copy.deepcopy(manifest),
+            copy.deepcopy(decisions),
+        )
+
+        self.assertEqual(first["status"], "selection_frozen")
+        self.assertEqual(first, second)
+        self.assertEqual(
+            selection_authority_bytes(first),
+            selection_authority_bytes(second),
+        )
+        self.assertEqual(
+            replay_phase3_pilot_selection(manifest, decisions, first),
+            first,
+        )
+
+    def test_every_authorized_input_is_bound_by_authority_digest(self):
+        manifest = convert_swe_evo_inventory(_inventory())
+        baseline = prepare_phase3_pilot_selection(manifest, _decisions())
+        mutations = []
+
+        complexity = _decisions()
+        complexity["complexity"]["proxy"]["extraction_rule"] += " Reviewed."
+        mutations.append(complexity)
+        seed = _decisions()
+        seed["selection"]["seed"] += 1
+        mutations.append(seed)
+        model = _decisions()
+        model["execution"]["model"] = "another-operator-selected-model"
+        mutations.append(model)
+        budget = _decisions()
+        budget["execution"]["per_instance_budget"]["max_total_tokens"] += 1
+        mutations.append(budget)
+        threshold = _decisions()
+        threshold["thresholds"]["max_token_cost_ratio"] = 1.5
+        mutations.append(threshold)
+
+        for decisions in mutations:
+            with self.subTest(decisions=decisions):
+                changed = prepare_phase3_pilot_selection(manifest, decisions)
+                self.assertEqual(changed["status"], "selection_frozen")
+                self.assertNotEqual(
+                    baseline["selection_authority_sha256"],
+                    changed["selection_authority_sha256"],
+                )
+
+    def test_manifest_or_authority_drift_is_rejected(self):
+        manifest = convert_swe_evo_inventory(_inventory())
+        decisions = _decisions()
+        authority = prepare_phase3_pilot_selection(manifest, decisions)
+        authority["decision_input_sha256"] = "0" * 64
+        with self.assertRaisesRegex(
+            Phase3PreparationError,
+            "selection_authority_sha256",
+        ):
+            validate_phase3_selection_authority(
+                authority,
+                routing_manifest=manifest,
+                decisions=decisions,
+            )
+
+    def test_routing_revision_mismatch_is_structured_and_blocks(self):
+        decisions = _decisions()
+        decisions["selection"]["metadata_revision"] = "other-revision"
+        report = prepare_phase3_pilot_selection(
+            convert_swe_evo_inventory(_inventory()),
+            decisions,
+        )
+        self.assertEqual(report["status"], "decision_input_required")
+        self.assertEqual(report["selection_freeze"], "blocked")
+        self.assertTrue(
+            any(
+                item["path"] == "selection.metadata_revision"
+                for item in report["invalid_decisions"]
+            )
+        )
 
 
 if __name__ == "__main__":
