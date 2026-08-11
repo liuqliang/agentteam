@@ -14,7 +14,10 @@ from .decision_runtime import (
     DecisionRuntimeError,
     validate_taskpack_decision_contract,
 )
-from .model_routing import validate_model_routing_policy
+from .model_routing import (
+    default_model_routing_policy,
+    validate_model_routing_policy,
+)
 from .release_manager import AgentTeamReleaseError, _rename_noreplace
 
 
@@ -1791,11 +1794,16 @@ def _generate_taskpack_blueprint(
                 "outbox_path": f"mailboxes/{declared_agent['agent_id']}/outbox.jsonl",
             }
         )
+    model_routing_policy = _blueprint_model_routing_policy(
+        role_runtime_profiles
+    )
     agent_pool = {
         "scheduler_agent_id": "agent-scheduler",
         "role_runtime_profiles": role_runtime_profiles,
         "agents": agents,
     }
+    if model_routing_policy is not None:
+        agent_pool["model_routing_policy"] = model_routing_policy
 
     items = []
     for blueprint_task in blueprint["tasks"]:
@@ -1882,6 +1890,30 @@ def _generate_taskpack_blueprint(
             "materialized_registry_bindings_sha256"
         ]
     return manifest
+
+
+def _blueprint_model_routing_policy(role_runtime_profiles):
+    codex_profiles = [
+        profile
+        for profile in role_runtime_profiles.values()
+        if profile.get("adapter") == "codex"
+    ]
+    if not codex_profiles:
+        return None
+    for profile in codex_profiles:
+        if profile.get("reasoning_profile") and not profile.get("model"):
+            raise TaskpackValidationError(
+                "blueprint Codex reasoning_profile requires an explicit model"
+            )
+    explicit_model = [bool(profile.get("model")) for profile in codex_profiles]
+    if any(explicit_model) and not all(explicit_model):
+        raise TaskpackValidationError(
+            "blueprint Codex roles must all use explicit models or all use "
+            "adaptive model routing"
+        )
+    if all(explicit_model):
+        return None
+    return default_model_routing_policy()
 
 
 def _git_output(project_root, *arguments):

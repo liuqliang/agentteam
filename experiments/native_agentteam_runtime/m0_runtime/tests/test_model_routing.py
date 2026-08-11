@@ -22,7 +22,12 @@ from agentteam_runtime.model_routing import (
 )
 from agentteam_runtime.profile import build_project_profile
 from agentteam_runtime.retry_decision import decide_retry
-from agentteam_runtime.taskpack import draft_taskpack_files, load_taskpack
+from agentteam_runtime.taskpack import (
+    TaskpackValidationError,
+    _blueprint_model_routing_policy,
+    draft_taskpack_files,
+    load_taskpack,
+)
 from agentteam_runtime.two_phase_scheduler import TwoPhaseFileScheduler
 
 
@@ -298,6 +303,50 @@ class ModelRoutingTest(unittest.TestCase):
             self.assertNotIn("model_routing_policy", loaded["agent_pool"])
             for profile in loaded["agent_pool"]["role_runtime_profiles"].values():
                 self.assertEqual(profile["model"], "gpt-5.6-sol")
+
+    def test_blueprint_implicit_codex_profiles_enable_adaptive_routing(self):
+        policy = _blueprint_model_routing_policy(
+            {
+                "repo_map_agent": {"adapter": "codex"},
+                "implementation_worker": {"adapter": "codex"},
+            }
+        )
+
+        self.assertEqual(policy["mode"], "adaptive")
+        self.assertTrue(policy["retry_escalation"])
+
+    def test_blueprint_explicit_codex_profiles_remain_fixed(self):
+        policy = _blueprint_model_routing_policy(
+            {
+                "repo_map_agent": {
+                    "adapter": "codex",
+                    "model": "gpt-5.6-sol",
+                    "reasoning_profile": "medium",
+                },
+                "implementation_worker": {
+                    "adapter": "codex",
+                    "model": "gpt-5.6-sol",
+                    "reasoning_profile": "high",
+                },
+            }
+        )
+
+        self.assertIsNone(policy)
+
+    def test_blueprint_mixed_codex_profiles_fail_closed(self):
+        with self.assertRaisesRegex(
+            TaskpackValidationError,
+            "all use explicit models or all use adaptive model routing",
+        ):
+            _blueprint_model_routing_policy(
+                {
+                    "repo_map_agent": {"adapter": "codex"},
+                    "implementation_worker": {
+                        "adapter": "codex",
+                        "model": "gpt-5.6-sol",
+                    },
+                }
+            )
 
     def test_scheduler_freezes_route_in_each_retry_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:
