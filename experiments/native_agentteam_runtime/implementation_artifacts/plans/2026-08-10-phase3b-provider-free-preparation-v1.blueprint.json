@@ -1,0 +1,373 @@
+{
+  "schema_version": "agentteam_taskpack_blueprint.v1",
+  "blueprint_id": "phase3b-provider-free-preparation-v1",
+  "source_plan": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md",
+  "research_authority": "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md",
+  "schema_inventory": [
+    "experiments/native_agentteam_runtime/schemas/benchmark_instance_selection.schema.json",
+    "experiments/native_agentteam_runtime/schemas/benchmark_preregistration.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase3_pilot_contract.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase3_live_authorization.schema.json",
+    "experiments/native_agentteam_runtime/schemas/taskpack_blueprint.schema.json"
+  ],
+  "taskpack": {
+    "taskpack_id": "phase3b-provider-free-preparation-v1",
+    "goal_kind": "implementation",
+    "milestone": "research-phase-3b-provider-free-preparation",
+    "goal": "Implement the deterministic, gold-blind Phase 3B preparation path through aggregate preflight without authorizing or executing a scored model call.",
+    "overall_risk": "L3",
+    "integration_policy": "Verified integration followed by operator review; no scored provider call, live authorization, source merge, push, or release activation.",
+    "execution_mode": "model_workers"
+  },
+  "contract": {
+    "benchmark": "SWE-EVO",
+    "upstream_source_commit": "9b83d5af943ba7a17567336f5b18239f73960219",
+    "dataset_artifact_sha256": "74e7c63160ada4ceba71d5d89a9bb7c9794f4574b384458d546eb65cdb730520",
+    "dataset_split": "test",
+    "dataset_row_count": 48,
+    "readiness_gate": "P3-READY",
+    "readiness_evidence_sha256": "d87486c41ef79707d52408215b05d22b52d736d16380001590d031c4fb483af7",
+    "readiness_receipt_content_sha256": "5fa7ff18044f2fcf5c01ee7d33b2592091d6af91bd09c1de641eeffe3a0bfc9d",
+    "readiness_integration_head": "ebce7b10a0ab7b2f9dc3e3936df3f7c2e1e77a02",
+    "scored_provider_calls": 0,
+    "development_worker_calls": "allowed_and_metered",
+    "experiment_parameter_policy": "explicit_operator_authority_required",
+    "missing_parameter_behavior": "emit_decision_input_required_and_stop_before_freeze",
+    "live_authorization_policy": "forbidden_in_this_taskpack",
+    "merge_policy": "operator_review_required"
+  },
+  "decision_contract": {
+    "schema_version": "taskpack_decision_contract.v1",
+    "root_decision_id": "DEC-P3-readiness-direction",
+    "decisions": [
+      {
+        "schema_version": "decision_record.v1",
+        "decision_id": "DEC-P3-readiness-direction",
+        "revision": 1,
+        "decision_kind": "direction",
+        "subject": "phase3_benchmark_readiness",
+        "authority_level": "L3",
+        "parent_decision_id": null,
+        "supersedes_decision_id": null,
+        "statement": "Prepare a decision-bound standard benchmark pilot without spending scored provider budget.",
+        "selected_option": "swe_evo_adapter_and_preregistration_first",
+        "alternatives": [
+          {
+            "option": "run an unregistered live benchmark",
+            "rejected_reason": "It would spend claim-bearing budget before instance, fairness, and metric authority is frozen."
+          }
+        ],
+        "rationale": "Phase 3A closed deterministic readiness; Phase 3B must bind actual pilot authority before outcomes become visible.",
+        "scope": [
+          "phase3b preparation",
+          "gold-blind selection",
+          "per-instance preregistration",
+          "aggregate preflight"
+        ],
+        "expected_outcome": "A mechanically validated preparation path suitable for a separately authorized live pilot.",
+        "acceptance_refs": [
+          "2026-08-10-phase3b-live-pilot-preparation.md#acceptance"
+        ],
+        "status": "active",
+        "created_at": "2026-08-10T00:00:00Z",
+        "created_by": "operator-semantic-authority",
+        "previous_revision_sha256": null
+      },
+      {
+        "schema_version": "decision_record.v1",
+        "decision_id": "DEC-P3B-provider-free-preparation",
+        "revision": 1,
+        "decision_kind": "execution",
+        "subject": "phase3b_preparation_implementation",
+        "authority_level": "L2",
+        "parent_decision_id": "DEC-P3-readiness-direction",
+        "supersedes_decision_id": null,
+        "statement": "Implement deterministic Phase 3B inventory, selection-input, preregistration, contract, and preflight producers while treating experiment parameters as external authority.",
+        "selected_option": "provider_free_fail_closed_preparation",
+        "alternatives": [
+          {
+            "option": "let workers infer missing experiment parameters",
+            "rejected_reason": "Sample, model, budget, and threshold choices are claim-bearing decisions and cannot be inferred from implementation convenience."
+          },
+          {
+            "option": "combine preparation and scored execution",
+            "rejected_reason": "It would erase the mandatory review and epoch-bound authorization boundary."
+          }
+        ],
+        "rationale": "Deterministic preparation can be implemented and tested before the remaining experiment choices are approved, while unresolved values must fail closed.",
+        "scope": [
+          "routing manifest",
+          "decision input validation",
+          "pilot artifact materialization",
+          "provider-free preflight"
+        ],
+        "expected_outcome": "One reviewed implementation that can later consume explicit pilot decisions without code changes.",
+        "acceptance_refs": [
+          "2026-08-10-phase3b-live-pilot-preparation.md#preparation-taskpack-boundary",
+          "2026-08-10-phase3b-live-pilot-preparation.md#acceptance"
+        ],
+        "status": "active",
+        "created_at": "2026-08-10T00:00:01Z",
+        "created_by": "implementation-planner",
+        "previous_revision_sha256": null
+      }
+    ],
+    "task_bindings": {
+      "P3B-00": "DEC-P3B-provider-free-preparation",
+      "P3B-01": "DEC-P3B-provider-free-preparation",
+      "P3B-02": "DEC-P3B-provider-free-preparation",
+      "P3B-03": "DEC-P3B-provider-free-preparation"
+    }
+  },
+  "approval": {
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase3b-provider-free-preparation-review.v1.json",
+    "schema_path": "experiments/native_agentteam_runtime/schemas/phase3b_preparation_review.schema.json",
+    "required_decision": "approved",
+    "git_object_format_required": true,
+    "runtime_release_binding_required": false,
+    "digest_bindings": [
+      "source_plan",
+      "blueprint",
+      "research_authority",
+      "review_schema",
+      "contract",
+      "decision_contract",
+      "schema_inventory"
+    ]
+  },
+  "agents": [
+    {
+      "agent_id": "agent-phase3b-repo-map",
+      "role": "repo_map_agent",
+      "runtime_profile": {
+        "adapter": "codex"
+      }
+    },
+    {
+      "agent_id": "agent-phase3b-implementation",
+      "role": "implementation_worker",
+      "runtime_profile": {
+        "adapter": "codex"
+      }
+    }
+  ],
+  "verification": {
+    "command": [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "experiments/native_agentteam_runtime/m0_runtime/tests",
+      "-p",
+      "test*.py"
+    ],
+    "success_criteria": [
+      "The provider-free integration lane passes.",
+      "The upstream inventory conversion rejects evaluator-only and unknown fields.",
+      "Missing experiment decisions stop before selection or taskpack freeze with structured evidence.",
+      "Per-instance preregistrations preserve equal visible inputs across all three modes.",
+      "Aggregate preflight records zero scored provider calls and cannot publish live authorization."
+    ]
+  },
+  "policy": {
+    "allow_merge": false,
+    "merge_requires_verified_integration": true,
+    "operator_review_required": true,
+    "live_provider_calls_allowed": false,
+    "scored_provider_calls_allowed": false,
+    "historical_authority_writes_forbidden": true,
+    "semantic_authority_worker_mutation_forbidden": true
+  },
+  "tasks": [
+    {
+      "task_id": "P3B-00",
+      "objective": "Implement a deterministic converter from the fixed SWE-EVO upstream inventory to an allowlisted gold-blind routing manifest, plus a compact Phase 3B repository handoff.",
+      "goal_alignment": "Establishes the exact input boundary before selection policy or model execution can observe benchmark instances.",
+      "work_type": "repository_mapping",
+      "required_role": "repo_map_agent",
+      "backlog_status": "ready",
+      "risk_target": "L0",
+      "depends_on": [],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/benchmark_adapter.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_readiness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_pilot.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_benchmark_adapter.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_pilot_preparation.py",
+        "experiments/native_agentteam_runtime/schemas/phase3_routing_manifest.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py",
+        ".agentteam/generated/"
+      ],
+      "expected_output_artifacts": [
+        ".agentteam/generated/repo_map_handoff.json"
+      ],
+      "required_deliverables": [
+        "fixed_inventory_binding",
+        "allowlisted_routing_manifest_converter",
+        "evaluator_field_rejection_tests",
+        "repo_map_handoff"
+      ],
+      "acceptance_criteria": [
+        "The converter verifies the fixed source commit, artifact digest, split, and row count.",
+        "Only reviewed routing fields can be emitted; patch, test patch, score, prior result, and unknown fields fail closed.",
+        "Equal visible inputs produce byte-identical manifest bytes and digest.",
+        "The handoff identifies reusable Phase 3A APIs without copying source bodies."
+      ],
+      "stop_condition": "Stop if conversion requires exposing evaluator-only fields or silently installing an undeclared runtime dependency.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v1.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md",
+        "experiments/native_agentteam_runtime/implementation_artifacts/reports/phase3-benchmark-readiness.md"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py",
+        ".agentteam/generated/repo_map_handoff.json"
+      ]
+    },
+    {
+      "task_id": "P3B-01",
+      "objective": "Implement and validate an explicit Phase 3B experiment-decision input, then replay deterministic selection only when every claim-bearing selection field is authorized.",
+      "goal_alignment": "Separates mechanical selection from the human-owned choice of complexity proxy, strata, quotas, sample size, seed, model, budgets, and thresholds.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L2",
+      "depends_on": [
+        "P3B-00"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/benchmark_adapter.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/benchmark_preregistration.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_contract.py",
+        ".agentteam/generated/repo_map_handoff.json"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_pilot_preparation.py",
+        "experiments/native_agentteam_runtime/schemas/phase3_pilot_decisions.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py"
+      ],
+      "required_deliverables": [
+        "experiment_decision_input_schema",
+        "missing_decision_report",
+        "selection_replay",
+        "selection_authority_digest"
+      ],
+      "acceptance_criteria": [
+        "No default value is substituted for a claim-bearing experiment decision.",
+        "Missing or invalid decisions emit structured decision_input_required evidence and stop before selection freeze.",
+        "Selection replay is byte-stable and gold-blind.",
+        "Changing any authorized selection field changes the selection digest."
+      ],
+      "stop_condition": "Stop and report the missing decision rather than choosing a complexity rule, quota, model, budget, metric, or threshold.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v1.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md",
+        ".agentteam/generated/repo_map_handoff.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py"
+      ]
+    },
+    {
+      "task_id": "P3B-02",
+      "objective": "Implement per-instance visible task input, direct taskpack, and immutable preregistration materialization from an approved selection and experiment-decision input.",
+      "goal_alignment": "Binds distinct repository tasks while preserving equal mode inputs, budgets, and execution policy for each selected instance.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L2",
+      "depends_on": [
+        "P3B-01"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/benchmark_preregistration.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_pilot.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/taskpack.py",
+        "experiments/native_agentteam_runtime/schemas/benchmark_preregistration.schema.json"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_pilot_preparation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py"
+      ],
+      "required_deliverables": [
+        "per_instance_visible_input_builder",
+        "per_instance_direct_taskpack_builder",
+        "per_instance_preregistration_builder",
+        "cross_mode_equal_input_tests"
+      ],
+      "acceptance_criteria": [
+        "Each selected instance has exactly one direct taskpack and one preregistration.",
+        "All three modes for one instance bind identical visible task inputs, model profile, budgets, tests, and environment policy.",
+        "Different instances cannot reuse a single shared_visible_inputs authority.",
+        "Evaluator-only material remains outside runtime-visible roots."
+      ],
+      "stop_condition": "Stop if an instance lacks a visible goal, repository commit, acceptance command, or approved budget.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v1.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md",
+        "experiments/native_agentteam_runtime/schemas/benchmark_preregistration.schema.json",
+        ".agentteam/generated/repo_map_handoff.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py"
+      ]
+    },
+    {
+      "task_id": "P3B-03",
+      "objective": "Implement aggregate Phase 3B pilot-contract materialization and a provider-free preflight receipt over the selected per-instance authorities.",
+      "goal_alignment": "Proves that the complete pilot authority is internally consistent before the mandatory operator review and live-authorization epoch.",
+      "work_type": "verification",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L2",
+      "depends_on": [
+        "P3B-02"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_pilot.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_readiness.py",
+        "experiments/native_agentteam_runtime/schemas/phase3_pilot_contract.schema.json",
+        "experiments/native_agentteam_runtime/schemas/phase3_live_authorization.schema.json"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_pilot_preparation.py",
+        "experiments/native_agentteam_runtime/schemas/phase3_pilot_preflight.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/reports/phase3b-provider-free-preflight.md"
+      ],
+      "required_deliverables": [
+        "aggregate_pilot_contract_builder",
+        "provider_free_preflight_receipt",
+        "live_authorization_denial_tests",
+        "operator_preflight_report"
+      ],
+      "acceptance_criteria": [
+        "Aggregate token and wall-time ceilings equal the sum of all maximum scheduled repetitions.",
+        "Changing any selected instance or preregistration changes the aggregate contract digest.",
+        "Preflight records zero scored provider calls and cannot issue a live permit.",
+        "Missing, stale, rejected, mismatched, or budget-expanding authorization remains denied.",
+        "The integration test lane passes."
+      ],
+      "stop_condition": "Stop before publishing phase3_live_authorization.v1, admitting P3-LIVE, invoking a scored model, merging source, pushing, or activating a release.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v1.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-live-pilot-preparation.md",
+        "experiments/native_agentteam_runtime/schemas/phase3_pilot_contract.schema.json",
+        "experiments/native_agentteam_runtime/schemas/phase3_live_authorization.schema.json",
+        ".agentteam/generated/repo_map_handoff.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/reports/phase3b-provider-free-preflight.md"
+      ]
+    }
+  ]
+}

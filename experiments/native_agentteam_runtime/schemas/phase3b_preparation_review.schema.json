@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase3b_preparation_review.schema.json",
+  "title": "Phase 3B Provider-Free Preparation Review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "remaining_escalations",
+    "git_object_format",
+    "preflight_release_source_commit",
+    "plan_sha256",
+    "blueprint_sha256",
+    "research_authority_sha256",
+    "review_schema_sha256",
+    "contract_decisions_sha256",
+    "decision_contract_sha256",
+    "schema_inventory_sha256"
+  ],
+  "properties": {
+    "decision": {
+      "const": "approved"
+    },
+    "remaining_escalations": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "git_object_format": {
+      "enum": [
+        "sha1",
+        "sha256"
+      ]
+    },
+    "preflight_release_source_commit": {
+      "$ref": "#/$defs/git_object_id"
+    },
+    "plan_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "blueprint_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "research_authority_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "review_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "contract_decisions_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "decision_contract_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "schema_inventory_sha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "git_object_id": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    }
+  }
+}

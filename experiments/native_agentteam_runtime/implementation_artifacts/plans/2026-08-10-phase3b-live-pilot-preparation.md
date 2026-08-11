@@ -1,7 +1,7 @@
 # Phase 3B Live Pilot Preparation
 
-Status: implementation contract in progress; provider-free preparation only.
-This document does not authorize a scored run.
+Status: provider-free implementation blueprint prepared; experiment-parameter
+freeze pending. This document does not authorize a scored run.
 
 ## Goal
 
@@ -10,6 +10,31 @@ cost can be approved once, bounded mechanically, and attributed to a fixed
 experimental protocol. Phase 3B inherits the completed Phase 3A `P3-READY`
 result and the research authority; it does not reopen Phase 1 usage counting,
 Phase 2 mode fairness, or D0-D5 artifact authority.
+
+The tracked
+[`2026-08-10-phase3b-provider-free-preparation-v1.blueprint.json`](2026-08-10-phase3b-provider-free-preparation-v1.blueprint.json)
+implements the deterministic preparation machinery for `P3B-00` through
+`P3B-03`. It may validate fixtures and emit a blocked decision-input report,
+but it may not guess unresolved experiment parameters, publish live
+authorization, invoke a scored provider, or execute `P3B-05`.
+
+## Preparation Taskpack Boundary
+
+The provider-free implementation taskpack has four responsibilities:
+
+1. convert the fixed upstream inventory into a gold-blind, allowlisted routing
+   manifest and prove that evaluator-only fields cannot cross the boundary;
+2. validate an explicit experiment-decision input and replay deterministic
+   selection without selecting policy values itself;
+3. build one task input, direct taskpack, and immutable preregistration per
+   selected instance while preserving equal inputs across modes;
+4. build the aggregate pilot contract and a provider-free preflight receipt
+   that either passes or reports the exact missing decision authority.
+
+This is an implementation taskpack, not the live-pilot taskpack. A later
+materialization step must bind actual decision values, selected instances, the
+reviewed runtime release, and an epoch-specific operator authorization before
+any scored execution can begin.
 
 ## Readiness Authority
 
@@ -107,6 +132,10 @@ evidence:
 5. non-inferiority margin and acceptable token/time ratios;
 6. the one preselected secondary benefit metric;
 7. the actual direct-mode taskpack for every selected instance.
+
+These are inputs to the deterministic preparation machinery, not outputs that
+an implementation worker may invent. Missing values must produce a structured
+`decision_input_required` result before taskpack or live authorization freeze.
 
 The official paper identifies linked pull-request count as a useful complexity
 proxy, but the public dataset does not expose a complete dedicated PR-count
