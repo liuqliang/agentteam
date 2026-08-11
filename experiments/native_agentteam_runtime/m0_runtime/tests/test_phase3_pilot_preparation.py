@@ -6,23 +6,33 @@ from agentteam_runtime.phase3_pilot_preparation import (
     FIXED_DATASET_ROW_COUNT,
     FIXED_SOURCE_COMMIT,
     Phase3PreparationError,
+    build_phase3_aggregate_pilot_contract,
     build_phase3_instance_direct_taskpack,
     build_phase3_instance_preregistration,
     build_phase3_instance_visible_input,
+    build_phase3_provider_free_preflight_receipt,
     convert_swe_evo_inventory,
     decision_input_report,
     fixed_dataset_binding,
     materialize_phase3_instance_authorities,
     prepare_phase3_pilot_selection,
+    provider_free_preflight_receipt_bytes,
     replay_phase3_pilot_selection,
     routing_manifest_bytes,
     selection_authority_bytes,
     validate_routing_manifest,
     validate_phase3_pilot_decisions,
     validate_phase3_instance_direct_taskpack,
+    validate_phase3_instance_materialization,
+    validate_phase3_provider_free_preflight_receipt,
     validate_phase3_selection_authority,
 )
 from agentteam_runtime.experiment_contract import canonical_json_sha256
+from agentteam_runtime.phase3_pilot import (
+    LIVE_AUTHORIZATION_SCHEMA_VERSION,
+    Phase3PilotError,
+    admit_phase3_live_launch,
+)
 
 
 def _inventory():
@@ -171,6 +181,87 @@ def _selection_authority():
         convert_swe_evo_inventory(_inventory()),
         _decisions(),
     )
+
+
+def _materialization():
+    selection_authority = _selection_authority()
+    materialization = materialize_phase3_instance_authorities(
+        selection_authority=selection_authority,
+        decisions=_decisions(),
+        task_inputs_by_instance=_task_inputs(selection_authority),
+        execution_profile=_execution_profile(),
+        shared_budget=_shared_budget(),
+        research_authority_sha256="a" * 64,
+        mode_order=_mode_order(),
+    )
+    return selection_authority, materialization
+
+
+def _retry_policy():
+    return {
+        "provider_retry_limit": 1,
+        "retryable_failures": [
+            "provider_transport_error",
+            "provider_rate_limit",
+        ],
+        "budget_accounting": (
+            "all_reported_usage_and_wall_time_count_toward_instance_budget"
+        ),
+    }
+
+
+def _abort_conditions():
+    return {
+        "usage_coverage_below_percent": 100,
+        "cross_mode_isolation_violation": True,
+        "gold_visibility_violation": True,
+        "contract_digest_mismatch": True,
+        "budget_ceiling_reached": True,
+    }
+
+
+def _aggregate():
+    selection_authority, materialization = _materialization()
+    contract = build_phase3_aggregate_pilot_contract(
+        selection_authority=selection_authority,
+        instance_materialization=materialization,
+        retry_policy=_retry_policy(),
+        abort_conditions=_abort_conditions(),
+    )
+    return selection_authority, materialization, contract
+
+
+def _live_authorization(contract, *, decision="approved"):
+    body = contract["contract"]
+    return {
+        "schema_version": LIVE_AUTHORIZATION_SCHEMA_VERSION,
+        "decision": decision,
+        "operator_identity": "phase3b-test-operator",
+        "authorized_at": "2026-08-11T01:00:00Z",
+        "gate_id": "P3-LIVE",
+        "epoch_number": 2,
+        "epoch_sha256": "b" * 64,
+        "pilot_contract_sha256": contract["contract_sha256"],
+        "readiness_evidence_sha256": body["readiness_binding"][
+            "evidence_sha256"
+        ],
+        "selection_sha256": body["selection"]["selection_sha256"],
+        "agentteam_release_commit": body["execution_profile"]["runtime"][
+            "agentteam_release_commit"
+        ],
+        "model": body["execution_profile"]["model"]["model"],
+        "reasoning_profile": body["execution_profile"]["model"][
+            "reasoning_profile"
+        ],
+        "max_total_tokens": body["aggregate_budget_ceiling"][
+            "maximum_total_tokens"
+        ],
+        "max_wall_time_seconds": body["aggregate_budget_ceiling"][
+            "maximum_wall_time_seconds"
+        ],
+        "max_inflight_model_invocations": 1,
+        "modes": ["single_codex", "agentteam_direct", "agentteam_full"],
+    }
 
 
 class Phase3PilotPreparationTests(unittest.TestCase):
@@ -588,6 +679,179 @@ class Phase3PilotPreparationTests(unittest.TestCase):
             "taskpack_sha256|visibility policy",
         ):
             validate_phase3_instance_direct_taskpack(direct)
+
+    def test_aggregate_contract_sums_all_maximum_scheduled_repetitions(self):
+        selection_authority, materialization, contract = _aggregate()
+
+        validate_phase3_instance_materialization(
+            materialization,
+            selection_authority=selection_authority,
+        )
+        self.assertFalse(contract["contract"]["provider_calls_authorized"])
+        self.assertEqual(
+            contract["contract"]["live_authorization"]["status"],
+            "not_authorized",
+        )
+        self.assertEqual(
+            contract["contract"]["aggregate_budget_ceiling"],
+            {
+                "maximum_total_tokens": 27_000,
+                "maximum_wall_time_seconds": 3_240,
+                "max_inflight_model_invocations": 1,
+            },
+        )
+
+    def test_preregistration_change_changes_aggregate_contract_digest(self):
+        selection_authority, baseline_materialization, baseline = _aggregate()
+        task_inputs = _task_inputs(selection_authority)
+        first_id = selection_authority["selection"]["ordered_instance_ids"][0]
+        task_inputs[first_id]["task"]["goal"] += " Preserve reviewed behavior."
+        changed_materialization = materialize_phase3_instance_authorities(
+            selection_authority=selection_authority,
+            decisions=_decisions(),
+            task_inputs_by_instance=task_inputs,
+            execution_profile=_execution_profile(),
+            shared_budget=_shared_budget(),
+            research_authority_sha256="a" * 64,
+            mode_order=_mode_order(),
+        )
+        changed = build_phase3_aggregate_pilot_contract(
+            selection_authority=selection_authority,
+            instance_materialization=changed_materialization,
+            retry_policy=_retry_policy(),
+            abort_conditions=_abort_conditions(),
+        )
+
+        self.assertNotEqual(
+            baseline_materialization["materialization_sha256"],
+            changed_materialization["materialization_sha256"],
+        )
+        self.assertNotEqual(
+            baseline["contract_sha256"],
+            changed["contract_sha256"],
+        )
+
+    def test_selected_instance_change_changes_aggregate_contract_digest(self):
+        baseline_authority, _, baseline = _aggregate()
+        changed_decisions = _decisions()
+        changed_decisions["selection"]["seed"] += 1
+        changed_authority = prepare_phase3_pilot_selection(
+            convert_swe_evo_inventory(_inventory()),
+            changed_decisions,
+        )
+        self.assertNotEqual(
+            baseline_authority["selection"]["ordered_instance_ids"],
+            changed_authority["selection"]["ordered_instance_ids"],
+        )
+        changed_materialization = materialize_phase3_instance_authorities(
+            selection_authority=changed_authority,
+            decisions=changed_decisions,
+            task_inputs_by_instance=_task_inputs(changed_authority),
+            execution_profile=_execution_profile(),
+            shared_budget=_shared_budget(),
+            research_authority_sha256="a" * 64,
+            mode_order=_mode_order(),
+        )
+        changed = build_phase3_aggregate_pilot_contract(
+            selection_authority=changed_authority,
+            instance_materialization=changed_materialization,
+            retry_policy=_retry_policy(),
+            abort_conditions=_abort_conditions(),
+        )
+        self.assertNotEqual(
+            baseline["contract_sha256"],
+            changed["contract_sha256"],
+        )
+
+    def test_provider_free_preflight_is_byte_stable_and_reports_zero_calls(self):
+        selection_authority, materialization, contract = _aggregate()
+        first = build_phase3_provider_free_preflight_receipt(
+            pilot_contract=contract,
+            selection_authority=selection_authority,
+            instance_materialization=materialization,
+        )
+        second = build_phase3_provider_free_preflight_receipt(
+            pilot_contract=copy.deepcopy(contract),
+            selection_authority=copy.deepcopy(selection_authority),
+            instance_materialization=copy.deepcopy(materialization),
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            provider_free_preflight_receipt_bytes(first),
+            provider_free_preflight_receipt_bytes(second),
+        )
+        self.assertEqual(first["usage_reconciliation"]["live_provider_calls"], 0)
+        self.assertEqual(
+            first["usage_reconciliation"]["scored_mode_executions"],
+            0,
+        )
+        self.assertFalse(
+            first["live_authorization_reconciliation"]["permit_issued"]
+        )
+        self.assertEqual(
+            first["live_authorization_reconciliation"]["admission_status"],
+            "denied",
+        )
+
+    def test_preflight_mutation_and_source_drift_fail_closed(self):
+        selection_authority, materialization, contract = _aggregate()
+        receipt = build_phase3_provider_free_preflight_receipt(
+            pilot_contract=contract,
+            selection_authority=selection_authority,
+            instance_materialization=materialization,
+        )
+        receipt["usage_reconciliation"]["live_provider_calls"] = 1
+        receipt_body = copy.deepcopy(receipt)
+        receipt_body.pop("receipt_sha256")
+        receipt["receipt_sha256"] = canonical_json_sha256(receipt_body)
+        with self.assertRaisesRegex(
+            Phase3PreparationError,
+            "schema validation",
+        ):
+            validate_phase3_provider_free_preflight_receipt(receipt)
+
+        changed = copy.deepcopy(materialization)
+        changed["materialization_sha256"] = "0" * 64
+        with self.assertRaisesRegex(
+            Phase3PreparationError,
+            "materialization_sha256",
+        ):
+            build_phase3_provider_free_preflight_receipt(
+                pilot_contract=contract,
+                selection_authority=selection_authority,
+                instance_materialization=changed,
+            )
+
+    def test_missing_stale_rejected_mismatched_and_expanded_live_authority_denied(self):
+        selection_authority, materialization, contract = _aggregate()
+        selection = selection_authority["selection"]
+        preregistrations = materialization["preregistrations_by_instance"]
+        cases = []
+        cases.append((None, 2, "b" * 64))
+        rejected = _live_authorization(contract, decision="rejected")
+        cases.append((rejected, 2, "b" * 64))
+        stale = _live_authorization(contract)
+        cases.append((stale, 3, "b" * 64))
+        mismatched = _live_authorization(contract)
+        mismatched["selection_sha256"] = "c" * 64
+        cases.append((mismatched, 2, "b" * 64))
+        expanded = _live_authorization(contract)
+        expanded["max_total_tokens"] += 1
+        cases.append((expanded, 2, "b" * 64))
+
+        for authorization, epoch, epoch_sha256 in cases:
+            with self.subTest(authorization=authorization), self.assertRaises(
+                Phase3PilotError
+            ):
+                admit_phase3_live_launch(
+                    contract,
+                    authorization,
+                    selection=selection,
+                    preregistrations_by_instance=preregistrations,
+                    expected_epoch_number=epoch,
+                    expected_epoch_sha256=epoch_sha256,
+                )
 
 
 if __name__ == "__main__":

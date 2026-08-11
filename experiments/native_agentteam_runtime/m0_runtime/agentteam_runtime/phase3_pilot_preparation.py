@@ -29,6 +29,11 @@ from .experiment_contract import (
     canonical_json_sha256,
     schema_path,
 )
+from .phase3_pilot import (
+    Phase3PilotError,
+    build_phase3_pilot_contract,
+    validate_phase3_pilot_contract,
+)
 
 FIXED_SOURCE_COMMIT = "9b83d5af943ba7a17567336f5b18239f73960219"
 FIXED_DATASET_ARTIFACT_SHA256 = "74e7c63160ada4ceba71d5d89a9bb7c9794f4574b384458d546eb65cdb730520"
@@ -42,6 +47,16 @@ DECISION_INPUT_REPORT_SCHEMA_VERSION = "phase3_decision_input_report.v1"
 SELECTION_AUTHORITY_SCHEMA_VERSION = "phase3_selection_authority.v1"
 DIRECT_TASKPACK_SCHEMA_VERSION = "phase3_direct_taskpack.v1"
 INSTANCE_MATERIALIZATION_SCHEMA_VERSION = "phase3_instance_materialization.v1"
+PILOT_PREFLIGHT_SCHEMA_VERSION = "phase3_pilot_preflight.v1"
+PILOT_PREFLIGHT_DECISION_ID = "DEC-P3B-provider-free-preparation"
+READINESS_BINDING = {
+    "gate_id": "P3-READY",
+    "controller_id": "phase3_readiness_controller_v1",
+    "relation_id": "phase3_readiness_relation_v1",
+    "evidence_sha256": "d87486c41ef79707d52408215b05d22b52d736d16380001590d031c4fb483af7",
+    "receipt_content_sha256": "5fa7ff18044f2fcf5c01ee7d33b2592091d6af91bd09c1de641eeffe3a0bfc9d",
+    "integration_head": "ebce7b10a0ab7b2f9dc3e3936df3f7c2e1e77a02",
+}
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 ROUTING_FIELDS = (
@@ -817,6 +832,491 @@ def materialize_phase3_instance_authorities(
 
 
 materialize_per_instance_preregistrations = materialize_phase3_instance_authorities
+
+
+def fixed_readiness_binding():
+    """Return the accepted Phase 3A readiness authority binding."""
+
+    return json.loads(canonical_json_bytes(READINESS_BINDING).decode("utf-8"))
+
+
+def validate_phase3_instance_materialization(
+    materialization,
+    *,
+    selection_authority,
+):
+    """Validate all per-instance authorities before aggregate materialization."""
+
+    authority = validate_phase3_selection_authority(selection_authority)
+    value = _require_exact_object(
+        materialization,
+        {
+            "schema_version",
+            "selection_authority_sha256",
+            "ordered_instance_ids",
+            "visible_inputs_by_instance",
+            "direct_taskpacks_by_instance",
+            "preregistrations_by_instance",
+            "materialization_sha256",
+        },
+        "instance materialization",
+    )
+    if value["schema_version"] != INSTANCE_MATERIALIZATION_SCHEMA_VERSION:
+        raise Phase3PreparationError(
+            "unsupported instance materialization schema_version"
+        )
+    digest_body = dict(value)
+    digest_body.pop("materialization_sha256")
+    if value["materialization_sha256"] != canonical_json_sha256(digest_body):
+        raise Phase3PreparationError(
+            "materialization_sha256 does not bind canonical content"
+        )
+    if value["selection_authority_sha256"] != authority[
+        "selection_authority_sha256"
+    ]:
+        raise Phase3PreparationError(
+            "instance materialization does not bind the selection authority"
+        )
+    ordered_ids = authority["selection"]["ordered_instance_ids"]
+    if value["ordered_instance_ids"] != ordered_ids:
+        raise Phase3PreparationError(
+            "instance materialization order does not match the selection"
+        )
+
+    maps = (
+        "visible_inputs_by_instance",
+        "direct_taskpacks_by_instance",
+        "preregistrations_by_instance",
+    )
+    for field in maps:
+        if not isinstance(value[field], dict) or set(value[field]) != set(
+            ordered_ids
+        ):
+            raise Phase3PreparationError(
+                f"{field} must cover the selection exactly"
+            )
+
+    visible_digests = set()
+    selection_sha256 = authority["selection"]["selection_sha256"]
+    for instance_id in ordered_ids:
+        visible = _validate_preregistration_definition(
+            "shared_visible_inputs",
+            value["visible_inputs_by_instance"][instance_id],
+        )
+        visible_digest = canonical_json_sha256(visible)
+        if visible_digest in visible_digests:
+            raise Phase3PreparationError(
+                "different instances cannot reuse shared_visible_inputs authority"
+            )
+        visible_digests.add(visible_digest)
+        direct = validate_phase3_instance_direct_taskpack(
+            value["direct_taskpacks_by_instance"][instance_id],
+            instance_id=instance_id,
+            selection_authority=authority,
+            visible_inputs=visible,
+        )
+        try:
+            preregistration = validate_benchmark_preregistration(
+                value["preregistrations_by_instance"][instance_id]
+            )
+        except BenchmarkPreregistrationError as exc:
+            raise Phase3PreparationError(str(exc)) from exc
+        authorization = preregistration["authorization"]
+        if authorization["selection"] != {
+            "selection_sha256": selection_sha256,
+            "ordered_instance_ids": [instance_id],
+        }:
+            raise Phase3PreparationError(
+                "per-instance preregistration selection binding mismatch"
+            )
+        if canonical_json_bytes(
+            authorization["equal_input_bindings"]["shared_visible_inputs"]
+        ) != canonical_json_bytes(visible):
+            raise Phase3PreparationError(
+                "per-instance preregistration visible input mismatch"
+            )
+        direct_binding = authorization["mode_controls"]["agentteam_direct"][
+            "taskpack_sha256_by_instance"
+        ]
+        if direct_binding != {instance_id: direct["taskpack_sha256"]}:
+            raise Phase3PreparationError(
+                "per-instance preregistration direct taskpack mismatch"
+            )
+    return value
+
+
+def build_phase3_aggregate_pilot_contract(
+    *,
+    selection_authority,
+    instance_materialization,
+    retry_policy,
+    abort_conditions,
+    readiness_binding=None,
+    dataset_binding=None,
+):
+    """Build the sealed provider-free pilot aggregate from Phase 3B inputs.
+
+    Readiness and dataset bindings are fixed authorities. Callers may pass
+    them for explicit replay, but cannot replace or expand them.
+    """
+
+    authority = validate_phase3_selection_authority(selection_authority)
+    materialization = validate_phase3_instance_materialization(
+        instance_materialization,
+        selection_authority=authority,
+    )
+    readiness = (
+        fixed_readiness_binding()
+        if readiness_binding is None
+        else _json_object_snapshot(readiness_binding)
+    )
+    if readiness != fixed_readiness_binding():
+        raise Phase3PreparationError(
+            "readiness binding does not match accepted P3-READY authority"
+        )
+    dataset = (
+        fixed_dataset_binding()
+        if dataset_binding is None
+        else _json_object_snapshot(dataset_binding)
+    )
+    if dataset != fixed_dataset_binding():
+        raise Phase3PreparationError(
+            "dataset binding does not match the fixed SWE-EVO inventory"
+        )
+    try:
+        return build_phase3_pilot_contract(
+            readiness_binding=readiness,
+            dataset_binding=dataset,
+            selection=authority["selection"],
+            preregistrations_by_instance=materialization[
+                "preregistrations_by_instance"
+            ],
+            retry_policy=retry_policy,
+            abort_conditions=abort_conditions,
+        )
+    except Phase3PilotError as exc:
+        raise Phase3PreparationError(str(exc)) from exc
+
+
+build_aggregate_pilot_contract = build_phase3_aggregate_pilot_contract
+materialize_phase3_pilot_contract = build_phase3_aggregate_pilot_contract
+
+
+def build_phase3_provider_free_preflight_receipt(
+    *,
+    pilot_contract,
+    selection_authority,
+    instance_materialization,
+):
+    """Prove aggregate consistency without creating a live-launch permit."""
+
+    authority = validate_phase3_selection_authority(selection_authority)
+    materialization = validate_phase3_instance_materialization(
+        instance_materialization,
+        selection_authority=authority,
+    )
+    try:
+        pilot = validate_phase3_pilot_contract(
+            pilot_contract,
+            selection=authority["selection"],
+            preregistrations_by_instance=materialization[
+                "preregistrations_by_instance"
+            ],
+        )
+    except Phase3PilotError as exc:
+        raise Phase3PreparationError(str(exc)) from exc
+    body = pilot["contract"]
+    if body["readiness_binding"] != fixed_readiness_binding():
+        raise Phase3PreparationError(
+            "pilot contract does not bind accepted P3-READY authority"
+        )
+    if body["dataset_binding"] != fixed_dataset_binding():
+        raise Phase3PreparationError(
+            "pilot contract does not bind the fixed SWE-EVO inventory"
+        )
+    ceiling = body["aggregate_budget_ceiling"]
+    computed_tokens = sum(
+        item["maximum_total_tokens"] for item in body["instance_bindings"]
+    )
+    computed_wall = sum(
+        item["maximum_wall_time_seconds"]
+        for item in body["instance_bindings"]
+    )
+    verification_results = {
+        "selection_binding": _preflight_check(
+            {
+                "selection_authority_sha256": authority[
+                    "selection_authority_sha256"
+                ],
+                "selection_sha256": authority["selection"]["selection_sha256"],
+                "ordered_instance_ids": authority["selection"][
+                    "ordered_instance_ids"
+                ],
+            }
+        ),
+        "preregistration_coverage": _preflight_check(
+            {
+                "materialization_sha256": materialization[
+                    "materialization_sha256"
+                ],
+                "authorization_sha256_by_instance": {
+                    instance_id: preregistration["authorization_sha256"]
+                    for instance_id, preregistration in materialization[
+                        "preregistrations_by_instance"
+                    ].items()
+                },
+            }
+        ),
+        "aggregate_contract": _preflight_check(pilot),
+        "aggregate_budget": _preflight_check(
+            {
+                "computed_maximum_total_tokens": computed_tokens,
+                "computed_maximum_wall_time_seconds": computed_wall,
+                "contract_ceiling": ceiling,
+            }
+        ),
+        "provider_absence": _preflight_check(
+            {
+                "live_provider_calls": 0,
+                "scored_mode_executions": 0,
+                "invocations_created": 0,
+                "provider_status": "not_invoked",
+            }
+        ),
+        "live_authorization_denial": _preflight_check(
+            {
+                "gate_id": "P3-LIVE",
+                "contract_status": body["live_authorization"]["status"],
+                "authorization_artifact_supplied": False,
+                "permit_issued": False,
+            }
+        ),
+    }
+    verification = {
+        "results": verification_results,
+        "verification_sha256": canonical_json_sha256(verification_results),
+    }
+    receipt_body = {
+        "status": "passed",
+        "decision_id": PILOT_PREFLIGHT_DECISION_ID,
+        "provider_free": True,
+        "bindings": {
+            "readiness_evidence_sha256": body["readiness_binding"][
+                "evidence_sha256"
+            ],
+            "dataset_artifact_sha256": body["dataset_binding"][
+                "artifact_sha256"
+            ],
+            "selection_authority_sha256": authority[
+                "selection_authority_sha256"
+            ],
+            "selection_sha256": body["selection"]["selection_sha256"],
+            "materialization_sha256": materialization[
+                "materialization_sha256"
+            ],
+            "pilot_contract_sha256": pilot["contract_sha256"],
+        },
+        "instance_reconciliation": {
+            "ordered_instance_ids": body["selection"]["ordered_instance_ids"],
+            "selected_instance_count": len(body["selection"]["ordered_instance_ids"]),
+            "preregistration_count": len(body["instance_bindings"]),
+        },
+        "aggregate_budget_reconciliation": {
+            "maximum_total_tokens": ceiling["maximum_total_tokens"],
+            "maximum_wall_time_seconds": ceiling["maximum_wall_time_seconds"],
+            "max_inflight_model_invocations": ceiling[
+                "max_inflight_model_invocations"
+            ],
+            "computed_maximum_total_tokens": computed_tokens,
+            "computed_maximum_wall_time_seconds": computed_wall,
+        },
+        "usage_reconciliation": {
+            "live_provider_calls": 0,
+            "scored_mode_executions": 0,
+            "invocations_created": 0,
+            "provider_status": "not_invoked",
+            "terminal_usage_records": 0,
+            "terminal_usage_status": "not_applicable",
+            "token_totals": None,
+        },
+        "live_authorization_reconciliation": {
+            "gate_id": "P3-LIVE",
+            "required": True,
+            "contract_status": "not_authorized",
+            "authorization_artifact_supplied": False,
+            "permit_issued": False,
+            "admission_status": "denied",
+            "denial_reason": "mandatory_operator_review_and_epoch_authorization_required",
+        },
+        "verification": verification,
+    }
+    receipt = {
+        "schema_version": PILOT_PREFLIGHT_SCHEMA_VERSION,
+        **receipt_body,
+    }
+    receipt["receipt_sha256"] = canonical_json_sha256(receipt)
+    return validate_phase3_provider_free_preflight_receipt(
+        receipt,
+        pilot_contract=pilot,
+        selection_authority=authority,
+        instance_materialization=materialization,
+    )
+
+
+build_provider_free_preflight_receipt = build_phase3_provider_free_preflight_receipt
+
+
+def validate_phase3_provider_free_preflight_receipt(
+    receipt,
+    *,
+    pilot_contract=None,
+    selection_authority=None,
+    instance_materialization=None,
+):
+    """Validate a provider-absence receipt and optional source authorities."""
+
+    value = _json_object_snapshot(receipt)
+    if value is None:
+        raise Phase3PreparationError("pilot preflight receipt must be a JSON object")
+    schema = json.loads(
+        schema_path("phase3_pilot_preflight.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    errors = sorted(
+        Draft202012Validator(schema).iter_errors(value),
+        key=lambda error: [str(part) for part in error.absolute_path],
+    )
+    if errors:
+        location = ".".join(str(part) for part in errors[0].absolute_path)
+        raise Phase3PreparationError(
+            f"pilot preflight schema validation failed at {location or '<root>'}: "
+            f"{errors[0].message}"
+        )
+    digest_body = dict(value)
+    digest_body.pop("receipt_sha256")
+    if value["receipt_sha256"] != canonical_json_sha256(digest_body):
+        raise Phase3PreparationError(
+            "receipt_sha256 does not bind canonical preflight content"
+        )
+    results = value["verification"]["results"]
+    if value["verification"]["verification_sha256"] != canonical_json_sha256(
+        results
+    ):
+        raise Phase3PreparationError(
+            "verification_sha256 does not bind preflight results"
+        )
+    if value["bindings"]["readiness_evidence_sha256"] != READINESS_BINDING[
+        "evidence_sha256"
+    ]:
+        raise Phase3PreparationError(
+            "preflight receipt readiness evidence binding changed"
+        )
+    if value["bindings"]["dataset_artifact_sha256"] != (
+        FIXED_DATASET_ARTIFACT_SHA256
+    ):
+        raise Phase3PreparationError(
+            "preflight receipt dataset artifact binding changed"
+        )
+    instances = value["instance_reconciliation"]
+    if instances["selected_instance_count"] != len(
+        instances["ordered_instance_ids"]
+    ) or instances["preregistration_count"] != instances[
+        "selected_instance_count"
+    ]:
+        raise Phase3PreparationError(
+            "preflight instance reconciliation is inconsistent"
+        )
+    budget = value["aggregate_budget_reconciliation"]
+    if budget["maximum_total_tokens"] != budget[
+        "computed_maximum_total_tokens"
+    ] or budget["maximum_wall_time_seconds"] != budget[
+        "computed_maximum_wall_time_seconds"
+    ]:
+        raise Phase3PreparationError(
+            "preflight aggregate budget reconciliation is inconsistent"
+        )
+    if pilot_contract is not None:
+        try:
+            pilot = validate_phase3_pilot_contract(pilot_contract)
+        except Phase3PilotError as exc:
+            raise Phase3PreparationError(str(exc)) from exc
+        if value["bindings"]["pilot_contract_sha256"] != pilot[
+            "contract_sha256"
+        ]:
+            raise Phase3PreparationError(
+                "preflight receipt does not bind the pilot contract"
+            )
+        pilot_body = pilot["contract"]
+        if value["instance_reconciliation"]["ordered_instance_ids"] != (
+            pilot_body["selection"]["ordered_instance_ids"]
+        ):
+            raise Phase3PreparationError(
+                "preflight receipt instance order does not match the pilot contract"
+            )
+        ceiling = pilot_body["aggregate_budget_ceiling"]
+        recorded_budget = value["aggregate_budget_reconciliation"]
+        if (
+            recorded_budget["maximum_total_tokens"]
+            != ceiling["maximum_total_tokens"]
+            or recorded_budget["maximum_wall_time_seconds"]
+            != ceiling["maximum_wall_time_seconds"]
+            or recorded_budget["max_inflight_model_invocations"]
+            != ceiling["max_inflight_model_invocations"]
+        ):
+            raise Phase3PreparationError(
+                "preflight receipt budget does not match the pilot contract"
+            )
+    if selection_authority is not None:
+        authority = validate_phase3_selection_authority(selection_authority)
+        if value["bindings"]["selection_authority_sha256"] != authority[
+            "selection_authority_sha256"
+        ]:
+            raise Phase3PreparationError(
+                "preflight receipt does not bind the selection authority"
+            )
+        if value["bindings"]["selection_sha256"] != authority["selection"][
+            "selection_sha256"
+        ] or value["instance_reconciliation"]["ordered_instance_ids"] != (
+            authority["selection"]["ordered_instance_ids"]
+        ):
+            raise Phase3PreparationError(
+                "preflight receipt does not match the frozen selection"
+            )
+    if instance_materialization is not None:
+        if selection_authority is None:
+            raise Phase3PreparationError(
+                "selection authority is required with instance materialization"
+            )
+        materialization = validate_phase3_instance_materialization(
+            instance_materialization,
+            selection_authority=selection_authority,
+        )
+        if value["bindings"]["materialization_sha256"] != materialization[
+            "materialization_sha256"
+        ]:
+            raise Phase3PreparationError(
+                "preflight receipt does not bind instance materialization"
+            )
+    return value
+
+
+validate_provider_free_preflight_receipt = validate_phase3_provider_free_preflight_receipt
+
+
+def provider_free_preflight_receipt_bytes(receipt):
+    """Return canonical bytes for a validated provider-free receipt."""
+
+    return canonical_json_bytes(
+        validate_phase3_provider_free_preflight_receipt(receipt)
+    )
+
+
+def _preflight_check(evidence):
+    return {
+        "status": "passed",
+        "evidence_sha256": canonical_json_sha256(evidence),
+    }
 
 
 def _require_selected_instance(authority, instance_id):

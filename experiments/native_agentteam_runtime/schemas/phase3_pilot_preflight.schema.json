@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase3_pilot_preflight.schema.json",
+  "title": "Phase 3B provider-free aggregate preflight receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "decision_id",
+    "provider_free",
+    "bindings",
+    "instance_reconciliation",
+    "aggregate_budget_reconciliation",
+    "usage_reconciliation",
+    "live_authorization_reconciliation",
+    "verification",
+    "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "phase3_pilot_preflight.v1"},
+    "status": {"const": "passed"},
+    "decision_id": {"const": "DEC-P3B-provider-free-preparation"},
+    "provider_free": {"const": true},
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "readiness_evidence_sha256",
+        "dataset_artifact_sha256",
+        "selection_authority_sha256",
+        "selection_sha256",
+        "materialization_sha256",
+        "pilot_contract_sha256"
+      ],
+      "properties": {
+        "readiness_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "dataset_artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "selection_authority_sha256": {"$ref": "#/$defs/sha256"},
+        "selection_sha256": {"$ref": "#/$defs/sha256"},
+        "materialization_sha256": {"$ref": "#/$defs/sha256"},
+        "pilot_contract_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "instance_reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordered_instance_ids",
+        "selected_instance_count",
+        "preregistration_count"
+      ],
+      "properties": {
+        "ordered_instance_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "selected_instance_count": {"type": "integer", "minimum": 1},
+        "preregistration_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "aggregate_budget_reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maximum_total_tokens",
+        "maximum_wall_time_seconds",
+        "max_inflight_model_invocations",
+        "computed_maximum_total_tokens",
+        "computed_maximum_wall_time_seconds"
+      ],
+      "properties": {
+        "maximum_total_tokens": {"type": "integer", "minimum": 1},
+        "maximum_wall_time_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "max_inflight_model_invocations": {"const": 1},
+        "computed_maximum_total_tokens": {"type": "integer", "minimum": 1},
+        "computed_maximum_wall_time_seconds": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "usage_reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "live_provider_calls",
+        "scored_mode_executions",
+        "invocations_created",
+        "provider_status",
+        "terminal_usage_records",
+        "terminal_usage_status",
+        "token_totals"
+      ],
+      "properties": {
+        "live_provider_calls": {"const": 0},
+        "scored_mode_executions": {"const": 0},
+        "invocations_created": {"const": 0},
+        "provider_status": {"const": "not_invoked"},
+        "terminal_usage_records": {"const": 0},
+        "terminal_usage_status": {"const": "not_applicable"},
+        "token_totals": {"type": "null"}
+      }
+    },
+    "live_authorization_reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gate_id",
+        "required",
+        "contract_status",
+        "authorization_artifact_supplied",
+        "permit_issued",
+        "admission_status",
+        "denial_reason"
+      ],
+      "properties": {
+        "gate_id": {"const": "P3-LIVE"},
+        "required": {"const": true},
+        "contract_status": {"const": "not_authorized"},
+        "authorization_artifact_supplied": {"const": false},
+        "permit_issued": {"const": false},
+        "admission_status": {"const": "denied"},
+        "denial_reason": {
+          "const": "mandatory_operator_review_and_epoch_authorization_required"
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["results", "verification_sha256"],
+      "properties": {
+        "results": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "selection_binding",
+            "preregistration_coverage",
+            "aggregate_contract",
+            "aggregate_budget",
+            "provider_absence",
+            "live_authorization_denial"
+          ],
+          "properties": {
+            "selection_binding": {"$ref": "#/$defs/check"},
+            "preregistration_coverage": {"$ref": "#/$defs/check"},
+            "aggregate_contract": {"$ref": "#/$defs/check"},
+            "aggregate_budget": {"$ref": "#/$defs/check"},
+            "provider_absence": {"$ref": "#/$defs/check"},
+            "live_authorization_denial": {"$ref": "#/$defs/check"}
+          }
+        },
+        "verification_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "evidence_sha256"],
+      "properties": {
+        "status": {"const": "passed"},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}
