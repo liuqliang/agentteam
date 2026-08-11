@@ -1,0 +1,14 @@
+{
+  "decision": "approved",
+  "remaining_escalations": [],
+  "git_object_format": "sha1",
+  "preflight_release_id": "git-6c2cf3022977",
+  "preflight_release_source_commit": "6c2cf30229774bcd7dd8d14c03c48f8e1898a1af",
+  "plan_sha256": "fd4dd32d5faf1e888e3be984d887fd5681dc1e8908c1891cef07a7fb1625bc5b",
+  "blueprint_sha256": "5d138e0c31fccc42ba6a10f2bea53086a949ac1d6c127f446d75b8b4789273e3",
+  "research_authority_sha256": "8dca1748a211b9eaf9df5d392d7d39d755cbe3946a358c11cff2f51c5323d91d",
+  "review_schema_sha256": "e4c70d14b555ae3da219e299e4b7e498c457ca44a96bc1f5e9e23d42fcdded83",
+  "contract_decisions_sha256": "7128ba550d7bc6d4fca0f1c9b806bcf9887e4be23eb4c1f65606bf6a50b8c525",
+  "decision_contract_sha256": "d6e200359cd9e756597d7c216cdc020897bfbdd076e5665b98c7d2b2406a05a8",
+  "schema_inventory_sha256": "7c2378e98b9444b59c9afa0fbbfd4e8334c6d85868ed7db2a9728b23560efd88"
+}
