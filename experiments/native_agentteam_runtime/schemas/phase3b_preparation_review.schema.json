@@ -8,6 +8,7 @@
     "decision",
     "remaining_escalations",
     "git_object_format",
+    "preflight_release_id",
     "preflight_release_source_commit",
     "plan_sha256",
     "blueprint_sha256",
@@ -30,6 +31,10 @@
         "sha1",
         "sha256"
       ]
+    },
+    "preflight_release_id": {
+      "type": "string",
+      "minLength": 1
     },
     "preflight_release_source_commit": {
       "$ref": "#/$defs/git_object_id"
