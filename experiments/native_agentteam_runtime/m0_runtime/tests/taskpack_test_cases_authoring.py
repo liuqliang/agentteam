@@ -5,6 +5,17 @@ except ImportError:
 
 
 class AuthoringMixin:
+    def test_codex_taskpack_author_defaults_to_workspace_write_sandbox(self):
+        command = taskpack_author_module._codex_author_jsonl_command(
+            ["codex", "exec", "--skip-git-repo-check"],
+            model="test-model",
+            reasoning_profile="high",
+        )
+
+        self.assertIn("--json", command)
+        self.assertEqual(command[command.index("-s") + 1], "workspace-write")
+        self.assertEqual(command[command.index("-m") + 1], "test-model")
+
     def test_blueprint_materialization_rejects_authority_drift_from_head(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

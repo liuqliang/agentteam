@@ -897,6 +897,8 @@ def _codex_author_jsonl_command(
     command = list(command)
     if not is_supported_codex_command(command):
         return command
+    if "-s" not in command and "--sandbox" not in command:
+        command.extend(["-s", "workspace-write"])
     if "--json" not in command:
         command.append("--json")
     if model and "-m" not in command and "--model" not in command:

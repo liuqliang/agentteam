@@ -11821,6 +11821,45 @@ class ExperimentSandboxTests(unittest.TestCase):
                 ),
                 evidence,
             )
+            blocked_evidence = copy.deepcopy(evidence)
+            blocked_evidence["evaluation_status"] = "blocked"
+            blocked_evidence["promotion_eligible"] = False
+            blocked_evidence["post_run_leak_scan"] = None
+            blocked_evidence["failure_reason"] = (
+                "provider invocation did not complete"
+            )
+            self.assertEqual(
+                validate_evaluation_evidence(
+                    blocked_evidence,
+                    expected_run_id="RUN-EXPERIMENT-FIXTURE",
+                    expected_taskpack_ids=["phase2-fixture"],
+                    expected_protocol_sha256=blocked_evidence[
+                        "experiment_protocol_sha256"
+                    ],
+                    expected_protocol_reference_sha256=(
+                        protocol_reference["sha256"]
+                    ),
+                    expected_acceptance_command_sha256=blocked_evidence[
+                        "acceptance_command_sha256"
+                    ],
+                    expected_acceptance_executable_sha256=blocked_evidence[
+                        "acceptance_executable_sha256"
+                    ],
+                    expected_evaluator_sha256=evaluator_digest,
+                    expected_invocation_set_reference_sha256=(
+                        invocation_set_reference["sha256"]
+                    ),
+                    expected_provider_sandbox_reference_sha256=(
+                        sandbox_reference["sha256"]
+                    ),
+                    authority_root=root,
+                    invocation_set_reference=invocation_set_reference,
+                    experiment_protocol_reference=protocol_reference,
+                    provider_sandbox_reference=sandbox_reference,
+                    canary_path=fixture["canary"],
+                ),
+                blocked_evidence,
+            )
             self.assertTrue(evidence_path.is_file())
             with self.assertRaisesRegex(
                 ExperimentSandboxError,

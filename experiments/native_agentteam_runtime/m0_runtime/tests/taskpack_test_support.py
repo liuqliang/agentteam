@@ -88,6 +88,7 @@ from agentteam_runtime.projection_db import (
     rebuild_project_projection_db,
 )
 import agentteam_runtime.taskpack as taskpack_module
+import agentteam_runtime.taskpack_author as taskpack_author_module
 from agentteam_runtime.taskpack_author import REQUIRED_TASKPACK_FILES
 from agentteam_runtime.taskpack_author import _apply_verification_profile_to_taskpack
 from agentteam_runtime.taskpack_author import _command_list

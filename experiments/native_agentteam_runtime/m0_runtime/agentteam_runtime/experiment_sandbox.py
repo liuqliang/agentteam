@@ -2668,6 +2668,8 @@ def _validate_evaluation_evidence(
                 max_bytes=64 * 1024,
             )
         ).hexdigest()
+        pre_scan = evidence["pre_run_leak_scan"]
+        post_scan = evidence["post_run_leak_scan"]
         if (
             evidence["provider_sandbox_reference_sha256"]
             != provider_sandbox_reference["sha256"]
@@ -2675,10 +2677,14 @@ def _validate_evaluation_evidence(
             != candidate_sandbox["policy_sha256"]
             or candidate_sandbox["namespace_evidence"]["canary_sha256"]
             != canary_sha256
-            or evidence["pre_run_leak_scan"]["canary_sha256"]
-            != canary_sha256
-            or evidence["post_run_leak_scan"]["canary_sha256"]
-            != canary_sha256
+            or (
+                isinstance(pre_scan, dict)
+                and pre_scan["canary_sha256"] != canary_sha256
+            )
+            or (
+                isinstance(post_scan, dict)
+                and post_scan["canary_sha256"] != canary_sha256
+            )
         ):
             raise ExperimentSandboxError(
                 "evaluation evidence candidate sandbox binding mismatch"

@@ -32,7 +32,7 @@ class MonolithOwnershipTests(unittest.TestCase):
     def test_taskpack_methods_have_exactly_one_domain_owner(self):
         ownership = _owned_test_methods(test_taskpack.TaskpackTests)
 
-        self.assertEqual(len(ownership), 393)
+        self.assertEqual(len(ownership), 394)
         self.assertFalse(
             {name: owners for name, owners in ownership.items() if len(owners) != 1}
         )
