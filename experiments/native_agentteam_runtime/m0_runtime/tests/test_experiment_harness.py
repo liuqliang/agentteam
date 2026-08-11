@@ -81,6 +81,7 @@ from agentteam_runtime.experiment_results import (
 from agentteam_runtime.experiment_modes import (
     _begin_mode_execution,
     _complete_mode_execution,
+    _publish_candidate_patch,
     _publish_mode_order_authority,
     _register_provider_launch,
     AgentTeamDirectModeAdapter,
@@ -6695,6 +6696,48 @@ class ExperimentResultBundleTests(unittest.TestCase):
 
 
 class ExperimentModeAdapterTests(unittest.TestCase):
+    def test_candidate_patch_is_retained_without_mutating_repository_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "runs" / "candidate-patch-run"
+            repository = run_dir / "repository"
+            repository.mkdir(parents=True)
+            _git(repository, "init", "--quiet")
+            _git(repository, "config", "user.name", "Experiment Fixture")
+            _git(repository, "config", "user.email", "fixture@example.invalid")
+            (repository / "tracked.txt").write_text("before\n", encoding="utf-8")
+            _git(repository, "add", "tracked.txt")
+            _git(repository, "commit", "--quiet", "-m", "baseline")
+            baseline = _git(repository, "rev-parse", "HEAD").stdout.strip()
+            index_before = (repository / ".git/index").read_bytes()
+            (repository / "tracked.txt").write_text("after\n", encoding="utf-8")
+            (repository / "added.txt").write_text("added\n", encoding="utf-8")
+            request = Mock(
+                run_dir=str(run_dir),
+                protocol={"repository": {"commit": baseline}},
+                run_manifest={
+                    "experiment_run_id": "candidate-patch-run",
+                    "mode": "single_codex",
+                },
+            )
+
+            _publish_candidate_patch(request, repository)
+
+            patch_path = run_dir / "artifacts/candidate.patch"
+            reference = json.loads(
+                (run_dir / "artifacts/candidate-patch.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            patch_text = patch_path.read_text(encoding="utf-8")
+            self.assertIn("diff --git a/added.txt b/added.txt", patch_text)
+            self.assertIn("diff --git a/tracked.txt b/tracked.txt", patch_text)
+            self.assertEqual(
+                reference["sha256"],
+                hashlib.sha256(patch_path.read_bytes()).hexdigest(),
+            )
+            self.assertEqual((repository / ".git/index").read_bytes(), index_before)
+            self.assertEqual(patch_path.stat().st_mode & 0o777, 0o400)
+
     @staticmethod
     def _fixture(root, mode, *, direct_taskpack_sha256=None):
         root = Path(root)

@@ -160,6 +160,10 @@ class ExperimentCommonFinalizer:
             raise ExperimentModeError(
                 "trusted evaluator digest differs from protocol"
             )
+        _publish_candidate_patch(
+            request,
+            candidate_workspace,
+        )
         retained_roots = _common_retained_roots(
             request,
             mode_result,
@@ -1746,6 +1750,93 @@ def _common_retained_roots(request, mode_result):
                 paths.append(str(path))
         retained[group] = sorted(set(paths))
     return retained
+
+
+def _publish_candidate_patch(request, candidate_workspace):
+    artifacts = Path(request.run_dir).resolve(strict=True) / "artifacts"
+    artifacts.mkdir(parents=True, mode=0o700, exist_ok=True)
+    patch_path = artifacts / "candidate.patch"
+    reference_path = artifacts / "candidate-patch.json"
+    if patch_path.exists() or reference_path.exists():
+        raise ExperimentModeError(
+            "candidate patch authority already exists"
+        )
+    index_path = artifacts / ".candidate-patch.index"
+    environment = dict(os.environ)
+    environment["GIT_INDEX_FILE"] = str(index_path)
+    base_commit = request.protocol["repository"]["commit"]
+    try:
+        subprocess.run(
+            ["git", "-C", str(candidate_workspace), "read-tree", base_commit],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(candidate_workspace), "add", "-A", "--", "."],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(candidate_workspace),
+                "diff",
+                "--cached",
+                "--binary",
+                "--full-index",
+                "--no-ext-diff",
+                base_commit,
+            ],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise ExperimentModeError(
+            "candidate patch publication failed"
+        ) from exc
+    finally:
+        index_path.unlink(missing_ok=True)
+    patch = bytes(completed.stdout)
+    if len(patch) > 64 * 1024 * 1024:
+        raise ExperimentModeError(
+            "candidate patch exceeds its retained artifact bound"
+        )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(patch_path, flags, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(patch)
+            handle.flush()
+            os.fsync(handle.fileno())
+        patch_path.chmod(0o400)
+    except OSError as exc:
+        patch_path.unlink(missing_ok=True)
+        raise ExperimentModeError(
+            "candidate patch publication failed"
+        ) from exc
+    publish_immutable_json(
+        reference_path,
+        {
+            "schema_version": "experiment_candidate_patch.v1",
+            "experiment_run_id": request.run_manifest[
+                "experiment_run_id"
+            ],
+            "mode": request.run_manifest["mode"],
+            "base_commit": base_commit,
+            "relative_path": "artifacts/candidate.patch",
+            "sha256": hashlib.sha256(patch).hexdigest(),
+            "bytes": len(patch),
+        },
+        label="candidate patch reference",
+    )
 
 
 def _build_common_result_bundle(
