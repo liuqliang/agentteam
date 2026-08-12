@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase3_complexity_projection.schema.json",
+  "title": "Trusted SWE-EVO Arrow complexity projection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source",
+    "proxy",
+    "stratum_boundaries",
+    "excluded_instance_ids",
+    "population",
+    "routing_manifest",
+    "routing_manifest_sha256",
+    "projection_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "phase3_complexity_projection.v1"},
+    "source": {"$ref": "#/$defs/fixed_source"},
+    "proxy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "source_field",
+        "extraction_rule",
+        "gold_blind",
+        "per_instance_count_retention"
+      ],
+      "properties": {
+        "name": {"const": "dataset_pr_record_count"},
+        "source_field": {"const": "PRs"},
+        "extraction_rule": {"const": "len(instance[\"PRs\"])"},
+        "gold_blind": {"const": true},
+        "per_instance_count_retention": {"const": "discarded_after_stratification"}
+      }
+    },
+    "stratum_boundaries": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stratum", "minimum", "maximum"],
+          "properties": {
+            "stratum": {"const": "low"},
+            "minimum": {"const": 0},
+            "maximum": {"const": 2}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stratum", "minimum", "maximum"],
+          "properties": {
+            "stratum": {"const": "medium"},
+            "minimum": {"const": 3},
+            "maximum": {"const": 6}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stratum", "minimum", "maximum"],
+          "properties": {
+            "stratum": {"const": "high"},
+            "minimum": {"const": 7},
+            "maximum": {"type": "null"}
+          }
+        }
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "excluded_instance_ids": {
+      "type": "array",
+      "prefixItems": [{"const": "psf__requests_v2.27.0_v2.27.1"}],
+      "items": false,
+      "minItems": 1,
+      "maxItems": 1
+    },
+    "population": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_row_count",
+        "counts_by_stratum",
+        "eligible_row_count",
+        "eligible_counts_by_stratum"
+      ],
+      "properties": {
+        "source_row_count": {"const": 48},
+        "counts_by_stratum": {"$ref": "#/$defs/source_counts"},
+        "eligible_row_count": {"const": 47},
+        "eligible_counts_by_stratum": {"$ref": "#/$defs/eligible_counts"}
+      }
+    },
+    "routing_manifest": {"$ref": "#/$defs/routing_manifest"},
+    "routing_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "projection_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "safe_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+    "fixed_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "benchmark",
+        "source_repository",
+        "source_commit",
+        "artifact_path",
+        "artifact_sha256",
+        "split",
+        "row_count"
+      ],
+      "properties": {
+        "benchmark": {"const": "swe_evo"},
+        "source_repository": {"const": "https://github.com/SWE-EVO/SWE-EVO.git"},
+        "source_commit": {"const": "9b83d5af943ba7a17567336f5b18239f73960219"},
+        "artifact_path": {"const": "hf_out/hf_dataset/test/data-00000-of-00001.arrow"},
+        "artifact_sha256": {"const": "74e7c63160ada4ceba71d5d89a9bb7c9794f4574b384458d546eb65cdb730520"},
+        "split": {"const": "test"},
+        "row_count": {"const": 48}
+      }
+    },
+    "source_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["high", "low", "medium"],
+      "properties": {
+        "high": {"const": 15},
+        "low": {"const": 21},
+        "medium": {"const": 12}
+      }
+    },
+    "eligible_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["high", "low", "medium"],
+      "properties": {
+        "high": {"const": 15},
+        "low": {"const": 20},
+        "medium": {"const": 12}
+      }
+    },
+    "routing_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "manifest", "manifest_sha256"],
+      "properties": {
+        "schema_version": {"const": "phase3_routing_manifest.v1"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dataset", "metadata", "gold_visibility", "allowlisted_fields"],
+          "properties": {
+            "dataset": {"$ref": "#/$defs/fixed_source"},
+            "metadata": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["schema_version", "benchmark", "metadata_revision", "instances"],
+              "properties": {
+                "schema_version": {"const": "swe_evo_metadata.v1"},
+                "benchmark": {"const": "swe_evo"},
+                "metadata_revision": {"$ref": "#/$defs/safe_id"},
+                "instances": {
+                  "type": "array",
+                  "minItems": 48,
+                  "maxItems": 48,
+                  "items": {"$ref": "#/$defs/routing_row"}
+                }
+              }
+            },
+            "gold_visibility": {"const": "evaluator_only"},
+            "allowlisted_fields": {
+              "type": "array",
+              "prefixItems": [
+                {"const": "instance_id"},
+                {"const": "repository"},
+                {"const": "complexity_stratum"},
+                {"const": "language"},
+                {"const": "tags"}
+              ],
+              "items": false,
+              "minItems": 5,
+              "maxItems": 5
+            }
+          }
+        }
+      }
+    },
+    "routing_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance_id", "repository", "complexity_stratum", "language", "tags"],
+      "properties": {
+        "instance_id": {"$ref": "#/$defs/safe_id"},
+        "repository": {"type": "string", "minLength": 1},
+        "complexity_stratum": {"enum": ["low", "medium", "high"]},
+        "language": {"const": "python"},
+        "tags": {"type": "array", "maxItems": 0}
+      }
+    }
+  }
+}

@@ -7,8 +7,10 @@ a structured ``decision_input_required`` report and no selection artifact.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
 
@@ -42,6 +44,7 @@ FIXED_DATASET_ROW_COUNT = 48
 FIXED_DATASET_ARTIFACT_PATH = "hf_out/hf_dataset/test/data-00000-of-00001.arrow"
 FIXED_SOURCE_REPOSITORY = "https://github.com/SWE-EVO/SWE-EVO.git"
 ROUTING_MANIFEST_SCHEMA_VERSION = "phase3_routing_manifest.v1"
+COMPLEXITY_PROJECTION_SCHEMA_VERSION = "phase3_complexity_projection.v1"
 PILOT_DECISIONS_SCHEMA_VERSION = "phase3_pilot_decisions.v1"
 DECISION_INPUT_REPORT_SCHEMA_VERSION = "phase3_decision_input_report.v1"
 SELECTION_AUTHORITY_SCHEMA_VERSION = "phase3_selection_authority.v1"
@@ -65,6 +68,29 @@ ROUTING_FIELDS = (
     "complexity_stratum",
     "language",
     "tags",
+)
+
+COMPLEXITY_PROXY_NAME = "dataset_pr_record_count"
+COMPLEXITY_PROXY_EXTRACTION_RULE = 'len(instance["PRs"])'
+COMPLEXITY_METADATA_REVISION = "swe-evo-pr-count-r1"
+EXCLUDED_CALIBRATION_INSTANCE_ID = "psf__requests_v2.27.0_v2.27.1"
+PILOT_SELECTION_SEED = 20260812
+PILOT_STRATUM_QUOTAS = {"high": 1, "low": 1, "medium": 1}
+EXPECTED_POPULATION_COUNTS = {"high": 15, "low": 21, "medium": 12}
+EXPECTED_ELIGIBLE_POPULATION_COUNTS = {
+    "high": 15,
+    "low": 20,
+    "medium": 12,
+}
+EXPECTED_SELECTION_PREVIEW = (
+    "psf__requests_v2.4.0_v2.4.1",
+    "dask__dask_2023.3.2_2023.4.0",
+    "iterative__dvc_2.19.0_2.20.0",
+)
+COMPLEXITY_STRATUM_BOUNDARIES = (
+    {"stratum": "low", "minimum": 0, "maximum": 2},
+    {"stratum": "medium", "minimum": 3, "maximum": 6},
+    {"stratum": "high", "minimum": 7, "maximum": None},
 )
 
 _DECISION_LEAF_PATHS = (
@@ -114,6 +140,211 @@ def fixed_dataset_binding():
         "split": FIXED_DATASET_SPLIT,
         "row_count": FIXED_DATASET_ROW_COUNT,
     }
+
+
+def project_swe_evo_arrow_inventory(
+    arrow_path,
+    *,
+    source_commit,
+    split,
+    metadata_revision=COMPLEXITY_METADATA_REVISION,
+):
+    """Project the fixed Arrow artifact into gold-blind routing metadata.
+
+    This is a trusted evaluator-side boundary. The Arrow rows may contain gold
+    and evaluator data, but only ``instance_id``, the repository identifier,
+    and ``len(PRs)`` are inspected. The count is immediately reduced to the
+    approved stratum and is never emitted per instance.
+
+    ``pyarrow`` is imported lazily so provider-free runtime users that only
+    consume a reviewed projection do not acquire an undeclared dependency.
+    """
+
+    if source_commit != FIXED_SOURCE_COMMIT:
+        raise Phase3PreparationError(
+            "fixed Arrow source drift: source_commit does not match"
+        )
+    if split != FIXED_DATASET_SPLIT:
+        raise Phase3PreparationError(
+            "fixed Arrow source drift: split does not match"
+        )
+    if (
+        not isinstance(metadata_revision, str)
+        or _SAFE_ID.fullmatch(metadata_revision) is None
+    ):
+        raise Phase3PreparationError(
+            "complexity projection metadata_revision must be a safe identifier"
+        )
+
+    path = Path(arrow_path)
+    if not path.is_file():
+        raise Phase3PreparationError(
+            f"fixed Arrow artifact is unavailable: {path}"
+        )
+    artifact_sha256 = _file_sha256(path)
+    if artifact_sha256 != FIXED_DATASET_ARTIFACT_SHA256:
+        raise Phase3PreparationError(
+            "fixed Arrow source drift: artifact SHA-256 does not match"
+        )
+
+    rows = _read_swe_evo_arrow_rows(path)
+    routing_rows, population_counts = _project_swe_evo_complexity_rows(rows)
+    eligible_counts = dict(population_counts)
+    excluded_rows = [
+        row
+        for row in routing_rows
+        if row["instance_id"] == EXCLUDED_CALIBRATION_INSTANCE_ID
+    ]
+    if len(excluded_rows) != 1:
+        raise Phase3PreparationError(
+            "fixed Arrow projection must contain the calibration exclusion exactly once"
+        )
+    excluded_stratum = excluded_rows[0]["complexity_stratum"]
+    eligible_counts[excluded_stratum] -= 1
+
+    if population_counts != EXPECTED_POPULATION_COUNTS:
+        raise Phase3PreparationError(
+            "fixed Arrow complexity population mismatch: "
+            f"expected {EXPECTED_POPULATION_COUNTS}, got {population_counts}"
+        )
+    if eligible_counts != EXPECTED_ELIGIBLE_POPULATION_COUNTS:
+        raise Phase3PreparationError(
+            "fixed Arrow eligible population mismatch: "
+            f"expected {EXPECTED_ELIGIBLE_POPULATION_COUNTS}, got {eligible_counts}"
+        )
+
+    routing_manifest = convert_swe_evo_inventory(
+        {
+            **fixed_dataset_binding(),
+            "instances": sorted(
+                routing_rows,
+                key=lambda row: row["instance_id"],
+            ),
+        },
+        metadata_revision=metadata_revision,
+    )
+    body = {
+        "source": fixed_dataset_binding(),
+        "proxy": {
+            "name": COMPLEXITY_PROXY_NAME,
+            "source_field": "PRs",
+            "extraction_rule": COMPLEXITY_PROXY_EXTRACTION_RULE,
+            "gold_blind": True,
+            "per_instance_count_retention": "discarded_after_stratification",
+        },
+        "stratum_boundaries": [dict(item) for item in COMPLEXITY_STRATUM_BOUNDARIES],
+        "excluded_instance_ids": [EXCLUDED_CALIBRATION_INSTANCE_ID],
+        "population": {
+            "source_row_count": FIXED_DATASET_ROW_COUNT,
+            "counts_by_stratum": population_counts,
+            "eligible_row_count": FIXED_DATASET_ROW_COUNT - 1,
+            "eligible_counts_by_stratum": eligible_counts,
+        },
+        "routing_manifest": routing_manifest,
+        "routing_manifest_sha256": routing_manifest["manifest_sha256"],
+    }
+    projection = {
+        "schema_version": COMPLEXITY_PROJECTION_SCHEMA_VERSION,
+        **body,
+    }
+    projection["projection_sha256"] = canonical_json_sha256(projection)
+    return validate_phase3_complexity_projection(projection)
+
+
+build_trusted_arrow_projection = project_swe_evo_arrow_inventory
+
+
+def validate_phase3_complexity_projection(projection):
+    """Validate a projection and all source, population, and output bindings."""
+
+    value = _json_object_snapshot(projection)
+    if value is None:
+        raise Phase3PreparationError("complexity projection must be a JSON object")
+    schema = json.loads(
+        schema_path("phase3_complexity_projection.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    errors = sorted(
+        Draft202012Validator(schema).iter_errors(value),
+        key=lambda item: [str(part) for part in item.absolute_path],
+    )
+    if errors:
+        first = errors[0]
+        location = ".".join(str(part) for part in first.absolute_path) or "<root>"
+        raise Phase3PreparationError(
+            "complexity projection schema validation failed at "
+            f"{location}: {first.message}"
+        )
+
+    body = dict(value)
+    supplied_digest = body.pop("projection_sha256")
+    if supplied_digest != canonical_json_sha256(body):
+        raise Phase3PreparationError(
+            "projection_sha256 does not bind canonical content"
+        )
+    if value["source"] != fixed_dataset_binding():
+        raise Phase3PreparationError("complexity projection source binding is not fixed")
+    manifest = validate_routing_manifest(value["routing_manifest"])
+    if value["routing_manifest_sha256"] != manifest["manifest_sha256"]:
+        raise Phase3PreparationError(
+            "complexity projection output digest does not bind the routing manifest"
+        )
+
+    counts = {"high": 0, "low": 0, "medium": 0}
+    eligible = {"high": 0, "low": 0, "medium": 0}
+    for row in manifest["manifest"]["metadata"]["instances"]:
+        stratum = row["complexity_stratum"]
+        if stratum not in counts:
+            raise Phase3PreparationError(
+                f"complexity projection contains unapproved stratum: {stratum}"
+            )
+        counts[stratum] += 1
+        if row["instance_id"] != EXCLUDED_CALIBRATION_INSTANCE_ID:
+            eligible[stratum] += 1
+    if counts != value["population"]["counts_by_stratum"]:
+        raise Phase3PreparationError(
+            "complexity projection population does not match routing metadata"
+        )
+    if eligible != value["population"]["eligible_counts_by_stratum"]:
+        raise Phase3PreparationError(
+            "complexity projection eligible population does not match routing metadata"
+        )
+    return value
+
+
+def complexity_projection_bytes(projection):
+    """Return canonical bytes for a validated trusted projection."""
+
+    return canonical_json_bytes(validate_phase3_complexity_projection(projection))
+
+
+def replay_phase3_complexity_selection(projection):
+    """Replay the approved preview through the existing deterministic selector."""
+
+    value = validate_phase3_complexity_projection(projection)
+    metadata = value["routing_manifest"]["manifest"]["metadata"]
+    selection = select_complexity_stratified_instances(
+        metadata,
+        metadata_revision=metadata["metadata_revision"],
+        filters={
+            "repositories": [],
+            "languages": [],
+            "required_tags": [],
+            "excluded_instance_ids": [EXCLUDED_CALIBRATION_INSTANCE_ID],
+        },
+        seed=PILOT_SELECTION_SEED,
+        stratum_quotas=PILOT_STRATUM_QUOTAS,
+    )
+    if selection["eligible_counts_by_stratum"] != EXPECTED_ELIGIBLE_POPULATION_COUNTS:
+        raise Phase3PreparationError(
+            "complexity selection eligible populations do not match the approved projection"
+        )
+    if tuple(selection["ordered_instance_ids"]) != EXPECTED_SELECTION_PREVIEW:
+        raise Phase3PreparationError(
+            "deterministic complexity selection does not match the approved preview"
+        )
+    return selection
 
 
 def convert_swe_evo_inventory(inventory, *, metadata_revision="swe-evo-fixed-r1"):
@@ -1489,6 +1720,119 @@ def _decision_required_report(missing, invalid):
         **body,
         "report_sha256": canonical_json_sha256(body),
     }
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise Phase3PreparationError(
+            f"fixed Arrow artifact cannot be read: {path}: {exc}"
+        ) from exc
+    return digest.hexdigest()
+
+
+def _read_swe_evo_arrow_rows(path):
+    try:
+        import pyarrow as pa
+        import pyarrow.ipc as ipc
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise Phase3PreparationError(
+            "pyarrow is required for trusted Arrow projection; "
+            "install it in the evaluator environment before preparation"
+        ) from exc
+
+    try:
+        with path.open("rb") as source:
+            try:
+                reader = ipc.open_stream(source)
+                table = reader.read_all()
+            except pa.ArrowInvalid:
+                source.seek(0)
+                reader = ipc.open_file(source)
+                table = reader.read_all()
+    except Exception as exc:
+        raise Phase3PreparationError(
+            f"fixed Arrow artifact could not be decoded: {exc}"
+        ) from exc
+    return table.to_pylist()
+
+
+def _project_swe_evo_complexity_rows(rows):
+    if not isinstance(rows, list):
+        raise Phase3PreparationError("decoded Arrow rows must be an array")
+    if len(rows) != FIXED_DATASET_ROW_COUNT:
+        raise Phase3PreparationError(
+            "fixed Arrow row count mismatch: "
+            f"expected {FIXED_DATASET_ROW_COUNT}, got {len(rows)}"
+        )
+
+    projected = []
+    seen_ids = set()
+    populations = {"high": 0, "low": 0, "medium": 0}
+    for index, row in enumerate(rows):
+        label = f"Arrow row {index}"
+        if not isinstance(row, dict):
+            raise Phase3PreparationError(f"{label} must be an object")
+        if "instance_id" not in row or "PRs" not in row:
+            raise Phase3PreparationError(
+                f"{label} must contain instance_id and PRs"
+            )
+        instance_id = row["instance_id"]
+        if not isinstance(instance_id, str) or _SAFE_ID.fullmatch(instance_id) is None:
+            raise Phase3PreparationError(
+                f"{label}.instance_id must be a safe identifier"
+            )
+        if instance_id in seen_ids:
+            raise Phase3PreparationError(
+                f"fixed Arrow artifact contains duplicate instance_id: {instance_id}"
+            )
+        seen_ids.add(instance_id)
+
+        repository_fields = [
+            field for field in ("repo", "repository") if field in row
+        ]
+        if len(repository_fields) != 1:
+            raise Phase3PreparationError(
+                f"{label} must contain exactly one repository identifier field"
+            )
+        repository = row[repository_fields[0]]
+        if (
+            not isinstance(repository, str)
+            or not repository
+            or repository != repository.strip()
+        ):
+            raise Phase3PreparationError(
+                f"{label} repository identifier must be a non-empty trimmed string"
+            )
+
+        prs = row["PRs"]
+        if not isinstance(prs, list):
+            raise Phase3PreparationError(f"{label}.PRs must be an Arrow list")
+        count = len(prs)
+        stratum = _complexity_stratum_for_pr_count(count)
+        populations[stratum] += 1
+        projected.append(
+            {
+                "instance_id": instance_id,
+                "repository": repository,
+                "complexity_stratum": stratum,
+                "language": "python",
+                "tags": [],
+            }
+        )
+    return projected, populations
+
+
+def _complexity_stratum_for_pr_count(count):
+    if count <= 2:
+        return "low"
+    if count <= 6:
+        return "medium"
+    return "high"
 
 
 def _json_object_snapshot(value):

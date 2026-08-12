@@ -1,10 +1,20 @@
 import copy
+import json
+import sys
+import tempfile
 import unittest
+from unittest import mock
+
+import agentteam_runtime.phase3_pilot_preparation as preparation
 
 from agentteam_runtime.phase3_pilot_preparation import (
     FIXED_DATASET_ARTIFACT_SHA256,
     FIXED_DATASET_ROW_COUNT,
+    FIXED_DATASET_SPLIT,
     FIXED_SOURCE_COMMIT,
+    EXPECTED_ELIGIBLE_POPULATION_COUNTS,
+    EXPECTED_POPULATION_COUNTS,
+    EXPECTED_SELECTION_PREVIEW,
     Phase3PreparationError,
     build_phase3_aggregate_pilot_contract,
     build_phase3_instance_direct_taskpack,
@@ -12,15 +22,19 @@ from agentteam_runtime.phase3_pilot_preparation import (
     build_phase3_instance_visible_input,
     build_phase3_provider_free_preflight_receipt,
     convert_swe_evo_inventory,
+    complexity_projection_bytes,
     decision_input_report,
     fixed_dataset_binding,
     materialize_phase3_instance_authorities,
     prepare_phase3_pilot_selection,
+    project_swe_evo_arrow_inventory,
     provider_free_preflight_receipt_bytes,
     replay_phase3_pilot_selection,
+    replay_phase3_complexity_selection,
     routing_manifest_bytes,
     selection_authority_bytes,
     validate_routing_manifest,
+    validate_phase3_complexity_projection,
     validate_phase3_pilot_decisions,
     validate_phase3_instance_direct_taskpack,
     validate_phase3_instance_materialization,
@@ -49,6 +63,131 @@ def _inventory():
             for index in range(FIXED_DATASET_ROW_COUNT)
         ],
     }
+
+
+def _trusted_arrow_rows():
+    """Return a gold-bearing fake Arrow decode with the frozen distributions."""
+
+    selected = {
+        "low": (
+            "dask__dask_2023.3.2_2023.4.0",
+            "dask/dask",
+            0,
+        ),
+        "medium": (
+            "iterative__dvc_2.19.0_2.20.0",
+            "iterative/dvc",
+            3,
+        ),
+        "high": (
+            "psf__requests_v2.4.0_v2.4.1",
+            "psf/requests",
+            15,
+        ),
+    }
+    filler_counts = {"low": 19, "medium": 11, "high": 14}
+
+    def rank(stratum, instance_id):
+        return canonical_json_sha256(
+            {
+                "seed": 20260812,
+                "complexity_stratum": stratum,
+                "instance_id": instance_id,
+            }
+        )
+
+    rows = []
+    for stratum in ("low", "medium", "high"):
+        selected_id, repository, pr_count = selected[stratum]
+        rows.append(_gold_bearing_arrow_row(selected_id, repository, pr_count))
+        target_rank = rank(stratum, selected_id)
+        added = 0
+        candidate = 0
+        while added < filler_counts[stratum]:
+            instance_id = f"fixture-{stratum}-{candidate:05d}"
+            candidate += 1
+            if rank(stratum, instance_id) <= target_rank:
+                continue
+            rows.append(
+                _gold_bearing_arrow_row(
+                    instance_id,
+                    f"fixture/{stratum}",
+                    pr_count,
+                )
+            )
+            added += 1
+    rows.append(
+        _gold_bearing_arrow_row(
+            "psf__requests_v2.27.0_v2.27.1",
+            "psf/requests",
+            2,
+        )
+    )
+    return list(reversed(rows))
+
+
+def _gold_bearing_arrow_row(instance_id, repository, pr_count):
+    return {
+        "instance_id": instance_id,
+        "repo": repository,
+        "PRs": [
+            {"body": f"raw-pr-sentinel-{instance_id}-{index}"}
+            for index in range(pr_count)
+        ],
+        "patch": f"restricted-patch-{instance_id}",
+        "test_patch": f"restricted-test-{instance_id}",
+        "score": 1,
+        "prior_result": "restricted-outcome",
+    }
+
+
+def _trusted_projection(rows=None):
+    rows = _trusted_arrow_rows() if rows is None else rows
+    with tempfile.NamedTemporaryFile() as source, mock.patch.object(
+        preparation,
+        "_file_sha256",
+        return_value=FIXED_DATASET_ARTIFACT_SHA256,
+    ), mock.patch.object(
+        preparation,
+        "_read_swe_evo_arrow_rows",
+        return_value=rows,
+    ):
+        return project_swe_evo_arrow_inventory(
+            source.name,
+            source_commit=FIXED_SOURCE_COMMIT,
+            split=FIXED_DATASET_SPLIT,
+        )
+
+
+def _complexity_decisions():
+    decisions = _decisions()
+    decisions["complexity"] = {
+        "proxy": {
+            "name": "dataset_pr_record_count",
+            "source": "trusted fixed Arrow projection",
+            "extraction_rule": 'len(instance["PRs"]) then discard the count',
+            "source_fields": ["complexity_stratum"],
+        },
+        "gold_blind": True,
+        "stratum_boundaries": [
+            {"stratum": "low", "boundary_rule": "0-2 PR records"},
+            {"stratum": "medium", "boundary_rule": "3-6 PR records"},
+            {"stratum": "high", "boundary_rule": "7 or more PR records"},
+        ],
+    }
+    decisions["selection"] = {
+        "metadata_revision": "swe-evo-pr-count-r1",
+        "filters": {
+            "repositories": [],
+            "languages": [],
+            "required_tags": [],
+            "excluded_instance_ids": ["psf__requests_v2.27.0_v2.27.1"],
+        },
+        "seed": 20260812,
+        "stratum_quotas": {"low": 1, "medium": 1, "high": 1},
+        "sample_size": 3,
+    }
+    return decisions
 
 
 def _decisions():
@@ -265,7 +404,183 @@ def _live_authorization(contract, *, decision="approved"):
 
 
 class Phase3PilotPreparationTests(unittest.TestCase):
+    def _assert_trusted_arrow_projection_is_bound_gold_blind_and_byte_stable(self):
+        first = _trusted_projection()
+        second = _trusted_projection(copy.deepcopy(_trusted_arrow_rows()))
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            complexity_projection_bytes(first),
+            complexity_projection_bytes(second),
+        )
+        self.assertEqual(
+            first["population"]["counts_by_stratum"],
+            EXPECTED_POPULATION_COUNTS,
+        )
+        self.assertEqual(
+            first["population"]["eligible_counts_by_stratum"],
+            EXPECTED_ELIGIBLE_POPULATION_COUNTS,
+        )
+        self.assertEqual(first["source"], fixed_dataset_binding())
+        self.assertEqual(
+            first["routing_manifest_sha256"],
+            first["routing_manifest"]["manifest_sha256"],
+        )
+
+        serialized = json.dumps(first, sort_keys=True)
+        for forbidden_value in (
+            "raw-pr-sentinel",
+            "restricted-patch",
+            "restricted-test",
+            "restricted-outcome",
+        ):
+            self.assertNotIn(forbidden_value, serialized)
+        for row in first["routing_manifest"]["manifest"]["metadata"][
+            "instances"
+        ]:
+            self.assertEqual(
+                set(row),
+                {
+                    "instance_id",
+                    "repository",
+                    "complexity_stratum",
+                    "language",
+                    "tags",
+                },
+            )
+            self.assertNotIn("dataset_pr_record_count", row)
+            self.assertNotIn("PRs", row)
+
+    def _assert_projection_replays_exact_approved_selection(self):
+        projection = _trusted_projection()
+        first = replay_phase3_complexity_selection(projection)
+        second = replay_phase3_complexity_selection(copy.deepcopy(projection))
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            tuple(first["ordered_instance_ids"]),
+            EXPECTED_SELECTION_PREVIEW,
+        )
+        self.assertEqual(
+            first["eligible_counts_by_stratum"],
+            EXPECTED_ELIGIBLE_POPULATION_COUNTS,
+        )
+
+    def _assert_complexity_control_metadata_does_not_enter_worker_visible_input(self):
+        projection = _trusted_projection()
+        decisions = _complexity_decisions()
+        authority = prepare_phase3_pilot_selection(
+            projection["routing_manifest"],
+            decisions,
+        )
+        self.assertEqual(authority["status"], "selection_frozen")
+        instance_id = authority["selection"]["ordered_instance_ids"][0]
+        visible = build_phase3_instance_visible_input(
+            instance_id=instance_id,
+            selection_authority=authority,
+            decisions=decisions,
+            task_input=_task_inputs(authority)[instance_id],
+            execution_profile=_execution_profile(),
+        )
+        serialized = json.dumps(visible, sort_keys=True)
+        for forbidden in (
+            "complexity_stratum",
+            "dataset_pr_record_count",
+            "PRs",
+            "raw-pr-sentinel",
+            "restricted-patch",
+            "restricted-outcome",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    def _assert_trusted_arrow_source_drift_and_missing_pyarrow_fail_closed(self):
+        with tempfile.NamedTemporaryFile() as source:
+            source.write(b"not-the-fixed-arrow-artifact")
+            source.flush()
+            with self.assertRaisesRegex(
+                Phase3PreparationError,
+                "artifact SHA-256",
+            ):
+                project_swe_evo_arrow_inventory(
+                    source.name,
+                    source_commit=FIXED_SOURCE_COMMIT,
+                    split=FIXED_DATASET_SPLIT,
+                )
+
+            with mock.patch.object(
+                preparation,
+                "_file_sha256",
+                return_value=FIXED_DATASET_ARTIFACT_SHA256,
+            ), mock.patch.dict(
+                sys.modules,
+                {"pyarrow": None, "pyarrow.ipc": None},
+            ), self.assertRaisesRegex(
+                Phase3PreparationError,
+                "pyarrow is required",
+            ):
+                project_swe_evo_arrow_inventory(
+                    source.name,
+                    source_commit=FIXED_SOURCE_COMMIT,
+                    split=FIXED_DATASET_SPLIT,
+                )
+
+        with self.assertRaisesRegex(Phase3PreparationError, "source_commit"):
+            project_swe_evo_arrow_inventory(
+                "unused.arrow",
+                source_commit="0" * 40,
+                split=FIXED_DATASET_SPLIT,
+            )
+        with self.assertRaisesRegex(Phase3PreparationError, "split"):
+            project_swe_evo_arrow_inventory(
+                "unused.arrow",
+                source_commit=FIXED_SOURCE_COMMIT,
+                split="train",
+            )
+
+    def _assert_trusted_arrow_projection_rejects_row_and_population_drift(self):
+        missing_prs = _trusted_arrow_rows()
+        missing_prs[0].pop("PRs")
+        with self.assertRaisesRegex(Phase3PreparationError, "instance_id and PRs"):
+            _trusted_projection(missing_prs)
+
+        invalid_prs = _trusted_arrow_rows()
+        invalid_prs[0]["PRs"] = None
+        with self.assertRaisesRegex(Phase3PreparationError, "must be an Arrow list"):
+            _trusted_projection(invalid_prs)
+
+        population_drift = _trusted_arrow_rows()
+        next(row for row in population_drift if len(row["PRs"]) >= 7)["PRs"] = []
+        with self.assertRaisesRegex(Phase3PreparationError, "population mismatch"):
+            _trusted_projection(population_drift)
+
+    def _assert_projection_mutation_and_leakage_are_rejected(self):
+        projection = _trusted_projection()
+        projection["routing_manifest"]["manifest"]["metadata"]["instances"][0][
+            "dataset_pr_record_count"
+        ] = 7
+        projection["routing_manifest"]["manifest_sha256"] = canonical_json_sha256(
+            projection["routing_manifest"]["manifest"]
+        )
+        projection["routing_manifest_sha256"] = projection["routing_manifest"][
+            "manifest_sha256"
+        ]
+        body = copy.deepcopy(projection)
+        body.pop("projection_sha256")
+        projection["projection_sha256"] = canonical_json_sha256(body)
+        with self.assertRaisesRegex(
+            Phase3PreparationError,
+            "schema validation",
+        ):
+            validate_phase3_complexity_projection(projection)
+
     def test_fixed_binding_and_byte_stable_manifest(self):
+        self._assert_trusted_arrow_projection_is_bound_gold_blind_and_byte_stable()
+        self._assert_projection_replays_exact_approved_selection()
+        self._assert_complexity_control_metadata_does_not_enter_worker_visible_input()
+        self._assert_trusted_arrow_source_drift_and_missing_pyarrow_fail_closed()
+        self._assert_trusted_arrow_projection_rejects_row_and_population_drift()
+        self._assert_projection_mutation_and_leakage_are_rejected()
+
         first = convert_swe_evo_inventory(_inventory())
         second = convert_swe_evo_inventory(copy.deepcopy(_inventory()))
         self.assertEqual(first, second)
