@@ -1997,6 +1997,10 @@ def run_trusted_argv_evaluator(
     timeout_seconds,
     evidence_path=None,
     max_output_bytes=DEFAULT_MAX_EVALUATOR_OUTPUT_BYTES,
+    resource_envelope_binding=None,
+    resource_mode=None,
+    resource_envelope_required=False,
+    resource_project_id=None,
 ):
     """Run post-model acceptance and return schema-validated bounded evidence."""
 
@@ -2106,6 +2110,24 @@ def run_trusted_argv_evaluator(
         base["experiment_protocol_reference_sha256"] = (
             experiment_protocol_reference["sha256"]
         )
+        if resource_envelope_binding is not None or resource_envelope_required:
+            from .experiment_protocol import (
+                validate_protocol_resource_envelope,
+            )
+
+            validate_protocol_resource_envelope(
+                experiment_protocol,
+                resource_envelope_binding,
+                require_binding=resource_envelope_required,
+            )
+        if resource_envelope_binding is not None and resource_mode not in {
+            "single_codex",
+            "agentteam_direct",
+            "agentteam_full",
+        }:
+            raise ExperimentSandboxError(
+                "resource-bound evaluator requires an experiment mode"
+            )
         expected_command = list(experiment_protocol["acceptance"]["command"])
         if list(command) != expected_command:
             raise ExperimentSandboxError(
@@ -2318,20 +2340,34 @@ def run_trusted_argv_evaluator(
         base["cwd"] = str(cwd_path)
         base["evaluator_artifact"] = str(artifact)
         base["evaluator_sha256"] = evaluator_sha256
-        execution = _run_bounded_argv(
-            evaluator_argv,
-            cwd=cwd_path,
-            environment=bounded_environment,
-            timeout_seconds=timeout_seconds,
-            max_output_bytes=int(max_output_bytes),
-            cpu_limit=experiment_protocol["environment"]["cpu_limit"],
-            memory_limit_bytes=experiment_protocol["environment"][
+        evaluator_arguments = {
+            "cwd": cwd_path,
+            "environment": bounded_environment,
+            "timeout_seconds": timeout_seconds,
+            "max_output_bytes": int(max_output_bytes),
+            "cpu_limit": experiment_protocol["environment"]["cpu_limit"],
+            "memory_limit_bytes": experiment_protocol["environment"][
                 "memory_limit_bytes"
             ],
-            input_bytes=evaluator_content,
-            prelaunch_source_authority=(
+            "input_bytes": evaluator_content,
+            "prelaunch_source_authority": (
                 candidate_launch.source_authority()
             ),
+        }
+        if resource_envelope_binding is not None:
+            evaluator_arguments.update(
+                {
+                    "resource_envelope_binding": resource_envelope_binding,
+                    "resource_mode": resource_mode,
+                    "resource_run_id": base["run_id"],
+                }
+            )
+            evaluator_arguments["resource_run_id"] = (
+                resource_project_id or base["run_id"]
+            )
+        execution = _run_bounded_argv(
+            evaluator_argv,
+            **evaluator_arguments,
         )
         base["evaluator_started"] = True
         base.update(
@@ -2352,6 +2388,10 @@ def run_trusted_argv_evaluator(
                 "stderr_truncated": execution["stderr_truncated"],
             }
         )
+        resource_evidence = execution.get("resource_evidence")
+        if resource_evidence is not None and evidence_path is not None:
+            resource_path = Path(str(evidence_path) + ".resources.json")
+            _publish_immutable_json(resource_path, resource_evidence)
         post_scan = scan_canary_leakage(
             scan_groups,
             canary_path=canary_path,
@@ -2392,8 +2432,17 @@ def run_trusted_argv_evaluator(
         base["evaluation_status"] = "passed" if passed else "failed"
         base["promotion_eligible"] = passed
         if not passed:
+            resource_exhausted = (
+                isinstance(resource_evidence, dict)
+                and resource_evidence.get("outcome", {}).get(
+                    "resource_exhausted"
+                )
+                is True
+            )
             base["failure_reason"] = (
-                "post_run_canary_leak"
+                "resource_limit_exhausted"
+                if resource_exhausted
+                else "post_run_canary_leak"
                 if post_scan["scan_status"] != "clean"
                 else "candidate_workspace_mutated_during_evaluation"
                 if not candidate_repository_unchanged
@@ -3075,6 +3124,10 @@ def _run_bounded_argv(
     memory_limit_bytes,
     input_bytes=None,
     prelaunch_source_authority=None,
+    resource_envelope_binding=None,
+    resource_mode=None,
+    resource_run_id=None,
+    resource_hierarchy_factory=None,
 ):
     systemd_run = Path("/usr/bin/systemd-run")
     systemctl = Path("/usr/bin/systemctl")
@@ -3165,18 +3218,36 @@ def _run_bounded_argv(
             *guarded_argv,
         ]
     unit = f"agentteam-eval-{os.urandom(12).hex()}.service"
+    resource_hierarchy = None
+    resource_arguments = []
+    if resource_envelope_binding is not None:
+        from .resource_envelope import SystemdResourceHierarchy
+
+        hierarchy_factory = (
+            resource_hierarchy_factory or SystemdResourceHierarchy
+        )
+        resource_hierarchy = hierarchy_factory(
+            resource_envelope_binding,
+            run_id=resource_run_id,
+            mode=resource_mode,
+        )
+        resource_hierarchy.prepare()
+        resource_arguments = resource_hierarchy.leaf_arguments(
+            evaluator=True
+        )
     command = [
         str(systemd_run),
         "--user",
         "--quiet",
         "--wait",
-        "--collect",
+        *([] if resource_hierarchy is not None else ["--collect"]),
         "--pipe",
         "--service-type=exec",
         "--unit",
         unit,
         "--property",
         "KillMode=control-group",
+        *resource_arguments,
         "--property",
         "ExitType=main",
         "--property",
@@ -3222,27 +3293,66 @@ def _run_bounded_argv(
         )
 
     try:
-        result = _capture_bounded_process(
-            command,
-            cwd="/",
-            environment=dict(os.environ),
-            timeout_seconds=(
-                timeout_seconds
-                + PRELAUNCH_SOURCE_REVALIDATION_TIMEOUT_SECONDS
-                if prelaunch_source_authority is not None
-                else timeout_seconds
-            ),
-            max_output_bytes=max_output_bytes,
-            timeout_callback=terminate_unit,
-            input_bytes=input_bytes,
+        try:
+            result = _capture_bounded_process(
+                command,
+                cwd="/",
+                environment=dict(os.environ),
+                timeout_seconds=(
+                    timeout_seconds
+                    + PRELAUNCH_SOURCE_REVALIDATION_TIMEOUT_SECONDS
+                    if prelaunch_source_authority is not None
+                    else timeout_seconds
+                ),
+                max_output_bytes=max_output_bytes,
+                timeout_callback=terminate_unit,
+                input_bytes=input_bytes,
+            )
+        finally:
+            if source_guard_path is not None:
+                Path(source_guard_path).unlink(missing_ok=True)
+    except Exception:
+        if resource_hierarchy is not None:
+            terminate_unit()
+            resource_hierarchy.cleanup()
+        raise
+    resource_evidence = None
+    if resource_hierarchy is not None:
+        from .resource_envelope import (
+            build_resource_evidence,
+            read_resource_counters,
         )
-    finally:
-        if source_guard_path is not None:
-            Path(source_guard_path).unlink(missing_ok=True)
+
+        try:
+            leaf_identity = resource_hierarchy.verify_leaf(unit)
+            counters = read_resource_counters(leaf_identity["ControlGroup"])
+        finally:
+            subprocess.run(
+                [str(systemctl), "--user", "stop", unit],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+            )
+            cleanup = resource_hierarchy.cleanup()
+        resource_evidence = build_resource_evidence(
+            binding=resource_envelope_binding,
+            scope="evaluator",
+            identity={
+                "systemd_unit": unit,
+                "control_group": leaf_identity["ControlGroup"],
+                "hierarchy": resource_hierarchy.identity(),
+            },
+            counters=counters,
+            timed_out=result["timed_out"],
+            cleanup=cleanup,
+        )
     result.update(
         {
             "execution_boundary": "systemd_user_transient_service",
             "systemd_unit": unit,
+            "resource_evidence": resource_evidence,
         }
     )
     return result

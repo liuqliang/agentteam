@@ -716,6 +716,7 @@ class ProviderExecution:
     timed_out: bool = False
     launch_failed: bool = False
     launch_error: str | None = None
+    resource_evidence: dict | None = None
 
     def completed_process(self):
         return subprocess.CompletedProcess(
@@ -766,6 +767,7 @@ class InvocationLifecycle:
         self.terminal_lock_path = self.invocation_dir / "terminal.lock"
         self.stdout_path = self.invocation_dir / "stdout.jsonl"
         self.stderr_path = self.invocation_dir / "stderr.log"
+        self.resource_path = self.invocation_dir / "resource.json"
 
     @property
     def is_started(self):
@@ -805,6 +807,18 @@ class InvocationLifecycle:
             self.stderr_path,
             str(stderr or "").encode("utf-8")[:MAX_PROVIDER_STREAM_BYTES],
         )
+
+    def write_resource_evidence(self, evidence):
+        if evidence is None:
+            return None
+        if not isinstance(evidence, dict):
+            raise ModelInvocationIntegrityError(
+                "model invocation resource evidence is invalid"
+            )
+        payload = dict(evidence)
+        payload["invocation_id"] = self.invocation_id
+        _exclusive_publish_json(self.resource_path, payload)
+        return payload
 
     @contextmanager
     def terminal_authority(self):
@@ -941,6 +955,7 @@ class InvocationLifecycle:
             "terminal_path": str(self.terminal_path),
             "stdout_path": str(self.stdout_path),
             "stderr_path": str(self.stderr_path),
+            "resource_path": str(self.resource_path),
         }
 
 
@@ -1069,7 +1084,6 @@ class ModelInvocationCall:
             self.lifecycle.context[
                 "experiment_sandbox_reference_sha256"
             ] = sandbox_reference["sha256"]
-        self._acquire_experiment_provider_admission()
         try:
             if self.supported:
                 runner_arguments = {
@@ -1079,11 +1093,53 @@ class ModelInvocationCall:
                 }
                 if environment is not None:
                     runner_arguments["environment"] = environment
-                runner = self.systemd_runner_factory(
-                    self.lifecycle,
-                    command,
-                    **runner_arguments,
+                resource_binding = self.lifecycle.context.get(
+                    "resource_envelope_binding"
                 )
+                if resource_binding is not None:
+                    runner_arguments.update(
+                        {
+                            "resource_envelope_binding": resource_binding,
+                            "resource_mode": self.lifecycle.context.get(
+                                "experiment_mode"
+                            ),
+                            "resource_run_id": self.lifecycle.context["run_id"],
+                        }
+                    )
+                    runner_arguments["resource_run_id"] = (
+                        self.lifecycle.context.get("resource_project_id")
+                        or self.lifecycle.context["run_id"]
+                    )
+                if resource_binding is None:
+                    self._acquire_experiment_provider_admission()
+                    runner = self.systemd_runner_factory(
+                        self.lifecycle,
+                        command,
+                        **runner_arguments,
+                    )
+                else:
+                    runner = self.systemd_runner_factory(
+                        self.lifecycle,
+                        command,
+                        **runner_arguments,
+                    )
+                    prepare_resources = getattr(
+                        runner,
+                        "prepare_resources_before_admission",
+                        None,
+                    )
+                    if not callable(prepare_resources):
+                        raise ModelInvocationUnavailable(
+                            "model runner cannot enforce the required "
+                            "resource envelope before admission"
+                        )
+                    prepare_resources()
+                    try:
+                        prepared_identity = runner.prepare()
+                        self._acquire_experiment_provider_admission()
+                    except Exception:
+                        runner.abort_before_permit()
+                        raise
                 self.execution_group = runner
                 supervisor_revalidation = False
                 if prepared is not None:
@@ -1098,7 +1154,11 @@ class ModelInvocationCall:
                         )
                         supervisor_revalidation = True
                 try:
-                    identity = runner.prepare()
+                    identity = (
+                        prepared_identity
+                        if resource_binding is not None
+                        else runner.prepare()
+                    )
                 except Exception:
                     runner.abort_before_permit()
                     raise
@@ -1134,6 +1194,7 @@ class ModelInvocationCall:
             # Test provider commands are intentionally outside the supported
             # live denominator, but still prove that start publication
             # precedes Popen.
+            self._acquire_experiment_provider_admission()
             self.lifecycle.publish_start(
                 ExecutionGroupIdentity.not_applicable()
             )
@@ -1156,6 +1217,7 @@ class ModelInvocationCall:
             raise
 
     def finalize(self, terminal_status, execution, *, terminal_writer="worker"):
+        terminal = None
         try:
             terminal = self.lifecycle.finalize(
                 terminal_status,
@@ -1173,7 +1235,11 @@ class ModelInvocationCall:
             return terminal
         finally:
             if self.execution_group is not None:
-                self.execution_group.cleanup_after_terminal()
+                cleanup = self.execution_group.cleanup_after_terminal()
+                evidence = execution.resource_evidence
+                if evidence is not None:
+                    evidence["cleanup"] = cleanup
+                    self.lifecycle.write_resource_evidence(evidence)
 
     def _acquire_experiment_provider_admission(self):
         reference = self.lifecycle.context.get(
@@ -1253,7 +1319,13 @@ class ModelInvocationCall:
         self.provider_admission = admission
 
 
-def _systemd_gated_supervisor_command(unit, module_path, spec_path):
+def _systemd_gated_supervisor_command(
+    unit,
+    module_path,
+    spec_path,
+    *,
+    resource_arguments=(),
+):
     return [
         "systemd-run",
         "--user",
@@ -1263,6 +1335,7 @@ def _systemd_gated_supervisor_command(unit, module_path, spec_path):
         "--property=Type=oneshot",
         "--property=RemainAfterExit=yes",
         "--property=KillMode=control-group",
+        *resource_arguments,
         "--",
         sys.executable,
         "-B",
@@ -1285,6 +1358,10 @@ class SystemdGatedExecution:
         timeout_seconds,
         environment=None,
         command_runner=None,
+        resource_envelope_binding=None,
+        resource_mode=None,
+        resource_run_id=None,
+        resource_hierarchy_factory=None,
     ):
         if not sys.platform.startswith("linux"):
             raise ModelInvocationUnavailable(
@@ -1301,6 +1378,12 @@ class SystemdGatedExecution:
         self.timeout_seconds = timeout_seconds
         self.environment = _validated_process_environment(environment)
         self.command_runner = command_runner or subprocess.run
+        self.resource_envelope_binding = resource_envelope_binding
+        self.resource_mode = resource_mode
+        self.resource_run_id = resource_run_id
+        self.resource_hierarchy_factory = resource_hierarchy_factory
+        self.resource_hierarchy = None
+        self.resource_evidence = None
         digest = hashlib.sha256(
             lifecycle.invocation_id.encode("utf-8")
         ).hexdigest()
@@ -1332,6 +1415,12 @@ class SystemdGatedExecution:
 
     def prepare(self):
         user_service = self._preflight_user_service()
+        self.prepare_resources_before_admission()
+        resource_arguments = (
+            self.resource_hierarchy.leaf_arguments()
+            if self.resource_hierarchy is not None
+            else ()
+        )
         spec = {
             "command": self.command,
             "cwd": self.cwd,
@@ -1358,6 +1447,7 @@ class SystemdGatedExecution:
                 self.unit,
                 module_path,
                 self.spec_path,
+                resource_arguments=resource_arguments,
             )
         )
         try:
@@ -1409,11 +1499,36 @@ class SystemdGatedExecution:
                 ),
             )
             self.identity = identity
+            if self.resource_hierarchy is not None:
+                self.resource_hierarchy.verify_leaf(self.unit)
             self._prepared = True
             return identity
         except Exception:
             self.abort_before_permit()
             raise
+
+    def prepare_resources_before_admission(self):
+        """Enforce and read back parent limits before budget admission."""
+
+        if (
+            self.resource_envelope_binding is None
+            or self.resource_hierarchy is not None
+        ):
+            return
+        from .resource_envelope import SystemdResourceHierarchy
+
+        hierarchy_factory = (
+            self.resource_hierarchy_factory or SystemdResourceHierarchy
+        )
+        self.resource_hierarchy = hierarchy_factory(
+            self.resource_envelope_binding,
+            run_id=self.resource_run_id,
+            mode=self.resource_mode,
+            command_runner=self.command_runner,
+        )
+        self.resource_hierarchy.prepare()
+        if self.resource_mode in {"agentteam_direct", "agentteam_full"}:
+            self.resource_hierarchy.attach_control_plane()
 
     def permit_and_wait(
         self,
@@ -1456,6 +1571,9 @@ class SystemdGatedExecution:
         while time.monotonic() < deadline:
             result = _read_json_if_exists(self.result_path)
             if result is not None:
+                resource_evidence = self._resource_evidence(
+                    timed_out=bool(result.get("timed_out")),
+                )
                 return ProviderExecution(
                     self.command,
                     result.get("returncode"),
@@ -1464,6 +1582,7 @@ class SystemdGatedExecution:
                     timed_out=bool(result.get("timed_out")),
                     launch_failed=not bool(result.get("launch_permitted")),
                     launch_error=result.get("launch_error"),
+                    resource_evidence=resource_evidence,
                 )
             if progress_callback is not None and time.monotonic() >= next_progress:
                 progress_callback()
@@ -1482,6 +1601,7 @@ class SystemdGatedExecution:
             "",
             timed_out=True,
             launch_error="supervisor_result_timeout",
+            resource_evidence=self._resource_evidence(timed_out=True),
         )
 
     def abort_before_permit(self):
@@ -1490,13 +1610,16 @@ class SystemdGatedExecution:
         # fails closed and its bounded supervisor handshake will expire.
         if self.identity is not None:
             self._stop_exact_unit(ignore_errors=True)
+        if self.resource_hierarchy is not None:
+            self.resource_hierarchy.cleanup()
 
     def cleanup_after_terminal(self):
         empty_observed = self._execution_group_is_empty()
         stopped = self._stop_exact_unit(ignore_errors=True)
-        if stopped and (
-            empty_observed or self._wait_execution_group_empty()
-        ):
+        leaf_empty = empty_observed
+        if stopped and not leaf_empty:
+            leaf_empty = self._wait_execution_group_empty()
+        if stopped and leaf_empty:
             self._checked_command(
                 ["systemctl", "--user", "reset-failed", self.unit],
                 ignore_errors=True,
@@ -1505,6 +1628,39 @@ class SystemdGatedExecution:
             self.socket_path.unlink()
         except FileNotFoundError:
             pass
+        return {
+            "leaf_unit_stopped": bool(stopped),
+            "leaf_cgroup_empty": bool(leaf_empty),
+        }
+
+    def _resource_evidence(self, *, timed_out):
+        if self.resource_hierarchy is None or self.identity is None:
+            return None
+        from .resource_envelope import (
+            build_resource_evidence,
+            read_resource_counters,
+        )
+
+        counters = read_resource_counters(
+            self.identity.systemd_transient_control_group
+        )
+        self.resource_evidence = build_resource_evidence(
+            binding=self.resource_envelope_binding,
+            scope="workload",
+            identity={
+                "systemd_unit": self.unit,
+                "control_group": (
+                    self.identity.systemd_transient_control_group
+                ),
+                "transient_invocation_id": (
+                    self.identity.systemd_transient_invocation_id
+                ),
+                "hierarchy": self.resource_hierarchy.identity(),
+            },
+            counters=counters,
+            timed_out=timed_out,
+        )
+        return self.resource_evidence
 
     def _preflight_user_service(self):
         linger = self._checked_command(
@@ -1888,6 +2044,13 @@ def invocation_context_from_message(message, *, model=None, backend="codex"):
         "experiment_controller_required": (
             payload.get("experiment_controller_required") is True
         ),
+        "resource_envelope_binding": payload.get(
+            "resource_envelope_binding"
+        ),
+        "resource_envelope_required": (
+            payload.get("resource_envelope_required") is True
+        ),
+        "resource_project_id": payload.get("resource_project_id"),
     }
     context["_explicit_context_fields"] = {
         "project": _nonempty(payload.get("project")) is not None,
@@ -1913,6 +2076,8 @@ def invocation_context_from_message(message, *, model=None, backend="codex"):
         is not None,
         "usage_stage": _nonempty(payload.get("usage_stage")) is not None,
     }
+    if payload.get("experiment_mode") is not None:
+        context["experiment_mode"] = payload["experiment_mode"]
     return context
 
 
@@ -3190,6 +3355,28 @@ def _validate_call_context(context, *, supported):
         raise ModelInvocationIntegrityError(
             "test provider call cannot claim supported coverage"
         )
+    resource_binding = context.get("resource_envelope_binding")
+    if resource_binding is None and context.get("resource_envelope_required") is True:
+        raise ModelInvocationUnavailable(
+            "required model-worker resource envelope is unavailable"
+        )
+    if resource_binding is not None:
+        try:
+            from .resource_envelope import validate_resource_envelope_binding
+
+            validate_resource_envelope_binding(resource_binding)
+        except (ImportError, RuntimeError, TypeError, ValueError) as exc:
+            raise ModelInvocationIntegrityError(
+                f"invalid model-worker resource envelope: {exc}"
+            ) from exc
+        if context.get("experiment_mode") not in {
+            "single_codex",
+            "agentteam_direct",
+            "agentteam_full",
+        }:
+            raise ModelInvocationIntegrityError(
+                "resource-bound model invocation requires experiment_mode"
+            )
     required = (
         "project",
         "run_id",

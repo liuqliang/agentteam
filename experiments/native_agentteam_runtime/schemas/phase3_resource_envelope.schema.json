@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentteam.local/schemas/phase3_resource_envelope.schema.json",
+  "title": "AgentTeam Phase 3 hierarchical resource envelope binding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "fairness_policy",
+    "failure_classification",
+    "envelopes",
+    "hierarchy",
+    "systemd"
+  ],
+  "properties": {
+    "schema_version": {"const": "phase3_resource_envelope.v1"},
+    "fairness_policy": {
+      "const": "equal_workload_slots_with_metered_agentteam_control_plane_allowance"
+    },
+    "failure_classification": {"const": "resource_limit_exhausted"},
+    "envelopes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "common_workload_slot",
+        "single_codex_mode",
+        "agentteam_control_plane_allowance",
+        "agentteam_mode",
+        "pilot_project"
+      ],
+      "properties": {
+        "common_workload_slot": {"$ref": "#/$defs/envelope"},
+        "single_codex_mode": {"$ref": "#/$defs/envelope"},
+        "agentteam_control_plane_allowance": {"$ref": "#/$defs/envelope"},
+        "agentteam_mode": {"$ref": "#/$defs/envelope"},
+        "pilot_project": {"$ref": "#/$defs/envelope"}
+      }
+    },
+    "hierarchy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_envelope", "modes"],
+      "properties": {
+        "project_envelope": {"const": "pilot_project"},
+        "modes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["single_codex", "agentteam_direct", "agentteam_full"],
+          "properties": {
+            "single_codex": {"$ref": "#/$defs/modeBinding"},
+            "agentteam_direct": {"$ref": "#/$defs/modeBinding"},
+            "agentteam_full": {"$ref": "#/$defs/modeBinding"}
+          }
+        }
+      }
+    },
+    "systemd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manager",
+        "cgroup_version",
+        "kill_mode",
+        "readback_required",
+        "cleanup_requires_empty_cgroup"
+      ],
+      "properties": {
+        "manager": {"const": "user"},
+        "cgroup_version": {"const": 2},
+        "kill_mode": {"const": "control-group"},
+        "readback_required": {"const": true},
+        "cleanup_requires_empty_cgroup": {"const": true}
+      }
+    }
+  },
+  "$defs": {
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu_quota",
+        "memory_high_bytes",
+        "memory_max_bytes",
+        "tasks_max",
+        "memory_swap_max_bytes"
+      ],
+      "properties": {
+        "cpu_quota": {"type": "integer", "minimum": 1, "maximum": 64},
+        "memory_high_bytes": {"type": "integer", "minimum": 67108864},
+        "memory_max_bytes": {"type": "integer", "minimum": 67108864},
+        "tasks_max": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "memory_swap_max_bytes": {"const": 0}
+      }
+    },
+    "modeBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode_envelope",
+        "control_plane_envelope",
+        "workload_envelope",
+        "evaluator_envelope"
+      ],
+      "properties": {
+        "mode_envelope": {
+          "enum": ["single_codex_mode", "agentteam_mode"]
+        },
+        "control_plane_envelope": {
+          "enum": [null, "agentteam_control_plane_allowance"]
+        },
+        "workload_envelope": {"const": "common_workload_slot"},
+        "evaluator_envelope": {"const": "common_workload_slot"}
+      }
+    }
+  }
+}
