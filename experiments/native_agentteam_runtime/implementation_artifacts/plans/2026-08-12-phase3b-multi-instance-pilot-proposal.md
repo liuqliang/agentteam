@@ -123,6 +123,55 @@ is not scored as execution cost. For `agentteam_full`, live taskpack authoring
 is part of the mode and its provider usage is included in that execution's
 budget and cost.
 
+## Local Resource Policy
+
+Resource limits protect the host and make failures attributable; they are not
+intended to force a multi-agent runtime into the footprint of one Codex
+process. The pilot therefore separates a common workload slot from AgentTeam's
+additional control-plane allowance.
+
+This refines the inherited equal-resource rule: equal `cpu_limit` and
+`memory_limit_bytes` continue to describe the common workload slot, while an
+additive, mode-specific parent envelope accounts for orchestration. It does
+not retroactively change any frozen Phase 3A or calibration artifact.
+
+| Scope | CPU quota | Memory high | Memory max | Tasks max |
+| --- | ---: | ---: | ---: | ---: |
+| Common workload slot | 8 CPUs | 16 GiB | 24 GiB | 512 |
+| `single_codex` total envelope | 8 CPUs | 16 GiB | 24 GiB | 512 |
+| AgentTeam control-plane allowance | 8 CPUs | 16 GiB | 24 GiB | 512 |
+| Each AgentTeam mode total envelope | 16 CPUs | 32 GiB | 48 GiB | 1,024 |
+| Whole pilot project hard envelope | 32 CPUs | 64 GiB | 96 GiB | 2,048 |
+
+The common workload slot covers the active coding worker and repository test
+processes. The same slot limit applies in all three modes. The AgentTeam
+allowance covers the scheduler, author, repo mapper, reviewer, reporting, and
+other control-plane processes. It may not silently increase one worker's
+workload slot. If a later protocol permits several concurrent workers, the
+contract must explicitly allocate one workload slot per active worker and
+raise the project envelope before authorization.
+
+The official evaluator always uses the common workload-slot limit, regardless
+of which mode produced the candidate. Model invocation concurrency remains one
+for this pilot, and mode executions remain sequential. Set `MemoryHigh` as the
+soft pressure boundary, `MemoryMax` as the hard boundary, and
+`MemorySwapMax=0` so a run cannot appear to survive by causing uncontrolled
+host paging. CPU quotas are ceilings, not reservations.
+
+This intentionally gives AgentTeam a larger total local-resource envelope. It
+is part of the system-under-test cost and must be disclosed rather than hidden
+as equal resources. Record per execution:
+
+- CPU time and peak resident memory for the workload slot;
+- CPU time and peak resident memory for the AgentTeam control plane;
+- cgroup OOM, PID-limit, CPU-throttling, and timeout counters;
+- the existing provider-token and wall-time metrics.
+
+Quality remains paired under an equal workload slot. Wall-time comparisons
+remain valid as observed system latency but must be interpreted together with
+the additional AgentTeam CPU and memory consumption. A future efficiency claim
+should report both wall time and aggregate CPU time.
+
 ## Budget
 
 Each instance/mode/repetition receives the same hard ceiling:
@@ -200,7 +249,38 @@ The current inventory converter accepts an existing `complexity_stratum`; it
 does not derive one from the Arrow source. The pilot cannot freeze until this
 gap is implemented and reviewed.
 
-### P3B-01B: Approved decision and selection artifacts
+### P3B-01B: Resource-envelope enforcement
+
+Bind the resource table above into the per-mode execution contract and enforce
+it over the complete descendant process tree:
+
+- apply the common workload slot to single Codex, every AgentTeam worker, and
+  every official evaluator invocation;
+- apply the larger mode envelope to all AgentTeam control-plane and workload
+  descendants together;
+- apply the project envelope across the complete pilot run;
+- reject launch when the host cannot provide the frozen envelope with reserved
+  scheduler and operating-system headroom;
+- persist cgroup identity and resource counters in terminal evidence;
+- classify OOM, PID exhaustion, and resource-driven timeout as
+  `resource_limit_exhausted`, not model-quality failure;
+- prove cleanup removes or drains every descendant before the next mode starts.
+
+Represent the common workload slot with the existing preregistration fields.
+Add an explicitly versioned resource-envelope binding for the project and mode
+parents rather than overloading those shared fields. On Linux, place transient
+services beneath a run-specific project slice and mode slice; enforce the
+project and mode ceilings on their parent slices and the workload ceiling on
+the leaf service. The binding must fail closed on systems that cannot enforce
+or read back the hierarchy.
+
+The current schemas contain `cpu_limit` and `memory_limit_bytes`, and the
+bounded evaluator path applies `CPUQuota`, `MemoryMax`, and `TasksMax`. The
+model-worker transient service does not yet apply equivalent limits. Merely
+recording resource fields is insufficient; live authorization remains blocked
+until enforcement and negative tests cover the model-worker path.
+
+### P3B-01C: Approved decision and selection artifacts
 
 After operator approval of this proposal, publish one immutable
 `phase3_pilot_decisions.v1` artifact containing these parameters, then
@@ -265,6 +345,8 @@ Stop before live authorization if any of these conditions holds:
 - a selected target commit or official evaluator image is unavailable;
 - direct taskpacks are not frozen before scored outcomes;
 - full-mode authoring and worker usage cannot share one enforced budget;
+- any required workload, mode, or project resource envelope is recorded but
+  not enforced over its full descendant process tree;
 - any mode receives different visible task inputs, tools, permissions, or
   evaluator conditions;
 - aggregate authorization would exceed the ceilings in this proposal;
