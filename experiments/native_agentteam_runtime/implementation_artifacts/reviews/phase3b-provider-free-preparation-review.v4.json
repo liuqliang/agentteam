@@ -5,10 +5,10 @@
   "preflight_release_id": "git-45d75376759f",
   "preflight_release_source_commit": "45d75376759f375eb32a29eb830e64d103ed1896",
   "plan_sha256": "622be205e6ab9ad9ec19a3551329fc3c6f775541826e982c0c54352007156c10",
-  "blueprint_sha256": "c6a5d46ee0e42f683675ef30852e50de5877096e3578027adbbcb7fcc404442f",
+  "blueprint_sha256": "a1b229c00eac28287310efd09178fa706d784b99024741877ca686b528608630",
   "research_authority_sha256": "8dca1748a211b9eaf9df5d392d7d39d755cbe3946a358c11cff2f51c5323d91d",
   "review_schema_sha256": "e4c70d14b555ae3da219e299e4b7e498c457ca44a96bc1f5e9e23d42fcdded83",
   "contract_decisions_sha256": "2b3362a04925ca991a0c05a723245fbc06edaeccd5417f59091256156a59dedf",
-  "decision_contract_sha256": "193ec3a03a660065508ba374e9bc5b44a0f7e04747e16d72c41d2440ba1fdd47",
+  "decision_contract_sha256": "6b6caa5fb44e4cdaa67ea54d26df6c4d8c3097fbb4d6b4170a3b40035a80417a",
   "schema_inventory_sha256": "c3db194db5ad45ff1008d401ba556068c9eefc74be2a45335164699667ea1a62"
 }
