@@ -4,8 +4,9 @@
 
 The non-scored, gold-blind calibration completed once in all three execution
 modes. All valid runs used the same immutable protocol, target commit, model,
-reasoning profile, and provider-concurrency limit. This report does not claim an
-official SWE-EVO score because the official evaluator image could not be pulled.
+reasoning profile, and provider-concurrency limit. After the provider runs were
+sealed, all three retained candidates achieved `RESOLVED_FULL` in the official
+SWE-EVO instance image.
 
 ## Frozen identity
 
@@ -15,6 +16,8 @@ official SWE-EVO score because the official evaluator image could not be pulled.
 - Target commit: `0192aac24123735b3eaf9b08df46429bb770c283`
 - Target tree: `94369dd609f8ae984d2397ca8bde82369e348a60`
 - AgentTeam runtime commit: `4894d9f`
+- Official image digest:
+  `sha256:da4dfbc89176657dad8fc82acf81580b7433484b47cfa08204b6c47b3514705d`
 - Protocol SHA-256:
   `01bd1bbca555a0c61f509a3d9077928bfd539033c27ed19ff45e8071170cedb3`
 - Direct taskpack SHA-256:
@@ -69,18 +72,29 @@ across the three candidates.
   `http://user:pass@example.com/path?query` and
   `http://user@example.com/path?query`.
 - The common isolated acceptance command passed for all three modes.
+- Official container grading produced the following result:
+
+  | Mode | FAIL_TO_PASS | PASS_TO_PASS | Resolution |
+  | --- | ---: | ---: | --- |
+  | `single_codex` | 2/2 | 185/185 | `RESOLVED_FULL` |
+  | `agentteam_direct` | 2/2 | 185/185 | `RESOLVED_FULL` |
+  | `agentteam_full` | 2/2 | 185/185 | `RESOLVED_FULL` |
+
+- Before official evaluation, candidate-authored changes to
+  `tests/test_utils.py` were reset and the same official test patch was applied
+  to every candidate, matching the SWE-bench evaluation order.
+- The official command was `pytest --continue-on-collection-errors -rA`; results
+  were graded with `parse_log_pytest_options` against the frozen two
+  FAIL_TO_PASS and 185 PASS_TO_PASS identifiers.
+- The complete pytest process also reported failures and setup errors outside
+  those scoring lists, primarily because the image lacks the `pytest-mock`
+  fixture required by later non-scored tests. These do not affect the instance's
+  official resolution calculation. Full compressed logs and their hashes are
+  retained with the acceptance evidence.
 - A host-local run of the complete `tests/test_utils.py` was attempted for the
   base and all candidates. Collection failed identically before tests ran
   because the host supplies `urllib3 2.0.7`, while requests 2.27.0 requires
   `urllib3 <1.27`; `SNIMissingWarning` is absent from the host version.
-- The official image
-  `ghcr.io/epoch-research/swe-bench.eval.x86_64.psf__requests-6028` was not
-  available locally. Two pull attempts ended in registry transfer errors
-  (`unexpected EOF` and TLS handshake timeout). Therefore official FAIL_TO_PASS,
-  PASS_TO_PASS, and resolved status remain unavailable.
-
-The public behavior checks are useful calibration evidence, but they are not a
-substitute for an official container score.
 
 ## Framework defects found and fixed
 
@@ -105,9 +119,9 @@ covering all three fixes pass after the final change.
 ## Decision
 
 This calibration demonstrates that the harness can execute and account for all
-three modes under one protocol and retain comparable candidate evidence. It
-also shows large orchestration overhead on this small task. Do not use this
-single instance to authorize a quality claim or a scored pilot. First restore
-official image availability, obtain an official score for this instance, and
-then run the preregistered multi-instance pilot.
-
+three modes under one protocol, retain comparable candidate evidence, and
+produce candidates that resolve the selected official instance. It also shows
+large orchestration overhead on this small task. One instance with identical
+resolution outcomes cannot establish a quality advantage, so it does not by
+itself authorize a broad quality claim. It is sufficient to unblock the
+preregistered multi-instance pilot, subject to operator review of this evidence.

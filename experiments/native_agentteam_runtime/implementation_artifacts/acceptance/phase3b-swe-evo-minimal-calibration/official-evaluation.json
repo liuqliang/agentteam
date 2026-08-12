@@ -1,0 +1,45 @@
+{
+  "schema_version": "phase3b_swe_evo_official_evaluation.v1",
+  "evaluated_at": "2026-08-12",
+  "benchmark_source_commit": "9b83d5af943ba7a17567336f5b18239f73960219",
+  "instance_id": "psf__requests_v2.27.0_v2.27.1",
+  "base_commit": "0192aac24123735b3eaf9b08df46429bb770c283",
+  "image": {
+    "name": "ghcr.io/epoch-research/swe-bench.eval.x86_64.psf__requests-6028",
+    "id": "f178c6f6a33329fd472e69e041d2111db752fc62d6a15fff7064f4d9ae051967",
+    "digest": "sha256:da4dfbc89176657dad8fc82acf81580b7433484b47cfa08204b6c47b3514705d"
+  },
+  "inputs": {
+    "official_test_patch_sha256": "38e6c39be3c5439e6ab4bcd91ad248ca54e678551476aa2b53fbd4f9f23ed7b3",
+    "official_test_ids_sha256": "95835f9fc9fa8eb8dc2ca7f950ed84c25835298051215f1dc862b651b7a73ab3",
+    "fail_to_pass_count": 2,
+    "pass_to_pass_count": 185,
+    "test_command": "pytest --continue-on-collection-errors -rA",
+    "log_parser": "parse_log_pytest_options"
+  },
+  "results": {
+    "single_codex": {
+      "fail_to_pass_passed": 2,
+      "pass_to_pass_passed": 185,
+      "resolution_status": "RESOLVED_FULL",
+      "raw_log_sha256": "6fe5e4c0e48a8bbac9a9bb72efa3c925c9160ba60869f768a90d5ebec53fdf34"
+    },
+    "agentteam_direct": {
+      "fail_to_pass_passed": 2,
+      "pass_to_pass_passed": 185,
+      "resolution_status": "RESOLVED_FULL",
+      "raw_log_sha256": "c7b58b9385727991b2c4630ec993da8c72868ec180f2b5e5fb831adb46f6d64f"
+    },
+    "agentteam_full": {
+      "fail_to_pass_passed": 2,
+      "pass_to_pass_passed": 185,
+      "resolution_status": "RESOLVED_FULL",
+      "raw_log_sha256": "ba03a5ed8abf792ec2239804d8c020288d0926edb9d79ef1071341d8661a596e"
+    }
+  },
+  "notes": [
+    "Candidate-authored test changes were reset before applying the common official test patch.",
+    "HTTP proxy inheritance was disabled for the official container runs.",
+    "The full pytest process returned non-zero for tests outside the frozen scoring lists; those failures do not change SWE-EVO grading for this instance."
+  ]
+}
