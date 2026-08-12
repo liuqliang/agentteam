@@ -137,11 +137,11 @@ not retroactively change any frozen Phase 3A or calibration artifact.
 
 | Scope | CPU quota | Memory high | Memory max | Tasks max |
 | --- | ---: | ---: | ---: | ---: |
-| Common workload slot | 8 CPUs | 16 GiB | 24 GiB | 512 |
-| `single_codex` total envelope | 8 CPUs | 16 GiB | 24 GiB | 512 |
-| AgentTeam control-plane allowance | 8 CPUs | 16 GiB | 24 GiB | 512 |
-| Each AgentTeam mode total envelope | 16 CPUs | 32 GiB | 48 GiB | 1,024 |
-| Whole pilot project hard envelope | 32 CPUs | 64 GiB | 96 GiB | 2,048 |
+| Common workload slot | 4 CPUs | 8 GiB | 12 GiB | 256 |
+| `single_codex` total envelope | 4 CPUs | 8 GiB | 12 GiB | 256 |
+| AgentTeam control-plane allowance | 4 CPUs | 8 GiB | 12 GiB | 256 |
+| Each AgentTeam mode total envelope | 8 CPUs | 16 GiB | 24 GiB | 512 |
+| Whole pilot project hard envelope | 16 CPUs | 32 GiB | 48 GiB | 1,024 |
 
 The common workload slot covers the active coding worker and repository test
 processes. The same slot limit applies in all three modes. The AgentTeam
