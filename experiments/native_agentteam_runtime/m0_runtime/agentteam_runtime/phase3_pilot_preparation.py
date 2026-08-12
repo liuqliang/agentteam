@@ -1758,7 +1758,25 @@ def _read_swe_evo_arrow_rows(path):
         raise Phase3PreparationError(
             f"fixed Arrow artifact could not be decoded: {exc}"
         ) from exc
-    return table.to_pylist()
+
+    column_names = set(table.column_names)
+    repository_fields = [
+        field for field in ("repo", "repository") if field in column_names
+    ]
+    if "instance_id" not in column_names or "PRs" not in column_names:
+        raise Phase3PreparationError(
+            "fixed Arrow schema must contain instance_id and PRs"
+        )
+    if len(repository_fields) != 1:
+        raise Phase3PreparationError(
+            "fixed Arrow schema must contain exactly one repository identifier field"
+        )
+
+    # Drop evaluator-only columns before materializing Arrow values in Python.
+    projected = table.select(
+        ["instance_id", repository_fields[0], "PRs"]
+    )
+    return projected.to_pylist()
 
 
 def _project_swe_evo_complexity_rows(rows):

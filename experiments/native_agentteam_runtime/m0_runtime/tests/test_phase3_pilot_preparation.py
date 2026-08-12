@@ -2,6 +2,7 @@ import copy
 import json
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -537,6 +538,56 @@ class Phase3PilotPreparationTests(unittest.TestCase):
                 split="train",
             )
 
+    def _assert_arrow_reader_projects_before_python_materialization(self):
+        class FakeProjectedTable:
+            def to_pylist(self):
+                return [{"instance_id": "fixture", "repo": "fixture/repo", "PRs": []}]
+
+        class FakeTable:
+            column_names = [
+                "instance_id",
+                "repo",
+                "PRs",
+                "patch",
+                "test_patch",
+                "score",
+                "prior_result",
+            ]
+
+            def __init__(self):
+                self.selected_columns = None
+
+            def select(self, columns):
+                self.selected_columns = list(columns)
+                return FakeProjectedTable()
+
+        class FakeReader:
+            def __init__(self, table):
+                self.table = table
+
+            def read_all(self):
+                return self.table
+
+        table = FakeTable()
+        fake_ipc = types.ModuleType("pyarrow.ipc")
+        fake_ipc.open_stream = lambda _source: FakeReader(table)
+        fake_pyarrow = types.ModuleType("pyarrow")
+        fake_pyarrow.ArrowInvalid = RuntimeError
+        fake_pyarrow.ipc = fake_ipc
+        with tempfile.NamedTemporaryFile() as source, mock.patch.dict(
+            sys.modules,
+            {"pyarrow": fake_pyarrow, "pyarrow.ipc": fake_ipc},
+        ):
+            rows = preparation._read_swe_evo_arrow_rows(
+                preparation.Path(source.name)
+            )
+
+        self.assertEqual(table.selected_columns, ["instance_id", "repo", "PRs"])
+        self.assertEqual(
+            rows,
+            [{"instance_id": "fixture", "repo": "fixture/repo", "PRs": []}],
+        )
+
     def _assert_trusted_arrow_projection_rejects_row_and_population_drift(self):
         missing_prs = _trusted_arrow_rows()
         missing_prs[0].pop("PRs")
@@ -578,6 +629,7 @@ class Phase3PilotPreparationTests(unittest.TestCase):
         self._assert_projection_replays_exact_approved_selection()
         self._assert_complexity_control_metadata_does_not_enter_worker_visible_input()
         self._assert_trusted_arrow_source_drift_and_missing_pyarrow_fail_closed()
+        self._assert_arrow_reader_projects_before_python_materialization()
         self._assert_trusted_arrow_projection_rejects_row_and_population_drift()
         self._assert_projection_mutation_and_leakage_are_rejected()
 
