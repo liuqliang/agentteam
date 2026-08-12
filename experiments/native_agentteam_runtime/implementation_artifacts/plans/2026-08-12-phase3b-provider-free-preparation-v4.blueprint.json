@@ -1,0 +1,426 @@
+{
+  "schema_version": "agentteam_taskpack_blueprint.v1",
+  "blueprint_id": "phase3b-provider-free-preparation-v4",
+  "source_plan": "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-12-phase3b-multi-instance-pilot-proposal.md",
+  "research_authority": "experiments/native_agentteam_runtime/research/agentteam_research_positioning.md",
+  "schema_inventory": [
+    "experiments/native_agentteam_runtime/schemas/benchmark_preregistration.schema.json",
+    "experiments/native_agentteam_runtime/schemas/experiment_protocol.schema.json",
+    "experiments/native_agentteam_runtime/schemas/phase3_pilot_decisions.schema.json",
+    "experiments/native_agentteam_runtime/schemas/taskpack_blueprint.schema.json"
+  ],
+  "taskpack": {
+    "taskpack_id": "phase3b-provider-free-preparation-v4",
+    "goal_kind": "implementation",
+    "milestone": "research-phase-3b-provider-free-repair",
+    "goal": "Implement the approved trusted SWE-EVO complexity projection and hierarchical local-resource enforcement, then revalidate the provider-free Phase 3B preparation path without authorizing a scored model call.",
+    "overall_risk": "L3",
+    "integration_policy": "Verified integration followed by operator review; no scored provider call, P3-LIVE authorization, source merge, push, or release activation.",
+    "execution_mode": "model_workers"
+  },
+  "contract": {
+    "benchmark": "SWE-EVO",
+    "upstream_source_commit": "9b83d5af943ba7a17567336f5b18239f73960219",
+    "dataset_artifact_sha256": "74e7c63160ada4ceba71d5d89a9bb7c9794f4574b384458d546eb65cdb730520",
+    "dataset_split": "test",
+    "dataset_row_count": 48,
+    "excluded_calibration_instance": "psf__requests_v2.27.0_v2.27.1",
+    "selection_seed": 20260812,
+    "complexity_proxy": {
+      "name": "dataset_pr_record_count",
+      "extraction_rule": "len(instance[\"PRs\"])",
+      "strata": {
+        "low": "0-2",
+        "medium": "3-6",
+        "high": "7-or-more"
+      },
+      "expected_population": {
+        "low": 21,
+        "medium": 12,
+        "high": 15
+      },
+      "expected_eligible_population": {
+        "low": 20,
+        "medium": 12,
+        "high": 15
+      },
+      "runtime_visible_fields": [
+        "instance_id",
+        "repository",
+        "complexity_stratum",
+        "language",
+        "tags"
+      ],
+      "worker_prompt_visibility": "complexity_proxy_and_stratum_forbidden"
+    },
+    "resource_envelopes": {
+      "common_workload_slot": {
+        "cpu_quota": 4,
+        "memory_high_bytes": 8589934592,
+        "memory_max_bytes": 12884901888,
+        "tasks_max": 256,
+        "memory_swap_max_bytes": 0
+      },
+      "single_codex_mode": {
+        "cpu_quota": 4,
+        "memory_high_bytes": 8589934592,
+        "memory_max_bytes": 12884901888,
+        "tasks_max": 256,
+        "memory_swap_max_bytes": 0
+      },
+      "agentteam_control_plane_allowance": {
+        "cpu_quota": 4,
+        "memory_high_bytes": 8589934592,
+        "memory_max_bytes": 12884901888,
+        "tasks_max": 256,
+        "memory_swap_max_bytes": 0
+      },
+      "agentteam_mode": {
+        "cpu_quota": 8,
+        "memory_high_bytes": 17179869184,
+        "memory_max_bytes": 25769803776,
+        "tasks_max": 512,
+        "memory_swap_max_bytes": 0
+      },
+      "pilot_project": {
+        "cpu_quota": 16,
+        "memory_high_bytes": 34359738368,
+        "memory_max_bytes": 51539607552,
+        "tasks_max": 1024,
+        "memory_swap_max_bytes": 0
+      }
+    },
+    "resource_fairness_policy": "equal_workload_slots_with_metered_agentteam_control_plane_allowance",
+    "resource_failure_classification": "resource_limit_exhausted",
+    "resource_enforcement_policy": "run_specific_project_slice_mode_slice_and_leaf_service",
+    "scored_provider_calls": 0,
+    "development_worker_calls": "allowed_and_metered",
+    "live_authorization_policy": "forbidden_in_this_taskpack",
+    "merge_policy": "operator_review_required",
+    "resumes_from_taskpack": "phase3b-provider-free-preparation-v3",
+    "accepted_prerequisite_code_state": "45d75376759f375eb32a29eb830e64d103ed1896"
+  },
+  "decision_contract": {
+    "schema_version": "taskpack_decision_contract.v1",
+    "root_decision_id": "DEC-P3B-multi-instance-pilot",
+    "decisions": [
+      {
+        "schema_version": "decision_record.v1",
+        "decision_id": "DEC-P3B-multi-instance-pilot",
+        "revision": 1,
+        "decision_kind": "direction",
+        "subject": "phase3b_multi_instance_pilot_preparation",
+        "authority_level": "L3",
+        "parent_decision_id": null,
+        "supersedes_decision_id": null,
+        "statement": "Prepare the approved three-instance SWE-EVO pilot without admitting scored provider calls.",
+        "selected_option": "repair_provider_free_preparation_before_live_authorization",
+        "alternatives": [
+          {
+            "option": "launch the scored pilot immediately",
+            "rejected_reason": "Worker resource fields are not yet enforced and the official Arrow complexity proxy is not yet projected by trusted code."
+          },
+          {
+            "option": "mutate the completed v3 or calibration taskpack",
+            "rejected_reason": "Frozen historical taskpacks must remain immutable."
+          }
+        ],
+        "rationale": "The selected instances and resource contract must be reproducible and enforceable before their outputs can support a comparison claim.",
+        "scope": [
+          "trusted complexity projection",
+          "hierarchical resource enforcement",
+          "provider-free preflight"
+        ],
+        "expected_outcome": "A reviewed v4 implementation ready to materialize live-pilot inputs under a separate P3-LIVE gate.",
+        "acceptance_refs": [
+          "2026-08-12-phase3b-multi-instance-pilot-proposal.md#preparation-work-before-authorization"
+        ],
+        "status": "active",
+        "created_at": "2026-08-12T00:00:00Z",
+        "created_by": "operator-semantic-authority",
+        "previous_revision_sha256": null
+      },
+      {
+        "schema_version": "decision_record.v1",
+        "decision_id": "DEC-P3B-v4-repair-execution",
+        "revision": 1,
+        "decision_kind": "execution",
+        "subject": "phase3b_v4_provider_free_repair",
+        "authority_level": "L2",
+        "parent_decision_id": "DEC-P3B-multi-instance-pilot",
+        "supersedes_decision_id": null,
+        "statement": "Implement and verify the approved complexity projection and resource envelope before materializing live-pilot taskpacks.",
+        "selected_option": "serial_provider_free_repair",
+        "alternatives": [
+          {
+            "option": "run both repair workers concurrently",
+            "rejected_reason": "The resource-control path is not yet implemented, so development tasks remain serial for this repair."
+          }
+        ],
+        "rationale": "A narrow serial repair preserves the completed v3 implementation while closing only the two newly approved preconditions.",
+        "scope": [
+          "complexity projection implementation",
+          "provider-free integration verification"
+        ],
+        "expected_outcome": "The deterministic preparation path passes with exact selection metadata and zero scored calls.",
+        "acceptance_refs": [
+          "2026-08-12-phase3b-multi-instance-pilot-proposal.md#preparation-work-before-authorization"
+        ],
+        "status": "active",
+        "created_at": "2026-08-12T00:00:01Z",
+        "created_by": "implementation-planner",
+        "previous_revision_sha256": null
+      },
+      {
+        "schema_version": "decision_record.v1",
+        "decision_id": "DEC-P3B-resource-envelope",
+        "revision": 1,
+        "decision_kind": "execution",
+        "subject": "phase3b_local_resource_enforcement",
+        "authority_level": "L2",
+        "parent_decision_id": "DEC-P3B-multi-instance-pilot",
+        "supersedes_decision_id": null,
+        "statement": "Use equal four-CPU workload slots and grant each AgentTeam mode a separately metered four-CPU control-plane allowance under a sixteen-CPU project ceiling.",
+        "selected_option": "hierarchical_cgroup_envelopes",
+        "alternatives": [
+          {
+            "option": "give every mode the same total process-group ceiling",
+            "rejected_reason": "It would charge AgentTeam orchestration against the worker slot and artificially constrain the framework."
+          },
+          {
+            "option": "leave local resources unlimited",
+            "rejected_reason": "A runaway test or descendant process could destabilize the host and invalidate attribution."
+          }
+        ],
+        "rationale": "Equal leaf workload capacity preserves task comparability while a bounded control-plane allowance lets the multi-agent system operate normally.",
+        "scope": [
+          "model worker services",
+          "AgentTeam control plane",
+          "official evaluator",
+          "run-level resource evidence"
+        ],
+        "expected_outcome": "Every descendant is bounded and terminal evidence distinguishes resource exhaustion from model-quality failure.",
+        "acceptance_refs": [
+          "2026-08-12-phase3b-multi-instance-pilot-proposal.md#local-resource-policy"
+        ],
+        "status": "active",
+        "created_at": "2026-08-12T00:00:02Z",
+        "created_by": "operator-semantic-authority",
+        "previous_revision_sha256": null
+      }
+    ],
+    "task_bindings": {
+      "P3B-R01": "DEC-P3B-v4-repair-execution",
+      "P3B-R02": "DEC-P3B-resource-envelope",
+      "P3B-R03": "DEC-P3B-v4-repair-execution"
+    }
+  },
+  "approval": {
+    "record_path": "experiments/native_agentteam_runtime/implementation_artifacts/reviews/phase3b-provider-free-preparation-review.v4.json",
+    "schema_path": "experiments/native_agentteam_runtime/schemas/phase3b_preparation_review.schema.json",
+    "required_decision": "approved",
+    "git_object_format_required": true,
+    "runtime_release_binding_required": false,
+    "digest_bindings": [
+      "source_plan",
+      "blueprint",
+      "research_authority",
+      "review_schema",
+      "contract",
+      "decision_contract",
+      "schema_inventory"
+    ]
+  },
+  "agents": [
+    {
+      "agent_id": "agent-phase3b-v4-implementation",
+      "role": "implementation_worker",
+      "runtime_profile": {
+        "adapter": "codex"
+      }
+    }
+  ],
+  "verification": {
+    "command": [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "experiments/native_agentteam_runtime/m0_runtime/tests",
+      "-p",
+      "test*.py"
+    ],
+    "success_criteria": [
+      "The exact SWE-EVO metadata fixture reproduces 48 rows, the 21/12/15 strata, the 20/12/15 eligible strata, and the three preview selections.",
+      "Evaluator-only PR records and complexity control metadata cannot enter worker-visible inputs.",
+      "Model worker, AgentTeam mode, project, and evaluator descendants are bound to the approved hierarchical resource envelope.",
+      "Resource exhaustion is terminal structured evidence rather than a model-quality outcome.",
+      "The provider-free integration lane passes and records zero scored provider calls."
+    ]
+  },
+  "policy": {
+    "allow_merge": false,
+    "merge_requires_verified_integration": true,
+    "operator_review_required": true,
+    "live_provider_calls_allowed": false,
+    "scored_provider_calls_allowed": false,
+    "historical_authority_writes_forbidden": true,
+    "semantic_authority_worker_mutation_forbidden": true
+  },
+  "tasks": [
+    {
+      "task_id": "P3B-R01",
+      "objective": "Implement a trusted projection from the fixed SWE-EVO Arrow inventory to the existing allowlisted routing manifest using dataset_pr_record_count and the approved strata.",
+      "goal_alignment": "Makes complexity-stratified selection reproducible without exposing raw PR records, patches, tests, scores, or prior outcomes to runtime workers.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L2",
+      "depends_on": [],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/benchmark_adapter.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_pilot_preparation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-12-phase3b-multi-instance-pilot-proposal.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_pilot_preparation.py",
+        "experiments/native_agentteam_runtime/schemas/phase3_complexity_projection.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py"
+      ],
+      "required_deliverables": [
+        "trusted_arrow_projection",
+        "complexity_projection_schema",
+        "gold_blind_routing_output",
+        "deterministic_selection_replay",
+        "negative_leakage_tests"
+      ],
+      "acceptance_criteria": [
+        "The extractor verifies source commit, Arrow SHA-256, split, and 48-row count before projection.",
+        "dataset_pr_record_count is computed only as len(PRs), then discarded after assigning low 0-2, medium 3-6, or high 7-or-more.",
+        "The projection records 21/12/15 source populations and 20/12/15 eligible populations after excluding the calibration instance.",
+        "Seed 20260812 and one-per-stratum quotas reproduce the three approved preview IDs through the existing selector.",
+        "Raw PR data, proxy counts, strata, patches, tests, scores, and prior outcomes are unavailable to worker prompts; only the existing allowlisted routing manifest reaches selection control code.",
+        "Missing pyarrow or source drift fails clearly without installing dependencies or changing policy."
+      ],
+      "stop_condition": "Stop if projection requires exposing evaluator-only row content to a model, deriving difficulty from outcomes, or changing the approved proxy, boundaries, seed, or exclusions.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-12-phase3b-multi-instance-pilot-proposal.md",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-12-phase3b-provider-free-preparation-v4.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v3.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py"
+      ]
+    },
+    {
+      "task_id": "P3B-R02",
+      "objective": "Implement and meter the approved project, mode, control-plane, workload-slot, and evaluator resource envelopes over complete descendant process trees.",
+      "goal_alignment": "Prevents host exhaustion without artificially constraining AgentTeam to the total footprint of one Codex worker.",
+      "work_type": "code_implementation",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L3",
+      "depends_on": [
+        "P3B-R01"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_protocol.py",
+        "experiments/native_agentteam_runtime/schemas/experiment_protocol.schema.json",
+        "experiments/native_agentteam_runtime/schemas/benchmark_preregistration.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_model_invocation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-12-phase3b-multi-instance-pilot-proposal.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/model_invocation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_sandbox.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/experiment_protocol.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/resource_envelope.py",
+        "experiments/native_agentteam_runtime/schemas/phase3_resource_envelope.schema.json",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_model_invocation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_resource_envelope.py"
+      ],
+      "required_deliverables": [
+        "versioned_resource_envelope_contract",
+        "hierarchical_systemd_cgroup_enforcement",
+        "model_worker_leaf_limits",
+        "resource_counter_evidence",
+        "resource_exhaustion_classification",
+        "descendant_cleanup_tests"
+      ],
+      "acceptance_criteria": [
+        "The existing shared cpu_limit and memory_limit_bytes remain the equal four-CPU, twelve-GiB workload-slot authority.",
+        "Single Codex is bounded at one workload slot; each AgentTeam mode receives an eight-CPU, twenty-four-GiB parent envelope including one equal workload slot and its control plane.",
+        "The complete pilot is bounded by a sixteen-CPU, forty-eight-GiB project envelope with TasksMax 1024 and swap disabled.",
+        "Systemd properties are applied before execution and read back; unavailable or mismatched enforcement fails before provider admission.",
+        "Terminal evidence records CPU time, peak memory, throttling, OOM, PID, timeout, cgroup identity, and cleanup state without polling from the model prompt.",
+        "OOM, PID exhaustion, and resource-driven timeout are classified as resource_limit_exhausted and never as model-quality failure.",
+        "Historical protocols without the additive Phase 3B resource binding preserve their existing behavior and tests."
+      ],
+      "stop_condition": "Stop if user-level systemd cannot represent or verify the parent/leaf hierarchy, if limits can be bypassed by descendants, or if the implementation mutates frozen historical protocol artifacts.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-12-phase3b-multi-instance-pilot-proposal.md",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-12-phase3b-provider-free-preparation-v4.blueprint.json",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-10-phase3b-provider-free-preparation-v3.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_model_invocation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_experiment_harness.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_resource_envelope.py"
+      ]
+    },
+    {
+      "task_id": "P3B-R03",
+      "objective": "Revalidate the complete Phase 3B provider-free preparation path with the approved complexity and resource authorities and publish updated preflight evidence.",
+      "goal_alignment": "Establishes that selection and execution controls are ready for later per-instance taskpack freeze without crossing the P3-LIVE boundary.",
+      "work_type": "verification",
+      "required_role": "implementation_worker",
+      "backlog_status": "ready",
+      "risk_target": "L2",
+      "depends_on": [
+        "P3B-R02"
+      ],
+      "blockers": [],
+      "read_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/phase3_pilot_preparation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/agentteam_runtime/resource_envelope.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_resource_envelope.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/reports/phase3b-provider-free-preflight.md"
+      ],
+      "write_scope": [
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_pilot_preparation.py",
+        "experiments/native_agentteam_runtime/m0_runtime/tests/test_phase3_resource_envelope.py",
+        "experiments/native_agentteam_runtime/implementation_artifacts/reports/phase3b-provider-free-preflight-v4.md"
+      ],
+      "required_deliverables": [
+        "focused_verification_results",
+        "full_provider_free_integration_result",
+        "zero_scored_call_evidence",
+        "updated_preflight_report"
+      ],
+      "acceptance_criteria": [
+        "Focused projection, resource-envelope, model-invocation, and experiment-harness tests pass.",
+        "The complete provider-free unittest lane passes or any pre-existing unrelated baseline failure is reproduced and isolated with evidence.",
+        "Preflight verifies the approved selection preview and all resource bindings without launching a scored model call.",
+        "The report records zero scored provider calls and leaves P3-LIVE unauthorized.",
+        "No source merge, push, runtime release activation, or benchmark candidate integration occurs."
+      ],
+      "stop_condition": "Stop before publishing live authorization, invoking a scored model, merging source, pushing, or activating a runtime release.",
+      "input_artifacts": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-12-phase3b-multi-instance-pilot-proposal.md",
+        "experiments/native_agentteam_runtime/implementation_artifacts/plans/2026-08-12-phase3b-provider-free-preparation-v4.blueprint.json"
+      ],
+      "evidence_paths": [
+        "experiments/native_agentteam_runtime/implementation_artifacts/reports/phase3b-provider-free-preflight-v4.md"
+      ]
+    }
+  ]
+}
