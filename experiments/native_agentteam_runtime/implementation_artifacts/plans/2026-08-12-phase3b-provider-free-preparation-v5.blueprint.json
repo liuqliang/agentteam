@@ -181,8 +181,13 @@
   ],
   "verification": {
     "command": [
-      "scripts/test-native-runtime.sh",
-      "integration"
+      "python3",
+      "-m",
+      "unittest",
+      "experiments.native_agentteam_runtime.m0_runtime.tests.test_m0_runtime",
+      "experiments.native_agentteam_runtime.m0_runtime.tests.test_taskpack",
+      "experiments.native_agentteam_runtime.m0_runtime.tests.test_git_code_state",
+      "experiments.native_agentteam_runtime.m0_runtime.tests.test_projection_db_operator_paths"
     ],
     "success_criteria": [
       "The accepted official Arrow projection digests remain reproducible.",
