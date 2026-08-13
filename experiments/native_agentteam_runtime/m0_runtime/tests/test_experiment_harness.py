@@ -93,6 +93,7 @@ from agentteam_runtime.experiment_modes import (
     ExperimentModeError,
     NativeSingleCodexProvider,
     SingleCodexModeAdapter,
+    _provider_infrastructure_failure,
     execute_bound_experiment_mode,
 )
 from agentteam_runtime.experiment_results import _publish_sealed_directory
@@ -7211,6 +7212,31 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 "model_reasoning_effort=high",
                 FakeGatedRunner.command,
             )
+
+    def test_single_provider_classifies_missing_code_mode_host(self):
+        execution = ProviderExecution(
+            ["codex", "exec"],
+            0,
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "error",
+                        "message": (
+                            "failed to spawn code-mode host "
+                            "/opt/agentteam/bin/codex-code-mode-host: "
+                            "host executable was not found"
+                        ),
+                    },
+                }
+            ),
+            "",
+        )
+
+        self.assertEqual(
+            _provider_infrastructure_failure(execution),
+            "codex_code_mode_host_unavailable",
+        )
 
     def test_single_mode_rejects_adapter_substitution(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -19,6 +19,7 @@ from agentteam_runtime.phase3_pilot_runner import (
     materialize_phase3_runtime_taskpack,
 )
 from agentteam_runtime.experiment_modes import _integration_candidate_workspace
+from agentteam_runtime.phase3_live_pilot import _live_sandbox_configuration
 from agentteam_runtime.phase3_swe_evo_evaluator import (
     Phase3SweEvoEvaluator,
     Phase3SweEvoEvaluatorError,
@@ -83,6 +84,32 @@ def _runner(root, executor):
 
 
 class Phase3PilotRunnerTests(unittest.TestCase):
+    def test_live_sandbox_mounts_codex_and_matching_code_mode_host(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary_root = root / "codex-release" / "bin"
+            binary_root.mkdir(parents=True)
+            codex = binary_root / "codex"
+            host = binary_root / "codex-code-mode-host"
+            codex.write_bytes(b"codex")
+            host.write_bytes(b"host")
+
+            with patch(
+                "agentteam_runtime.phase3_live_pilot.shutil.which",
+                return_value=str(codex),
+            ):
+                configuration = _live_sandbox_configuration(root / "pilot")
+
+        views = {
+            item["target"]: item["source"]
+            for item in configuration["runtime_views"]
+        }
+        self.assertEqual(views["/opt/agentteam/bin/codex"], str(codex))
+        self.assertEqual(
+            views["/opt/agentteam/bin/codex-code-mode-host"],
+            str(host),
+        )
+
     def test_runtime_candidate_falls_back_to_accepted_attempt_after_rollback(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -582,6 +609,39 @@ class Phase3PilotRunnerTests(unittest.TestCase):
 
         self.assertEqual(adapter.provider.timeout_seconds, 1800)
 
+    def test_production_executor_skips_official_evaluator_after_infrastructure_failure(self):
+        executor = object.__new__(Phase3ProductionExecutor)
+        executor.sandbox_configuration = {}
+        executor.runtime_release = {}
+        executor.resource_envelope_binding = None
+        executor.resource_references = {}
+        entry = {
+            "entry_id": "fixture--r0--single_codex",
+            "instance_id": "fixture",
+            "mode": "single_codex",
+            "repetition_index": 0,
+        }
+        expected = {"terminal_status": "infrastructure_failed"}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            evaluator = Path(temporary) / "evaluator.py"
+            evaluator.write_text("# fixture\n", encoding="ascii")
+            executor.common_evaluator_artifact = str(evaluator)
+            with patch.object(
+                executor, "_allocation", return_value={"run_dir": temporary}
+            ), patch.object(executor, "_adapter", return_value=object()), patch(
+                "agentteam_runtime.phase3_pilot_runner.execute_bound_experiment_mode"
+            ), patch(
+                "agentteam_runtime.phase3_pilot_runner.load_experiment_result_bundle",
+                return_value={"bundle": expected},
+            ), patch.object(
+                executor, "_terminal_result", return_value=expected
+            ), patch.object(executor, "_evaluate_official") as official:
+                result = executor.execute(entry, 0)
+
+            self.assertEqual(result, expected)
+            official.assert_not_called()
+
     def test_sealed_usage_coverage_projects_to_percent(self):
         self.assertEqual(
             _usage_coverage_percent(
@@ -748,6 +808,24 @@ class Phase3PilotRunnerTests(unittest.TestCase):
         self.assertEqual(len(state["attempts"][entry_id]), 2)
         self.assertIn(entry_id, state["terminal_results"])
         self.assertEqual(state["aggregate_usage"]["total_tokens"], 200)
+
+    def test_provider_infrastructure_failure_stops_without_retry(self):
+        def result_factory(entry, _attempt):
+            return _result(
+                entry,
+                resolved=False,
+                failure_class="provider_infrastructure_error",
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            executor = _Executor(result_factory)
+            state = _runner(temporary, executor).run()
+
+        self.assertEqual(state["status"], "stopped")
+        self.assertEqual(
+            state["stop_reason"], "provider_infrastructure_error"
+        )
+        self.assertEqual(len(executor.calls), 1)
 
     def test_incomplete_usage_stops_pilot(self):
         def result_factory(entry, _attempt):

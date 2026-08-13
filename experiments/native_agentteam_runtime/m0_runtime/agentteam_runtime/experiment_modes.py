@@ -1018,17 +1018,41 @@ class NativeSingleCodexProvider:
             input_text=prompt,
             timeout_seconds=self.timeout_seconds,
         )
-        terminal_status = (
-            "completed" if execution.returncode == 0 else "failed"
+        infrastructure_failure = _provider_infrastructure_failure(execution)
+        invocation_terminal_status = (
+            "completed"
+            if execution.returncode == 0 and infrastructure_failure is None
+            else "failed"
         )
-        invocation.finalize(terminal_status, execution)
+        invocation.finalize(invocation_terminal_status, execution)
         return {
-            "terminal_status": terminal_status,
+            "terminal_status": (
+                "infrastructure_failed"
+                if infrastructure_failure is not None
+                else invocation_terminal_status
+            ),
             "adapter_output": {
                 "returncode": execution.returncode,
                 "invocation_id": invocation.lifecycle.invocation_id,
+                "infrastructure_failure": infrastructure_failure,
             },
         }
+
+
+def _provider_infrastructure_failure(execution):
+    """Return a stable class for provider-success/tool-host failures."""
+
+    combined = f"{execution.stdout}\n{execution.stderr}".lower()
+    signatures = {
+        "codex_code_mode_host_unavailable": (
+            "failed to spawn code-mode host",
+            "codex-code-mode-host",
+        ),
+    }
+    for failure_class, fragments in signatures.items():
+        if all(fragment in combined for fragment in fragments):
+            return failure_class
+    return None
 
 
 class AgentTeamDirectModeAdapter:

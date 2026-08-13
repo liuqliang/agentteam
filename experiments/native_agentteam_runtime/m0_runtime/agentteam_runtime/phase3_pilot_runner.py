@@ -54,6 +54,9 @@ _RETRYABLE_FAILURES = {
     "provider_transport_error",
     "provider_rate_limit",
 }
+_INFRASTRUCTURE_FAILURES = {
+    "provider_infrastructure_error",
+}
 _FORBIDDEN_RESULT_KEYS = {
     "gold_patch",
     "test_patch",
@@ -308,6 +311,9 @@ class Phase3ProductionExecutor:
             resource_envelope_binding=self.resource_envelope_binding,
             resource_hierarchy_reference=self.resource_references.get(entry["mode"]),
         )
+        sealed = load_experiment_result_bundle(run_dir)["bundle"]
+        if sealed["terminal_status"] == "infrastructure_failed":
+            return self._terminal_result(entry, run_dir, None)
         score = self._evaluate_official(entry, run_dir)
         score = _validate_official_score(score)
         publish_immutable_json(
@@ -329,6 +335,9 @@ class Phase3ProductionExecutor:
         terminal = run_dir / "results" / "terminal"
         patch = run_dir / "artifacts" / "candidate.patch"
         if terminal.is_dir() and patch.is_file():
+            sealed = load_experiment_result_bundle(run_dir)["bundle"]
+            if sealed["terminal_status"] == "infrastructure_failed":
+                return self._terminal_result(entry, run_dir, None)
             score = self._evaluate_official(entry, run_dir)
             publish_immutable_json(
                 official_path,
@@ -404,10 +413,14 @@ class Phase3ProductionExecutor:
     def _terminal_result(self, entry, run_dir, score):
         sealed = load_experiment_result_bundle(run_dir)["bundle"]
         usage = sealed["usage_totals"]
+        infrastructure_failed = sealed["terminal_status"] == "infrastructure_failed"
+        failure_class = (
+            "provider_infrastructure_error" if infrastructure_failed else None
+        )
         return {
             "entry_id": entry["entry_id"],
             "terminal_status": sealed["terminal_status"],
-            "failure_class": None,
+            "failure_class": failure_class,
             "usage": {
                 field: int(usage.get(field, 0))
                 for field in (
@@ -425,9 +438,17 @@ class Phase3ProductionExecutor:
             },
             "wall_time_seconds": (
                 float(sealed["budget_result"]["elapsed_wall_time_seconds"])
-                + float(score["wall_time_seconds"])
+                + (0.0 if score is None else float(score["wall_time_seconds"]))
             ),
-            "official_score": copy.deepcopy(score),
+            "official_score": (
+                {
+                    "status": "failed",
+                    "resolved": False,
+                    "reason": "provider_infrastructure_error",
+                }
+                if score is None
+                else copy.deepcopy(score)
+            ),
             "mode_result_bundle_sha256": canonical_json_sha256(sealed),
         }
 
@@ -768,6 +789,9 @@ class Phase3PilotRunner:
         if failure_class in contract_retryable and attempt_index < retry_limit:
             return
         state["terminal_results"][entry["entry_id"]] = copy.deepcopy(result)
+        if failure_class in _INFRASTRUCTURE_FAILURES:
+            state["status"] = "stopped"
+            state["stop_reason"] = failure_class
         if result["usage"]["coverage_percent"] != 100:
             state["status"] = "stopped"
             state["stop_reason"] = "incomplete_provider_usage"
@@ -979,7 +1003,9 @@ def _validate_terminal_result(result, entry):
     ):
         raise Phase3PilotRunnerError("pilot official score is invalid")
     if value.get("failure_class") is not None and value["failure_class"] not in (
-        _RETRYABLE_FAILURES | {"resource_limit_exhausted", "evaluator_failure"}
+        _RETRYABLE_FAILURES
+        | _INFRASTRUCTURE_FAILURES
+        | {"resource_limit_exhausted", "evaluator_failure"}
     ):
         raise Phase3PilotRunnerError("pilot failure classification is invalid")
     _reject_forbidden_keys(value)

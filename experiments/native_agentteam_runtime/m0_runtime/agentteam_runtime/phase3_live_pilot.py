@@ -342,6 +342,11 @@ def _live_sandbox_configuration(pilot_root):
         canary.write_text("phase3-live-gold-canary\n", encoding="ascii")
         os.chmod(canary, 0o600)
     codex = Path(shutil.which("codex") or "").resolve(strict=True)
+    codex_code_mode_host = codex.with_name("codex-code-mode-host")
+    if not codex_code_mode_host.is_file():
+        raise Phase3LivePilotError(
+            "Codex code-mode host is unavailable beside the Codex executable"
+        )
     home = Path.home() / ".codex"
     credentials = []
     for source, target in (
@@ -368,6 +373,10 @@ def _live_sandbox_configuration(pilot_root):
                 if Path(path).exists()
             ],
             {"source": str(codex), "target": "/opt/agentteam/bin/codex"},
+            {
+                "source": str(codex_code_mode_host),
+                "target": "/opt/agentteam/bin/codex-code-mode-host",
+            },
         ],
         "library_views": [
             {"source": path, "target": path}
