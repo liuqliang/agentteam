@@ -2072,6 +2072,22 @@ class TwoPhaseFileScheduler:
                 ],
             }
         )
+        if context.get("resource_envelope_binding") is not None:
+            updated.update(
+                {
+                    "experiment_mode": context["mode"],
+                    "resource_envelope_binding": deepcopy(
+                        context["resource_envelope_binding"]
+                    ),
+                    "resource_envelope_required": True,
+                    "resource_project_id": context[
+                        "resource_project_id"
+                    ],
+                    "resource_hierarchy_reference": deepcopy(
+                        context["resource_hierarchy_reference"]
+                    ),
+                }
+            )
         return updated
 
     def _stage_experiment_provider_io(
@@ -3744,7 +3760,13 @@ def _load_experiment_runtime_context(output_dir):
         "sandbox_configuration",
         "sandbox_configuration_sha256",
     }
-    optional = {"usage_stage"}
+    optional = {
+        "usage_stage",
+        "resource_envelope_binding",
+        "resource_envelope_required",
+        "resource_project_id",
+        "resource_hierarchy_reference",
+    }
     if (
         not isinstance(value, dict)
         or not required.issubset(value)
@@ -3754,6 +3776,22 @@ def _load_experiment_runtime_context(output_dir):
         or value["independent_attempt_workspaces"] is not True
     ):
         raise ValueError("experiment runtime context fields are invalid")
+    resource_binding = value.get("resource_envelope_binding")
+    if resource_binding is not None:
+        from .resource_envelope import validate_resource_envelope_binding
+
+        validate_resource_envelope_binding(resource_binding)
+        if (
+            value.get("resource_envelope_required") is not True
+            or not isinstance(value.get("resource_project_id"), str)
+            or not isinstance(
+                value.get("resource_hierarchy_reference"),
+                dict,
+            )
+        ):
+            raise ValueError(
+                "experiment resource runtime context fields are invalid"
+            )
     controller_reference = validate_experiment_controller_reference(
         value["controller_reference"],
     )

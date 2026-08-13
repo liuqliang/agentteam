@@ -2001,6 +2001,7 @@ def run_trusted_argv_evaluator(
     resource_mode=None,
     resource_envelope_required=False,
     resource_project_id=None,
+    resource_hierarchy_reference=None,
 ):
     """Run post-model acceptance and return schema-validated bounded evidence."""
 
@@ -2360,6 +2361,9 @@ def run_trusted_argv_evaluator(
                     "resource_envelope_binding": resource_envelope_binding,
                     "resource_mode": resource_mode,
                     "resource_run_id": base["run_id"],
+                    "resource_hierarchy_reference": (
+                        resource_hierarchy_reference
+                    ),
                 }
             )
             evaluator_arguments["resource_run_id"] = (
@@ -3127,6 +3131,7 @@ def _run_bounded_argv(
     resource_envelope_binding=None,
     resource_mode=None,
     resource_run_id=None,
+    resource_hierarchy_reference=None,
     resource_hierarchy_factory=None,
 ):
     systemd_run = Path("/usr/bin/systemd-run")
@@ -3230,11 +3235,22 @@ def _run_bounded_argv(
             resource_envelope_binding,
             run_id=resource_run_id,
             mode=resource_mode,
+            owner_reference=resource_hierarchy_reference,
         )
         resource_hierarchy.prepare()
         resource_arguments = resource_hierarchy.leaf_arguments(
             evaluator=True
         )
+    legacy_resource_arguments = []
+    if resource_hierarchy is None:
+        legacy_resource_arguments = [
+            "--property",
+            "TasksMax=256",
+            "--property",
+            f"MemoryMax={memory_limit_bytes}",
+            "--property",
+            f"CPUQuota={cpu_limit * 100}%",
+        ]
     command = [
         str(systemd_run),
         "--user",
@@ -3252,12 +3268,7 @@ def _run_bounded_argv(
         "ExitType=main",
         "--property",
         "TimeoutStopSec=5s",
-        "--property",
-        "TasksMax=256",
-        "--property",
-        f"MemoryMax={memory_limit_bytes}",
-        "--property",
-        f"CPUQuota={cpu_limit * 100}%",
+        *legacy_resource_arguments,
         "--working-directory",
         str(cwd),
     ]
@@ -3265,15 +3276,30 @@ def _run_bounded_argv(
         prelaunch_source_authority is None
         and Path(argv[0]).resolve(strict=False) == _TRUSTED_BWRAP_PATH
     ):
-        command.extend(["--", *argv])
+        bounded_argv = list(argv)
     else:
-        clean_environment_argv = [
+        bounded_argv = [
             str(env_binary),
             "-i",
             *(f"{name}={value}" for name, value in sorted(environment.items())),
             *guarded_argv,
         ]
-        command.extend(["--", *clean_environment_argv])
+    if resource_hierarchy is not None:
+        from .resource_envelope import _resource_wrapped_command
+
+        bounded_argv = _resource_wrapped_command(bounded_argv, unit=unit)
+    command.extend(["--", *bounded_argv])
+
+    resource_monitor = None
+    if resource_hierarchy is not None:
+        from .resource_envelope import ResourceUnitMonitor
+
+        resource_monitor = ResourceUnitMonitor(
+            resource_hierarchy,
+            unit,
+            scope="evaluator",
+            evaluator=True,
+        ).start()
 
     def terminate_unit():
         subprocess.run(
@@ -3312,20 +3338,19 @@ def _run_bounded_argv(
             if source_guard_path is not None:
                 Path(source_guard_path).unlink(missing_ok=True)
     except Exception:
+        if resource_monitor is not None:
+            resource_monitor.cancel()
         if resource_hierarchy is not None:
             terminate_unit()
             resource_hierarchy.cleanup()
         raise
     resource_evidence = None
     if resource_hierarchy is not None:
-        from .resource_envelope import (
-            build_resource_evidence,
-            read_resource_counters,
-        )
-
         try:
-            leaf_identity = resource_hierarchy.verify_leaf(unit)
-            counters = read_resource_counters(leaf_identity["ControlGroup"])
+            resource_evidence = resource_monitor.finish(
+                binding=resource_envelope_binding,
+                timed_out=result["timed_out"],
+            )
         finally:
             subprocess.run(
                 [str(systemctl), "--user", "stop", unit],
@@ -3336,18 +3361,7 @@ def _run_bounded_argv(
                 timeout=10,
             )
             cleanup = resource_hierarchy.cleanup()
-        resource_evidence = build_resource_evidence(
-            binding=resource_envelope_binding,
-            scope="evaluator",
-            identity={
-                "systemd_unit": unit,
-                "control_group": leaf_identity["ControlGroup"],
-                "hierarchy": resource_hierarchy.identity(),
-            },
-            counters=counters,
-            timed_out=result["timed_out"],
-            cleanup=cleanup,
-        )
+        resource_evidence["cleanup"] = cleanup
     result.update(
         {
             "execution_boundary": "systemd_user_transient_service",

@@ -13,7 +13,7 @@
     "systemd"
   ],
   "properties": {
-    "schema_version": {"const": "phase3_resource_envelope.v1"},
+    "schema_version": {"const": "phase3_resource_envelope.v2"},
     "fairness_policy": {
       "const": "equal_workload_slots_with_metered_agentteam_control_plane_allowance"
     },

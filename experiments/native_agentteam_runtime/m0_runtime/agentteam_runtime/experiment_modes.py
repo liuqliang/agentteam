@@ -62,6 +62,8 @@ from .model_invocation import (
     ModelInvocationCall,
     is_supported_codex_command,
 )
+from .experiment_protocol import validate_protocol_resource_envelope
+from .resource_envelope import SystemdResourceHierarchy
 from .taskpack import (
     TaskpackValidationError,
     _normalize_taskpack_verification_profile,
@@ -100,6 +102,8 @@ class ExperimentModeRequest:
     model_policy: dict
     sandbox_configuration: dict | None
     runtime_release_identity: dict
+    resource_envelope_binding: dict | None = None
+    resource_hierarchy_reference: dict | None = None
 
 
 class ExperimentCommonFinalizer:
@@ -222,6 +226,21 @@ class ExperimentCommonFinalizer:
             / "artifacts"
             / "common-evaluation.json"
         )
+        evaluator_arguments = {}
+        if request.resource_envelope_binding is not None:
+            evaluator_arguments = {
+                "resource_envelope_binding": (
+                    request.resource_envelope_binding
+                ),
+                "resource_mode": request.run_manifest["mode"],
+                "resource_envelope_required": True,
+                "resource_project_id": request.resource_hierarchy_reference[
+                    "run_id"
+                ],
+                "resource_hierarchy_reference": (
+                    request.resource_hierarchy_reference
+                ),
+            }
         try:
             evaluation = run_trusted_argv_evaluator(
                 authority_root=request.authority_root,
@@ -241,6 +260,7 @@ class ExperimentCommonFinalizer:
                     "timeout_seconds"
                 ],
                 evidence_path=evaluation_path,
+                **evaluator_arguments,
             )
         except ExperimentEvaluationBlocked as exc:
             evaluation = exc.evidence
@@ -248,6 +268,12 @@ class ExperimentCommonFinalizer:
             request,
             evaluation,
             expected_path=evaluation_path,
+        )
+        resource_evidence_reference = _publish_resource_evidence_index(
+            request,
+            mode_result,
+            invocation_set_reference,
+            evaluation_path,
         )
         bundle = _build_common_result_bundle(
             request,
@@ -258,6 +284,7 @@ class ExperimentCommonFinalizer:
             self.runtime_release_identity,
             retained_roots,
             scan_scope_reference,
+            resource_evidence_reference,
         )
         seal_experiment_result_bundle(
             request.run_dir,
@@ -326,6 +353,8 @@ class ExperimentModeController:
         sandbox_configuration,
         common_finalizer,
         runtime_release_identity,
+        resource_envelope_binding=None,
+        resource_hierarchy_reference=None,
     ):
         protocol = copy.deepcopy(protocol)
         run_manifest = copy.deepcopy(run_manifest)
@@ -386,6 +415,23 @@ class ExperimentModeController:
         self.runtime_release_identity = copy.deepcopy(
             runtime_release_identity
         )
+        validate_protocol_resource_envelope(
+            protocol,
+            resource_envelope_binding,
+            require_binding=resource_envelope_binding is not None,
+        )
+        self.resource_envelope_binding = copy.deepcopy(
+            resource_envelope_binding
+        )
+        self.resource_hierarchy_reference = copy.deepcopy(
+            resource_hierarchy_reference
+        )
+        if (self.resource_envelope_binding is None) != (
+            self.resource_hierarchy_reference is None
+        ):
+            raise ExperimentModeError(
+                "resource binding and hierarchy reference must be provided together"
+            )
         _validate_sandbox_configuration(sandbox_configuration)
         self.sandbox_configuration = copy.deepcopy(
             sandbox_configuration
@@ -415,6 +461,7 @@ class ExperimentModeController:
             _common_mode_contract(
                 protocol,
                 self.sandbox_configuration_sha256,
+                resource_envelope_binding=self.resource_envelope_binding,
             )
         )
         publish_experiment_mode_authority(
@@ -465,6 +512,12 @@ class ExperimentModeController:
             ),
             runtime_release_identity=copy.deepcopy(
                 self.runtime_release_identity
+            ),
+            resource_envelope_binding=copy.deepcopy(
+                self.resource_envelope_binding
+            ),
+            resource_hierarchy_reference=copy.deepcopy(
+                self.resource_hierarchy_reference
             ),
         )
         adapter.preflight(request)
@@ -700,6 +753,8 @@ def execute_bound_experiment_mode(
     sandbox_configuration,
     adapter,
     common_finalizer,
+    resource_envelope_binding=None,
+    resource_hierarchy_reference=None,
 ):
     """Execute one previously allocated immutable run through its mode."""
 
@@ -768,6 +823,23 @@ def execute_bound_experiment_mode(
     terminal_result = run_dir / "results" / "terminal"
     if terminal_result.exists() or terminal_result.is_symlink():
         return _replayed_mode_result(run_dir, run_manifest)
+    if resource_envelope_binding is not None:
+        validate_protocol_resource_envelope(
+            protocol,
+            resource_envelope_binding,
+            require_binding=True,
+        )
+        if not isinstance(resource_hierarchy_reference, dict):
+            raise ExperimentModeError(
+                "resource-bound mode requires a pilot-owner hierarchy reference"
+            )
+        resource_hierarchy = SystemdResourceHierarchy(
+            resource_envelope_binding,
+            run_id=resource_hierarchy_reference.get("run_id"),
+            mode=run_manifest["mode"],
+            owner_reference=resource_hierarchy_reference,
+        )
+        resource_hierarchy.prepare(check_host=False)
     snapshot = run_dir / "repository"
     if snapshot.exists():
         verify_clean_snapshot(snapshot, protocol["repository"])
@@ -811,6 +883,8 @@ def execute_bound_experiment_mode(
         runtime_release_identity=bound_run["binding"][
             "runtime_release"
         ],
+        resource_envelope_binding=resource_envelope_binding,
+        resource_hierarchy_reference=resource_hierarchy_reference,
     )
     with acquire_controller_lease(
         run_dir,
@@ -1307,8 +1381,10 @@ def _normalize_mode_result(
 def _common_mode_contract(
     protocol,
     sandbox_configuration_sha256,
+    *,
+    resource_envelope_binding=None,
 ):
-    return {
+    contract = {
         "repository": copy.deepcopy(protocol["repository"]),
         "goal": copy.deepcopy(protocol["goal"]),
         "acceptance": copy.deepcopy(protocol["acceptance"]),
@@ -1324,6 +1400,13 @@ def _common_mode_contract(
             sandbox_configuration_sha256
         ),
     }
+    if resource_envelope_binding is not None:
+        from .resource_envelope import canonical_resource_envelope_sha256
+
+        contract["resource_envelope_sha256"] = (
+            canonical_resource_envelope_sha256(resource_envelope_binding)
+        )
+    return contract
 
 
 def _model_policy(protocol):
@@ -1396,7 +1479,7 @@ def _experiment_invocation_context(
     usage_stage,
     taskpack_id,
 ):
-    return {
+    context = {
         "project": Path(request.project_root).name,
         "run_id": request.run_manifest["experiment_run_id"],
         "taskpack_id": taskpack_id,
@@ -1408,6 +1491,23 @@ def _experiment_invocation_context(
         "experiment_controller_required": True,
         "provider_resume_mode": "new",
     }
+    if request.resource_envelope_binding is not None:
+        context.update(
+            {
+                "experiment_mode": request.run_manifest["mode"],
+                "resource_envelope_binding": copy.deepcopy(
+                    request.resource_envelope_binding
+                ),
+                "resource_envelope_required": True,
+                "resource_project_id": request.resource_hierarchy_reference[
+                    "run_id"
+                ],
+                "resource_hierarchy_reference": copy.deepcopy(
+                    request.resource_hierarchy_reference
+                ),
+            }
+        )
+    return context
 
 
 def _experiment_runtime_context(request, usage_stage=None):
@@ -1440,6 +1540,21 @@ def _experiment_runtime_context(request, usage_stage=None):
     }
     if usage_stage is not None:
         context["usage_stage"] = usage_stage
+    if request.resource_envelope_binding is not None:
+        context.update(
+            {
+                "resource_envelope_binding": copy.deepcopy(
+                    request.resource_envelope_binding
+                ),
+                "resource_envelope_required": True,
+                "resource_project_id": request.resource_hierarchy_reference[
+                    "run_id"
+                ],
+                "resource_hierarchy_reference": copy.deepcopy(
+                    request.resource_hierarchy_reference
+                ),
+            }
+        )
     return context
 
 
@@ -1848,6 +1963,7 @@ def _build_common_result_bundle(
     runtime_release_identity,
     retained_roots,
     scan_scope_reference,
+    resource_evidence_reference,
 ):
     usage_totals, usage_coverage, terminal_statuses = (
         _registered_invocation_usage(
@@ -1908,6 +2024,37 @@ def _build_common_result_bundle(
         regressions.append(
             evaluation.get("failure_reason") or "evaluation_failed"
         )
+    result_evidence = {
+        "evaluation_relative_path": evaluation[
+            "evaluation_relative_path"
+        ],
+        "evaluation_sha256": evaluation["evaluation_sha256"],
+        "taskpack_ids": evaluation["taskpack_ids"],
+        "protocol_reference_sha256": evaluation[
+            "experiment_protocol_reference_sha256"
+        ],
+        "invocation_set_reference_sha256": (
+            invocation_set_reference["sha256"]
+        ),
+        "scan_scope_reference_sha256": (
+            scan_scope_reference["sha256"]
+        ),
+        "scan_scope_sha256": evaluation[
+            "scan_scope_sha256"
+        ],
+        "acceptance_command_sha256": evaluation[
+            "acceptance_command_sha256"
+        ],
+        "acceptance_executable_sha256": evaluation[
+            "acceptance_executable_sha256"
+        ],
+        "evaluator_sha256": evaluation["evaluator_sha256"],
+        "provider_sandbox_reference_sha256": evaluation[
+            "provider_sandbox_reference_sha256"
+        ],
+    }
+    if resource_evidence_reference is not None:
+        result_evidence.update(resource_evidence_reference)
     return build_experiment_result_bundle(
         protocol=request.protocol,
         run_manifest=request.run_manifest,
@@ -1960,37 +2107,114 @@ def _build_common_result_bundle(
         workspace_diff_sha256=canonical_json_sha256(
             candidate_state
         ),
-        result_evidence={
-            "evaluation_relative_path": evaluation[
-                "evaluation_relative_path"
-            ],
-            "evaluation_sha256": evaluation["evaluation_sha256"],
-            "taskpack_ids": evaluation["taskpack_ids"],
-            "protocol_reference_sha256": evaluation[
-                "experiment_protocol_reference_sha256"
-            ],
-            "invocation_set_reference_sha256": (
-                invocation_set_reference["sha256"]
-            ),
-            "scan_scope_reference_sha256": (
-                scan_scope_reference["sha256"]
-            ),
-            "scan_scope_sha256": evaluation[
-                "scan_scope_sha256"
-            ],
-            "acceptance_command_sha256": evaluation[
-                "acceptance_command_sha256"
-            ],
-            "acceptance_executable_sha256": evaluation[
-                "acceptance_executable_sha256"
-            ],
-            "evaluator_sha256": evaluation["evaluator_sha256"],
-            "provider_sandbox_reference_sha256": evaluation[
-                "provider_sandbox_reference_sha256"
-            ],
-        },
+        result_evidence=result_evidence,
         cleanup_status="pending",
     )
+
+
+def _publish_resource_evidence_index(
+    request,
+    mode_result,
+    invocation_set_reference,
+    evaluation_path,
+):
+    if request.resource_envelope_binding is None:
+        return None
+    from .resource_envelope import canonical_resource_envelope_sha256
+
+    binding_sha256 = canonical_resource_envelope_sha256(
+        request.resource_envelope_binding
+    )
+    run_dir = Path(request.run_dir).resolve(strict=True)
+    manifest = load_model_invocation_set_reference(
+        invocation_set_reference,
+        request.authority_root,
+    )
+    records = []
+
+    def register(path, *, scope, evidence_id):
+        try:
+            path = Path(path).resolve(strict=True)
+        except OSError as exc:
+            raise ExperimentModeError(
+                f"resource evidence is unavailable: {evidence_id}"
+            ) from exc
+        try:
+            relative_path = str(path.relative_to(run_dir))
+        except ValueError as exc:
+            raise ExperimentModeError(
+                "resource evidence escaped the experiment run"
+            ) from exc
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(value, dict)
+            or value.get("binding_sha256") != binding_sha256
+            or value.get("scope") != scope
+        ):
+            raise ExperimentModeError(
+                f"resource evidence is invalid: {evidence_id}"
+            )
+        records.append(
+            {
+                "evidence_id": evidence_id,
+                "scope": scope,
+                "relative_path": relative_path,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        )
+
+    for invocation_set in manifest["invocation_sets"]:
+        root = Path(invocation_set["lifecycle_authority_root"])
+        for invocation_id in invocation_set["invocation_ids"]:
+            register(
+                root / "model_invocations" / invocation_id / "resource.json",
+                scope="workload",
+                evidence_id=invocation_id,
+            )
+    register(
+        Path(str(evaluation_path) + ".resources.json"),
+        scope="evaluator",
+        evidence_id="official-evaluator",
+    )
+    if request.run_manifest["mode"] != "single_codex":
+        adapter_output = mode_result.get("adapter_output")
+        control = (
+            adapter_output.get("control_plane_resource_evidence")
+            if isinstance(adapter_output, dict)
+            else None
+        )
+        if not isinstance(control, dict):
+            raise ExperimentModeError(
+                "AgentTeam mode is missing control-plane resource evidence"
+            )
+        control_path = run_dir / "artifacts" / "control-plane-resource.json"
+        publish_immutable_json(
+            control_path,
+            control,
+            label="control-plane resource evidence",
+        )
+        register(
+            control_path,
+            scope="control_plane",
+            evidence_id="agentteam-control-plane",
+        )
+    index = {
+        "schema_version": "phase3_resource_evidence_index.v1",
+        "binding_sha256": binding_sha256,
+        "experiment_run_id": request.run_manifest["experiment_run_id"],
+        "mode": request.run_manifest["mode"],
+        "records": sorted(records, key=lambda item: item["evidence_id"]),
+    }
+    index_path = run_dir / "artifacts" / "phase3-resource-evidence.json"
+    published = publish_immutable_json(
+        index_path,
+        index,
+        label="Phase 3 resource evidence index",
+    )
+    return {
+        "resource_evidence_relative_path": str(index_path.relative_to(run_dir)),
+        "resource_evidence_sha256": published["sha256"],
+    }
 
 
 def _registered_invocation_usage(

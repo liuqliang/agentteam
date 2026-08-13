@@ -22,6 +22,8 @@ from agentteam_runtime.resource_envelope import (
     GIB,
     ResourceEnvelopeError,
     ResourceEnvelopeUnavailable,
+    Phase3PilotResourceOwner,
+    ResourceUnitMonitor,
     SystemdResourceHierarchy,
     approved_phase3_resource_envelope_binding,
     build_resource_evidence,
@@ -60,7 +62,7 @@ class _SystemdRunner:
             envelope = binding["envelopes"][
                 "agentteam_control_plane_allowance"
             ]
-            control_group = "/project/mode/control.scope"
+            control_group = "/project/mode/control.service"
         else:
             envelope = binding["envelopes"]["common_workload_slot"]
             control_group = "/project/mode/workload.service"
@@ -83,12 +85,21 @@ class _SystemdRunner:
 class _EvaluatorHierarchy:
     instance = None
 
-    def __init__(self, binding, *, run_id, mode):
+    def __init__(self, binding, *, run_id, mode, owner_reference=None):
         self.binding = binding
         self.run_id = run_id
         self.mode = mode
+        self.owner_reference = owner_reference
         self.prepared = False
         self.cleaned = False
+        self._cgroup_tmp = tempfile.TemporaryDirectory()
+        self.cgroup_root = Path(self._cgroup_tmp.name)
+        cgroup = self.cgroup_root / "phase3" / "evaluator"
+        cgroup.mkdir(parents=True)
+        (cgroup / "cpu.stat").write_text("usage_usec 10\n", encoding="ascii")
+        (cgroup / "memory.events").write_text("oom 0\n", encoding="ascii")
+        (cgroup / "pids.events").write_text("max 0\n", encoding="ascii")
+        (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
         self.__class__.instance = self
 
     def prepare(self):
@@ -101,11 +112,12 @@ class _EvaluatorHierarchy:
             "--property=CPUQuota=400%",
             "--property=MemoryHigh=8589934592",
             "--property=MemoryMax=12884901888",
-            "--property=TasksMax=256",
+            "--property=TasksMax=384",
             "--property=MemorySwapMax=0",
         ]
 
-    def verify_leaf(self, unit):
+    def verify_leaf(self, unit, *, evaluator=False):
+        assert evaluator
         return {"ControlGroup": "/phase3/evaluator", "Unit": unit}
 
     def identity(self):
@@ -113,6 +125,7 @@ class _EvaluatorHierarchy:
 
     def cleanup(self):
         self.cleaned = True
+        self._cgroup_tmp.cleanup()
         return {"cleanup_attempted": True, "cleanup_complete": True}
 
 
@@ -120,7 +133,7 @@ class Phase3ResourceEnvelopeTests(unittest.TestCase):
     def test_versioned_contract_has_exact_approved_envelopes(self):
         binding = approved_phase3_resource_envelope_binding()
         self.assertIs(validate_resource_envelope_binding(binding), binding)
-        self.assertEqual(binding["schema_version"], "phase3_resource_envelope.v1")
+        self.assertEqual(binding["schema_version"], "phase3_resource_envelope.v2")
         self.assertEqual(
             binding["envelopes"],
             {
@@ -128,28 +141,28 @@ class Phase3ResourceEnvelopeTests(unittest.TestCase):
                     "cpu_quota": 4,
                     "memory_high_bytes": 8 * GIB,
                     "memory_max_bytes": 12 * GIB,
-                    "tasks_max": 256,
+                    "tasks_max": 384,
                     "memory_swap_max_bytes": 0,
                 },
                 "single_codex_mode": {
                     "cpu_quota": 4,
                     "memory_high_bytes": 8 * GIB,
                     "memory_max_bytes": 12 * GIB,
-                    "tasks_max": 256,
+                    "tasks_max": 384,
                     "memory_swap_max_bytes": 0,
                 },
                 "agentteam_control_plane_allowance": {
                     "cpu_quota": 4,
                     "memory_high_bytes": 8 * GIB,
                     "memory_max_bytes": 12 * GIB,
-                    "tasks_max": 256,
+                    "tasks_max": 384,
                     "memory_swap_max_bytes": 0,
                 },
                 "agentteam_mode": {
                     "cpu_quota": 8,
                     "memory_high_bytes": 16 * GIB,
                     "memory_max_bytes": 24 * GIB,
-                    "tasks_max": 512,
+                    "tasks_max": 768,
                     "memory_swap_max_bytes": 0,
                 },
                 "pilot_project": {
@@ -229,7 +242,8 @@ class Phase3ResourceEnvelopeTests(unittest.TestCase):
             )
             runner.hierarchy = hierarchy
             identity = hierarchy.prepare(check_host=False)
-            control = hierarchy.attach_control_plane(pid=1234)
+            control_command = hierarchy.control_plane_command(["/bin/true"])
+            control = hierarchy.verify_control_plane()
             leaf = hierarchy.verify_leaf("workload.service")
             self.assertEqual(
                 leaf["ControlGroup"],
@@ -250,7 +264,7 @@ class Phase3ResourceEnvelopeTests(unittest.TestCase):
             for control_group in (
                 "project",
                 "project/mode",
-                "project/mode/control.scope",
+                "project/mode/control.service",
             ):
                 path = Path(tmp) / control_group
                 path.mkdir(parents=True, exist_ok=True)
@@ -264,9 +278,9 @@ class Phase3ResourceEnvelopeTests(unittest.TestCase):
                 set(cleanup["cgroup_population"].values()),
                 {"drained"},
             )
-            self.assertTrue(
-                any("--pid=1234" in command for command in runner.commands)
-            )
+            self.assertIn("--wait", control_command)
+            self.assertIn("--property=TasksMax=384", control_command)
+            self.assertNotIn("--pid=1234", control_command)
 
     def test_readback_mismatch_fails_before_leaf_admission(self):
         runner = _SystemdRunner()
@@ -308,6 +322,243 @@ class Phase3ResourceEnvelopeTests(unittest.TestCase):
         self.assertEqual(
             set(cleanup["cgroup_population"].values()),
             {"populated"},
+        )
+
+    def test_borrower_revalidates_but_never_cleans_owner_units(self):
+        binding = approved_phase3_resource_envelope_binding()
+        runner = _SystemdRunner()
+        owner = SystemdResourceHierarchy(
+            binding,
+            run_id="PILOT-OWNER",
+            mode="agentteam_full",
+            command_runner=runner,
+        )
+        runner.hierarchy = owner
+        owner.prepare(check_host=False)
+        reference = owner.owner_reference()
+        runner.commands.clear()
+        borrower = SystemdResourceHierarchy(
+            binding,
+            run_id="PILOT-OWNER",
+            mode="agentteam_full",
+            command_runner=runner,
+            owner_reference=reference,
+        )
+        runner.hierarchy = borrower
+        borrower.prepare(check_host=False)
+        cleanup = borrower.cleanup()
+        self.assertFalse(cleanup["cleanup_attempted"])
+        self.assertFalse(cleanup["cleanup_owner"])
+        self.assertFalse(
+            any("stop" in command for command in runner.commands)
+        )
+
+    def test_borrower_rejects_owner_identity_drift(self):
+        binding = approved_phase3_resource_envelope_binding()
+        runner = _SystemdRunner()
+        owner = SystemdResourceHierarchy(
+            binding,
+            run_id="PILOT-DRIFT",
+            mode="single_codex",
+            command_runner=runner,
+        )
+        runner.hierarchy = owner
+        owner.prepare(check_host=False)
+        reference = owner.owner_reference()
+        reference["units"]["mode"]["ControlGroup"] = "/escaped"
+        borrower = SystemdResourceHierarchy(
+            binding,
+            run_id="PILOT-DRIFT",
+            mode="single_codex",
+            command_runner=runner,
+            owner_reference=reference,
+        )
+        runner.hierarchy = borrower
+        with self.assertRaisesRegex(
+            ResourceEnvelopeUnavailable,
+            "identity changed",
+        ):
+            borrower.prepare(check_host=False)
+
+    def test_pilot_owner_issues_three_mode_references_and_cleans_project_once(self):
+        binding = approved_phase3_resource_envelope_binding()
+        runner = _SystemdRunner()
+
+        class BoundHierarchy(SystemdResourceHierarchy):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                runner.hierarchy = self
+
+        owner = Phase3PilotResourceOwner(
+            binding,
+            pilot_id="PILOT-THREE-MODES",
+            command_runner=runner,
+            hierarchy_factory=BoundHierarchy,
+        )
+        references = owner.prepare(
+            host_capacity={
+                "cpu_count": 17,
+                "memory_total_bytes": 49 * GIB,
+            }
+        )
+        self.assertEqual(
+            set(references),
+            {"single_codex", "agentteam_direct", "agentteam_full"},
+        )
+        self.assertEqual(
+            {item["run_id"] for item in references.values()},
+            {"PILOT-THREE-MODES"},
+        )
+        for hierarchy in owner.hierarchies.values():
+            for identity in hierarchy._identities.values():
+                identity["ControlGroup"] = "/missing"
+        runner.commands.clear()
+        cleanup = owner.cleanup()
+        project_stops = [
+            command
+            for command in runner.commands
+            if "stop" in command
+            and any(
+                item.endswith(".slice")
+                and "single-codex" not in item
+                and "agentteam-direct" not in item
+                and "agentteam-full" not in item
+                for item in command
+            )
+        ]
+        self.assertTrue(cleanup["cleanup_complete"])
+        self.assertEqual(len(project_stops), 1)
+
+    def test_pilot_owner_reads_project_and_mode_aggregate_evidence(self):
+        binding = approved_phase3_resource_envelope_binding()
+        runner = _SystemdRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            class BoundHierarchy(SystemdResourceHierarchy):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    runner.hierarchy = self
+
+            owner = Phase3PilotResourceOwner(
+                binding,
+                pilot_id="PILOT-AGGREGATE",
+                command_runner=runner,
+                cgroup_root=tmp,
+                hierarchy_factory=BoundHierarchy,
+            )
+            owner.prepare(
+                host_capacity={
+                    "cpu_count": 17,
+                    "memory_total_bytes": 49 * GIB,
+                }
+            )
+            identities = {
+                owner.hierarchies["single_codex"]._identities["project"][
+                    "ControlGroup"
+                ],
+                *(
+                    hierarchy._identities["mode"]["ControlGroup"]
+                    for hierarchy in owner.hierarchies.values()
+                ),
+            }
+            for control_group in identities:
+                cgroup = Path(tmp) / control_group.lstrip("/")
+                cgroup.mkdir(parents=True, exist_ok=True)
+                (cgroup / "cpu.stat").write_text(
+                    "usage_usec 50\n",
+                    encoding="ascii",
+                )
+                (cgroup / "memory.events").write_text(
+                    "oom 0\n",
+                    encoding="ascii",
+                )
+                (cgroup / "pids.events").write_text(
+                    "max 0\n",
+                    encoding="ascii",
+                )
+                (cgroup / "cgroup.events").write_text(
+                    "populated 0\n",
+                    encoding="ascii",
+                )
+            evidence = owner.evidence()
+            self.assertEqual(evidence["project"]["scope"], "project")
+            self.assertEqual(
+                set(evidence["modes"]),
+                {"single_codex", "agentteam_direct", "agentteam_full"},
+            )
+            self.assertTrue(
+                all(
+                    item["counters"]["cpu"]["usage_usec"] == 50
+                    for item in evidence["modes"].values()
+                )
+            )
+
+    def test_monitor_captures_short_lived_unit_without_owning_parents(self):
+        binding = approved_phase3_resource_envelope_binding()
+        runner = _SystemdRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            hierarchy = SystemdResourceHierarchy(
+                binding,
+                run_id="PILOT-MONITOR",
+                mode="agentteam_direct",
+                command_runner=runner,
+                cgroup_root=tmp,
+            )
+            runner.hierarchy = hierarchy
+            hierarchy.prepare(check_host=False)
+            cgroup = Path(tmp) / "project" / "mode" / "control.service"
+            cgroup.mkdir(parents=True)
+            (cgroup / "cpu.stat").write_text(
+                "usage_usec 25\nnr_throttled 0\n",
+                encoding="ascii",
+            )
+            (cgroup / "memory.events").write_text(
+                "oom 0\noom_kill 0\n",
+                encoding="ascii",
+            )
+            (cgroup / "pids.events").write_text(
+                "max 0\n",
+                encoding="ascii",
+            )
+            (cgroup / "cgroup.events").write_text(
+                "populated 1\n",
+                encoding="ascii",
+            )
+            monitor = ResourceUnitMonitor(
+                hierarchy,
+                hierarchy.control_scope,
+                scope="control_plane",
+                sample_interval_seconds=0.01,
+            ).start()
+            evidence = monitor.finish(binding=binding)
+            self.assertEqual(evidence["scope"], "control_plane")
+            self.assertEqual(evidence["counters"]["cpu"]["usage_usec"], 25)
+            self.assertFalse(evidence["outcome"]["resource_exhausted"])
+
+    def test_borrower_can_stop_leaf_without_stopping_shared_slices(self):
+        binding = approved_phase3_resource_envelope_binding()
+        runner = _SystemdRunner()
+        owner = SystemdResourceHierarchy(
+            binding,
+            run_id="PILOT-LEAF-CLEANUP",
+            mode="agentteam_full",
+            command_runner=runner,
+        )
+        runner.hierarchy = owner
+        owner.prepare(check_host=False)
+        borrower = SystemdResourceHierarchy(
+            binding,
+            run_id="PILOT-LEAF-CLEANUP",
+            mode="agentteam_full",
+            command_runner=runner,
+            owner_reference=owner.owner_reference(),
+        )
+        runner.hierarchy = borrower
+        borrower.prepare(check_host=False)
+        runner.commands.clear()
+        self.assertTrue(borrower.stop_transient_unit("leaf.service"))
+        self.assertEqual(
+            runner.commands,
+            [["systemctl", "--user", "stop", "leaf.service"]],
         )
 
     def test_counters_and_exhaustion_are_not_model_quality_failure(self):
@@ -393,6 +644,9 @@ class Phase3ResourceEnvelopeTests(unittest.TestCase):
                 resource_mode="agentteam_direct",
                 resource_run_id="RUN-P3B-EVAL",
                 resource_hierarchy_factory=_EvaluatorHierarchy,
+                resource_hierarchy_reference={
+                    "schema_version": "phase3_resource_hierarchy_reference.v1"
+                },
             )
         self.assertIn("--slice=phase3-mode.slice", captured["command"])
         self.assertIn("--property=CPUQuota=400%", captured["command"])

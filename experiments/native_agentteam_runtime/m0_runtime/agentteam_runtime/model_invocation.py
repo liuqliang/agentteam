@@ -1104,6 +1104,11 @@ class ModelInvocationCall:
                                 "experiment_mode"
                             ),
                             "resource_run_id": self.lifecycle.context["run_id"],
+                            "resource_hierarchy_reference": (
+                                self.lifecycle.context.get(
+                                    "resource_hierarchy_reference"
+                                )
+                            ),
                         }
                     )
                     runner_arguments["resource_run_id"] = (
@@ -1361,6 +1366,7 @@ class SystemdGatedExecution:
         resource_envelope_binding=None,
         resource_mode=None,
         resource_run_id=None,
+        resource_hierarchy_reference=None,
         resource_hierarchy_factory=None,
     ):
         if not sys.platform.startswith("linux"):
@@ -1381,6 +1387,7 @@ class SystemdGatedExecution:
         self.resource_envelope_binding = resource_envelope_binding
         self.resource_mode = resource_mode
         self.resource_run_id = resource_run_id
+        self.resource_hierarchy_reference = resource_hierarchy_reference
         self.resource_hierarchy_factory = resource_hierarchy_factory
         self.resource_hierarchy = None
         self.resource_evidence = None
@@ -1394,6 +1401,9 @@ class SystemdGatedExecution:
         self.socket_path = socket_root / f"{digest[:40]}.sock"
         self.ready_path = lifecycle.invocation_dir / "supervisor-ready.json"
         self.result_path = lifecycle.invocation_dir / "supervisor-result.json"
+        self.resource_evidence_ack_path = (
+            lifecycle.invocation_dir / "resource-evidence.ack"
+        )
         self.spec_path = lifecycle.invocation_dir / "supervisor-spec.json"
         self.nonce = secrets.token_hex(32)
         self._prepared = False
@@ -1439,6 +1449,11 @@ class SystemdGatedExecution:
         if self.prelaunch_source_authority is not None:
             spec["prelaunch_source_authority"] = (
                 self.prelaunch_source_authority
+            )
+        if self.resource_envelope_binding is not None:
+            self.resource_evidence_ack_path.unlink(missing_ok=True)
+            spec["resource_evidence_ack_path"] = str(
+                self.resource_evidence_ack_path
             )
         _exclusive_publish_json(self.spec_path, spec)
         module_path = str(Path(__file__).resolve())
@@ -1525,10 +1540,9 @@ class SystemdGatedExecution:
             run_id=self.resource_run_id,
             mode=self.resource_mode,
             command_runner=self.command_runner,
+            owner_reference=self.resource_hierarchy_reference,
         )
         self.resource_hierarchy.prepare()
-        if self.resource_mode in {"agentteam_direct", "agentteam_full"}:
-            self.resource_hierarchy.attach_control_plane()
 
     def permit_and_wait(
         self,
@@ -1571,9 +1585,16 @@ class SystemdGatedExecution:
         while time.monotonic() < deadline:
             result = _read_json_if_exists(self.result_path)
             if result is not None:
-                resource_evidence = self._resource_evidence(
-                    timed_out=bool(result.get("timed_out")),
-                )
+                try:
+                    resource_evidence = self._resource_evidence(
+                        timed_out=bool(result.get("timed_out")),
+                    )
+                finally:
+                    if self.resource_envelope_binding is not None:
+                        self.resource_evidence_ack_path.touch(
+                            mode=0o600,
+                            exist_ok=True,
+                        )
                 return ProviderExecution(
                     self.command,
                     result.get("returncode"),
@@ -1589,6 +1610,7 @@ class SystemdGatedExecution:
                 next_progress = time.monotonic() + interval
             time.sleep(min(0.05, interval))
         empty_observed = self._execution_group_is_empty()
+        resource_evidence = self._resource_evidence(timed_out=True)
         self._stop_exact_unit()
         if not empty_observed and not self._wait_execution_group_empty():
             raise ModelInvocationUnavailable(
@@ -1601,7 +1623,7 @@ class SystemdGatedExecution:
             "",
             timed_out=True,
             launch_error="supervisor_result_timeout",
-            resource_evidence=self._resource_evidence(timed_out=True),
+            resource_evidence=resource_evidence,
         )
 
     def abort_before_permit(self):
@@ -1612,6 +1634,7 @@ class SystemdGatedExecution:
             self._stop_exact_unit(ignore_errors=True)
         if self.resource_hierarchy is not None:
             self.resource_hierarchy.cleanup()
+        self.resource_evidence_ack_path.unlink(missing_ok=True)
 
     def cleanup_after_terminal(self):
         empty_observed = self._execution_group_is_empty()
@@ -1628,6 +1651,7 @@ class SystemdGatedExecution:
             self.socket_path.unlink()
         except FileNotFoundError:
             pass
+        self.resource_evidence_ack_path.unlink(missing_ok=True)
         return {
             "leaf_unit_stopped": bool(stopped),
             "leaf_cgroup_empty": bool(leaf_empty),
@@ -2050,6 +2074,9 @@ def invocation_context_from_message(message, *, model=None, backend="codex"):
         "resource_envelope_required": (
             payload.get("resource_envelope_required") is True
         ),
+        "resource_hierarchy_reference": payload.get(
+            "resource_hierarchy_reference"
+        ),
         "resource_project_id": payload.get("resource_project_id"),
     }
     context["_explicit_context_fields"] = {
@@ -2268,6 +2295,14 @@ def _supervisor_main(spec_path):
             "timed_out": False,
         }
     _exclusive_publish_json(Path(spec["result_path"]), result)
+    ack_path = spec.get("resource_evidence_ack_path")
+    if ack_path is not None:
+        deadline = time.monotonic() + 10.0
+        ack_path = Path(ack_path)
+        while time.monotonic() < deadline:
+            if ack_path.is_file() and not ack_path.is_symlink():
+                break
+            time.sleep(0.05)
     return 0
 
 
@@ -3376,6 +3411,10 @@ def _validate_call_context(context, *, supported):
         }:
             raise ModelInvocationIntegrityError(
                 "resource-bound model invocation requires experiment_mode"
+            )
+        if not isinstance(context.get("resource_hierarchy_reference"), dict):
+            raise ModelInvocationIntegrityError(
+                "resource-bound model invocation requires an owner reference"
             )
     required = (
         "project",

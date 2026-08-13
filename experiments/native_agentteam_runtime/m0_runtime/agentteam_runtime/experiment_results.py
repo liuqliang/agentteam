@@ -553,6 +553,34 @@ def seal_experiment_result_bundle(
         raise ExperimentResultIntegrityError(
             "result evidence authority binding mismatch"
         )
+    resource_relative_path = expected.get("resource_evidence_relative_path")
+    if resource_relative_path is not None:
+        resource_path = _existing_file(
+            run_dir / resource_relative_path,
+            "Phase 3 resource evidence index",
+        )
+        if _relative_path(resource_path, run_dir) != resource_relative_path:
+            raise ExperimentResultIntegrityError(
+                "resource evidence path differs from run authority"
+            )
+        try:
+            resource_index = json.loads(
+                resource_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ExperimentResultIntegrityError(
+                "resource evidence index is unreadable"
+            ) from exc
+        if (
+            expected.get("resource_evidence_sha256")
+            != canonical_json_sha256(resource_index)
+            or resource_index.get("experiment_run_id")
+            != run_manifest["experiment_run_id"]
+            or resource_index.get("mode") != run_manifest["mode"]
+        ):
+            raise ExperimentResultIntegrityError(
+                "resource evidence index differs from run authority"
+            )
     protocol_bindings = {
         "acceptance_command_sha256": canonical_json_sha256(
             protocol["acceptance"]["command"]

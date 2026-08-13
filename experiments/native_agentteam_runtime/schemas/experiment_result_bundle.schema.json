@@ -207,7 +207,17 @@
         "acceptance_command_sha256": {"$ref": "#/$defs/sha256"},
         "acceptance_executable_sha256": {"$ref": "#/$defs/sha256"},
         "evaluator_sha256": {"$ref": "#/$defs/sha256"},
-        "provider_sandbox_reference_sha256": {"$ref": "#/$defs/sha256"}
+        "provider_sandbox_reference_sha256": {"$ref": "#/$defs/sha256"},
+        "resource_evidence_relative_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "resource_evidence_sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "dependentRequired": {
+        "resource_evidence_relative_path": ["resource_evidence_sha256"],
+        "resource_evidence_sha256": ["resource_evidence_relative_path"]
       }
     },
     "projection_reconciliation": {

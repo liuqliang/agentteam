@@ -137,10 +137,10 @@ not retroactively change any frozen Phase 3A or calibration artifact.
 
 | Scope | CPU quota | Memory high | Memory max | Tasks max |
 | --- | ---: | ---: | ---: | ---: |
-| Common workload slot | 4 CPUs | 8 GiB | 12 GiB | 256 |
-| `single_codex` total envelope | 4 CPUs | 8 GiB | 12 GiB | 256 |
-| AgentTeam control-plane allowance | 4 CPUs | 8 GiB | 12 GiB | 256 |
-| Each AgentTeam mode total envelope | 8 CPUs | 16 GiB | 24 GiB | 512 |
+| Common workload slot | 4 CPUs | 8 GiB | 12 GiB | 384 |
+| `single_codex` total envelope | 4 CPUs | 8 GiB | 12 GiB | 384 |
+| AgentTeam control-plane allowance | 4 CPUs | 8 GiB | 12 GiB | 384 |
+| Each AgentTeam mode total envelope | 8 CPUs | 16 GiB | 24 GiB | 768 |
 | Whole pilot project hard envelope | 16 CPUs | 32 GiB | 48 GiB | 1,024 |
 
 The common workload slot covers the active coding worker and repository test
@@ -157,6 +157,11 @@ for this pilot, and mode executions remain sequential. Set `MemoryHigh` as the
 soft pressure boundary, `MemoryMax` as the hard boundary, and
 `MemorySwapMax=0` so a run cannot appear to survive by causing uncontrolled
 host paging. CPU quotas are ceilings, not reservations.
+
+`TasksMax` retains headroom above the observed local Codex service range of
+234-240 tasks. The earlier value of 256 left too little margin for test and
+helper descendants; v2 raises only PID capacity while preserving the reduced
+CPU and memory ceilings.
 
 This intentionally gives AgentTeam a larger total local-resource envelope. It
 is part of the system-under-test cost and must be disclosed rather than hidden

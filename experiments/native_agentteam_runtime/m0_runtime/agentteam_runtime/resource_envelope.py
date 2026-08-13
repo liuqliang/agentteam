@@ -12,7 +12,11 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
+import sys
+import threading
+import time
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,13 +24,14 @@ from pathlib import Path
 from jsonschema import Draft202012Validator, FormatChecker
 
 
-RESOURCE_ENVELOPE_SCHEMA_VERSION = "phase3_resource_envelope.v1"
+RESOURCE_ENVELOPE_SCHEMA_VERSION = "phase3_resource_envelope.v2"
 RESOURCE_EVIDENCE_SCHEMA_VERSION = "phase3_resource_evidence.v1"
 RESOURCE_FAILURE_CLASSIFICATION = "resource_limit_exhausted"
 RESOURCE_FAIRNESS_POLICY = (
     "equal_workload_slots_with_metered_agentteam_control_plane_allowance"
 )
 GIB = 1024**3
+RESOURCE_MONITOR_ACK_TIMEOUT_SECONDS = 10.0
 
 _MODES = ("single_codex", "agentteam_direct", "agentteam_full")
 _ENVELOPE_FIELDS = (
@@ -63,12 +68,12 @@ def approved_phase3_resource_envelope_binding():
         "fairness_policy": RESOURCE_FAIRNESS_POLICY,
         "failure_classification": RESOURCE_FAILURE_CLASSIFICATION,
         "envelopes": {
-            "common_workload_slot": _envelope(4, 8 * GIB, 12 * GIB, 256),
-            "single_codex_mode": _envelope(4, 8 * GIB, 12 * GIB, 256),
+            "common_workload_slot": _envelope(4, 8 * GIB, 12 * GIB, 384),
+            "single_codex_mode": _envelope(4, 8 * GIB, 12 * GIB, 384),
             "agentteam_control_plane_allowance": _envelope(
-                4, 8 * GIB, 12 * GIB, 256
+                4, 8 * GIB, 12 * GIB, 384
             ),
-            "agentteam_mode": _envelope(8, 16 * GIB, 24 * GIB, 512),
+            "agentteam_mode": _envelope(8, 16 * GIB, 24 * GIB, 768),
             "pilot_project": _envelope(16, 32 * GIB, 48 * GIB, 1024),
         },
         "hierarchy": {
@@ -237,9 +242,9 @@ class SystemdResourceHierarchy:
     """Prepare and verify project/mode/control-plane user-systemd cgroups.
 
     Parent slices are started and fully read back before a leaf command is
-    returned.  ``attach_control_plane`` moves the complete controller process
-    tree into a bounded scope; workload and evaluator transient services are
-    then placed below the same mode slice.
+    returned. Control-plane, workload, and evaluator transient services are
+    launched below the verified mode slice by callers holding an owner
+    reference.
     """
 
     def __init__(
@@ -250,6 +255,7 @@ class SystemdResourceHierarchy:
         mode,
         command_runner=None,
         cgroup_root="/sys/fs/cgroup",
+        owner_reference=None,
     ):
         validate_resource_envelope_binding(binding)
         if not isinstance(run_id, str) or not _SAFE_ID.fullmatch(run_id):
@@ -267,14 +273,21 @@ class SystemdResourceHierarchy:
         self.project_slice = f"agentteam-p3-{digest}.slice"
         self.mode_slice = f"agentteam-p3-{digest}-{mode_token}.slice"
         self.control_scope = (
-            f"agentteam-p3-{digest}-{mode_token}-control.scope"
+            f"agentteam-p3-{digest}-{mode_token}-control.service"
         )
         self._prepared = False
         self._control_attached = False
         self._identities = {}
+        self._owner_reference = deepcopy(owner_reference)
+        self._owns_parents = owner_reference is None
 
     def prepare(self, *, check_host=True, host_capacity=None):
         try:
+            if not self._owns_parents:
+                self._load_owner_reference()
+                self._verify_existing_parents()
+                self._prepared = True
+                return self.identity()
             if check_host:
                 verify_host_capacity(self.binding, **(host_capacity or {}))
             project = envelope_for(self.binding, "pilot_project")
@@ -293,41 +306,41 @@ class SystemdResourceHierarchy:
             self.cleanup()
             raise
 
-    def attach_control_plane(self, pid=None):
+    def control_plane_command(self, command):
         if not self._prepared:
-            raise ResourceEnvelopeError("resource parents must be prepared first")
+            raise ResourceEnvelopeError(
+                "resource parents must be prepared before control-plane launch"
+            )
+        arguments = [
+            "systemd-run",
+            "--user",
+            "--quiet",
+            "--wait",
+            "--pipe",
+            "--service-type=exec",
+            f"--unit={self.control_scope}",
+            *self.control_plane_arguments(),
+            "--property=KillMode=control-group",
+            "--",
+            *_resource_wrapped_command(command, unit=self.control_scope),
+        ]
+        return arguments
+
+    def verify_control_plane(self):
         envelope = mode_envelopes(self.binding, self.mode)[
             "control_plane_envelope"
         ]
         if envelope is None:
             return None
-        pid = os.getpid() if pid is None else pid
-        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-            raise ResourceEnvelopeError("control-plane pid is invalid")
-        command = [
-            "systemd-run",
-            "--user",
-            "--quiet",
-            "--scope",
-            f"--unit={self.control_scope}",
-            f"--slice={self.mode_slice}",
-            f"--pid={pid}",
-        ]
-        for name, value in systemd_properties(envelope).items():
-            command.append(f"--property={name}={value}")
-        self._checked(command)
-        self._identities["control_plane"] = self._verify_unit(
-            self.control_scope,
-            envelope,
-        )
-        control_group = self._identities["control_plane"]["ControlGroup"]
+        identity = self._verify_unit(self.control_scope, envelope)
         mode_group = self._identities["mode"]["ControlGroup"]
-        if not control_group.startswith(mode_group.rstrip("/") + "/"):
+        if not identity["ControlGroup"].startswith(mode_group.rstrip("/") + "/"):
             raise ResourceEnvelopeUnavailable(
                 "control-plane cgroup escaped the verified mode cgroup"
             )
+        self._identities["control_plane"] = identity
         self._control_attached = True
-        return deepcopy(self._identities["control_plane"])
+        return deepcopy(identity)
 
     def leaf_arguments(self, *, evaluator=False):
         if not self._prepared:
@@ -339,8 +352,23 @@ class SystemdResourceHierarchy:
             arguments.append(f"--property={name}={value}")
         return arguments
 
-    def verify_leaf(self, unit):
-        key = "workload_envelope"
+    def control_plane_arguments(self):
+        if not self._prepared:
+            raise ResourceEnvelopeError("resource parents must be prepared first")
+        envelope = mode_envelopes(self.binding, self.mode)[
+            "control_plane_envelope"
+        ]
+        if envelope is None:
+            raise ResourceEnvelopeError(
+                "single Codex mode has no control-plane allowance"
+            )
+        arguments = [f"--slice={self.mode_slice}"]
+        for name, value in systemd_properties(envelope).items():
+            arguments.append(f"--property={name}={value}")
+        return arguments
+
+    def verify_leaf(self, unit, *, evaluator=False):
+        key = "evaluator_envelope" if evaluator else "workload_envelope"
         envelope = mode_envelopes(self.binding, self.mode)[key]
         identity = self._verify_unit(unit, envelope)
         if identity["ControlGroup"].rsplit("/", 1)[0] != self._identities[
@@ -350,6 +378,14 @@ class SystemdResourceHierarchy:
                 "workload leaf escaped the verified mode cgroup"
             )
         return identity
+
+    def stop_transient_unit(self, unit):
+        if not isinstance(unit, str) or not unit.endswith(".service"):
+            raise ResourceEnvelopeError("transient resource unit is invalid")
+        return self._checked(
+            ["systemctl", "--user", "stop", unit],
+            ignore_errors=True,
+        ).returncode == 0
 
     def identity(self):
         return {
@@ -365,13 +401,39 @@ class SystemdResourceHierarchy:
                 else None
             ),
             "units": deepcopy(self._identities),
+            "owner": self._owns_parents,
         }
 
-    def cleanup(self):
+    def owner_reference(self):
+        if not self._prepared or not self._owns_parents:
+            raise ResourceEnvelopeError(
+                "only a prepared owner can publish a resource hierarchy reference"
+            )
+        return {
+            "schema_version": "phase3_resource_hierarchy_reference.v1",
+            "binding_sha256": self.binding_sha256,
+            "run_id": self.run_id,
+            "mode": self.mode,
+            "project_slice": self.project_slice,
+            "mode_slice": self.mode_slice,
+            "units": deepcopy(self._identities),
+        }
+
+    def cleanup(self, *, include_project=True):
+        if not self._owns_parents:
+            return {
+                "cleanup_attempted": False,
+                "cleanup_complete": True,
+                "cleanup_owner": False,
+                "stopped_units": [],
+                "cgroup_population": {},
+            }
         targets = []
         if self._control_attached:
             targets.append(self.control_scope)
-        targets.extend((self.mode_slice, self.project_slice))
+        targets.append(self.mode_slice)
+        if include_project:
+            targets.append(self.project_slice)
         stopped = []
         for unit in targets:
             completed = self._checked(
@@ -381,6 +443,8 @@ class SystemdResourceHierarchy:
             stopped.append({"unit": unit, "returncode": completed.returncode})
         population = {}
         for label, identity in self._identities.items():
+            if label == "project" and not include_project:
+                continue
             control_group = identity.get("ControlGroup")
             population[label] = _cgroup_cleanup_state(
                 control_group,
@@ -394,7 +458,47 @@ class SystemdResourceHierarchy:
             "cleanup_complete": cleanup_complete,
             "stopped_units": stopped,
             "cgroup_population": population,
+            "cleanup_owner": True,
         }
+
+    def _load_owner_reference(self):
+        reference = self._owner_reference
+        if (
+            not isinstance(reference, dict)
+            or reference.get("schema_version")
+            != "phase3_resource_hierarchy_reference.v1"
+            or reference.get("binding_sha256") != self.binding_sha256
+            or reference.get("run_id") != self.run_id
+            or reference.get("mode") != self.mode
+            or reference.get("project_slice") != self.project_slice
+            or reference.get("mode_slice") != self.mode_slice
+            or not isinstance(reference.get("units"), dict)
+        ):
+            raise ResourceEnvelopeError(
+                "resource hierarchy owner reference is invalid"
+            )
+        self._identities = deepcopy(reference["units"])
+
+    def _verify_existing_parents(self):
+        expected = (
+            ("project", self.project_slice, envelope_for(self.binding, "pilot_project")),
+            (
+                "mode",
+                self.mode_slice,
+                mode_envelopes(self.binding, self.mode)["mode_envelope"],
+            ),
+        )
+        for label, unit, envelope in expected:
+            actual = self._verify_unit(unit, envelope)
+            recorded = self._identities.get(label)
+            if (
+                not isinstance(recorded, dict)
+                or recorded.get("ControlGroup") != actual.get("ControlGroup")
+            ):
+                raise ResourceEnvelopeUnavailable(
+                    "resource hierarchy owner identity changed"
+                )
+            self._identities[label] = actual
 
     def _start_and_verify_slice(self, unit, envelope):
         self._checked(["systemctl", "--user", "start", unit])
@@ -486,6 +590,299 @@ class SystemdResourceHierarchy:
         return completed
 
 
+class Phase3PilotResourceOwner:
+    """Own one project envelope and all three mode envelopes for a pilot."""
+
+    def __init__(
+        self,
+        binding,
+        *,
+        pilot_id,
+        command_runner=None,
+        cgroup_root="/sys/fs/cgroup",
+        hierarchy_factory=SystemdResourceHierarchy,
+    ):
+        validate_resource_envelope_binding(binding)
+        self.binding = deepcopy(binding)
+        self.pilot_id = pilot_id
+        self.command_runner = command_runner or subprocess.run
+        self.cgroup_root = cgroup_root
+        self.hierarchy_factory = hierarchy_factory
+        self.hierarchies = {}
+        self._prepared = False
+
+    def prepare(self, *, host_capacity=None):
+        if self._prepared:
+            return self.references()
+        verify_host_capacity(self.binding, **(host_capacity or {}))
+        try:
+            for mode in _MODES:
+                hierarchy = self.hierarchy_factory(
+                    self.binding,
+                    run_id=self.pilot_id,
+                    mode=mode,
+                    command_runner=self.command_runner,
+                    cgroup_root=self.cgroup_root,
+                )
+                hierarchy.prepare(check_host=False)
+                self.hierarchies[mode] = hierarchy
+            self._prepared = True
+            return self.references()
+        except Exception:
+            self.cleanup()
+            raise
+
+    def references(self):
+        if not self._prepared:
+            raise ResourceEnvelopeError("pilot resource owner is not prepared")
+        return {
+            mode: hierarchy.owner_reference()
+            for mode, hierarchy in self.hierarchies.items()
+        }
+
+    def evidence(self):
+        if not self._prepared:
+            raise ResourceEnvelopeError("pilot resource owner is not prepared")
+        project_identity = self.hierarchies[_MODES[0]]._identities["project"]
+        project = build_resource_evidence(
+            binding=self.binding,
+            scope="project",
+            identity={
+                "systemd_unit": self.hierarchies[_MODES[0]].project_slice,
+                "control_group": project_identity["ControlGroup"],
+            },
+            counters=read_resource_counters(
+                project_identity["ControlGroup"],
+                cgroup_root=self.cgroup_root,
+            ),
+        )
+        modes = {}
+        for mode, hierarchy in self.hierarchies.items():
+            identity = hierarchy._identities["mode"]
+            modes[mode] = build_resource_evidence(
+                binding=self.binding,
+                scope="mode",
+                identity={
+                    "systemd_unit": hierarchy.mode_slice,
+                    "control_group": identity["ControlGroup"],
+                    "mode": mode,
+                },
+                counters=read_resource_counters(
+                    identity["ControlGroup"],
+                    cgroup_root=self.cgroup_root,
+                ),
+            )
+        return {"project": project, "modes": modes}
+
+    def cleanup(self):
+        results = {}
+        modes = list(reversed(_MODES))
+        for mode in modes:
+            hierarchy = self.hierarchies.get(mode)
+            if hierarchy is None:
+                continue
+            results[mode] = hierarchy.cleanup(
+                include_project=(mode == modes[-1])
+            )
+        complete = all(
+            result.get("cleanup_complete") is True
+            for result in results.values()
+        )
+        self._prepared = False
+        return {
+            "cleanup_attempted": bool(results),
+            "cleanup_complete": complete,
+            "mode_cleanup": results,
+        }
+
+
+class ResourceUnitMonitor:
+    """Capture cgroup evidence while a short-lived transient unit exists."""
+
+    def __init__(
+        self,
+        hierarchy,
+        unit,
+        *,
+        scope,
+        evaluator=False,
+        discovery_timeout_seconds=10.0,
+        sample_interval_seconds=0.25,
+    ):
+        if scope not in {"control_plane", "workload", "evaluator"}:
+            raise ResourceEnvelopeError("resource monitor scope is invalid")
+        self.hierarchy = hierarchy
+        self.unit = unit
+        self.scope = scope
+        self.evaluator = bool(evaluator)
+        self.discovery_timeout_seconds = float(discovery_timeout_seconds)
+        self.sample_interval_seconds = float(sample_interval_seconds)
+        self._stop = threading.Event()
+        self._thread = None
+        self._discovery_complete = threading.Event()
+        self._identity = None
+        self._counters = None
+        self._last_error = None
+        self._ack_path = _resource_monitor_ack_path(unit)
+
+    def start(self):
+        if self._thread is not None:
+            raise ResourceEnvelopeError("resource monitor already started")
+        self._ack_path.unlink(missing_ok=True)
+        self._thread = threading.Thread(
+            target=self._observe,
+            name=f"resource-monitor-{self.unit}",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def finish(self, *, binding, timed_out=False, cleanup=None):
+        if self._thread is None:
+            raise ResourceEnvelopeError("resource monitor was not started")
+        self._discovery_complete.wait(self.discovery_timeout_seconds)
+        self._stop.set()
+        self._thread.join(timeout=max(self.sample_interval_seconds + 1.0, 2.0))
+        if self._thread.is_alive():
+            raise ResourceEnvelopeUnavailable("resource monitor did not stop")
+        if self._identity is None or self._counters is None:
+            if self._last_error is not None:
+                raise ResourceEnvelopeUnavailable(
+                    f"transient resource unit was not observable: {self.unit}"
+                ) from self._last_error
+            raise ResourceEnvelopeUnavailable(
+                f"transient resource unit was not observable: {self.unit}"
+            )
+        try:
+            return build_resource_evidence(
+                binding=binding,
+                scope=self.scope,
+                identity={
+                    "systemd_unit": self.unit,
+                    "control_group": self._identity["ControlGroup"],
+                    "hierarchy": self.hierarchy.identity(),
+                },
+                counters=self._counters,
+                timed_out=timed_out,
+                cleanup=cleanup,
+            )
+        finally:
+            self._ack_path.unlink(missing_ok=True)
+
+    def cancel(self):
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=max(self.sample_interval_seconds + 1.0, 2.0))
+        self._ack_path.unlink(missing_ok=True)
+
+    def _observe(self):
+        try:
+            deadline = time.monotonic() + self.discovery_timeout_seconds
+            while not self._stop.is_set() and time.monotonic() < deadline:
+                try:
+                    if self.scope == "control_plane":
+                        identity = self.hierarchy.verify_control_plane()
+                    else:
+                        identity = self.hierarchy.verify_leaf(
+                            self.unit,
+                            evaluator=self.evaluator,
+                        )
+                    self._identity = identity
+                    break
+                except ResourceEnvelopeError as exc:
+                    self._last_error = exc
+                    self._stop.wait(0.05)
+        finally:
+            self._discovery_complete.set()
+        while self._identity is not None and not self._stop.is_set():
+            self._sample()
+            self._stop.wait(self.sample_interval_seconds)
+        if self._identity is not None:
+            self._sample()
+
+    def _sample(self):
+        counters = read_resource_counters(
+            self._identity["ControlGroup"],
+            cgroup_root=self.hierarchy.cgroup_root,
+        )
+        if _resource_counters_observed(counters):
+            self._counters = counters
+            _publish_resource_monitor_ack(self._ack_path)
+
+
+def _resource_monitor_ack_path(unit):
+    if not isinstance(unit, str) or not unit.endswith(".service"):
+        raise ResourceEnvelopeError("resource monitor unit is invalid")
+    root = Path("/tmp") / f"agentteam-resource-monitor-{os.getuid()}"
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = root.lstat()
+    if root.is_symlink() or not root.is_dir() or metadata.st_uid != os.getuid():
+        raise ResourceEnvelopeUnavailable("resource monitor directory is unsafe")
+    os.chmod(root, 0o700)
+    digest = hashlib.sha256(unit.encode("utf-8")).hexdigest()
+    return root / f"{digest}.ack"
+
+
+def _publish_resource_monitor_ack(path):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        if not _valid_resource_monitor_ack(path):
+            raise ResourceEnvelopeUnavailable(
+                "resource monitor acknowledgement is unsafe"
+            )
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _valid_resource_monitor_ack(path):
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and stat.S_IMODE(metadata.st_mode) == 0o600
+    )
+
+
+def _resource_wrapped_command(command, *, unit):
+    return [
+        sys.executable,
+        "-B",
+        str(Path(__file__).resolve()),
+        "_acknowledged_exec",
+        str(_resource_monitor_ack_path(unit)),
+        "--",
+        *list(command),
+    ]
+
+
+def _acknowledged_exec(argv):
+    if len(argv) < 2:
+        return 2
+    command = list(argv)
+    ack_path = Path(command.pop(0))
+    if command[:1] == ["--"]:
+        command.pop(0)
+    if not command:
+        return 2
+    returncode = subprocess.run(command, check=False).returncode
+    deadline = time.monotonic() + RESOURCE_MONITOR_ACK_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if _valid_resource_monitor_ack(ack_path):
+            return returncode
+        time.sleep(0.05)
+    return 125
+
+
 def read_resource_counters(control_group, *, cgroup_root="/sys/fs/cgroup"):
     """Read bounded cgroup-v2 counters for one complete descendant tree."""
 
@@ -508,6 +905,18 @@ def read_resource_counters(control_group, *, cgroup_root="/sys/fs/cgroup"):
         "cgroup": _read_key_value_file(root / "cgroup.events"),
         "observed_at": _utc_now(),
     }
+
+
+def _resource_counters_observed(counters):
+    return any(
+        bool(value)
+        for value in (
+            counters.get("cpu"),
+            (counters.get("memory") or {}).get("events"),
+            (counters.get("pids") or {}).get("events"),
+            counters.get("cgroup"),
+        )
+    )
 
 
 def classify_resource_exhaustion(counters, *, timed_out=False):
@@ -715,3 +1124,9 @@ def _utc_now():
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["_acknowledged_exec"]:
+        raise SystemExit(_acknowledged_exec(sys.argv[2:]))
+    raise SystemExit(2)

@@ -87,7 +87,7 @@ class ModelInvocationResourceTests(unittest.TestCase):
                 "--property=CPUQuota=400%",
                 "--property=MemoryHigh=8589934592",
                 "--property=MemoryMax=12884901888",
-                "--property=TasksMax=256",
+                "--property=TasksMax=384",
                 "--property=MemorySwapMax=0",
             ),
         )
@@ -114,6 +114,10 @@ class ModelInvocationResourceTests(unittest.TestCase):
                 "resource_envelope_required": True,
                 "resource_project_id": "PILOT-PROJECT-1",
                 "resource_envelope_binding": binding,
+                "resource_hierarchy_reference": {
+                    "schema_version": "phase3_resource_hierarchy_reference.v1",
+                    "binding_sha256": "a" * 64,
+                },
             },
         }
         context = invocation_context_from_message(message, model="gpt-test")
@@ -183,6 +187,10 @@ class ModelInvocationResourceTests(unittest.TestCase):
                 "resource_envelope_binding": (
                     approved_phase3_resource_envelope_binding()
                 ),
+                "resource_hierarchy_reference": {
+                    "schema_version": "phase3_resource_hierarchy_reference.v1",
+                    "binding_sha256": "a" * 64,
+                },
             },
         }
         with tempfile.TemporaryDirectory() as tmp:

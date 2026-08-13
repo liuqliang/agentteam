@@ -83,6 +83,8 @@ from agentteam_runtime.experiment_modes import (
     _complete_mode_execution,
     _publish_candidate_patch,
     _publish_mode_order_authority,
+    _common_mode_contract,
+    _publish_resource_evidence_index,
     _register_provider_launch,
     AgentTeamDirectModeAdapter,
     AgentTeamFullModeAdapter,
@@ -170,6 +172,10 @@ from agentteam_runtime.model_invocation import (
     ModelInvocationUnavailable,
     ProviderExecution,
     invocation_context_from_message,
+)
+from agentteam_runtime.resource_envelope import (
+    approved_phase3_resource_envelope_binding,
+    build_resource_evidence,
 )
 from agentteam_runtime.m0_runtime import (
     _with_codex_reasoning_profile,
@@ -6696,6 +6702,106 @@ class ExperimentResultBundleTests(unittest.TestCase):
 
 
 class ExperimentModeAdapterTests(unittest.TestCase):
+    def test_resource_evidence_index_requires_every_registered_invocation(self):
+        binding = approved_phase3_resource_envelope_binding()
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp).resolve()
+            authority_root = run_dir / "authority"
+            invocation_root = authority_root / "lifecycle"
+            resource_path = (
+                invocation_root
+                / "model_invocations"
+                / "INV-RESOURCE-1"
+                / "resource.json"
+            )
+            resource_path.parent.mkdir(parents=True)
+            evaluator_path = run_dir / "artifacts" / "evaluation.json"
+            evaluator_path.parent.mkdir(parents=True)
+            workload = build_resource_evidence(
+                binding=binding,
+                scope="workload",
+                identity={"control_group": "/project/mode/workload"},
+                counters={"cpu": {}, "memory": {}, "pids": {}, "cgroup": {}},
+            )
+            evaluator = build_resource_evidence(
+                binding=binding,
+                scope="evaluator",
+                identity={"control_group": "/project/mode/evaluator"},
+                counters={"cpu": {}, "memory": {}, "pids": {}, "cgroup": {}},
+            )
+            publish_immutable_json(resource_path, workload)
+            publish_immutable_json(
+                Path(str(evaluator_path) + ".resources.json"),
+                evaluator,
+            )
+            request = Mock(
+                resource_envelope_binding=binding,
+                authority_root=str(authority_root),
+                run_dir=str(run_dir),
+                run_manifest={
+                    "experiment_run_id": "RUN-RESOURCE-INDEX",
+                    "mode": "single_codex",
+                },
+            )
+            manifest = {
+                "invocation_sets": [
+                    {
+                        "lifecycle_authority_root": str(invocation_root),
+                        "invocation_ids": ["INV-RESOURCE-1"],
+                    }
+                ]
+            }
+            with patch(
+                "agentteam_runtime.experiment_modes."
+                "load_model_invocation_set_reference",
+                return_value=manifest,
+            ):
+                reference = _publish_resource_evidence_index(
+                    request,
+                    {"adapter_output": {}},
+                    {"sha256": "a" * 64},
+                    evaluator_path,
+                )
+                index = json.loads(
+                    (run_dir / reference["resource_evidence_relative_path"])
+                    .read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    [item["scope"] for item in index["records"]],
+                    ["workload", "evaluator"],
+                )
+                resource_path.unlink()
+                (run_dir / reference["resource_evidence_relative_path"]).unlink()
+                with self.assertRaisesRegex(
+                    ExperimentModeError,
+                    "resource evidence is unavailable",
+                ):
+                    _publish_resource_evidence_index(
+                        request,
+                        {"adapter_output": {}},
+                        {"sha256": "a" * 64},
+                        evaluator_path,
+                    )
+
+    def test_resource_sidecar_is_bound_into_common_mode_contract(self):
+        protocol = _protocol()
+        legacy = _common_mode_contract(protocol, "a" * 64)
+        binding = approved_phase3_resource_envelope_binding()
+        bounded = _common_mode_contract(
+            protocol,
+            "a" * 64,
+            resource_envelope_binding=binding,
+        )
+        self.assertNotIn("resource_envelope_sha256", legacy)
+        self.assertEqual(
+            bounded["resource_envelope_sha256"],
+            canonical_json_sha256(binding),
+        )
+        self.assertNotEqual(
+            canonical_json_sha256(legacy),
+            canonical_json_sha256(bounded),
+        )
+
     def test_candidate_patch_is_retained_without_mutating_repository_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "runs" / "candidate-patch-run"
@@ -7285,6 +7391,53 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                         runtime_release_identity=_release(),
                     ),
                 )
+
+    def test_execute_bound_resource_binding_requires_pilot_owner_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "source").mkdir()
+            repository = _fixture_repository(root / "source")
+            evaluator = root / "evaluator.py"
+            evaluator.write_text(
+                "#!/usr/bin/python3\nraise SystemExit(0)\n",
+                encoding="utf-8",
+            )
+            evaluator.chmod(0o700)
+            protocol = copy.deepcopy(_protocol())
+            protocol["repository"] = repository["repository"]
+            protocol["environment"]["cpu_limit"] = 4
+            protocol["environment"]["memory_limit_bytes"] = 12 * 1024**3
+            protocol["evaluator"]["artifact_sha256"] = hashlib.sha256(
+                evaluator.read_bytes()
+            ).hexdigest()
+            allocation = allocate_experiment_run(
+                root / "experiment",
+                protocol,
+                mode="single_codex",
+                repetition_index=0,
+                stable_request_key="resource-owner-required",
+                runtime_release=_release(),
+                bound_at="2026-08-13T00:00:00Z",
+            )
+            with self.assertRaisesRegex(
+                ExperimentModeError,
+                "pilot-owner hierarchy reference",
+            ):
+                execute_bound_experiment_mode(
+                    allocation,
+                    sandbox_configuration={},
+                    adapter=SingleCodexModeAdapter(),
+                    common_finalizer=ExperimentCommonFinalizer(
+                        evaluator_artifact=evaluator,
+                        runtime_release_identity=_release(),
+                    ),
+                    resource_envelope_binding=(
+                        approved_phase3_resource_envelope_binding()
+                    ),
+                )
+            self.assertFalse(
+                (Path(allocation["run_dir"]) / "repository").exists()
+            )
 
     def test_execute_bound_accepts_allocation_authority(self):
         class FakeGatedRunner:

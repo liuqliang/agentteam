@@ -13896,22 +13896,65 @@ def _run_frozen_taskpack(
     if feishu_signing_secret_env:
         runtime_args.extend(["--feishu-signing-secret-env", feishu_signing_secret_env])
     command = [sys.executable, "-m", "agentteam_runtime.cli", *runtime_args]
+    resource_hierarchy = None
+    if (
+        experiment_runtime_context is not None
+        and experiment_runtime_context.get("resource_envelope_binding")
+        is not None
+    ):
+        from .resource_envelope import (
+            ResourceUnitMonitor,
+            SystemdResourceHierarchy,
+        )
+
+        resource_hierarchy = SystemdResourceHierarchy(
+            experiment_runtime_context["resource_envelope_binding"],
+            run_id=experiment_runtime_context["resource_project_id"],
+            mode=experiment_runtime_context["mode"],
+            owner_reference=experiment_runtime_context[
+                "resource_hierarchy_reference"
+            ],
+        )
+        resource_hierarchy.prepare(check_host=False)
+        command = resource_hierarchy.control_plane_command(command)
+        resource_monitor = ResourceUnitMonitor(
+            resource_hierarchy,
+            resource_hierarchy.control_scope,
+            scope="control_plane",
+        ).start()
+    else:
+        resource_monitor = None
     env = _runtime_subprocess_env(
         inherit_launcher_selection=inherit_launcher_selection,
     )
-    completed = _run_runtime_command_with_progress(
-        command,
-        env=env,
-        run_dir=run_paths["run_dir"],
-        progress=progress,
-        progress_interval_seconds=progress_interval_seconds,
-        progress_stream=sys.stderr,
-    )
+    try:
+        completed = _run_runtime_command_with_progress(
+            command,
+            env=env,
+            run_dir=run_paths["run_dir"],
+            progress=progress,
+            progress_interval_seconds=progress_interval_seconds,
+            progress_stream=sys.stderr,
+        )
+    except Exception:
+        if resource_monitor is not None:
+            resource_monitor.cancel()
+            resource_hierarchy.stop_transient_unit(
+                resource_hierarchy.control_scope
+            )
+        raise
+    control_plane_resource_evidence = None
+    if resource_monitor is not None:
+        control_plane_resource_evidence = resource_monitor.finish(
+            binding=experiment_runtime_context["resource_envelope_binding"],
+            timed_out=False,
+        )
     if experiment_runtime_context is None:
         return completed
     return _experiment_runtime_launcher_result(
         completed,
         run_dir=run_paths["run_dir"],
+        control_plane_resource_evidence=control_plane_resource_evidence,
     )
 
 
@@ -14024,7 +14067,12 @@ def _run_controller_only_taskpack(
     )
 
 
-def _experiment_runtime_launcher_result(completed, *, run_dir):
+def _experiment_runtime_launcher_result(
+    completed,
+    *,
+    run_dir,
+    control_plane_resource_evidence=None,
+):
     returncode = getattr(completed, "returncode", None)
     stdout = str(getattr(completed, "stdout", "") or "")
     stderr = str(getattr(completed, "stderr", "") or "")
@@ -14059,6 +14107,9 @@ def _experiment_runtime_launcher_result(completed, *, run_dir):
             "scheduler_status": scheduler_status,
             "stdout": stdout[-4000:],
             "stderr": stderr[-4000:],
+            "control_plane_resource_evidence": (
+                control_plane_resource_evidence
+            ),
         },
         "runtime_run_dir": str(Path(run_dir).resolve()),
     }
