@@ -72,6 +72,9 @@ EXECUTION_AUTHORITY_SCHEMA_VERSION = "phase3_execution_authority.v1"
 EXECUTION_AUTHORITY_RECEIPT_SCHEMA_VERSION = (
     "phase3_execution_authority_receipt.v1"
 )
+FINAL_PROVIDER_FREE_RECEIPT_SCHEMA_VERSION = (
+    "phase3_final_provider_free_receipt.v1"
+)
 PILOT_PREFLIGHT_DECISION_ID = "DEC-P3B-provider-free-preparation"
 READINESS_BINDING = {
     "gate_id": "P3-READY",
@@ -127,9 +130,21 @@ APPROVED_SELECTION_AUTHORITY_SHA256 = (
 APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256 = (
     "f60c537a478aa43f694134b1e22ccc31479d8534aad4683473ec532849bea178"
 )
-# Set only after the implementation commit exists, avoiding a self-referential
-# release-commit binding. Publication remains closed while this is unset.
-APPROVED_EXECUTION_AUTHORITY_SHA256 = None
+APPROVED_EXECUTION_AUTHORITY_SHA256 = (
+    "d28f853c02655f92f52b2733476f78acc579c67131b8544eea612fda7aae0748"
+)
+APPROVED_INSTANCE_MATERIALIZATION_SHA256 = (
+    "748a39478eedb79554041ffbe327102063553d0cf04fb65c56407f1bd11adf51"
+)
+APPROVED_PILOT_CONTRACT_SHA256 = (
+    "8d597abb61fab3e0b551d6e1a94c8f833f36714396cdf805aa49ab818881e46b"
+)
+APPROVED_FINAL_PREFLIGHT_RECEIPT_SHA256 = (
+    "557c1f41a0b4890b3aba0c071e93dc6ddd7391b8c8efa8829ea74ce9aeff64dd"
+)
+APPROVED_FINAL_PROVIDER_FREE_RECEIPT_SHA256 = (
+    "95de138f21e361a017ed9b6c763a116314fb8bf8b20a6c577d072e23d80376e9"
+)
 FINAL_PREREGISTRATION_MISSING_AUTHORITIES = (
     "runtime.agentteam_release_commit",
     "runtime.codex_cli_version",
@@ -179,6 +194,28 @@ EXECUTION_POLICY_NAMES = (
     "termination",
     "shared_dependency_cache",
 )
+APPROVED_PHASE3_MODE_ORDER = (
+    ("single_codex", "agentteam_direct", "agentteam_full"),
+    ("agentteam_direct", "agentteam_full", "single_codex"),
+    ("agentteam_full", "single_codex", "agentteam_direct"),
+)
+APPROVED_PHASE3_RETRY_POLICY = {
+    "provider_retry_limit": 1,
+    "retryable_failures": [
+        "provider_transport_error",
+        "provider_rate_limit",
+    ],
+    "budget_accounting": (
+        "all_reported_usage_and_wall_time_count_toward_instance_budget"
+    ),
+}
+APPROVED_PHASE3_ABORT_CONDITIONS = {
+    "usage_coverage_below_percent": 100,
+    "cross_mode_isolation_violation": True,
+    "gold_visibility_violation": True,
+    "contract_digest_mismatch": True,
+    "budget_ceiling_reached": True,
+}
 EXPECTED_SELECTION_PREVIEW = (
     "psf__requests_v2.4.0_v2.4.1",
     "dask__dask_2023.3.2_2023.4.0",
@@ -1503,6 +1540,11 @@ def validate_phase3_execution_authority_receipt(receipt, *, authority=None):
         or value["provider_free"] is not True
         or not isinstance(value["authority_sha256"], str)
         or _SHA256.fullmatch(value["authority_sha256"]) is None
+        or (
+            APPROVED_EXECUTION_AUTHORITY_SHA256 is not None
+            and value["authority_sha256"]
+            != APPROVED_EXECUTION_AUTHORITY_SHA256
+        )
         or re.fullmatch(r"[0-9a-f]{40}", value["agentteam_release_commit"])
         is None
         or value["candidate_bundle_sha256"]
@@ -3041,6 +3083,414 @@ def provider_free_preflight_receipt_bytes(receipt):
     return canonical_json_bytes(
         validate_phase3_provider_free_preflight_receipt(receipt)
     )
+
+
+def publish_phase3_final_provider_free_bundle(
+    authority_root,
+    *,
+    candidates,
+    execution_authority,
+    selection_authority,
+    instance_materialization,
+    pilot_contract,
+    resource_preflight_receipt,
+    preflight_receipt,
+):
+    """Publish the complete P3B-02/P3B-03 chain as a digest-bound set."""
+
+    candidate = validate_phase3_instance_authority_candidates(candidates)
+    execution = validate_phase3_execution_authority(
+        execution_authority,
+        candidates=candidate,
+    )
+    if not _verify_local_git_commit(
+        execution["runtime"]["agentteam_release_commit"]
+    ):
+        raise Phase3PreparationError(
+            "execution authority release commit is unavailable"
+        )
+    selection = validate_phase3_selection_authority(selection_authority)
+    materialization = validate_phase3_instance_materialization(
+        instance_materialization,
+        selection_authority=selection,
+    )
+    if materialization["materialization_sha256"] != (
+        APPROVED_INSTANCE_MATERIALIZATION_SHA256
+    ):
+        raise Phase3PreparationError(
+            "instance materialization does not match the approved authority"
+        )
+    profile = phase3_execution_profile_from_authority(
+        execution,
+        candidates=candidate,
+    )
+    for instance_id in materialization["ordered_instance_ids"]:
+        visible = materialization["visible_inputs_by_instance"][instance_id]
+        expected_task = candidate["instances_by_id"][instance_id]["worker_visible"]
+        if (
+            visible["repository"] != expected_task["repository"]
+            or visible["task"] != expected_task["task"]
+            or {
+                "runtime": visible["runtime"],
+                "model": visible["model"],
+                "execution": visible["execution"],
+            }
+            != profile
+        ):
+            raise Phase3PreparationError(
+                "instance materialization does not bind candidate and execution authorities"
+            )
+    try:
+        pilot = validate_phase3_pilot_contract(
+            pilot_contract,
+            selection=selection["selection"],
+            preregistrations_by_instance=materialization[
+                "preregistrations_by_instance"
+            ],
+        )
+    except Phase3PilotError as exc:
+        raise Phase3PreparationError(str(exc)) from exc
+    if pilot["contract_sha256"] != APPROVED_PILOT_CONTRACT_SHA256:
+        raise Phase3PreparationError(
+            "pilot contract does not match the approved authority"
+        )
+    try:
+        resource = validate_phase3_resource_preflight_receipt(
+            resource_preflight_receipt
+        )
+    except ResourceEnvelopeError as exc:
+        raise Phase3PreparationError("resource preflight receipt is invalid") from exc
+    preflight = validate_phase3_provider_free_preflight_receipt(
+        preflight_receipt,
+        pilot_contract=pilot,
+        selection_authority=selection,
+        instance_materialization=materialization,
+        resource_preflight_receipt=resource,
+    )
+    if preflight["receipt_sha256"] != APPROVED_FINAL_PREFLIGHT_RECEIPT_SHA256:
+        raise Phase3PreparationError(
+            "provider-free preflight does not match the approved receipt"
+        )
+    root = Path(authority_root)
+    values = {
+        "instance-materialization.json": materialization,
+        "pilot-contract.json": pilot,
+        "provider-free-preflight.json": preflight,
+    }
+    publications = {
+        filename: publish_immutable_json(
+            root / filename,
+            value,
+            label=f"Phase 3 final {filename}",
+        )
+        for filename, value in values.items()
+    }
+    receipt = {
+        "schema_version": FINAL_PROVIDER_FREE_RECEIPT_SCHEMA_VERSION,
+        "status": "passed",
+        "provider_free": True,
+        "candidate_bundle_sha256": candidate["bundle_sha256"],
+        "execution_authority_sha256": execution["authority_sha256"],
+        "selection_authority_sha256": selection[
+            "selection_authority_sha256"
+        ],
+        "materialization_sha256": materialization["materialization_sha256"],
+        "pilot_contract_sha256": pilot["contract_sha256"],
+        "resource_preflight_receipt_sha256": resource["receipt_sha256"],
+        "provider_free_preflight_receipt_sha256": preflight["receipt_sha256"],
+        "ordered_instance_ids": materialization["ordered_instance_ids"],
+        "provider_calls": 0,
+        "scored_mode_executions": 0,
+        "live_authorization": "not_authorized",
+    }
+    receipt["receipt_sha256"] = canonical_json_sha256(receipt)
+    validate_phase3_final_provider_free_receipt(
+        receipt,
+        candidates=candidate,
+        execution_authority=execution,
+        selection_authority=selection,
+        instance_materialization=materialization,
+        pilot_contract=pilot,
+        resource_preflight_receipt=resource,
+        preflight_receipt=preflight,
+    )
+    publications["receipt.json"] = publish_immutable_json(
+        root / "receipt.json",
+        receipt,
+        label="Phase 3 final provider-free receipt",
+    )
+    return {"publications": publications, "receipt": receipt}
+
+
+def build_phase3_approved_final_provider_free_bundle(
+    *,
+    candidates,
+    execution_authority,
+    selection_authority,
+    resource_preflight_receipt,
+    research_authority_path=None,
+):
+    """Mechanically build the complete approved provider-free authority chain."""
+
+    candidate = validate_phase3_instance_authority_candidates(candidates)
+    execution = validate_phase3_execution_authority(
+        execution_authority,
+        candidates=candidate,
+    )
+    if not _verify_local_git_commit(
+        execution["runtime"]["agentteam_release_commit"]
+    ):
+        raise Phase3PreparationError(
+            "execution authority release commit is unavailable"
+        )
+    selection = validate_phase3_selection_authority(selection_authority)
+    resource = validate_phase3_resource_preflight_receipt(
+        resource_preflight_receipt
+    )
+    research_path = Path(
+        research_authority_path
+        or (
+            Path(__file__).resolve().parents[2]
+            / "research"
+            / "agentteam_research_positioning.md"
+        )
+    )
+    research_sha256 = _file_sha256(research_path)
+    decisions = approved_phase3_pilot_decisions()
+    approved_budget = decisions["execution"]["per_instance_budget"]
+    materialization = materialize_phase3_instance_authorities(
+        selection_authority=selection,
+        decisions=decisions,
+        task_inputs_by_instance={
+            instance_id: candidate["instances_by_id"][instance_id][
+                "worker_visible"
+            ]
+            for instance_id in candidate["ordered_instance_ids"]
+        },
+        execution_profile=phase3_execution_profile_from_authority(
+            execution,
+            candidates=candidate,
+        ),
+        shared_budget={
+            "max_total_tokens": approved_budget["max_total_tokens"],
+            "max_wall_time_seconds": approved_budget["max_wall_time_seconds"],
+            "max_operator_interactions": 0,
+            "allowed_operator_input_types": ["decision_escalation"],
+        },
+        research_authority_sha256=research_sha256,
+        mode_order=[list(order) for order in APPROVED_PHASE3_MODE_ORDER],
+    )
+    pilot = build_phase3_aggregate_pilot_contract(
+        selection_authority=selection,
+        instance_materialization=materialization,
+        retry_policy=APPROVED_PHASE3_RETRY_POLICY,
+        abort_conditions=APPROVED_PHASE3_ABORT_CONDITIONS,
+    )
+    preflight = build_phase3_provider_free_preflight_receipt(
+        pilot_contract=pilot,
+        selection_authority=selection,
+        instance_materialization=materialization,
+        resource_preflight_receipt=resource,
+    )
+    if (
+        materialization["materialization_sha256"]
+        != APPROVED_INSTANCE_MATERIALIZATION_SHA256
+        or pilot["contract_sha256"] != APPROVED_PILOT_CONTRACT_SHA256
+        or preflight["receipt_sha256"]
+        != APPROVED_FINAL_PREFLIGHT_RECEIPT_SHA256
+    ):
+        raise Phase3PreparationError(
+            "approved final provider-free authority chain changed"
+        )
+    return {
+        "instance_materialization": materialization,
+        "pilot_contract": pilot,
+        "preflight_receipt": preflight,
+    }
+
+
+def validate_phase3_final_provider_free_receipt(
+    receipt,
+    *,
+    candidates=None,
+    execution_authority=None,
+    selection_authority=None,
+    instance_materialization=None,
+    pilot_contract=None,
+    resource_preflight_receipt=None,
+    preflight_receipt=None,
+):
+    value = _json_object_snapshot(receipt)
+    expected = {
+        "schema_version",
+        "status",
+        "provider_free",
+        "candidate_bundle_sha256",
+        "execution_authority_sha256",
+        "selection_authority_sha256",
+        "materialization_sha256",
+        "pilot_contract_sha256",
+        "resource_preflight_receipt_sha256",
+        "provider_free_preflight_receipt_sha256",
+        "ordered_instance_ids",
+        "provider_calls",
+        "scored_mode_executions",
+        "live_authorization",
+        "receipt_sha256",
+    }
+    if value is None or set(value) != expected:
+        raise Phase3PreparationError("final provider-free receipt fields are invalid")
+    body = dict(value)
+    digest = body.pop("receipt_sha256")
+    sha_fields = expected - {
+        "schema_version",
+        "status",
+        "provider_free",
+        "ordered_instance_ids",
+        "provider_calls",
+        "scored_mode_executions",
+        "live_authorization",
+        "receipt_sha256",
+    }
+    if (
+        value["schema_version"] != FINAL_PROVIDER_FREE_RECEIPT_SCHEMA_VERSION
+        or value["status"] != "passed"
+        or value["provider_free"] is not True
+        or any(
+            not isinstance(value[field], str)
+            or _SHA256.fullmatch(value[field]) is None
+            for field in sha_fields
+        )
+        or value["candidate_bundle_sha256"]
+        != APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256
+        or value["execution_authority_sha256"]
+        != APPROVED_EXECUTION_AUTHORITY_SHA256
+        or value["selection_authority_sha256"]
+        != APPROVED_SELECTION_AUTHORITY_SHA256
+        or value["materialization_sha256"]
+        != APPROVED_INSTANCE_MATERIALIZATION_SHA256
+        or value["pilot_contract_sha256"] != APPROVED_PILOT_CONTRACT_SHA256
+        or value["provider_free_preflight_receipt_sha256"]
+        != APPROVED_FINAL_PREFLIGHT_RECEIPT_SHA256
+        or value["ordered_instance_ids"] != list(EXPECTED_SELECTION_PREVIEW)
+        or value["provider_calls"] != 0
+        or isinstance(value["provider_calls"], bool)
+        or value["scored_mode_executions"] != 0
+        or isinstance(value["scored_mode_executions"], bool)
+        or value["live_authorization"] != "not_authorized"
+        or digest != canonical_json_sha256(body)
+        or digest != APPROVED_FINAL_PROVIDER_FREE_RECEIPT_SHA256
+    ):
+        raise Phase3PreparationError("final provider-free receipt is invalid")
+    bindings = (
+        (candidates, "candidate_bundle_sha256", "bundle_sha256"),
+        (execution_authority, "execution_authority_sha256", "authority_sha256"),
+        (
+            selection_authority,
+            "selection_authority_sha256",
+            "selection_authority_sha256",
+        ),
+        (instance_materialization, "materialization_sha256", "materialization_sha256"),
+        (pilot_contract, "pilot_contract_sha256", "contract_sha256"),
+        (
+            resource_preflight_receipt,
+            "resource_preflight_receipt_sha256",
+            "receipt_sha256",
+        ),
+        (
+            preflight_receipt,
+            "provider_free_preflight_receipt_sha256",
+            "receipt_sha256",
+        ),
+    )
+    for source, receipt_field, source_field in bindings:
+        if source is not None and value[receipt_field] != source[source_field]:
+            raise Phase3PreparationError(
+                f"final provider-free receipt does not bind {receipt_field}"
+            )
+    return value
+
+
+def load_phase3_final_provider_free_bundle(
+    authority_root,
+    *,
+    candidates,
+    execution_authority,
+    selection_authority,
+    resource_preflight_receipt,
+):
+    """Load and replay the complete persisted P3B-02/P3B-03 chain."""
+
+    root = Path(authority_root)
+    if root.is_symlink() or not root.is_dir():
+        raise Phase3PreparationError("final provider-free root is unavailable")
+    values = {}
+    for name, filename in (
+        ("instance_materialization", "instance-materialization.json"),
+        ("pilot_contract", "pilot-contract.json"),
+        ("preflight_receipt", "provider-free-preflight.json"),
+        ("receipt", "receipt.json"),
+    ):
+        path = root / filename
+        if path.is_symlink() or not path.is_file():
+            raise Phase3PreparationError(
+                f"final provider-free {name} is unavailable"
+            )
+        try:
+            values[name] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise Phase3PreparationError(
+                f"final provider-free {name} is unavailable"
+            ) from exc
+    candidate = validate_phase3_instance_authority_candidates(candidates)
+    execution = validate_phase3_execution_authority(
+        execution_authority,
+        candidates=candidate,
+    )
+    if not _verify_local_git_commit(
+        execution["runtime"]["agentteam_release_commit"]
+    ):
+        raise Phase3PreparationError(
+            "execution authority release commit is unavailable"
+        )
+    selection = validate_phase3_selection_authority(selection_authority)
+    materialization = validate_phase3_instance_materialization(
+        values["instance_materialization"],
+        selection_authority=selection,
+    )
+    try:
+        pilot = validate_phase3_pilot_contract(
+            values["pilot_contract"],
+            selection=selection["selection"],
+            preregistrations_by_instance=materialization[
+                "preregistrations_by_instance"
+            ],
+        )
+        resource = validate_phase3_resource_preflight_receipt(
+            resource_preflight_receipt
+        )
+    except (Phase3PilotError, ResourceEnvelopeError) as exc:
+        raise Phase3PreparationError(
+            "final provider-free source authority is invalid"
+        ) from exc
+    preflight = validate_phase3_provider_free_preflight_receipt(
+        values["preflight_receipt"],
+        pilot_contract=pilot,
+        selection_authority=selection,
+        instance_materialization=materialization,
+        resource_preflight_receipt=resource,
+    )
+    validate_phase3_final_provider_free_receipt(
+        values["receipt"],
+        candidates=candidate,
+        execution_authority=execution,
+        selection_authority=selection,
+        instance_materialization=materialization,
+        pilot_contract=pilot,
+        resource_preflight_receipt=resource,
+        preflight_receipt=preflight,
+    )
+    return values
 
 
 def _preflight_check(evidence):

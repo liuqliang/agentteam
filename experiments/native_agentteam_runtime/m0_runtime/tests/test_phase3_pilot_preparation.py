@@ -20,6 +20,7 @@ from agentteam_runtime.phase3_pilot_preparation import (
     Phase3PreparationError,
     approved_phase3_pilot_decisions,
     build_phase3_aggregate_pilot_contract,
+    build_phase3_approved_final_provider_free_bundle,
     build_phase3_execution_authority,
     build_phase3_instance_authority_candidates,
     build_phase3_instance_direct_taskpack,
@@ -32,12 +33,14 @@ from agentteam_runtime.phase3_pilot_preparation import (
     fixed_dataset_binding,
     load_phase3_instance_authority_candidates,
     load_phase3_execution_authority,
+    load_phase3_final_provider_free_bundle,
     load_phase3_selection_freeze_bundle,
     materialize_phase3_instance_authorities,
     prepare_phase3_pilot_selection,
     project_swe_evo_arrow_inventory,
     phase3_execution_profile_from_authority,
     publish_phase3_execution_authority,
+    validate_phase3_final_provider_free_receipt,
     publish_phase3_instance_authority_candidates,
     publish_phase3_selection_freeze_bundle,
     provider_free_preflight_receipt_bytes,
@@ -586,6 +589,176 @@ def _live_authorization(contract, *, decision="approved"):
 
 
 class Phase3PilotPreparationTests(unittest.TestCase):
+    def test_approved_final_builder_reproduces_committed_chain(self):
+        acceptance = (
+            Path(__file__).resolve().parents[2]
+            / "implementation_artifacts"
+            / "acceptance"
+        )
+        candidates = load_phase3_instance_authority_candidates(
+            acceptance / "phase3b-instance-authority-candidates-v9"
+        )["candidates"]
+        execution = load_phase3_execution_authority(
+            acceptance / "phase3b-execution-authority-v10",
+            candidates=candidates,
+        )["authority"]
+        selection = load_phase3_selection_freeze_bundle(
+            acceptance / "phase3b-selection-freeze-v8"
+        )["selection_authority"]
+        resource = json.loads(
+            (
+                acceptance
+                / "phase3b-provider-free-resource-preflight-v7"
+                / "receipt.json"
+            ).read_text(encoding="utf-8")
+        )
+        built = build_phase3_approved_final_provider_free_bundle(
+            candidates=candidates,
+            execution_authority=execution,
+            selection_authority=selection,
+            resource_preflight_receipt=resource,
+        )
+        committed = load_phase3_final_provider_free_bundle(
+            acceptance / "phase3b-final-provider-free-v11",
+            candidates=candidates,
+            execution_authority=execution,
+            selection_authority=selection,
+            resource_preflight_receipt=resource,
+        )
+        self.assertEqual(
+            built["instance_materialization"],
+            committed["instance_materialization"],
+        )
+        self.assertEqual(built["pilot_contract"], committed["pilot_contract"])
+        self.assertEqual(
+            built["preflight_receipt"],
+            committed["preflight_receipt"],
+        )
+
+    def test_committed_final_provider_free_bundle_replays_complete_chain(self):
+        acceptance = (
+            Path(__file__).resolve().parents[2]
+            / "implementation_artifacts"
+            / "acceptance"
+        )
+        candidates = load_phase3_instance_authority_candidates(
+            acceptance / "phase3b-instance-authority-candidates-v9"
+        )["candidates"]
+        execution = load_phase3_execution_authority(
+            acceptance / "phase3b-execution-authority-v10",
+            candidates=candidates,
+        )["authority"]
+        selection = load_phase3_selection_freeze_bundle(
+            acceptance / "phase3b-selection-freeze-v8"
+        )["selection_authority"]
+        resource = json.loads(
+            (
+                acceptance
+                / "phase3b-provider-free-resource-preflight-v7"
+                / "receipt.json"
+            ).read_text(encoding="utf-8")
+        )
+        values = load_phase3_final_provider_free_bundle(
+            acceptance / "phase3b-final-provider-free-v11",
+            candidates=candidates,
+            execution_authority=execution,
+            selection_authority=selection,
+            resource_preflight_receipt=resource,
+        )
+        self.assertEqual(
+            values["receipt"]["receipt_sha256"],
+            "95de138f21e361a017ed9b6c763a116314fb8bf8b20a6c577d072e23d80376e9",
+        )
+        self.assertEqual(
+            values["pilot_contract"]["contract"][
+                "aggregate_budget_ceiling"
+            ],
+            {
+                "maximum_total_tokens": 40500000,
+                "maximum_wall_time_seconds": 48600.0,
+                "max_inflight_model_invocations": 1,
+            },
+        )
+
+    def test_final_provider_free_bundle_rejects_symlinked_root(self):
+        acceptance = (
+            Path(__file__).resolve().parents[2]
+            / "implementation_artifacts"
+            / "acceptance"
+        )
+        candidates = load_phase3_instance_authority_candidates(
+            acceptance / "phase3b-instance-authority-candidates-v9"
+        )["candidates"]
+        execution = load_phase3_execution_authority(
+            acceptance / "phase3b-execution-authority-v10",
+            candidates=candidates,
+        )["authority"]
+        selection = load_phase3_selection_freeze_bundle(
+            acceptance / "phase3b-selection-freeze-v8"
+        )["selection_authority"]
+        resource = json.loads(
+            (
+                acceptance
+                / "phase3b-provider-free-resource-preflight-v7"
+                / "receipt.json"
+            ).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "authority"
+            root.symlink_to(
+                acceptance / "phase3b-final-provider-free-v11",
+                target_is_directory=True,
+            )
+            with self.assertRaisesRegex(
+                Phase3PreparationError,
+                "root is unavailable",
+            ):
+                load_phase3_final_provider_free_bundle(
+                    root,
+                    candidates=candidates,
+                    execution_authority=execution,
+                    selection_authority=selection,
+                    resource_preflight_receipt=resource,
+                )
+
+    def test_final_provider_free_receipt_rejects_rehashed_live_expansion(self):
+        path = (
+            Path(__file__).resolve().parents[2]
+            / "implementation_artifacts"
+            / "acceptance"
+            / "phase3b-final-provider-free-v11"
+            / "receipt.json"
+        )
+        changed = json.loads(path.read_text(encoding="utf-8"))
+        changed["live_authorization"] = "authorized"
+        body = dict(changed)
+        body.pop("receipt_sha256")
+        changed["receipt_sha256"] = canonical_json_sha256(body)
+        with self.assertRaisesRegex(
+            Phase3PreparationError,
+            "receipt is invalid",
+        ):
+            validate_phase3_final_provider_free_receipt(changed)
+
+    def test_final_provider_free_receipt_rejects_rehashed_resource_drift(self):
+        path = (
+            Path(__file__).resolve().parents[2]
+            / "implementation_artifacts"
+            / "acceptance"
+            / "phase3b-final-provider-free-v11"
+            / "receipt.json"
+        )
+        changed = json.loads(path.read_text(encoding="utf-8"))
+        changed["resource_preflight_receipt_sha256"] = "0" * 64
+        body = dict(changed)
+        body.pop("receipt_sha256")
+        changed["receipt_sha256"] = canonical_json_sha256(body)
+        with self.assertRaisesRegex(
+            Phase3PreparationError,
+            "receipt is invalid",
+        ):
+            validate_phase3_final_provider_free_receipt(changed)
+
     def test_execution_authority_derives_complete_preregistration_profile(self):
         candidates = _committed_candidate_bundle()
         authority = build_phase3_execution_authority(
