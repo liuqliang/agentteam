@@ -13,6 +13,7 @@ from unittest.mock import patch
 from agentteam_runtime.phase3_pilot_runner import (
     Phase3PilotRunner,
     Phase3PilotRunnerError,
+    Phase3ProductionExecutor,
     build_phase3_experiment_protocol,
     materialize_phase3_runtime_taskpack,
 )
@@ -546,6 +547,18 @@ class Phase3PilotRunnerTests(unittest.TestCase):
                 first["semantic_authority_sha256"],
                 semantic["taskpack_sha256"],
             )
+
+    def test_production_executor_uses_protocol_budget_for_single_codex(self):
+        executor = object.__new__(Phase3ProductionExecutor)
+        executor.protocols = {
+            "fixture": {"budgets": {"max_wall_time_seconds": 1800}}
+        }
+
+        adapter = executor._adapter(
+            {"instance_id": "fixture", "mode": "single_codex"}
+        )
+
+        self.assertEqual(adapter.provider.timeout_seconds, 1800)
 
     def test_full_provider_free_simulation_runs_all_counterbalanced_entries(self):
         with tempfile.TemporaryDirectory() as temporary:

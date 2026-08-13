@@ -28,6 +28,7 @@ from .experiment_modes import (
     AgentTeamDirectModeAdapter,
     AgentTeamFullModeAdapter,
     ExperimentCommonFinalizer,
+    NativeSingleCodexProvider,
     SingleCodexModeAdapter,
     execute_bound_experiment_mode,
 )
@@ -379,7 +380,13 @@ class Phase3ProductionExecutor:
     def _adapter(self, entry):
         mode = entry["mode"]
         if mode == "single_codex":
-            return SingleCodexModeAdapter()
+            return SingleCodexModeAdapter(
+                provider=NativeSingleCodexProvider(
+                    timeout_seconds=self.protocols[entry["instance_id"]][
+                        "budgets"
+                    ]["max_wall_time_seconds"]
+                )
+            )
         if mode == "agentteam_full":
             return AgentTeamFullModeAdapter(
                 integration_verification_command=self.integration_verification_command
