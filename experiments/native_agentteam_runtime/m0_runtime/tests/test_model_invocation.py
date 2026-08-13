@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
 if str(RUNTIME_ROOT) not in sys.path:
@@ -49,6 +50,9 @@ class _ResourceRunner:
 
     def prepare_resources_before_admission(self):
         return None
+
+    def set_prelaunch_source_authority(self, authority):
+        self.source_authority = authority
 
     def permit_and_wait(self, **_kwargs):
         return ProviderExecution(
@@ -210,6 +214,97 @@ class ModelInvocationResourceTests(unittest.TestCase):
             events,
             [
                 "resource_readback",
+                "supervisor_prepare",
+                "provider_admission",
+            ],
+        )
+
+    def test_resource_bound_source_authority_precedes_supervisor_prepare(self):
+        events = []
+
+        class OrderedRunner(_ResourceRunner):
+            def prepare_resources_before_admission(self):
+                events.append("resource_readback")
+
+            def set_prelaunch_source_authority(self, authority):
+                events.append("source_authority")
+                self.source_authority = authority
+
+            def prepare(self):
+                events.append("supervisor_prepare")
+                return super().prepare()
+
+        class OrderedCall(ModelInvocationCall):
+            def _acquire_experiment_provider_admission(self):
+                events.append("provider_admission")
+
+        message = {
+            "to_agent": "agent-worker",
+            "payload": {
+                "project": "phase3",
+                "run_id": "RUN-P3B-SOURCE-ORDER",
+                "taskpack_id": "phase3-taskpack",
+                "attempt_id": "ATTEMPT-SOURCE-ORDER",
+                "runtime_execution_session_id": "SESSION-SOURCE-ORDER",
+                "lifecycle_owner_token": "OWNER-SOURCE-ORDER",
+                "agent_id": "agent-worker",
+                "agent_role": "implementation_worker",
+                "usage_stage": "implementation_worker",
+                "coverage_class": "supported_model_invocation",
+                "experiment_mode": "single_codex",
+                "resource_envelope_required": True,
+                "resource_envelope_binding": (
+                    approved_phase3_resource_envelope_binding()
+                ),
+                "resource_hierarchy_reference": {
+                    "schema_version": "phase3_resource_hierarchy_reference.v1",
+                    "binding_sha256": "a" * 64,
+                },
+                "experiment_sandbox_reference": {"sha256": "c" * 64},
+                "experiment_authority_root": "/tmp/fixture-authority",
+            },
+        }
+
+        class Prepared:
+            policy_sha256 = "a" * 64
+            command = ("/bin/true",)
+            cwd = "/"
+            environment = {}
+
+            @staticmethod
+            def source_authority():
+                return {"repository_workspace_sha256": "b" * 64}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            call = OrderedCall(
+                tmp,
+                invocation_context_from_message(message, model="gpt-test"),
+                supported=True,
+                systemd_runner_factory=OrderedRunner,
+            )
+            with mock.patch(
+                "agentteam_runtime.experiment_sandbox.load_provider_sandbox_reference",
+                return_value={},
+            ), mock.patch(
+                "agentteam_runtime.experiment_sandbox.validate_experiment_lifecycle_authority"
+            ), mock.patch(
+                "agentteam_runtime.experiment_sandbox.validate_provider_authority_separation"
+            ), mock.patch(
+                "agentteam_runtime.experiment_sandbox.prepare_provider_launch",
+                return_value=Prepared(),
+            ):
+                call.execute(
+                    ["/bin/true"],
+                    cwd="/",
+                    input_text="",
+                    timeout_seconds=5,
+                )
+
+        self.assertEqual(
+            events[:4],
+            [
+                "resource_readback",
+                "source_authority",
                 "supervisor_prepare",
                 "provider_admission",
             ],

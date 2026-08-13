@@ -1086,6 +1086,7 @@ class ModelInvocationCall:
             ] = sandbox_reference["sha256"]
         try:
             if self.supported:
+                supervisor_revalidation = False
                 runner_arguments = {
                     "cwd": cwd,
                     "input_text": input_text,
@@ -1139,6 +1140,17 @@ class ModelInvocationCall:
                             "resource envelope before admission"
                         )
                     prepare_resources()
+                    if prepared is not None:
+                        configure_source_authority = getattr(
+                            runner,
+                            "set_prelaunch_source_authority",
+                            None,
+                        )
+                        if callable(configure_source_authority):
+                            configure_source_authority(
+                                prepared.source_authority()
+                            )
+                            supervisor_revalidation = True
                     try:
                         prepared_identity = runner.prepare()
                         self._acquire_experiment_provider_admission()
@@ -1146,14 +1158,16 @@ class ModelInvocationCall:
                         runner.abort_before_permit()
                         raise
                 self.execution_group = runner
-                supervisor_revalidation = False
                 if prepared is not None:
                     configure_source_authority = getattr(
                         runner,
                         "set_prelaunch_source_authority",
                         None,
                     )
-                    if callable(configure_source_authority):
+                    if (
+                        callable(configure_source_authority)
+                        and not supervisor_revalidation
+                    ):
                         configure_source_authority(
                             prepared.source_authority()
                         )
