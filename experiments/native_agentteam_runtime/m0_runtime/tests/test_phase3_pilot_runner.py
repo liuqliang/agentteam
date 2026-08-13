@@ -442,6 +442,7 @@ class Phase3PilotRunnerTests(unittest.TestCase):
 
             self.assertEqual(result, score)
             self.assertTrue(observed["evaluator"])
+            self.assertTrue(observed["command"][1].startswith("PYTHONPATH="))
             self.assertEqual(observed["monitor"][1:], ("evaluator", True))
             self.assertEqual(json.loads(evidence.read_text())["scope"], "evaluator")
 

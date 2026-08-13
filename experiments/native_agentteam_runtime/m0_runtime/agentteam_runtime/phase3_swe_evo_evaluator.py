@@ -107,6 +107,8 @@ class Phase3SweEvoEvaluator:
         unit = f"agentteam-p3-{request_id[:16]}-evaluator.service"
         command = hierarchy.leaf_command(
             [
+                "/usr/bin/env",
+                f"PYTHONPATH={Path(__file__).resolve().parents[1]}",
                 sys.executable,
                 "-m",
                 "agentteam_runtime.phase3_swe_evo_evaluator",
