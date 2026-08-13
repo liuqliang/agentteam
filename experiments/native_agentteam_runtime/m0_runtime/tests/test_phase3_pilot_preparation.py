@@ -20,6 +20,7 @@ from agentteam_runtime.phase3_pilot_preparation import (
     Phase3PreparationError,
     approved_phase3_pilot_decisions,
     build_phase3_aggregate_pilot_contract,
+    build_phase3_instance_authority_candidates,
     build_phase3_instance_direct_taskpack,
     build_phase3_instance_preregistration,
     build_phase3_instance_visible_input,
@@ -28,10 +29,12 @@ from agentteam_runtime.phase3_pilot_preparation import (
     complexity_projection_bytes,
     decision_input_report,
     fixed_dataset_binding,
+    load_phase3_instance_authority_candidates,
     load_phase3_selection_freeze_bundle,
     materialize_phase3_instance_authorities,
     prepare_phase3_pilot_selection,
     project_swe_evo_arrow_inventory,
+    publish_phase3_instance_authority_candidates,
     publish_phase3_selection_freeze_bundle,
     provider_free_preflight_receipt_bytes,
     replay_phase3_pilot_selection,
@@ -43,6 +46,8 @@ from agentteam_runtime.phase3_pilot_preparation import (
     validate_phase3_pilot_decisions,
     validate_phase3_instance_direct_taskpack,
     validate_phase3_instance_materialization,
+    validate_phase3_instance_authority_candidates,
+    validate_phase3_instance_authority_candidates_receipt,
     validate_phase3_provider_free_preflight_receipt,
     validate_phase3_selection_freeze_receipt,
     validate_phase3_selection_authority,
@@ -269,6 +274,56 @@ def _selection_freeze_digest_patches(projection):
             "selection_authority_sha256"
         ],
     }
+
+
+def _candidate_rows():
+    external = preparation.verified_phase3_instance_external_authorities()
+    rows = []
+    for index, instance_id in enumerate(EXPECTED_SELECTION_PREVIEW):
+        authority = external[instance_id]
+        repository = authority["repository"]
+        rows.append(
+            {
+                "instance_id": instance_id,
+                "repo": repository["source"].removeprefix(
+                    "https://github.com/"
+                ).removesuffix(".git"),
+                "base_commit": repository["base_commit"],
+                "problem_statement": f"Public selected task {index}.",
+                "FAIL_TO_PASS": [f"tests::new-{index}"],
+                "PASS_TO_PASS": [f"tests::old-{index}"],
+                "environment_setup_commit": repository["environment_commit"],
+                "image": authority["image"]["reference"],
+                "bench": "swe_bench" if index == 0 else "swe_gym",
+                "test_cmds": "pytest -rA",
+                "log_parser": "parse_log_pytest",
+                "patch": f"gold-patch-{index}",
+                "test_patch": f"gold-test-patch-{index}",
+                "all_patch": None if index == 1 else f"all-patch-{index}",
+            }
+        )
+    return rows
+
+
+def _candidate_bundle():
+    selection_root = (
+        Path(__file__).resolve().parents[2]
+        / "implementation_artifacts"
+        / "acceptance"
+        / "phase3b-selection-freeze-v8"
+    )
+    with tempfile.NamedTemporaryFile() as source, mock.patch.object(
+        preparation,
+        "_file_sha256",
+        return_value=FIXED_DATASET_ARTIFACT_SHA256,
+    ):
+        return build_phase3_instance_authority_candidates(
+            source.name,
+            selection_bundle_root=selection_root,
+            source_commit=FIXED_SOURCE_COMMIT,
+            split=FIXED_DATASET_SPLIT,
+            row_reader=lambda _path, _ids: _candidate_rows(),
+        )
 
 
 def _complexity_decisions():
@@ -516,6 +571,170 @@ def _live_authorization(contract, *, decision="approved"):
 
 
 class Phase3PilotPreparationTests(unittest.TestCase):
+    def test_instance_authority_candidates_split_worker_and_evaluator_fields(self):
+        candidates = _candidate_bundle()
+        self.assertEqual(
+            candidates["ordered_instance_ids"],
+            list(EXPECTED_SELECTION_PREVIEW),
+        )
+        for item in candidates["instances_by_id"].values():
+            serialized_worker = json.dumps(item["worker_visible"], sort_keys=True)
+            self.assertNotIn("gold-patch", serialized_worker)
+            self.assertNotIn("gold-test-patch", serialized_worker)
+            self.assertEqual(
+                set(item["evaluator_only"]["gold_bindings"]),
+                {
+                    "patch_sha256",
+                    "test_patch_sha256",
+                    "fail_to_pass_sha256",
+                    "pass_to_pass_sha256",
+                    "all_patch_sha256",
+                },
+            )
+        self.assertEqual(
+            candidates["final_preregistration"]["status"],
+            "blocked",
+        )
+
+    def test_instance_authority_candidates_require_selection_order_coverage(self):
+        selection_root = (
+            Path(__file__).resolve().parents[2]
+            / "implementation_artifacts"
+            / "acceptance"
+            / "phase3b-selection-freeze-v8"
+        )
+        with tempfile.NamedTemporaryFile() as source, mock.patch.object(
+            preparation,
+            "_file_sha256",
+            return_value=FIXED_DATASET_ARTIFACT_SHA256,
+        ), self.assertRaisesRegex(
+            Phase3PreparationError,
+            "cover the selection in order",
+        ):
+            build_phase3_instance_authority_candidates(
+                source.name,
+                selection_bundle_root=selection_root,
+                source_commit=FIXED_SOURCE_COMMIT,
+                split=FIXED_DATASET_SPLIT,
+                row_reader=lambda _path, _ids: list(reversed(_candidate_rows())),
+            )
+
+    def test_instance_authority_candidates_reject_unknown_source_fields(self):
+        rows = _candidate_rows()
+        rows[0]["score"] = 1
+        selection_root = (
+            Path(__file__).resolve().parents[2]
+            / "implementation_artifacts"
+            / "acceptance"
+            / "phase3b-selection-freeze-v8"
+        )
+        with tempfile.NamedTemporaryFile() as source, mock.patch.object(
+            preparation,
+            "_file_sha256",
+            return_value=FIXED_DATASET_ARTIFACT_SHA256,
+        ), self.assertRaisesRegex(
+            Phase3PreparationError,
+            "cover the selection in order",
+        ):
+            build_phase3_instance_authority_candidates(
+                source.name,
+                selection_bundle_root=selection_root,
+                source_commit=FIXED_SOURCE_COMMIT,
+                split=FIXED_DATASET_SPLIT,
+                row_reader=lambda _path, _ids: rows,
+            )
+
+    def test_instance_authority_candidate_publication_is_idempotent_and_reloadable(self):
+        candidates = _candidate_bundle()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            preparation,
+            "APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256",
+            candidates["bundle_sha256"],
+        ):
+            first = publish_phase3_instance_authority_candidates(
+                directory,
+                candidates,
+            )
+            second = publish_phase3_instance_authority_candidates(
+                directory,
+                candidates,
+            )
+            self.assertTrue(first["candidates"]["created"])
+            self.assertTrue(first["receipt"]["created"])
+            self.assertFalse(second["candidates"]["created"])
+            self.assertFalse(second["receipt"]["created"])
+            loaded = load_phase3_instance_authority_candidates(directory)
+            self.assertEqual(loaded["candidates"], candidates)
+            self.assertEqual(
+                validate_phase3_instance_authority_candidates_receipt(
+                    loaded["receipt"],
+                    candidates=candidates,
+                ),
+                loaded["receipt"],
+            )
+
+    def test_instance_authority_candidate_publication_rejects_unapproved_bundle(self):
+        candidates = _candidate_bundle()
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
+            Phase3PreparationError,
+            "approved bundle",
+        ):
+            publish_phase3_instance_authority_candidates(directory, candidates)
+
+    def test_instance_authority_candidates_reject_rehashed_repository_drift(self):
+        candidates = _candidate_bundle()
+        changed = copy.deepcopy(candidates)
+        instance_id = EXPECTED_SELECTION_PREVIEW[0]
+        item = changed["instances_by_id"][instance_id]
+        item["worker_visible"]["repository"]["commit"] = "0" * 40
+        item_body = dict(item)
+        item_body.pop("candidate_sha256")
+        item["candidate_sha256"] = canonical_json_sha256(item_body)
+        body = dict(changed)
+        body.pop("bundle_sha256")
+        changed["bundle_sha256"] = canonical_json_sha256(body)
+        with self.assertRaisesRegex(
+            Phase3PreparationError,
+            "candidate changed",
+        ):
+            validate_phase3_instance_authority_candidates(changed)
+
+    def test_committed_instance_authority_candidates_replay(self):
+        root = (
+            Path(__file__).resolve().parents[2]
+            / "implementation_artifacts"
+            / "acceptance"
+            / "phase3b-instance-authority-candidates-v9"
+        )
+        bundle = load_phase3_instance_authority_candidates(root)
+        self.assertEqual(
+            bundle["candidates"]["bundle_sha256"],
+            preparation.APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256,
+        )
+        self.assertEqual(
+            bundle["receipt"]["candidate_bundle_sha256"],
+            preparation.APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256,
+        )
+        serialized = json.dumps(bundle, sort_keys=True)
+        self.assertNotIn("diff --git", serialized)
+        self.assertNotIn("gold-patch", serialized)
+
+    def test_committed_instance_authority_candidates_reject_symlinked_root(self):
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "implementation_artifacts"
+            / "acceptance"
+            / "phase3b-instance-authority-candidates-v9"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "authority"
+            root.symlink_to(source, target_is_directory=True)
+            with self.assertRaisesRegex(
+                Phase3PreparationError,
+                "root is unavailable",
+            ):
+                load_phase3_instance_authority_candidates(root)
+
     def test_committed_selection_freeze_bundle_replays_complete_chain(self):
         root = (
             Path(__file__).resolve().parents[2]

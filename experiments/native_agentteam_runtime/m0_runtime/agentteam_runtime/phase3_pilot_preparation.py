@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -60,6 +61,12 @@ INSTANCE_MATERIALIZATION_SCHEMA_VERSION = "phase3_instance_materialization.v1"
 PILOT_PREFLIGHT_SCHEMA_VERSION = "phase3_pilot_preflight.v1"
 PILOT_PREFLIGHT_V2_SCHEMA_VERSION = "phase3_pilot_preflight.v2"
 SELECTION_FREEZE_RECEIPT_SCHEMA_VERSION = "phase3_selection_freeze_receipt.v1"
+INSTANCE_AUTHORITY_CANDIDATES_SCHEMA_VERSION = (
+    "phase3_instance_authority_candidates.v1"
+)
+INSTANCE_AUTHORITY_CANDIDATES_RECEIPT_SCHEMA_VERSION = (
+    "phase3_instance_authority_candidates_receipt.v1"
+)
 PILOT_PREFLIGHT_DECISION_ID = "DEC-P3B-provider-free-preparation"
 READINESS_BINDING = {
     "gate_id": "P3-READY",
@@ -111,6 +118,49 @@ APPROVED_SELECTION_SHA256 = (
 )
 APPROVED_SELECTION_AUTHORITY_SHA256 = (
     "4eef7bccd83662b27b2f359189ccc59943a494eb8af05de58f0bf8f29a64f09a"
+)
+APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256 = (
+    "f60c537a478aa43f694134b1e22ccc31479d8534aad4683473ec532849bea178"
+)
+FINAL_PREREGISTRATION_MISSING_AUTHORITIES = (
+    "runtime.agentteam_release_commit",
+    "runtime.codex_cli_version",
+    "runtime.environment_version",
+    "model.service_configuration_sha256",
+    "execution.tools_sha256",
+    "execution.sandbox_policy_sha256",
+    "execution.permission_policy_sha256",
+    "execution.external_services_sha256",
+    "execution.benchmark_visible_tests_sha256",
+    "execution.termination_policy_sha256",
+    "execution.shared_dependency_cache_sha256",
+)
+INSTANCE_WORKER_CONSTRAINTS = (
+    "Do not read benchmark gold patches or evaluator-only state.",
+    "Keep the candidate change inside the selected repository.",
+    "Do not merge or push the candidate change.",
+)
+INSTANCE_WORKER_NON_GOALS = (
+    "Do not modify the benchmark task or evaluator.",
+    "Do not access sibling-mode artifacts.",
+)
+INSTANCE_AUTHORITY_ROW_FIELDS = frozenset(
+    {
+        "instance_id",
+        "repo",
+        "base_commit",
+        "problem_statement",
+        "FAIL_TO_PASS",
+        "PASS_TO_PASS",
+        "environment_setup_commit",
+        "image",
+        "bench",
+        "test_cmds",
+        "log_parser",
+        "patch",
+        "test_patch",
+        "all_patch",
+    }
 )
 EXPECTED_SELECTION_PREVIEW = (
     "psf__requests_v2.4.0_v2.4.1",
@@ -688,6 +738,523 @@ def load_phase3_selection_freeze_bundle(authority_root):
         selection_authority=authority,
     )
     return values
+
+
+def verified_phase3_instance_external_authorities():
+    """Return provider-free Git and image-manifest evidence for selected rows."""
+
+    return {
+        "psf__requests_v2.4.0_v2.4.1": {
+            "repository": {
+                "source": "https://github.com/psf/requests.git",
+                "base_commit": "95161ed313db11296c3bd473336340dbb19bb347",
+                "base_tree": "ad6b385fee1424258097703f8d4a2a6a587e10a0",
+                "environment_commit": "dff383ce8f7a7f1c348c1cb5ea970a59fbe48527",
+                "environment_tree": "09788e38f9d34c619899341e32ebf4529df0ec3a",
+            },
+            "image": {
+                "reference": (
+                    "ghcr.io/epoch-research/"
+                    "swe-bench.eval.x86_64.psf__requests-2193"
+                ),
+                "manifest_digest": (
+                    "sha256:c768b34d5596f879d80f052e609d1ebc13338245d8331266ef7af26b29b9cccf"
+                ),
+                "architecture": "amd64",
+                "os": "linux",
+            },
+        },
+        "dask__dask_2023.3.2_2023.4.0": {
+            "repository": {
+                "source": "https://github.com/dask/dask.git",
+                "base_commit": "0cbc46ac89b6f6a2cf949f2fd73c4c1175419db5",
+                "base_tree": "9f37bfafa2942049d12f03e4a4a3951619b0c6e9",
+                "environment_commit": "ce977733a97664e26c073f5ccc0bd86cb3ce92ff",
+                "environment_tree": "16e1829a9b10b72d070876a3458a1c43b9cd6c5c",
+            },
+            "image": {
+                "reference": "xingyaoww/sweb.eval.x86_64.dask_s_dask-10042",
+                "manifest_digest": (
+                    "sha256:6e8faf434f2f92f3df4577b28f959e7d9e37ee80b745f34ff44e232814cabeb8"
+                ),
+                "architecture": "amd64",
+                "os": "linux",
+            },
+        },
+        "iterative__dvc_2.19.0_2.20.0": {
+            "repository": {
+                "source": "https://github.com/iterative/dvc.git",
+                "base_commit": "78dd045d29f274960bcaf48fd2d055366abaf2c1",
+                "base_tree": "ddbe1d3231306250970a0b6ff9384838643d31d3",
+                "environment_commit": "cc6deb24c834cd628bbb7261bc1652d66b69c86e",
+                "environment_tree": "af2ae8f97750b3e6f4f26c93af2aede933bec1a3",
+            },
+            "image": {
+                "reference": "xingyaoww/sweb.eval.x86_64.iterative_s_dvc-8024",
+                "manifest_digest": (
+                    "sha256:cccdad0b5064f23be9d6e1047238a9fc3f3d3a528015427eed8d17d8fd1ece73"
+                ),
+                "architecture": "amd64",
+                "os": "linux",
+            },
+        },
+    }
+
+
+def build_phase3_instance_authority_candidates(
+    arrow_path,
+    *,
+    selection_bundle_root,
+    source_commit,
+    split,
+    row_reader=None,
+):
+    """Build a strict worker/evaluator visibility split for selected rows."""
+
+    selection_bundle = load_phase3_selection_freeze_bundle(selection_bundle_root)
+    selection = selection_bundle["selection_authority"]
+    selected_ids = selection["selection"]["ordered_instance_ids"]
+    if source_commit != FIXED_SOURCE_COMMIT or split != FIXED_DATASET_SPLIT:
+        raise Phase3PreparationError("instance candidate fixed source changed")
+    path = Path(arrow_path)
+    if not path.is_file() or _file_sha256(path) != FIXED_DATASET_ARTIFACT_SHA256:
+        raise Phase3PreparationError("instance candidate Arrow artifact changed")
+    reader = row_reader or _read_selected_swe_evo_authority_rows
+    rows = reader(path, selected_ids)
+    if (
+        not isinstance(rows, list)
+        or len(rows) != len(selected_ids)
+        or any(
+            not isinstance(row, dict)
+            or set(row) != INSTANCE_AUTHORITY_ROW_FIELDS
+            for row in rows
+        )
+        or [row.get("instance_id") for row in rows] != selected_ids
+    ):
+        raise Phase3PreparationError(
+            "instance candidate rows do not cover the selection in order"
+        )
+    external = verified_phase3_instance_external_authorities()
+    candidates = {}
+    for row in rows:
+        instance_id = row["instance_id"]
+        expected_external = external[instance_id]
+        repository = expected_external["repository"]
+        image = expected_external["image"]
+        if (
+            row["base_commit"] != repository["base_commit"]
+            or row["environment_setup_commit"]
+            != repository["environment_commit"]
+            or row["image"] != image["reference"]
+            or row["repo"]
+            != repository["source"]
+            .removeprefix("https://github.com/")
+            .removesuffix(".git")
+        ):
+            raise Phase3PreparationError(
+                f"instance candidate external authority changed: {instance_id}"
+            )
+        try:
+            acceptance_argv = shlex.split(row["test_cmds"])
+        except (TypeError, ValueError) as exc:
+            raise Phase3PreparationError(
+                f"instance candidate test command is invalid: {instance_id}"
+            ) from exc
+        if not acceptance_argv:
+            raise Phase3PreparationError(
+                f"instance candidate test command is empty: {instance_id}"
+            )
+        body = {
+            "instance_id": instance_id,
+            "worker_visible": {
+                "repository": {
+                    "source": repository["source"],
+                    "commit": repository["base_commit"],
+                    "tree": repository["base_tree"],
+                    "git_object_format": "sha1",
+                },
+                "task": {
+                    "goal": row["problem_statement"],
+                    "constraints": list(INSTANCE_WORKER_CONSTRAINTS),
+                    "non_goals": list(INSTANCE_WORKER_NON_GOALS),
+                    "acceptance_commands": [acceptance_argv],
+                },
+            },
+            "evaluator_only": {
+                "environment_setup_commit": repository["environment_commit"],
+                "environment_setup_tree": repository["environment_tree"],
+                "image": image,
+                "benchmark_family": row["bench"],
+                "test_command": acceptance_argv,
+                "log_parser": row["log_parser"],
+                "gold_bindings": {
+                    "patch_sha256": _text_sha256(row["patch"]),
+                    "test_patch_sha256": _text_sha256(row["test_patch"]),
+                    "fail_to_pass_sha256": canonical_json_sha256(
+                        row["FAIL_TO_PASS"]
+                    ),
+                    "pass_to_pass_sha256": canonical_json_sha256(
+                        row["PASS_TO_PASS"]
+                    ),
+                    "all_patch_sha256": canonical_json_sha256(row["all_patch"]),
+                },
+            },
+        }
+        candidates[instance_id] = {
+            **body,
+            "candidate_sha256": canonical_json_sha256(body),
+        }
+    bundle_body = {
+        "status": "candidate_authorities_ready",
+        "provider_free": True,
+        "dataset_artifact_sha256": FIXED_DATASET_ARTIFACT_SHA256,
+        "selection_authority_sha256": selection[
+            "selection_authority_sha256"
+        ],
+        "ordered_instance_ids": list(selected_ids),
+        "instances_by_id": candidates,
+        "final_preregistration": {
+            "status": "blocked",
+            "missing_authorities": list(FINAL_PREREGISTRATION_MISSING_AUTHORITIES),
+        },
+        "provider_calls": 0,
+        "scored_mode_executions": 0,
+    }
+    bundle = {
+        "schema_version": INSTANCE_AUTHORITY_CANDIDATES_SCHEMA_VERSION,
+        **bundle_body,
+    }
+    bundle["bundle_sha256"] = canonical_json_sha256(bundle)
+    return validate_phase3_instance_authority_candidates(
+        bundle,
+        selection_authority=selection,
+    )
+
+
+def validate_phase3_instance_authority_candidates(
+    candidates,
+    *,
+    selection_authority=None,
+):
+    value = _json_object_snapshot(candidates)
+    expected = {
+        "schema_version",
+        "status",
+        "provider_free",
+        "dataset_artifact_sha256",
+        "selection_authority_sha256",
+        "ordered_instance_ids",
+        "instances_by_id",
+        "final_preregistration",
+        "provider_calls",
+        "scored_mode_executions",
+        "bundle_sha256",
+    }
+    if value is None or set(value) != expected:
+        raise Phase3PreparationError("instance authority candidate fields are invalid")
+    body = dict(value)
+    digest = body.pop("bundle_sha256")
+    ids = value["ordered_instance_ids"]
+    if (
+        value["schema_version"] != INSTANCE_AUTHORITY_CANDIDATES_SCHEMA_VERSION
+        or value["status"] != "candidate_authorities_ready"
+        or value["provider_free"] is not True
+        or value["dataset_artifact_sha256"] != FIXED_DATASET_ARTIFACT_SHA256
+        or value["selection_authority_sha256"]
+        != APPROVED_SELECTION_AUTHORITY_SHA256
+        or ids != list(EXPECTED_SELECTION_PREVIEW)
+        or not isinstance(value["instances_by_id"], dict)
+        or set(value["instances_by_id"]) != set(ids)
+        or value["final_preregistration"]
+        != {
+            "status": "blocked",
+            "missing_authorities": list(FINAL_PREREGISTRATION_MISSING_AUTHORITIES),
+        }
+        or value["provider_calls"] != 0
+        or isinstance(value["provider_calls"], bool)
+        or value["scored_mode_executions"] != 0
+        or isinstance(value["scored_mode_executions"], bool)
+        or digest != canonical_json_sha256(body)
+    ):
+        raise Phase3PreparationError("instance authority candidates are invalid")
+    external = verified_phase3_instance_external_authorities()
+    for instance_id in ids:
+        item = value["instances_by_id"][instance_id]
+        if not isinstance(item, dict) or set(item) != {
+            "instance_id",
+            "worker_visible",
+            "evaluator_only",
+            "candidate_sha256",
+        }:
+            raise Phase3PreparationError("instance authority candidate is invalid")
+        item_body = dict(item)
+        item_digest = item_body.pop("candidate_sha256")
+        evaluator = item.get("evaluator_only")
+        worker = item.get("worker_visible")
+        if (
+            item["instance_id"] != instance_id
+            or item_digest != canonical_json_sha256(item_body)
+            or not isinstance(worker, dict)
+            or set(worker) != {"repository", "task"}
+            or worker["repository"]
+            != {
+                "source": external[instance_id]["repository"]["source"],
+                "commit": external[instance_id]["repository"]["base_commit"],
+                "tree": external[instance_id]["repository"]["base_tree"],
+                "git_object_format": "sha1",
+            }
+            or not isinstance(worker["task"], dict)
+            or set(worker["task"])
+            != {"goal", "constraints", "non_goals", "acceptance_commands"}
+            or not isinstance(worker["task"]["goal"], str)
+            or not worker["task"]["goal"].strip()
+            or worker["task"]["constraints"]
+            != list(INSTANCE_WORKER_CONSTRAINTS)
+            or worker["task"]["non_goals"]
+            != list(INSTANCE_WORKER_NON_GOALS)
+            or not isinstance(worker["task"]["acceptance_commands"], list)
+            or len(worker["task"]["acceptance_commands"]) != 1
+            or not isinstance(worker["task"]["acceptance_commands"][0], list)
+            or not worker["task"]["acceptance_commands"][0]
+            or any(
+                not isinstance(argument, str) or not argument
+                for argument in worker["task"]["acceptance_commands"][0]
+            )
+            or not isinstance(evaluator, dict)
+            or set(evaluator)
+            != {
+                "environment_setup_commit",
+                "environment_setup_tree",
+                "image",
+                "benchmark_family",
+                "test_command",
+                "log_parser",
+                "gold_bindings",
+            }
+            or evaluator["environment_setup_commit"]
+            != external[instance_id]["repository"]["environment_commit"]
+            or evaluator["environment_setup_tree"]
+            != external[instance_id]["repository"]["environment_tree"]
+            or evaluator["image"] != external[instance_id]["image"]
+            or evaluator["benchmark_family"] not in {"swe_bench", "swe_gym"}
+            or evaluator["test_command"]
+            != worker["task"]["acceptance_commands"][0]
+            or not isinstance(evaluator["log_parser"], str)
+            or not evaluator["log_parser"].strip()
+            or not isinstance(evaluator["gold_bindings"], dict)
+            or set(evaluator["gold_bindings"])
+            != {
+                "patch_sha256",
+                "test_patch_sha256",
+                "fail_to_pass_sha256",
+                "pass_to_pass_sha256",
+                "all_patch_sha256",
+            }
+            or any(
+                not isinstance(entry, str) or _SHA256.fullmatch(entry) is None
+                for entry in evaluator["gold_bindings"].values()
+            )
+        ):
+            raise Phase3PreparationError(
+                f"instance authority candidate changed: {instance_id}"
+            )
+    if selection_authority is not None:
+        authority = validate_phase3_selection_authority(selection_authority)
+        if (
+            value["selection_authority_sha256"]
+            != authority["selection_authority_sha256"]
+            or ids != authority["selection"]["ordered_instance_ids"]
+        ):
+            raise Phase3PreparationError(
+                "instance candidates do not bind the selection authority"
+            )
+    return value
+
+
+def publish_phase3_instance_authority_candidates(authority_root, candidates):
+    value = validate_phase3_instance_authority_candidates(candidates)
+    if value["bundle_sha256"] != APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256:
+        raise Phase3PreparationError(
+            "instance authority candidates do not match the approved bundle"
+        )
+    root = Path(authority_root)
+    candidate_publication = publish_immutable_json(
+        root / "candidates.json",
+        value,
+        label="Phase 3 instance authority candidates",
+    )
+    receipt_body = {
+        "status": "candidate_authorities_ready",
+        "provider_free": True,
+        "candidate_bundle_sha256": value["bundle_sha256"],
+        "selection_authority_sha256": value["selection_authority_sha256"],
+        "ordered_instance_ids": value["ordered_instance_ids"],
+        "final_preregistration_status": "blocked",
+        "missing_authorities": list(FINAL_PREREGISTRATION_MISSING_AUTHORITIES),
+        "provider_calls": 0,
+        "scored_mode_executions": 0,
+    }
+    receipt = {
+        "schema_version": INSTANCE_AUTHORITY_CANDIDATES_RECEIPT_SCHEMA_VERSION,
+        **receipt_body,
+    }
+    receipt["receipt_sha256"] = canonical_json_sha256(receipt)
+    validate_phase3_instance_authority_candidates_receipt(
+        receipt,
+        candidates=value,
+    )
+    publication = publish_immutable_json(
+        root / "receipt.json",
+        receipt,
+        label="Phase 3 instance authority candidate receipt",
+    )
+    return {
+        "candidates": candidate_publication,
+        "receipt": publication,
+        "receipt_value": receipt,
+    }
+
+
+def validate_phase3_instance_authority_candidates_receipt(
+    receipt,
+    *,
+    candidates=None,
+):
+    value = _json_object_snapshot(receipt)
+    expected = {
+        "schema_version",
+        "status",
+        "provider_free",
+        "candidate_bundle_sha256",
+        "selection_authority_sha256",
+        "ordered_instance_ids",
+        "final_preregistration_status",
+        "missing_authorities",
+        "provider_calls",
+        "scored_mode_executions",
+        "receipt_sha256",
+    }
+    if value is None or set(value) != expected:
+        raise Phase3PreparationError(
+            "instance authority candidate receipt fields are invalid"
+        )
+    body = dict(value)
+    digest = body.pop("receipt_sha256")
+    if (
+        value["schema_version"]
+        != INSTANCE_AUTHORITY_CANDIDATES_RECEIPT_SCHEMA_VERSION
+        or value["status"] != "candidate_authorities_ready"
+        or value["provider_free"] is not True
+        or not isinstance(value["candidate_bundle_sha256"], str)
+        or _SHA256.fullmatch(value["candidate_bundle_sha256"]) is None
+        or value["candidate_bundle_sha256"]
+        != APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256
+        or value["selection_authority_sha256"]
+        != APPROVED_SELECTION_AUTHORITY_SHA256
+        or value["ordered_instance_ids"] != list(EXPECTED_SELECTION_PREVIEW)
+        or value["final_preregistration_status"] != "blocked"
+        or value["missing_authorities"]
+        != list(FINAL_PREREGISTRATION_MISSING_AUTHORITIES)
+        or not isinstance(value["provider_calls"], int)
+        or isinstance(value["provider_calls"], bool)
+        or value["provider_calls"] != 0
+        or not isinstance(value["scored_mode_executions"], int)
+        or isinstance(value["scored_mode_executions"], bool)
+        or value["scored_mode_executions"] != 0
+        or digest != canonical_json_sha256(body)
+    ):
+        raise Phase3PreparationError(
+            "instance authority candidate receipt is invalid"
+        )
+    if candidates is not None:
+        candidate = validate_phase3_instance_authority_candidates(candidates)
+        if (
+            value["candidate_bundle_sha256"] != candidate["bundle_sha256"]
+            or value["selection_authority_sha256"]
+            != candidate["selection_authority_sha256"]
+            or value["ordered_instance_ids"]
+            != candidate["ordered_instance_ids"]
+        ):
+            raise Phase3PreparationError(
+                "instance authority receipt does not bind candidate bundle"
+            )
+    return value
+
+
+def load_phase3_instance_authority_candidates(authority_root):
+    """Load and validate one complete candidate bundle and receipt."""
+
+    root = Path(authority_root)
+    if root.is_symlink() or not root.is_dir():
+        raise Phase3PreparationError("instance authority candidate root is unavailable")
+    values = {}
+    for name, filename in (
+        ("candidates", "candidates.json"),
+        ("receipt", "receipt.json"),
+    ):
+        path = root / filename
+        if path.is_symlink() or not path.is_file():
+            raise Phase3PreparationError(
+                f"instance authority candidate {name} is unavailable"
+            )
+        try:
+            values[name] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise Phase3PreparationError(
+                f"instance authority candidate {name} is unavailable"
+            ) from exc
+    candidates = validate_phase3_instance_authority_candidates(
+        values["candidates"]
+    )
+    validate_phase3_instance_authority_candidates_receipt(
+        values["receipt"],
+        candidates=candidates,
+    )
+    return values
+
+
+def _read_selected_swe_evo_authority_rows(path, selected_ids):
+    try:
+        import pyarrow as pa
+        import pyarrow.compute as pc
+        import pyarrow.ipc as ipc
+    except ImportError as exc:
+        raise Phase3PreparationError(
+            "pyarrow is required for trusted instance authority projection"
+        ) from exc
+    try:
+        with path.open("rb") as source:
+            try:
+                table = ipc.open_stream(source).read_all()
+            except pa.ArrowInvalid:
+                source.seek(0)
+                table = ipc.open_file(source).read_all()
+    except (OSError, pa.ArrowInvalid, pa.ArrowException) as exc:
+        raise Phase3PreparationError(
+            "instance authority Arrow artifact could not be decoded"
+        ) from exc
+    columns = sorted(INSTANCE_AUTHORITY_ROW_FIELDS)
+    if table.num_rows != FIXED_DATASET_ROW_COUNT or not set(columns).issubset(
+        table.column_names
+    ):
+        raise Phase3PreparationError("instance authority Arrow schema changed")
+    projected = table.select(columns)
+    mask = pc.is_in(
+        projected["instance_id"],
+        value_set=pa.array(list(selected_ids)),
+    )
+    rows_by_id = {
+        row["instance_id"]: row for row in projected.filter(mask).to_pylist()
+    }
+    if set(rows_by_id) != set(selected_ids) or len(rows_by_id) != len(selected_ids):
+        raise Phase3PreparationError("selected instance authority rows are incomplete")
+    return [rows_by_id[instance_id] for instance_id in selected_ids]
+
+
+def _text_sha256(value):
+    if not isinstance(value, str):
+        raise Phase3PreparationError("instance authority text binding is invalid")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def convert_swe_evo_inventory(inventory, *, metadata_revision="swe-evo-fixed-r1"):
