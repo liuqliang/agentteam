@@ -593,6 +593,7 @@ class Phase3PilotPreparationTests(unittest.TestCase):
             codex_cli_version="codex-cli-test",
             environment_version="phase3b-test-environment-v1",
             candidates=candidates,
+            release_verifier=lambda _commit: True,
         )
         profile = phase3_execution_profile_from_authority(
             authority,
@@ -617,6 +618,7 @@ class Phase3PilotPreparationTests(unittest.TestCase):
             codex_cli_version="codex-cli-test",
             environment_version="phase3b-test-environment-v1",
             candidates=candidates,
+            release_verifier=lambda _commit: True,
         )
         changed = copy.deepcopy(authority)
         changed["policies"]["sandbox"]["gold_mount"] = "read-only"
@@ -639,6 +641,7 @@ class Phase3PilotPreparationTests(unittest.TestCase):
             codex_cli_version="codex-cli-test",
             environment_version="phase3b-test-environment-v1",
             candidates=candidates,
+            release_verifier=lambda _commit: True,
         )
         with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
             Phase3PreparationError,
@@ -650,6 +653,20 @@ class Phase3PilotPreparationTests(unittest.TestCase):
                 candidates=candidates,
             )
 
+    def test_execution_authority_rejects_unavailable_release_commit(self):
+        candidates = _committed_candidate_bundle()
+        with self.assertRaisesRegex(
+            Phase3PreparationError,
+            "release commit is unavailable",
+        ):
+            build_phase3_execution_authority(
+                agentteam_release_commit="a" * 40,
+                codex_cli_version="codex-cli-test",
+                environment_version="phase3b-test-environment-v1",
+                candidates=candidates,
+                release_verifier=lambda _commit: False,
+            )
+
     def test_execution_authority_publication_is_idempotent_and_reloadable(self):
         candidates = _committed_candidate_bundle()
         authority = build_phase3_execution_authority(
@@ -657,6 +674,7 @@ class Phase3PilotPreparationTests(unittest.TestCase):
             codex_cli_version="codex-cli-test",
             environment_version="phase3b-test-environment-v1",
             candidates=candidates,
+            release_verifier=lambda _commit: True,
         )
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             preparation,

@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -1235,6 +1236,7 @@ def build_phase3_execution_authority(
     codex_cli_version,
     environment_version,
     candidates,
+    release_verifier=None,
 ):
     """Build the concrete policy authority behind preregistration digests."""
 
@@ -1242,6 +1244,11 @@ def build_phase3_execution_authority(
     if candidate["bundle_sha256"] != APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256:
         raise Phase3PreparationError(
             "execution authority requires the approved instance candidates"
+        )
+    verifier = release_verifier or _verify_local_git_commit
+    if verifier(agentteam_release_commit) is not True:
+        raise Phase3PreparationError(
+            "execution authority release commit is unavailable"
         )
     runtime = {
         "agentteam_release_commit": agentteam_release_commit,
@@ -1604,6 +1611,21 @@ def _phase3_execution_policy_objects(candidates):
             "cache_warmup_counted_outside_scored_execution": True,
         },
     }
+
+
+def _verify_local_git_commit(commit):
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
 
 
 def _validate_phase3_execution_policy_objects(policies):
