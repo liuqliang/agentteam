@@ -56,6 +56,8 @@ TASKPACK_AUTHORING_MODES = {
     "legacy_direct",
     "semantic_materialized",
 }
+BENCHMARK_EXPERIMENT_EXECUTION_MODE = "benchmark_experiment"
+BENCHMARK_REPOSITORY_WRITE_SCOPE = "@benchmark-repository"
 TASKPACK_BLUEPRINT_CONTROL_AGENT_IDS = {"agent-scheduler", "agent-integrator"}
 TASKPACK_BLUEPRINT_CONTROL_ROLES = {"scheduler", "integrator"}
 OPTIMIZATION_CODE_WORK_TYPES = {"code_implementation", "code_investigation"}
@@ -2292,9 +2294,14 @@ def validate_taskpack(taskpack_dir):
             errors.append(
                 f"controller gate graph validation failed: {exc}"
             )
-    elif taskpack.get("execution_mode") not in {None, "model_workers"}:
+    elif taskpack.get("execution_mode") not in {
+        None,
+        "model_workers",
+        BENCHMARK_EXPERIMENT_EXECUTION_MODE,
+    }:
         errors.append(
-            "execution_mode must be model_workers or controller_only"
+            "execution_mode must be model_workers, benchmark_experiment, "
+            "or controller_only"
         )
     idle_agent_roles = _validate_agent_pool(
         agent_pool,
@@ -2435,12 +2442,23 @@ def validate_taskpack(taskpack_dir):
             errors,
         )
         write_scope = item.get("write_scope", [])
+        benchmark_repository_scope = (
+            taskpack.get("execution_mode")
+            == BENCHMARK_EXPERIMENT_EXECUTION_MODE
+        )
         if not isinstance(write_scope, list) or not write_scope:
             errors.append(f"{task_id_label} write_scope must be a non-empty list")
         else:
             for scope in write_scope:
                 if not isinstance(scope, str):
                     errors.append(f"{task_id_label} write_scope entries must be strings")
+                    continue
+                if scope == BENCHMARK_REPOSITORY_WRITE_SCOPE:
+                    if not benchmark_repository_scope:
+                        errors.append(
+                            f"{task_id_label} benchmark repository write scope "
+                            "requires benchmark_experiment execution mode"
+                        )
                     continue
                 if scope in {"", "*", "**", "/"}:
                     errors.append("write_scope must not include repository root")

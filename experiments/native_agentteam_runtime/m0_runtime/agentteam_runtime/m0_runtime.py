@@ -3360,6 +3360,13 @@ def _changed_files_in_scope(changed_files, task):
 
 
 def _path_matches_write_scope(path, scope):
+    if scope == "@benchmark-repository":
+        candidate = Path(path)
+        return bool(
+            path
+            and not candidate.is_absolute()
+            and ".." not in candidate.parts
+        )
     if path == scope:
         return True
     return path.startswith(scope.rstrip("/") + "/")

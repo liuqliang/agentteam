@@ -1036,13 +1036,33 @@ class AgentTeamDirectModeAdapter:
 
     mode = "agentteam_direct"
 
-    def __init__(self, frozen_taskpack_dir):
+    def __init__(
+        self,
+        frozen_taskpack_dir,
+        *,
+        semantic_authority_sha256=None,
+        runtime_taskpack_sha256=None,
+        integration_verification_command=None,
+    ):
         self.frozen_taskpack_dir = str(
             Path(frozen_taskpack_dir).resolve(strict=True)
+        )
+        self.semantic_authority_sha256 = semantic_authority_sha256
+        self.runtime_taskpack_sha256 = runtime_taskpack_sha256
+        self.integration_verification_command = copy.deepcopy(
+            integration_verification_command
         )
 
     def preflight(self, request):
         expected = request.protocol["direct_taskpack"]["sha256"]
+        runtime_expected = self.runtime_taskpack_sha256 or expected
+        if (
+            self.semantic_authority_sha256 is not None
+            and self.semantic_authority_sha256 != expected
+        ):
+            raise ExperimentModeError(
+                "direct taskpack semantic authority differs from protocol"
+            )
         snapshot_root = (
             Path(request.authority_root)
             / "direct-taskpack-snapshot"
@@ -1058,7 +1078,7 @@ class AgentTeamDirectModeAdapter:
                         staging,
                         symlinks=True,
                     )
-                    verify_frozen_taskpack_digest(staging, expected)
+                    verify_frozen_taskpack_digest(staging, runtime_expected)
                     staging.rename(snapshot_root)
                 finally:
                     if staging.exists():
@@ -1066,7 +1086,7 @@ class AgentTeamDirectModeAdapter:
                 _make_tree_read_only(snapshot_root)
             verified = verify_frozen_taskpack_digest(
                 snapshot_root,
-                expected,
+                runtime_expected,
             )
         except TaskpackValidationError as exc:
             raise ExperimentModeError(
@@ -1074,6 +1094,8 @@ class AgentTeamDirectModeAdapter:
             ) from exc
         return {
             **verified,
+            "semantic_authority_sha256": expected,
+            "runtime_taskpack_sha256": runtime_expected,
             "frozen_taskpack_dir": str(snapshot_root.resolve()),
         }
 
@@ -1087,7 +1109,8 @@ class AgentTeamDirectModeAdapter:
             run_root=str(run_root),
             trusted_project_root=request.project_root,
             trusted_verification_command=(
-                request.protocol["acceptance"]["command"]
+                self.integration_verification_command
+                or request.protocol["acceptance"]["command"]
             ),
             experiment_runtime_context=(
                 _experiment_runtime_context(request)
@@ -1146,8 +1169,11 @@ class AgentTeamFullModeAdapter:
 
     mode = "agentteam_full"
 
-    def __init__(self):
+    def __init__(self, *, integration_verification_command=None):
         self._frozen_taskpack = None
+        self.integration_verification_command = copy.deepcopy(
+            integration_verification_command
+        )
 
     def preflight(self, _request):
         return None
@@ -1229,7 +1255,8 @@ class AgentTeamFullModeAdapter:
             run_root=str(run_root),
             trusted_project_root=request.project_root,
             trusted_verification_command=(
-                request.protocol["acceptance"]["command"]
+                self.integration_verification_command
+                or request.protocol["acceptance"]["command"]
             ),
             experiment_runtime_context=(
                 _experiment_runtime_context(request)
@@ -1716,17 +1743,44 @@ def _integration_candidate_workspace(run_root, taskpack_id):
         if isinstance(state, dict)
         else None
     )
-    candidate = (
+    baseline_candidate = (
         baseline.get("integration_baseline_worktree_path")
         if isinstance(baseline, dict)
         else None
     )
-    if not isinstance(candidate, str) or not candidate:
-        return None
-    try:
-        return str(Path(candidate).resolve(strict=True))
-    except OSError:
-        return None
+    accepted_result = None
+    steps = state.get("steps", []) if isinstance(state, dict) else []
+    if isinstance(steps, list):
+        for step in reversed(steps):
+            result = step.get("result") if isinstance(step, dict) else None
+            if isinstance(result, dict) and result.get("validation_status") == "accepted":
+                accepted_result = result
+                break
+    accepted_attempt = (
+        accepted_result.get("worktree_path")
+        if isinstance(accepted_result, dict)
+        else None
+    )
+    integration_verified = bool(
+        isinstance(accepted_result, dict)
+        and (
+            accepted_result.get("integration_verification_status") == "passed"
+            or accepted_result.get("integration_status") == "verified_noop"
+        )
+    )
+    candidates = (
+        [baseline_candidate, accepted_attempt]
+        if integration_verified
+        else [accepted_attempt, baseline_candidate]
+    )
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate:
+            continue
+        try:
+            return str(Path(candidate).resolve(strict=True))
+        except OSError:
+            continue
+    return None
 
 
 def _validated_candidate_workspace(request, mode_result):

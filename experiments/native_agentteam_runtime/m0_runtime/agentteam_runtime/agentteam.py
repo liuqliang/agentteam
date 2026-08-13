@@ -13754,6 +13754,14 @@ def _run_frozen_taskpack(
 ):
     loaded = load_taskpack(frozen_taskpack_dir)
     loaded_taskpack = loaded["taskpack"]
+    benchmark_experiment = (
+        loaded_taskpack.get("execution_mode") == "benchmark_experiment"
+    )
+    if benchmark_experiment and experiment_runtime_context is None:
+        raise AgentTeamCliError(
+            "benchmark experiment taskpack requires a bound experiment runtime context",
+            taskpack_id=loaded_taskpack.get("taskpack_id"),
+        )
     controller_only = (
         loaded_taskpack.get("execution_mode") == "controller_only"
     )
