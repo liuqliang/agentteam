@@ -25,6 +25,7 @@ from agentteam_runtime.phase3_swe_evo_evaluator import (
     Phase3SweEvoEvaluatorError,
     _aggregate_upstream_report,
 )
+from agentteam_runtime.experiment_sandbox import _candidate_source_unchanged
 from agentteam_runtime.resource_envelope import approved_phase3_resource_envelope_binding
 from agentteam_runtime.experiment_contract import canonical_json_sha256
 from test_phase3_pilot import _build, _live_authorization
@@ -84,6 +85,23 @@ def _runner(root, executor):
 
 
 class Phase3PilotRunnerTests(unittest.TestCase):
+    def test_candidate_source_comparison_ignores_untracked_evaluator_outputs(self):
+        before = {
+            "baseline_commit": "1" * 40,
+            "baseline_tree": "2" * 40,
+            "head_commit": "1" * 40,
+            "head_tree": "2" * 40,
+            "git_object_format": "sha1",
+            "tracked_status_sha256": "3" * 64,
+            "working_tree_sha256": "4" * 64,
+        }
+        after = dict(before)
+        after["working_tree_sha256"] = "5" * 64
+
+        self.assertTrue(_candidate_source_unchanged(before, after))
+        after["tracked_status_sha256"] = "6" * 64
+        self.assertFalse(_candidate_source_unchanged(before, after))
+
     def test_live_sandbox_mounts_codex_and_matching_code_mode_host(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -646,6 +664,92 @@ class Phase3PilotRunnerTests(unittest.TestCase):
             self.assertEqual(result, expected)
             official.assert_not_called()
 
+    def test_production_executor_seals_evaluator_failure_before_returning_usage(self):
+        executor = object.__new__(Phase3ProductionExecutor)
+        executor.sandbox_configuration = {}
+        executor.runtime_release = {}
+        executor.resource_envelope_binding = None
+        executor.resource_references = {}
+        entry = {
+            "entry_id": "fixture--r0--single_codex",
+            "instance_id": "fixture",
+            "mode": "single_codex",
+            "repetition_index": 0,
+        }
+        expected = {"terminal_status": "completed"}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evaluator = root / "evaluator.py"
+            evaluator.write_text("# fixture\n", encoding="ascii")
+            executor.common_evaluator_artifact = str(evaluator)
+            (root / "results").mkdir()
+            with patch.object(
+                executor, "_allocation", return_value={"run_dir": temporary}
+            ), patch.object(executor, "_adapter", return_value=object()), patch(
+                "agentteam_runtime.phase3_pilot_runner.execute_bound_experiment_mode"
+            ), patch(
+                "agentteam_runtime.phase3_pilot_runner.load_experiment_result_bundle",
+                return_value={"bundle": expected},
+            ), patch.object(
+                executor,
+                "_evaluate_official",
+                side_effect=RuntimeError("evaluator timeout"),
+            ), patch.object(
+                executor, "_terminal_result", return_value=expected
+            ) as terminal:
+                result = executor.execute(entry, 0)
+
+            failure = json.loads(
+                (root / "results" / "official-evaluator-failure.json").read_text()
+            )
+            self.assertEqual(result, expected)
+            self.assertEqual(failure["error_type"], "RuntimeError")
+            self.assertGreaterEqual(failure["wall_time_seconds"], 0.0)
+            terminal.assert_called_once_with(
+                entry, root, None, evaluator_failed=True
+            )
+
+    def test_evaluator_failure_projection_preserves_usage_and_wall_time(self):
+        executor = object.__new__(Phase3ProductionExecutor)
+        entry = {"entry_id": "fixture--r0--single_codex"}
+        bundle = {
+            "terminal_status": "completed",
+            "usage_totals": {
+                "input_tokens": 980995,
+                "cached_input_tokens": 903424,
+                "output_tokens": 12897,
+                "reasoning_tokens": 6127,
+                "total_tokens": 993892,
+            },
+            "usage_coverage": {
+                "covered_invocations": 1,
+                "total_invocations": 1,
+                "status": "complete",
+            },
+            "budget_result": {"elapsed_wall_time_seconds": 300.0},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "results").mkdir()
+            (root / "results" / "official-evaluator-failure.json").write_text(
+                json.dumps({"wall_time_seconds": 1800.0}),
+                encoding="ascii",
+            )
+            with patch(
+                "agentteam_runtime.phase3_pilot_runner.load_experiment_result_bundle",
+                return_value={"bundle": bundle},
+            ):
+                result = executor._terminal_result(
+                    entry, root, None, evaluator_failed=True
+                )
+
+        self.assertEqual(result["terminal_status"], "infrastructure_failed")
+        self.assertEqual(result["failure_class"], "evaluator_failure")
+        self.assertEqual(result["usage"]["total_tokens"], 993892)
+        self.assertEqual(result["usage"]["coverage_percent"], 100)
+        self.assertEqual(result["wall_time_seconds"], 2100.0)
+
     def test_sealed_usage_coverage_projects_to_percent(self):
         self.assertEqual(
             _usage_coverage_percent(
@@ -768,8 +872,39 @@ class Phase3PilotRunnerTests(unittest.TestCase):
 
             recovered = runner.run(max_executions=1)
 
-            self.assertIn(entry["entry_id"], recovered["terminal_results"])
-            self.assertNotEqual(executor.calls[0][0]["entry_id"], entry["entry_id"])
+        self.assertIn(entry["entry_id"], recovered["terminal_results"])
+        self.assertNotEqual(executor.calls[0][0]["entry_id"], entry["entry_id"])
+
+    def test_resume_recovers_stopped_executor_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executor = _Executor()
+            runner = _runner(temporary, executor)
+            state = runner.initialize()
+            entry = state["schedule"][0]
+            state.update(
+                {
+                    "status": "stopped",
+                    "stop_reason": "executor_exception",
+                    "active": {
+                        "entry_id": entry["entry_id"],
+                        "attempt_index": 0,
+                        "started_at": state["created_at"],
+                    },
+                    "active_error": {
+                        "type": "RuntimeError",
+                        "message_sha256": "a" * 64,
+                    },
+                }
+            )
+            executor.results[entry["entry_id"]] = _result(entry)
+            with runner._lease():
+                runner._write_state(state)
+
+            recovered = runner.run(max_executions=1)
+
+        self.assertIn(entry["entry_id"], recovered["terminal_results"])
+        self.assertNotEqual(recovered["stop_reason"], "executor_exception")
+        self.assertNotIn("active_error", recovered)
 
     def test_ambiguous_active_result_stops_before_duplicate_provider_call(self):
         class NoRecoveryExecutor:

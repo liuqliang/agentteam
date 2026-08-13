@@ -2413,12 +2413,13 @@ def run_trusted_argv_evaluator(
         if post_scan["findings"]:
             post_scan["scan_status"] = "leak_detected"
         base["post_run_leak_scan"] = post_scan
-        candidate_repository_unchanged = (
-            _candidate_repository_state(
-                provider_sandbox_descriptor["repository"]["source"],
-                protocol_repository_identity,
-            )
-            == candidate_repository
+        post_candidate_repository = _candidate_repository_state(
+            provider_sandbox_descriptor["repository"]["source"],
+            protocol_repository_identity,
+        )
+        candidate_repository_unchanged = _candidate_source_unchanged(
+            candidate_repository,
+            post_candidate_repository,
         )
         if post_scan["scan_scope_sha256"] != actual_scan_scope_sha256:
             raise ExperimentSandboxError("post-run leak scan scope drift")
@@ -4377,6 +4378,20 @@ def _sanitized_git_environment():
         "LANG": "C.UTF-8",
         "PATH": "/usr/bin:/bin",
     }
+
+
+def _candidate_source_unchanged(before, after):
+    """Ignore evaluator-created untracked files while protecting source state."""
+
+    protected = (
+        "baseline_commit",
+        "baseline_tree",
+        "head_commit",
+        "head_tree",
+        "git_object_format",
+        "tracked_status_sha256",
+    )
+    return all(after.get(field) == before.get(field) for field in protected)
 
 
 def _candidate_repository_state(repository, baseline_identity):

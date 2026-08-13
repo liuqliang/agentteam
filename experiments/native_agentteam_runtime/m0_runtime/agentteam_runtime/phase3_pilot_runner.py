@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,6 +57,7 @@ _RETRYABLE_FAILURES = {
 }
 _INFRASTRUCTURE_FAILURES = {
     "provider_infrastructure_error",
+    "evaluator_failure",
 }
 _FORBIDDEN_RESULT_KEYS = {
     "gold_patch",
@@ -297,8 +299,13 @@ class Phase3ProductionExecutor:
         allocation = self._allocation(entry, attempt_index)
         run_dir = Path(allocation["run_dir"])
         official_path = run_dir / "results" / "official-score.json"
+        failure_path = run_dir / "results" / "official-evaluator-failure.json"
         if official_path.is_file():
             return self._terminal_result(entry, run_dir, _read_json(official_path, "official score"))
+        if failure_path.is_file():
+            return self._terminal_result(
+                entry, run_dir, None, evaluator_failed=True
+            )
         adapter = self._adapter(entry)
         execute_bound_experiment_mode(
             allocation,
@@ -314,8 +321,17 @@ class Phase3ProductionExecutor:
         sealed = load_experiment_result_bundle(run_dir)["bundle"]
         if sealed["terminal_status"] == "infrastructure_failed":
             return self._terminal_result(entry, run_dir, None)
-        score = self._evaluate_official(entry, run_dir)
-        score = _validate_official_score(score)
+        try:
+            evaluator_started = time.monotonic()
+            score = self._evaluate_official(entry, run_dir)
+            score = _validate_official_score(score)
+        except Exception as exc:
+            self._publish_evaluator_failure(
+                run_dir,
+                exc,
+                wall_time_seconds=time.monotonic() - evaluator_started,
+            )
+            return self._terminal_result(entry, run_dir, None, evaluator_failed=True)
         publish_immutable_json(
             official_path,
             score,
@@ -326,11 +342,16 @@ class Phase3ProductionExecutor:
     def recover(self, entry, _attempt_index=0):
         run_dir = self._run_dir(entry)
         official_path = run_dir / "results" / "official-score.json"
+        failure_path = run_dir / "results" / "official-evaluator-failure.json"
         if official_path.is_file():
             return self._terminal_result(
                 entry,
                 run_dir,
                 _read_json(official_path, "official score"),
+            )
+        if failure_path.is_file():
+            return self._terminal_result(
+                entry, run_dir, None, evaluator_failed=True
             )
         terminal = run_dir / "results" / "terminal"
         patch = run_dir / "artifacts" / "candidate.patch"
@@ -338,7 +359,18 @@ class Phase3ProductionExecutor:
             sealed = load_experiment_result_bundle(run_dir)["bundle"]
             if sealed["terminal_status"] == "infrastructure_failed":
                 return self._terminal_result(entry, run_dir, None)
-            score = self._evaluate_official(entry, run_dir)
+            try:
+                evaluator_started = time.monotonic()
+                score = self._evaluate_official(entry, run_dir)
+            except Exception as exc:
+                self._publish_evaluator_failure(
+                    run_dir,
+                    exc,
+                    wall_time_seconds=time.monotonic() - evaluator_started,
+                )
+                return self._terminal_result(
+                    entry, run_dir, None, evaluator_failed=True
+                )
             publish_immutable_json(
                 official_path,
                 score,
@@ -346,6 +378,22 @@ class Phase3ProductionExecutor:
             )
             return self._terminal_result(entry, run_dir, score)
         return None
+
+    @staticmethod
+    def _publish_evaluator_failure(run_dir, error, *, wall_time_seconds):
+        publish_immutable_json(
+            Path(run_dir) / "results" / "official-evaluator-failure.json",
+            {
+                "schema_version": "phase3_official_evaluator_failure.v1",
+                "status": "failed",
+                "error_type": type(error).__name__,
+                "error_sha256": hashlib.sha256(
+                    str(error).encode("utf-8")
+                ).hexdigest(),
+                "wall_time_seconds": max(float(wall_time_seconds), 0.0),
+            },
+            label="Phase 3 official evaluator failure",
+        )
 
     def _evaluate_official(self, entry, run_dir):
         patch = run_dir / "artifacts" / "candidate.patch"
@@ -410,16 +458,33 @@ class Phase3ProductionExecutor:
             integration_verification_command=self.integration_verification_command,
         )
 
-    def _terminal_result(self, entry, run_dir, score):
+    def _terminal_result(
+        self, entry, run_dir, score, *, evaluator_failed=False
+    ):
         sealed = load_experiment_result_bundle(run_dir)["bundle"]
         usage = sealed["usage_totals"]
         infrastructure_failed = sealed["terminal_status"] == "infrastructure_failed"
+        evaluator_failure_wall = 0.0
+        if evaluator_failed:
+            failure = _read_json(
+                Path(run_dir) / "results" / "official-evaluator-failure.json",
+                "official evaluator failure",
+            )
+            evaluator_failure_wall = float(failure["wall_time_seconds"])
         failure_class = (
-            "provider_infrastructure_error" if infrastructure_failed else None
+            "provider_infrastructure_error"
+            if infrastructure_failed
+            else "evaluator_failure"
+            if evaluator_failed
+            else None
         )
         return {
             "entry_id": entry["entry_id"],
-            "terminal_status": sealed["terminal_status"],
+            "terminal_status": (
+                "infrastructure_failed"
+                if evaluator_failed
+                else sealed["terminal_status"]
+            ),
             "failure_class": failure_class,
             "usage": {
                 field: int(usage.get(field, 0))
@@ -438,13 +503,14 @@ class Phase3ProductionExecutor:
             },
             "wall_time_seconds": (
                 float(sealed["budget_result"]["elapsed_wall_time_seconds"])
+                + evaluator_failure_wall
                 + (0.0 if score is None else float(score["wall_time_seconds"]))
             ),
             "official_score": (
                 {
                     "status": "failed",
                     "resolved": False,
-                    "reason": "provider_infrastructure_error",
+                    "reason": failure_class,
                 }
                 if score is None
                 else copy.deepcopy(score)
@@ -529,8 +595,24 @@ class Phase3PilotRunner:
                 manifest = self._load_manifest()
                 state = self._load_state()
                 self._validate_state(state, manifest)
-                if state["status"] in {"completed", "stopped"}:
+                if state["status"] == "completed":
                     return copy.deepcopy(state)
+                if state["status"] == "stopped":
+                    if not (
+                        state.get("stop_reason") == "executor_exception"
+                        and isinstance(state.get("active"), dict)
+                    ):
+                        return copy.deepcopy(state)
+                    state["status"] = "running"
+                    state["stop_reason"] = None
+                    state.pop("active_error", None)
+                    recovered = self._recover_active(state)
+                    if not recovered:
+                        raise Phase3PilotRunnerError(
+                            "stopped executor checkpoint was not recovered"
+                        )
+                    self._write_state(state)
+                    continue
                 recovered = self._recover_active(state)
                 if recovered:
                     self._write_state(state)
