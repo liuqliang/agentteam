@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from dataclasses import asdict
@@ -55,6 +57,126 @@ class Phase3SweEvoEvaluator:
             raise Phase3SweEvoEvaluatorError("SWE-EVO Arrow authority changed")
         if _git_output(self.harness_root, "rev-parse", "HEAD") != harness_commit:
             raise Phase3SweEvoEvaluatorError("SWE-bench evaluator commit changed")
+
+    def evaluate_resource_bound(
+        self,
+        entry,
+        patch_path,
+        *,
+        resource_envelope_binding,
+        resource_hierarchy_reference,
+        evidence_path,
+        command_runner=None,
+        hierarchy_factory=None,
+        monitor_factory=None,
+    ):
+        """Run the evaluator client in its verified transient service."""
+
+        from .experiment_contract import publish_immutable_json
+        from .resource_envelope import (
+            ResourceUnitMonitor,
+            SystemdResourceHierarchy,
+        )
+
+        hierarchy_factory = hierarchy_factory or SystemdResourceHierarchy
+        monitor_factory = monitor_factory or ResourceUnitMonitor
+        runner = command_runner or subprocess.run
+        hierarchy = hierarchy_factory(
+            resource_envelope_binding,
+            run_id=resource_hierarchy_reference["run_id"],
+            mode=entry["mode"],
+            owner_reference=resource_hierarchy_reference,
+            command_runner=runner,
+        )
+        hierarchy.prepare(check_host=False)
+        request_id = hashlib.sha256(entry["entry_id"].encode("utf-8")).hexdigest()
+        request_root = self.evaluator_root / "requests" / request_id
+        request_root.mkdir(parents=True, exist_ok=True)
+        request_path = request_root / "request.json"
+        score_path = request_root / "score.json"
+        score_path.unlink(missing_ok=True)
+        _write_private_json(
+            request_path,
+            {
+                "schema_version": "phase3_swe_evo_evaluator_request.v1",
+                "configuration": self.configuration(),
+                "entry": copy.deepcopy(entry),
+                "patch_path": str(Path(patch_path).resolve(strict=True)),
+            },
+        )
+        unit = f"agentteam-p3-{request_id[:16]}-evaluator.service"
+        command = hierarchy.leaf_command(
+            [
+                sys.executable,
+                "-m",
+                "agentteam_runtime.phase3_swe_evo_evaluator",
+                "--request",
+                str(request_path),
+                "--output",
+                str(score_path),
+            ],
+            unit=unit,
+            evaluator=True,
+        )
+        monitor = monitor_factory(
+            hierarchy,
+            unit,
+            scope="evaluator",
+            evaluator=True,
+        ).start()
+        timed_out = False
+        try:
+            try:
+                completed = runner(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    timeout=self.timeout_seconds + 120,
+                )
+            except subprocess.TimeoutExpired as exc:
+                timed_out = True
+                hierarchy.stop_transient_unit(unit)
+                raise Phase3SweEvoEvaluatorError(
+                    "resource-bound evaluator exceeded its timeout"
+                ) from exc
+            evidence = monitor.finish(
+                binding=resource_envelope_binding,
+                timed_out=timed_out,
+            )
+        except Exception:
+            monitor.cancel()
+            hierarchy.stop_transient_unit(unit)
+            raise
+        if completed.returncode != 0:
+            reason = (completed.stderr or completed.stdout or "").strip()[:500]
+            raise Phase3SweEvoEvaluatorError(
+                f"resource-bound evaluator failed: {reason}"
+            )
+        score = _read_private_json(score_path, "resource-bound evaluator score")
+        publish_immutable_json(
+            evidence_path,
+            evidence,
+            label="Phase 3 official evaluator resource evidence",
+        )
+        return score
+
+    def configuration(self):
+        return {
+            "arrow_path": str(self.arrow_path),
+            "arrow_sha256": _file_sha256(self.arrow_path),
+            "harness_root": str(self.harness_root),
+            "harness_commit": self.harness_commit,
+            "instances_by_id": copy.deepcopy(self.instances),
+            "evaluator_root": str(self.evaluator_root),
+            "resource_envelope_binding": {
+                "schema_version": "phase3_resource_envelope.v2",
+                **_resource_binding_from_limits(self.resource_limits_by_mode),
+            },
+            "docker_socket": self.docker_socket,
+            "timeout_seconds": self.timeout_seconds,
+        }
 
     def __call__(self, entry, patch_path):
         started = time.monotonic()
@@ -239,8 +361,6 @@ def _file_sha256(path):
 
 
 def _git_output(root, *arguments):
-    import subprocess
-
     completed = subprocess.run(
         ["git", "-C", str(root), *arguments],
         check=True,
@@ -327,3 +447,70 @@ class _ResourceBoundContainers:
                     "evaluator container resource readback differs from authority"
                 )
         return container
+
+
+def _resource_binding_from_limits(limits_by_mode):
+    """Recover the approved binding without serializing mutable internals."""
+
+    from .resource_envelope import approved_phase3_resource_envelope_binding
+
+    binding = approved_phase3_resource_envelope_binding()
+    expected = {
+        mode: binding["envelopes"][
+            binding["hierarchy"]["modes"][mode]["evaluator_envelope"]
+        ]
+        for mode in limits_by_mode
+    }
+    if expected != limits_by_mode:
+        raise Phase3SweEvoEvaluatorError(
+            "evaluator resource limits differ from approved authority"
+        )
+    body = copy.deepcopy(binding)
+    body.pop("schema_version")
+    return body
+
+
+def _write_private_json(path, value):
+    path = Path(path)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n",
+        encoding="ascii",
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def _read_private_json(path, label):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise Phase3SweEvoEvaluatorError(f"{label} is missing or unsafe")
+    try:
+        value = json.loads(path.read_text(encoding="ascii"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise Phase3SweEvoEvaluatorError(f"{label} is unreadable") from exc
+    if not isinstance(value, dict):
+        raise Phase3SweEvoEvaluatorError(f"{label} is invalid")
+    return value
+
+
+def _main(argv=None):
+    parser = argparse.ArgumentParser(description="Run one frozen SWE-EVO evaluation")
+    parser.add_argument("--request", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args(argv)
+    request = _read_private_json(args.request, "evaluator request")
+    if request.get("schema_version") != "phase3_swe_evo_evaluator_request.v1":
+        raise Phase3SweEvoEvaluatorError("evaluator request version is invalid")
+    configuration = request.get("configuration")
+    entry = request.get("entry")
+    if not isinstance(configuration, dict) or not isinstance(entry, dict):
+        raise Phase3SweEvoEvaluatorError("evaluator request fields are invalid")
+    score = Phase3SweEvoEvaluator(**configuration)(entry, request.get("patch_path"))
+    _write_private_json(args.output, score)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through subprocess
+    raise SystemExit(_main())

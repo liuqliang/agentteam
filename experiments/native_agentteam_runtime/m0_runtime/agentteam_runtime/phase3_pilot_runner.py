@@ -305,10 +305,7 @@ class Phase3ProductionExecutor:
             resource_envelope_binding=self.resource_envelope_binding,
             resource_hierarchy_reference=self.resource_references.get(entry["mode"]),
         )
-        score = self.official_evaluator(
-            copy.deepcopy(entry),
-            run_dir / "artifacts" / "candidate.patch",
-        )
+        score = self._evaluate_official(entry, run_dir)
         score = _validate_official_score(score)
         publish_immutable_json(
             official_path,
@@ -329,9 +326,7 @@ class Phase3ProductionExecutor:
         terminal = run_dir / "results" / "terminal"
         patch = run_dir / "artifacts" / "candidate.patch"
         if terminal.is_dir() and patch.is_file():
-            score = _validate_official_score(
-                self.official_evaluator(copy.deepcopy(entry), patch)
-            )
+            score = self._evaluate_official(entry, run_dir)
             publish_immutable_json(
                 official_path,
                 score,
@@ -339,6 +334,28 @@ class Phase3ProductionExecutor:
             )
             return self._terminal_result(entry, run_dir, score)
         return None
+
+    def _evaluate_official(self, entry, run_dir):
+        patch = run_dir / "artifacts" / "candidate.patch"
+        bound = getattr(self.official_evaluator, "evaluate_resource_bound", None)
+        if self.resource_envelope_binding is not None:
+            reference = self.resource_references.get(entry["mode"])
+            if not callable(bound) or not isinstance(reference, dict):
+                raise Phase3PilotRunnerError(
+                    "official evaluator resource binding is incomplete"
+                )
+            score = bound(
+                copy.deepcopy(entry),
+                patch,
+                resource_envelope_binding=self.resource_envelope_binding,
+                resource_hierarchy_reference=reference,
+                evidence_path=(
+                    run_dir / "results" / "official-evaluator-resource.json"
+                ),
+            )
+        else:
+            score = self.official_evaluator(copy.deepcopy(entry), patch)
+        return _validate_official_score(score)
 
     def _allocation(self, entry, attempt_index):
         protocol = self.protocols[entry["instance_id"]]

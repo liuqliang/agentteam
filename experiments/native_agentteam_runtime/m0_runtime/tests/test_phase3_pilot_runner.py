@@ -366,6 +366,84 @@ class Phase3PilotRunnerTests(unittest.TestCase):
 
         self.assertEqual(aggregate["swe_style_partial_score"], 0.0)
 
+    def test_official_evaluator_runs_in_resource_leaf_and_seals_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate.patch"
+            candidate.write_text("diff --git a/a b/a\n", encoding="ascii")
+            evaluator = object.__new__(Phase3SweEvoEvaluator)
+            evaluator.evaluator_root = root / "evaluator"
+            evaluator.evaluator_root.mkdir()
+            evaluator.timeout_seconds = 30
+            evaluator.configuration = lambda: {"fixture": True}
+            observed = {}
+
+            class FakeHierarchy:
+                def __init__(self, binding, **kwargs):
+                    observed["binding"] = binding
+                    observed["hierarchy_kwargs"] = kwargs
+
+                def prepare(self, *, check_host):
+                    observed["check_host"] = check_host
+
+                def leaf_command(self, command, *, unit, evaluator):
+                    observed["unit"] = unit
+                    observed["evaluator"] = evaluator
+                    return command
+
+                def stop_transient_unit(self, unit):
+                    observed["stopped"] = unit
+
+            class FakeMonitor:
+                def __init__(self, hierarchy, unit, *, scope, evaluator):
+                    observed["monitor"] = (unit, scope, evaluator)
+
+                def start(self):
+                    return self
+
+                def finish(self, *, binding, timed_out):
+                    observed["finished"] = (binding, timed_out)
+                    return {"scope": "evaluator", "status": "observed"}
+
+                def cancel(self):
+                    observed["cancelled"] = True
+
+            score = {
+                "schema_version": "phase3_official_score.v1",
+                "status": "completed",
+                "resolved": False,
+            }
+
+            def fake_runner(command, **kwargs):
+                observed["command"] = command
+                output = Path(command[command.index("--output") + 1])
+                output.write_text(json.dumps(score), encoding="ascii")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            evidence = root / "resource-evidence.json"
+            result = evaluator.evaluate_resource_bound(
+                {
+                    "entry_id": "fixture-entry",
+                    "instance_id": "fixture",
+                    "mode": "single_codex",
+                },
+                candidate,
+                resource_envelope_binding={"binding": "fixture"},
+                resource_hierarchy_reference={
+                    "run_id": "fixture-pilot",
+                    "mode": "single_codex",
+                },
+                evidence_path=evidence,
+                command_runner=fake_runner,
+                hierarchy_factory=FakeHierarchy,
+                monitor_factory=FakeMonitor,
+            )
+
+            self.assertEqual(result, score)
+            self.assertTrue(observed["evaluator"])
+            self.assertEqual(observed["monitor"][1:], ("evaluator", True))
+            self.assertEqual(json.loads(evidence.read_text())["scope"], "evaluator")
+
     def test_protocol_and_runtime_taskpack_bridge_are_executable(self):
         selection, preregistrations, _ = _build()
         instance_id = selection["ordered_instance_ids"][0]
