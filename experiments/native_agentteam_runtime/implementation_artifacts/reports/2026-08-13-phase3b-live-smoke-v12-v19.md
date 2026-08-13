@@ -3,7 +3,7 @@
 - Decision: `DEC-P3B-live-pilot-execution`
 - Evidence level: `L3`
 - Status: execution plumbing proven; scored comparison blocked
-- Runtime branch head: `449be49`
+- Cost-profiler implementation base: `1c73bcb`
 
 ## Result
 
@@ -21,6 +21,7 @@ provider-reported usage was:
 | --- | ---: |
 | Input tokens | 980,995 |
 | Cached input tokens | 903,424 |
+| Uncached input tokens | 77,571 |
 | Output tokens | 12,897 |
 | Reasoning tokens | 6,127 |
 | Total tokens | 993,892 |
@@ -46,6 +47,30 @@ model result and not a sample in the three-mode quality comparison.
 The known provider total across v13-v17 and v19 is 1,343,241 tokens. Failed
 epochs remain outside scored comparison but must remain in engineering-cost
 accounting.
+
+`phase3_cost_profile.v1` now reconstructs these costs from immutable invocation
+terminals without changing the frozen result-bundle schema. It separates
+cached and uncached input, stage, role, mode, outcome, model wall time,
+controller/common-acceptance overhead, and official-evaluator wall time. It
+also includes terminal provider usage from unsealed failed runs and labels that
+cost as infrastructure waste instead of silently dropping it.
+
+For v19 the machine-reconstructable model cost is therefore 993,892 total
+tokens but only 77,571 uncached input tokens. The profile must retain both
+numbers: total tokens are the provider's usage unit and budget authority,
+whereas uncached input is the useful signal for repeated-context overhead.
+The old v19 controller failed before writing an official-evaluator failure
+receipt, so its 1,800-second timeout cannot be reconstructed from retained
+machine authority. The profiler reports that evidence gap instead of importing
+the prose value into a supposedly mechanical result.
+
+Run the projection with:
+
+```bash
+PYTHONPATH=experiments/native_agentteam_runtime/m0_runtime \
+python3 -m agentteam_runtime.phase3_cost_profile \
+  --pilot-root /tmp/agentteam-phase3-live-pilot-v19-43a7f54
+```
 
 ## Corrections
 
@@ -83,6 +108,12 @@ The full 18-to-27 execution pilot must not start yet.
 3. Historical failed epochs did not project provider usage into pilot state.
    Commit `449be49` fixes future recovery and sealing, but historical states
    remain immutable and are accounted for by this report.
+4. The fixed Requests image was probed without applying evaluator-only test
+   patches. It contains the correct base commit, Python 3.9 environment, and
+   collects 138 public tests, but those tests include unstable network-facing
+   behavior. The next epoch must select a deterministic instance and freeze a
+   controller-owned public verification runner for that instance. Exposing the
+   Podman socket or evaluator-only Arrow fields to workers is forbidden.
 
 ## Evidence
 

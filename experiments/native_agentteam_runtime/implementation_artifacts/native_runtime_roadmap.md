@@ -1618,13 +1618,26 @@ Requests worker produced a substantive 3,523-byte patch and reported 993,892
 tokens, but the official evaluator timed out at 1,800 seconds and produced no
 valid score.
 
+Stage-level Phase 3 cost profiling is now implemented as a rebuildable
+`phase3_cost_profile.v1` projection over invocation terminal authority. It
+keeps cached input, uncached input, output, reasoning, role, stage, mode,
+outcome, model time, controller/common-acceptance time, and official-evaluator
+time separate. It also accounts for provider usage in unsealed failed runs as
+infrastructure waste. Frozen experiment result schemas and historical run
+artifacts remain unchanged.
+
 Do not expand the pilot to all modes or instances until a new execution
 decision closes both prerequisites:
 
-1. stabilize or replace the Requests evaluator path so a timeout is not the
-   dominant outcome or wall-time signal;
-2. bind worker-visible verification to an environment equivalent to the
-   official benchmark container instead of host Python 3.12.
+1. replace the Requests calibration instance with a deterministic task whose
+   public tests do not make network latency the dominant wall-time signal;
+2. freeze a controller-owned public verification runner with that instance so
+   taskpack, integration, and common acceptance use an environment equivalent
+   to the official benchmark image;
+3. prove that the public runner exposes neither the Podman control socket nor
+   evaluator-only Arrow fields, gold patches, or hidden test patches;
+4. execute one repetition of each mode before expanding to the full pilot, and
+   compare quality per total and uncached token rather than raw totals alone.
 
 The detailed epoch and cost audit is in
 [`2026-08-13-phase3b-live-smoke-v12-v19.md`](reports/2026-08-13-phase3b-live-smoke-v12-v19.md).
