@@ -358,6 +358,7 @@ def _live_sandbox_configuration(pilot_root):
     environment = {
         "CODEX_HOME": "/run/agentteam-credentials/codex",
         "PATH": "/opt/agentteam/bin:/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
     }
     for name in (
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",

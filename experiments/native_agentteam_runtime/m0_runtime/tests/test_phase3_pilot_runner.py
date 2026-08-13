@@ -109,6 +109,10 @@ class Phase3PilotRunnerTests(unittest.TestCase):
             views["/opt/agentteam/bin/codex-code-mode-host"],
             str(host),
         )
+        self.assertEqual(
+            configuration["environment"]["PYTHONDONTWRITEBYTECODE"],
+            "1",
+        )
 
     def test_runtime_candidate_falls_back_to_accepted_attempt_after_rollback(self):
         with tempfile.TemporaryDirectory() as temporary:
