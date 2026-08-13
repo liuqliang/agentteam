@@ -20,6 +20,7 @@ from agentteam_runtime.phase3_pilot_preparation import (
     Phase3PreparationError,
     approved_phase3_pilot_decisions,
     build_phase3_aggregate_pilot_contract,
+    build_phase3_execution_authority,
     build_phase3_instance_authority_candidates,
     build_phase3_instance_direct_taskpack,
     build_phase3_instance_preregistration,
@@ -30,10 +31,13 @@ from agentteam_runtime.phase3_pilot_preparation import (
     decision_input_report,
     fixed_dataset_binding,
     load_phase3_instance_authority_candidates,
+    load_phase3_execution_authority,
     load_phase3_selection_freeze_bundle,
     materialize_phase3_instance_authorities,
     prepare_phase3_pilot_selection,
     project_swe_evo_arrow_inventory,
+    phase3_execution_profile_from_authority,
+    publish_phase3_execution_authority,
     publish_phase3_instance_authority_candidates,
     publish_phase3_selection_freeze_bundle,
     provider_free_preflight_receipt_bytes,
@@ -48,6 +52,7 @@ from agentteam_runtime.phase3_pilot_preparation import (
     validate_phase3_instance_materialization,
     validate_phase3_instance_authority_candidates,
     validate_phase3_instance_authority_candidates_receipt,
+    validate_phase3_execution_authority,
     validate_phase3_provider_free_preflight_receipt,
     validate_phase3_selection_freeze_receipt,
     validate_phase3_selection_authority,
@@ -326,6 +331,16 @@ def _candidate_bundle():
         )
 
 
+def _committed_candidate_bundle():
+    root = (
+        Path(__file__).resolve().parents[2]
+        / "implementation_artifacts"
+        / "acceptance"
+        / "phase3b-instance-authority-candidates-v9"
+    )
+    return load_phase3_instance_authority_candidates(root)["candidates"]
+
+
 def _complexity_decisions():
     decisions = _decisions()
     decisions["complexity"] = {
@@ -571,6 +586,103 @@ def _live_authorization(contract, *, decision="approved"):
 
 
 class Phase3PilotPreparationTests(unittest.TestCase):
+    def test_execution_authority_derives_complete_preregistration_profile(self):
+        candidates = _committed_candidate_bundle()
+        authority = build_phase3_execution_authority(
+            agentteam_release_commit="a" * 40,
+            codex_cli_version="codex-cli-test",
+            environment_version="phase3b-test-environment-v1",
+            candidates=candidates,
+        )
+        profile = phase3_execution_profile_from_authority(
+            authority,
+            candidates=candidates,
+        )
+        self.assertEqual(profile["model"]["model"], "gpt-5.6-sol")
+        self.assertEqual(profile["model"]["reasoning_profile"], "high")
+        self.assertEqual(profile["execution"]["cpu_limit"], 4)
+        self.assertEqual(
+            profile["execution"]["memory_limit_bytes"],
+            12 * 1024 * 1024 * 1024,
+        )
+        self.assertEqual(
+            profile["execution"]["benchmark_visible_tests_sha256"],
+            authority["bindings"]["benchmark_visible_tests_sha256"],
+        )
+
+    def test_execution_authority_rejects_rehashed_policy_drift(self):
+        candidates = _committed_candidate_bundle()
+        authority = build_phase3_execution_authority(
+            agentteam_release_commit="a" * 40,
+            codex_cli_version="codex-cli-test",
+            environment_version="phase3b-test-environment-v1",
+            candidates=candidates,
+        )
+        changed = copy.deepcopy(authority)
+        changed["policies"]["sandbox"]["gold_mount"] = "read-only"
+        changed["bindings"]["sandbox_sha256"] = canonical_json_sha256(
+            changed["policies"]["sandbox"]
+        )
+        body = dict(changed)
+        body.pop("authority_sha256")
+        changed["authority_sha256"] = canonical_json_sha256(body)
+        with self.assertRaisesRegex(
+            Phase3PreparationError,
+            "policy objects",
+        ):
+            validate_phase3_execution_authority(changed, candidates=candidates)
+
+    def test_execution_authority_publication_requires_approved_digest(self):
+        candidates = _committed_candidate_bundle()
+        authority = build_phase3_execution_authority(
+            agentteam_release_commit="a" * 40,
+            codex_cli_version="codex-cli-test",
+            environment_version="phase3b-test-environment-v1",
+            candidates=candidates,
+        )
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
+            Phase3PreparationError,
+            "approved production authority",
+        ):
+            publish_phase3_execution_authority(
+                directory,
+                authority,
+                candidates=candidates,
+            )
+
+    def test_execution_authority_publication_is_idempotent_and_reloadable(self):
+        candidates = _committed_candidate_bundle()
+        authority = build_phase3_execution_authority(
+            agentteam_release_commit="a" * 40,
+            codex_cli_version="codex-cli-test",
+            environment_version="phase3b-test-environment-v1",
+            candidates=candidates,
+        )
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            preparation,
+            "APPROVED_EXECUTION_AUTHORITY_SHA256",
+            authority["authority_sha256"],
+        ):
+            first = publish_phase3_execution_authority(
+                directory,
+                authority,
+                candidates=candidates,
+            )
+            second = publish_phase3_execution_authority(
+                directory,
+                authority,
+                candidates=candidates,
+            )
+            loaded = load_phase3_execution_authority(
+                directory,
+                candidates=candidates,
+            )
+        self.assertTrue(first["authority"]["created"])
+        self.assertTrue(first["receipt"]["created"])
+        self.assertFalse(second["authority"]["created"])
+        self.assertFalse(second["receipt"]["created"])
+        self.assertEqual(loaded["authority"], authority)
+
     def test_instance_authority_candidates_split_worker_and_evaluator_fields(self):
         candidates = _candidate_bundle()
         self.assertEqual(

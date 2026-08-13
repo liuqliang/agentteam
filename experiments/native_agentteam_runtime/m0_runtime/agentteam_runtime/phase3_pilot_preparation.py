@@ -67,6 +67,10 @@ INSTANCE_AUTHORITY_CANDIDATES_SCHEMA_VERSION = (
 INSTANCE_AUTHORITY_CANDIDATES_RECEIPT_SCHEMA_VERSION = (
     "phase3_instance_authority_candidates_receipt.v1"
 )
+EXECUTION_AUTHORITY_SCHEMA_VERSION = "phase3_execution_authority.v1"
+EXECUTION_AUTHORITY_RECEIPT_SCHEMA_VERSION = (
+    "phase3_execution_authority_receipt.v1"
+)
 PILOT_PREFLIGHT_DECISION_ID = "DEC-P3B-provider-free-preparation"
 READINESS_BINDING = {
     "gate_id": "P3-READY",
@@ -122,6 +126,9 @@ APPROVED_SELECTION_AUTHORITY_SHA256 = (
 APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256 = (
     "f60c537a478aa43f694134b1e22ccc31479d8534aad4683473ec532849bea178"
 )
+# Set only after the implementation commit exists, avoiding a self-referential
+# release-commit binding. Publication remains closed while this is unset.
+APPROVED_EXECUTION_AUTHORITY_SHA256 = None
 FINAL_PREREGISTRATION_MISSING_AUTHORITIES = (
     "runtime.agentteam_release_commit",
     "runtime.codex_cli_version",
@@ -161,6 +168,15 @@ INSTANCE_AUTHORITY_ROW_FIELDS = frozenset(
         "test_patch",
         "all_patch",
     }
+)
+EXECUTION_POLICY_NAMES = (
+    "tools",
+    "sandbox",
+    "permission",
+    "external_services",
+    "benchmark_visible_tests",
+    "termination",
+    "shared_dependency_cache",
 )
 EXPECTED_SELECTION_PREVIEW = (
     "psf__requests_v2.4.0_v2.4.1",
@@ -1211,6 +1227,461 @@ def load_phase3_instance_authority_candidates(authority_root):
         candidates=candidates,
     )
     return values
+
+
+def build_phase3_execution_authority(
+    *,
+    agentteam_release_commit,
+    codex_cli_version,
+    environment_version,
+    candidates,
+):
+    """Build the concrete policy authority behind preregistration digests."""
+
+    candidate = validate_phase3_instance_authority_candidates(candidates)
+    if candidate["bundle_sha256"] != APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256:
+        raise Phase3PreparationError(
+            "execution authority requires the approved instance candidates"
+        )
+    runtime = {
+        "agentteam_release_commit": agentteam_release_commit,
+        "codex_cli_version": codex_cli_version,
+        "environment_version": environment_version,
+    }
+    decisions = approved_phase3_pilot_decisions()
+    service_configuration = {
+        "backend": "codex",
+        "model": decisions["execution"]["model"],
+        "reasoning_profile": decisions["execution"]["reasoning_profile"],
+        "max_inflight_model_invocations": 1,
+        "provider_usage_contract": "model_invocation_usage.v1",
+    }
+    policies = _phase3_execution_policy_objects(candidate)
+    resource_envelope = approved_phase3_resource_envelope_binding()
+    bindings = {
+        "candidate_bundle_sha256": candidate["bundle_sha256"],
+        "resource_envelope_sha256": canonical_resource_envelope_sha256(
+            resource_envelope
+        ),
+        "service_configuration_sha256": canonical_json_sha256(
+            service_configuration
+        ),
+        **{
+            f"{name}_sha256": canonical_json_sha256(policies[name])
+            for name in EXECUTION_POLICY_NAMES
+        },
+    }
+    body = {
+        "status": "frozen",
+        "provider_free": True,
+        "runtime": runtime,
+        "service_configuration": service_configuration,
+        "policies": policies,
+        "resource_envelope": resource_envelope,
+        "bindings": bindings,
+        "provider_calls": 0,
+        "scored_mode_executions": 0,
+    }
+    authority = {
+        "schema_version": EXECUTION_AUTHORITY_SCHEMA_VERSION,
+        **body,
+    }
+    authority["authority_sha256"] = canonical_json_sha256(authority)
+    return validate_phase3_execution_authority(
+        authority,
+        candidates=candidate,
+    )
+
+
+def validate_phase3_execution_authority(authority, *, candidates=None):
+    value = _json_object_snapshot(authority)
+    expected = {
+        "schema_version",
+        "status",
+        "provider_free",
+        "runtime",
+        "service_configuration",
+        "policies",
+        "resource_envelope",
+        "bindings",
+        "provider_calls",
+        "scored_mode_executions",
+        "authority_sha256",
+    }
+    if value is None or set(value) != expected:
+        raise Phase3PreparationError("execution authority fields are invalid")
+    body = dict(value)
+    digest = body.pop("authority_sha256")
+    runtime = value["runtime"]
+    service = value["service_configuration"]
+    policies = value["policies"]
+    bindings = value["bindings"]
+    decisions = approved_phase3_pilot_decisions()
+    if (
+        value["schema_version"] != EXECUTION_AUTHORITY_SCHEMA_VERSION
+        or value["status"] != "frozen"
+        or value["provider_free"] is not True
+        or not isinstance(runtime, dict)
+        or set(runtime)
+        != {
+            "agentteam_release_commit",
+            "codex_cli_version",
+            "environment_version",
+        }
+        or not isinstance(runtime["agentteam_release_commit"], str)
+        or re.fullmatch(r"[0-9a-f]{40}", runtime["agentteam_release_commit"])
+        is None
+        or any(
+            not isinstance(runtime[field], str) or not runtime[field].strip()
+            for field in ("codex_cli_version", "environment_version")
+        )
+        or service
+        != {
+            "backend": "codex",
+            "model": decisions["execution"]["model"],
+            "reasoning_profile": decisions["execution"]["reasoning_profile"],
+            "max_inflight_model_invocations": 1,
+            "provider_usage_contract": "model_invocation_usage.v1",
+        }
+        or not isinstance(policies, dict)
+        or set(policies) != set(EXECUTION_POLICY_NAMES)
+        or any(not isinstance(policies[name], dict) for name in policies)
+        or value["resource_envelope"]
+        != approved_phase3_resource_envelope_binding()
+        or not isinstance(bindings, dict)
+        or set(bindings)
+        != {
+            "candidate_bundle_sha256",
+            "resource_envelope_sha256",
+            "service_configuration_sha256",
+            *(f"{name}_sha256" for name in EXECUTION_POLICY_NAMES),
+        }
+        or bindings["candidate_bundle_sha256"]
+        != APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256
+        or bindings["resource_envelope_sha256"]
+        != canonical_resource_envelope_sha256(value["resource_envelope"])
+        or bindings["service_configuration_sha256"]
+        != canonical_json_sha256(service)
+        or any(
+            bindings[f"{name}_sha256"] != canonical_json_sha256(policies[name])
+            for name in EXECUTION_POLICY_NAMES
+        )
+        or value["provider_calls"] != 0
+        or isinstance(value["provider_calls"], bool)
+        or value["scored_mode_executions"] != 0
+        or isinstance(value["scored_mode_executions"], bool)
+        or digest != canonical_json_sha256(body)
+    ):
+        raise Phase3PreparationError("execution authority is invalid")
+    _validate_phase3_execution_policy_objects(policies)
+    if candidates is not None:
+        candidate = validate_phase3_instance_authority_candidates(candidates)
+        if (
+            bindings["candidate_bundle_sha256"] != candidate["bundle_sha256"]
+            or policies != _phase3_execution_policy_objects(candidate)
+        ):
+            raise Phase3PreparationError(
+                "execution authority does not bind the instance candidates"
+            )
+    return value
+
+
+def phase3_execution_profile_from_authority(authority, *, candidates=None):
+    """Derive the exact common preregistration profile from one authority."""
+
+    value = validate_phase3_execution_authority(
+        authority,
+        candidates=candidates,
+    )
+    bindings = value["bindings"]
+    resource = value["resource_envelope"]["envelopes"]["common_workload_slot"]
+    service = value["service_configuration"]
+    return {
+        "runtime": value["runtime"],
+        "model": {
+            "model": service["model"],
+            "reasoning_profile": service["reasoning_profile"],
+            "service_configuration_sha256": bindings[
+                "service_configuration_sha256"
+            ],
+        },
+        "execution": {
+            "tools_sha256": bindings["tools_sha256"],
+            "network_policy": value["policies"]["external_services"][
+                "network_policy"
+            ],
+            "sandbox_policy_sha256": bindings["sandbox_sha256"],
+            "permission_policy_sha256": bindings["permission_sha256"],
+            "host_class": value["policies"]["sandbox"]["host_class"],
+            "cpu_limit": resource["cpu_quota"],
+            "memory_limit_bytes": resource["memory_max_bytes"],
+            "external_services_sha256": bindings["external_services_sha256"],
+            "benchmark_visible_tests_sha256": bindings[
+                "benchmark_visible_tests_sha256"
+            ],
+            "termination_policy_sha256": bindings["termination_sha256"],
+            "shared_dependency_cache_sha256": bindings[
+                "shared_dependency_cache_sha256"
+            ],
+        },
+    }
+
+
+def publish_phase3_execution_authority(authority_root, authority, *, candidates):
+    value = validate_phase3_execution_authority(
+        authority,
+        candidates=candidates,
+    )
+    if (
+        APPROVED_EXECUTION_AUTHORITY_SHA256 is None
+        or value["authority_sha256"] != APPROVED_EXECUTION_AUTHORITY_SHA256
+    ):
+        raise Phase3PreparationError(
+            "execution authority does not match the approved production authority"
+        )
+    root = Path(authority_root)
+    authority_publication = publish_immutable_json(
+        root / "execution-authority.json",
+        value,
+        label="Phase 3 execution authority",
+    )
+    receipt = {
+        "schema_version": EXECUTION_AUTHORITY_RECEIPT_SCHEMA_VERSION,
+        "status": "frozen",
+        "provider_free": True,
+        "authority_sha256": value["authority_sha256"],
+        "agentteam_release_commit": value["runtime"][
+            "agentteam_release_commit"
+        ],
+        "candidate_bundle_sha256": value["bindings"][
+            "candidate_bundle_sha256"
+        ],
+        "provider_calls": 0,
+        "scored_mode_executions": 0,
+    }
+    receipt["receipt_sha256"] = canonical_json_sha256(receipt)
+    validate_phase3_execution_authority_receipt(receipt, authority=value)
+    receipt_publication = publish_immutable_json(
+        root / "receipt.json",
+        receipt,
+        label="Phase 3 execution authority receipt",
+    )
+    return {
+        "authority": authority_publication,
+        "receipt": receipt_publication,
+        "receipt_value": receipt,
+    }
+
+
+def validate_phase3_execution_authority_receipt(receipt, *, authority=None):
+    value = _json_object_snapshot(receipt)
+    expected = {
+        "schema_version",
+        "status",
+        "provider_free",
+        "authority_sha256",
+        "agentteam_release_commit",
+        "candidate_bundle_sha256",
+        "provider_calls",
+        "scored_mode_executions",
+        "receipt_sha256",
+    }
+    if value is None or set(value) != expected:
+        raise Phase3PreparationError("execution authority receipt fields are invalid")
+    body = dict(value)
+    digest = body.pop("receipt_sha256")
+    if (
+        value["schema_version"] != EXECUTION_AUTHORITY_RECEIPT_SCHEMA_VERSION
+        or value["status"] != "frozen"
+        or value["provider_free"] is not True
+        or not isinstance(value["authority_sha256"], str)
+        or _SHA256.fullmatch(value["authority_sha256"]) is None
+        or re.fullmatch(r"[0-9a-f]{40}", value["agentteam_release_commit"])
+        is None
+        or value["candidate_bundle_sha256"]
+        != APPROVED_INSTANCE_AUTHORITY_CANDIDATES_SHA256
+        or value["provider_calls"] != 0
+        or isinstance(value["provider_calls"], bool)
+        or value["scored_mode_executions"] != 0
+        or isinstance(value["scored_mode_executions"], bool)
+        or digest != canonical_json_sha256(body)
+    ):
+        raise Phase3PreparationError("execution authority receipt is invalid")
+    if authority is not None:
+        authority_value = validate_phase3_execution_authority(authority)
+        if (
+            value["authority_sha256"] != authority_value["authority_sha256"]
+            or value["agentteam_release_commit"]
+            != authority_value["runtime"]["agentteam_release_commit"]
+            or value["candidate_bundle_sha256"]
+            != authority_value["bindings"]["candidate_bundle_sha256"]
+        ):
+            raise Phase3PreparationError(
+                "execution authority receipt does not bind its authority"
+            )
+    return value
+
+
+def load_phase3_execution_authority(authority_root, *, candidates):
+    root = Path(authority_root)
+    if root.is_symlink() or not root.is_dir():
+        raise Phase3PreparationError("execution authority root is unavailable")
+    values = {}
+    for name, filename in (
+        ("authority", "execution-authority.json"),
+        ("receipt", "receipt.json"),
+    ):
+        path = root / filename
+        if path.is_symlink() or not path.is_file():
+            raise Phase3PreparationError(f"execution authority {name} is unavailable")
+        try:
+            values[name] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise Phase3PreparationError(
+                f"execution authority {name} is unavailable"
+            ) from exc
+    authority = validate_phase3_execution_authority(
+        values["authority"],
+        candidates=candidates,
+    )
+    validate_phase3_execution_authority_receipt(
+        values["receipt"],
+        authority=authority,
+    )
+    return values
+
+
+def _phase3_execution_policy_objects(candidates):
+    commands = {
+        instance_id: candidates["instances_by_id"][instance_id][
+            "worker_visible"
+        ]["task"]["acceptance_commands"]
+        for instance_id in candidates["ordered_instance_ids"]
+    }
+    return {
+        "tools": {
+            "allowlist": ["exec_command", "apply_patch"],
+            "shell": "bash",
+            "structured_command_argv": True,
+        },
+        "sandbox": {
+            "mode": "workspace-write",
+            "host_class": "local-rootless-linux-x86_64",
+            "worktree_per_execution": True,
+            "gold_mount": "absent",
+            "sibling_mode_roots": "absent",
+        },
+        "permission": {
+            "approval_policy": "never",
+            "operator_input": "decision_escalation_only",
+        },
+        "external_services": {
+            "network_policy": "provider_and_declared_package_sources",
+            "provider_api": "required_at_live_launch",
+            "undeclared_services": "forbidden",
+        },
+        "benchmark_visible_tests": {
+            "ordered_instance_ids": candidates["ordered_instance_ids"],
+            "acceptance_commands_by_instance": commands,
+            "gold_tests_visible": False,
+        },
+        "termination": {
+            "maximum_wall_time_seconds": approved_phase3_pilot_decisions()[
+                "execution"
+            ]["per_instance_budget"]["max_wall_time_seconds"],
+            "graceful_stop_first": True,
+            "retain_terminal_candidate": True,
+            "stop_boundaries": [
+                "pre_provider_launch",
+                "post_invocation_terminal",
+                "pre_integration",
+                "post_integration",
+            ],
+        },
+        "shared_dependency_cache": {
+            "policy": "declared_equal_read_only",
+            "cross_mode_writes": "forbidden",
+            "cache_warmup_counted_outside_scored_execution": True,
+        },
+    }
+
+
+def _validate_phase3_execution_policy_objects(policies):
+    visible = policies.get("benchmark_visible_tests")
+    if (
+        policies.get("tools")
+        != {
+            "allowlist": ["exec_command", "apply_patch"],
+            "shell": "bash",
+            "structured_command_argv": True,
+        }
+        or policies.get("sandbox")
+        != {
+            "mode": "workspace-write",
+            "host_class": "local-rootless-linux-x86_64",
+            "worktree_per_execution": True,
+            "gold_mount": "absent",
+            "sibling_mode_roots": "absent",
+        }
+        or policies.get("permission")
+        != {
+            "approval_policy": "never",
+            "operator_input": "decision_escalation_only",
+        }
+        or policies.get("external_services")
+        != {
+            "network_policy": "provider_and_declared_package_sources",
+            "provider_api": "required_at_live_launch",
+            "undeclared_services": "forbidden",
+        }
+        or policies.get("termination")
+        != {
+            "maximum_wall_time_seconds": approved_phase3_pilot_decisions()[
+                "execution"
+            ]["per_instance_budget"]["max_wall_time_seconds"],
+            "graceful_stop_first": True,
+            "retain_terminal_candidate": True,
+            "stop_boundaries": [
+                "pre_provider_launch",
+                "post_invocation_terminal",
+                "pre_integration",
+                "post_integration",
+            ],
+        }
+        or policies.get("shared_dependency_cache")
+        != {
+            "policy": "declared_equal_read_only",
+            "cross_mode_writes": "forbidden",
+            "cache_warmup_counted_outside_scored_execution": True,
+        }
+        or not isinstance(visible, dict)
+        or set(visible)
+        != {
+            "ordered_instance_ids",
+            "acceptance_commands_by_instance",
+            "gold_tests_visible",
+        }
+        or visible["ordered_instance_ids"] != list(EXPECTED_SELECTION_PREVIEW)
+        or not isinstance(visible["acceptance_commands_by_instance"], dict)
+        or set(visible["acceptance_commands_by_instance"])
+        != set(EXPECTED_SELECTION_PREVIEW)
+        or visible["gold_tests_visible"] is not False
+    ):
+        raise Phase3PreparationError("execution policy objects are invalid")
+    for commands in visible["acceptance_commands_by_instance"].values():
+        if (
+            not isinstance(commands, list)
+            or not commands
+            or any(
+                not isinstance(command, list)
+                or not command
+                or any(not isinstance(argument, str) or not argument for argument in command)
+                for command in commands
+            )
+        ):
+            raise Phase3PreparationError(
+                "benchmark visible acceptance commands are invalid"
+            )
 
 
 def _read_selected_swe_evo_authority_rows(path, selected_ids):
