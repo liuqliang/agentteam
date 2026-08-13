@@ -267,8 +267,8 @@ def _aggregate_upstream_report(report_bytes, instance_id):
     f2p_success, f2p_total = counts("FAIL_TO_PASS")
     p2p_success, p2p_total = counts("PASS_TO_PASS")
     patch_applied = bool(record.get("patch_successfully_applied"))
-    f2p_ratio = f2p_success / f2p_total if f2p_total else 1.0
-    p2p_ratio = p2p_success / p2p_total if p2p_total else 1.0
+    f2p_ratio = f2p_success / f2p_total if f2p_total else float(patch_applied)
+    p2p_ratio = p2p_success / p2p_total if p2p_total else float(patch_applied)
     partial = 0.7 * f2p_ratio + 0.2 * p2p_ratio + 0.1 * float(patch_applied)
     return {
         "patch_applied": patch_applied,

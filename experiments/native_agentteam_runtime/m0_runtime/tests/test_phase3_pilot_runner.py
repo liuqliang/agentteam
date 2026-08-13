@@ -20,6 +20,7 @@ from agentteam_runtime.experiment_modes import _integration_candidate_workspace
 from agentteam_runtime.phase3_swe_evo_evaluator import (
     Phase3SweEvoEvaluator,
     Phase3SweEvoEvaluatorError,
+    _aggregate_upstream_report,
 )
 from agentteam_runtime.resource_envelope import approved_phase3_resource_envelope_binding
 from agentteam_runtime.experiment_contract import canonical_json_sha256
@@ -354,6 +355,16 @@ class Phase3PilotRunnerTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(Phase3SweEvoEvaluatorError, "gold binding"):
             Phase3SweEvoEvaluator._verify_gold_bindings(row, bindings)
+
+    def test_partial_score_does_not_reward_unapplied_patch(self):
+        aggregate = _aggregate_upstream_report(
+            json.dumps(
+                {"fixture": {"patch_successfully_applied": False}}
+            ).encode("ascii"),
+            "fixture",
+        )
+
+        self.assertEqual(aggregate["swe_style_partial_score"], 0.0)
 
     def test_protocol_and_runtime_taskpack_bridge_are_executable(self):
         selection, preregistrations, _ = _build()
