@@ -4,6 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import agentteam_runtime.phase3_pilot_preparation as preparation
@@ -17,6 +18,7 @@ from agentteam_runtime.phase3_pilot_preparation import (
     EXPECTED_POPULATION_COUNTS,
     EXPECTED_SELECTION_PREVIEW,
     Phase3PreparationError,
+    approved_phase3_pilot_decisions,
     build_phase3_aggregate_pilot_contract,
     build_phase3_instance_direct_taskpack,
     build_phase3_instance_preregistration,
@@ -26,9 +28,11 @@ from agentteam_runtime.phase3_pilot_preparation import (
     complexity_projection_bytes,
     decision_input_report,
     fixed_dataset_binding,
+    load_phase3_selection_freeze_bundle,
     materialize_phase3_instance_authorities,
     prepare_phase3_pilot_selection,
     project_swe_evo_arrow_inventory,
+    publish_phase3_selection_freeze_bundle,
     provider_free_preflight_receipt_bytes,
     replay_phase3_pilot_selection,
     replay_phase3_complexity_selection,
@@ -40,9 +44,13 @@ from agentteam_runtime.phase3_pilot_preparation import (
     validate_phase3_instance_direct_taskpack,
     validate_phase3_instance_materialization,
     validate_phase3_provider_free_preflight_receipt,
+    validate_phase3_selection_freeze_receipt,
     validate_phase3_selection_authority,
 )
-from agentteam_runtime.experiment_contract import canonical_json_sha256
+from agentteam_runtime.experiment_contract import (
+    ExperimentContractError,
+    canonical_json_sha256,
+)
 from agentteam_runtime.resource_envelope import (
     approved_phase3_resource_envelope_binding,
     build_resource_evidence,
@@ -241,6 +249,26 @@ def _trusted_projection(rows=None):
             source_commit=FIXED_SOURCE_COMMIT,
             split=FIXED_DATASET_SPLIT,
         )
+
+
+def _selection_freeze_digest_patches(projection):
+    decisions = approved_phase3_pilot_decisions()
+    authority = prepare_phase3_pilot_selection(
+        projection["routing_manifest"],
+        decisions,
+    )
+    return {
+        "APPROVED_PROJECTION_SHA256": projection["projection_sha256"],
+        "APPROVED_ROUTING_MANIFEST_SHA256": projection[
+            "routing_manifest_sha256"
+        ],
+        "APPROVED_SELECTION_SHA256": authority["selection"][
+            "selection_sha256"
+        ],
+        "APPROVED_SELECTION_AUTHORITY_SHA256": authority[
+            "selection_authority_sha256"
+        ],
+    }
 
 
 def _complexity_decisions():
@@ -488,6 +516,222 @@ def _live_authorization(contract, *, decision="approved"):
 
 
 class Phase3PilotPreparationTests(unittest.TestCase):
+    def test_committed_selection_freeze_bundle_replays_complete_chain(self):
+        root = (
+            Path(__file__).resolve().parents[2]
+            / "implementation_artifacts"
+            / "acceptance"
+            / "phase3b-selection-freeze-v8"
+        )
+        bundle = load_phase3_selection_freeze_bundle(root)
+        self.assertEqual(
+            bundle["receipt"]["selection_sha256"],
+            preparation.APPROVED_SELECTION_SHA256,
+        )
+        self.assertEqual(
+            bundle["receipt"]["ordered_instance_ids"],
+            list(EXPECTED_SELECTION_PREVIEW),
+        )
+
+    def test_approved_selection_freeze_bundle_replays_and_is_idempotent(self):
+        projection = _trusted_projection()
+        with mock.patch.multiple(
+            preparation,
+            **_selection_freeze_digest_patches(projection),
+        ), tempfile.TemporaryDirectory() as directory:
+            first = publish_phase3_selection_freeze_bundle(
+                directory,
+                projection=projection,
+                proposal_sha256=preparation.APPROVED_PILOT_PROPOSAL_SHA256,
+                review_sha256=preparation.APPROVED_PILOT_REVIEW_SHA256,
+            )
+            second = publish_phase3_selection_freeze_bundle(
+                directory,
+                projection=projection,
+                proposal_sha256=preparation.APPROVED_PILOT_PROPOSAL_SHA256,
+                review_sha256=preparation.APPROVED_PILOT_REVIEW_SHA256,
+            )
+            receipt = first["receipt"]
+            self.assertEqual(
+                receipt["ordered_instance_ids"],
+                list(EXPECTED_SELECTION_PREVIEW),
+            )
+            self.assertEqual(
+                receipt["projection_sha256"],
+                projection["projection_sha256"],
+            )
+            self.assertEqual(
+                receipt["selection_sha256"],
+                replay_phase3_complexity_selection(projection)[
+                    "selection_sha256"
+                ],
+            )
+            self.assertTrue(
+                all(item["created"] for item in first["publications"].values())
+            )
+            self.assertTrue(
+                all(
+                    item["created"] is False
+                    for item in second["publications"].values()
+                )
+            )
+            self.assertEqual(
+                validate_phase3_selection_freeze_receipt(receipt),
+                receipt,
+            )
+            self.assertEqual(
+                load_phase3_selection_freeze_bundle(directory)["receipt"],
+                receipt,
+            )
+
+    def test_selection_freeze_rejects_proposal_drift_before_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                Phase3PreparationError,
+                "proposal digest changed",
+            ):
+                publish_phase3_selection_freeze_bundle(
+                    directory,
+                    projection=_trusted_projection(),
+                    proposal_sha256="0" * 64,
+                    review_sha256=preparation.APPROVED_PILOT_REVIEW_SHA256,
+                )
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_selection_freeze_conflict_never_publishes_completion_receipt(self):
+        projection = _trusted_projection()
+        with mock.patch.multiple(
+            preparation,
+            **_selection_freeze_digest_patches(projection),
+        ), tempfile.TemporaryDirectory() as directory:
+            Path(directory, "decisions.json").write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                ExperimentContractError,
+                "already exists with different",
+            ):
+                publish_phase3_selection_freeze_bundle(
+                    directory,
+                    projection=projection,
+                    proposal_sha256=preparation.APPROVED_PILOT_PROPOSAL_SHA256,
+                    review_sha256=preparation.APPROVED_PILOT_REVIEW_SHA256,
+                )
+            self.assertFalse(Path(directory, "receipt.json").exists())
+
+    def test_selection_freeze_loader_rejects_routing_drift(self):
+        projection = _trusted_projection()
+        with mock.patch.multiple(
+            preparation,
+            **_selection_freeze_digest_patches(projection),
+        ), tempfile.TemporaryDirectory() as directory:
+            publish_phase3_selection_freeze_bundle(
+                directory,
+                projection=projection,
+                proposal_sha256=preparation.APPROVED_PILOT_PROPOSAL_SHA256,
+                review_sha256=preparation.APPROVED_PILOT_REVIEW_SHA256,
+            )
+            Path(directory, "routing-manifest.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                Phase3PreparationError,
+                "differs from projection",
+            ):
+                load_phase3_selection_freeze_bundle(directory)
+
+    def test_selection_freeze_receipt_rejects_rehashed_decision_drift(self):
+        root = (
+            Path(__file__).resolve().parents[2]
+            / "implementation_artifacts"
+            / "acceptance"
+            / "phase3b-selection-freeze-v8"
+        )
+        if not root.is_dir():
+            self.skipTest("production selection freeze artifact is unavailable")
+        receipt = json.loads((root / "receipt.json").read_text(encoding="utf-8"))
+        receipt["decision_id"] = "DEC-P3B-DRIFT"
+        body = dict(receipt)
+        body.pop("receipt_sha256")
+        receipt["receipt_sha256"] = canonical_json_sha256(body)
+        with self.assertRaisesRegex(
+            Phase3PreparationError,
+            "receipt is invalid",
+        ):
+            validate_phase3_selection_freeze_receipt(receipt)
+
+    def test_selection_freeze_receipt_rejects_boolean_counter_aliases(self):
+        root = (
+            Path(__file__).resolve().parents[2]
+            / "implementation_artifacts"
+            / "acceptance"
+            / "phase3b-selection-freeze-v8"
+        )
+        receipt = json.loads((root / "receipt.json").read_text(encoding="utf-8"))
+        receipt["provider_calls"] = False
+        body = dict(receipt)
+        body.pop("receipt_sha256")
+        receipt["receipt_sha256"] = canonical_json_sha256(body)
+        with self.assertRaisesRegex(
+            Phase3PreparationError,
+            "receipt is invalid",
+        ):
+            validate_phase3_selection_freeze_receipt(receipt)
+
+    def test_selection_freeze_loader_rejects_symlinked_authority(self):
+        projection = _trusted_projection()
+        with mock.patch.multiple(
+            preparation,
+            **_selection_freeze_digest_patches(projection),
+        ), tempfile.TemporaryDirectory() as directory:
+            publish_phase3_selection_freeze_bundle(
+                directory,
+                projection=projection,
+                proposal_sha256=preparation.APPROVED_PILOT_PROPOSAL_SHA256,
+                review_sha256=preparation.APPROVED_PILOT_REVIEW_SHA256,
+            )
+            routing = Path(directory, "routing-manifest.json")
+            replacement = Path(directory, "replacement.json")
+            replacement.write_bytes(routing.read_bytes())
+            routing.unlink()
+            routing.symlink_to(replacement.name)
+            with self.assertRaisesRegex(
+                Phase3PreparationError,
+                "routing_manifest is unavailable",
+            ):
+                load_phase3_selection_freeze_bundle(directory)
+
+    def test_selection_freeze_loader_rejects_symlinked_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "target")
+            target.mkdir()
+            alias = Path(directory, "alias")
+            alias.symlink_to(target.name, target_is_directory=True)
+            with self.assertRaisesRegex(
+                Phase3PreparationError,
+                "root is unavailable",
+            ):
+                load_phase3_selection_freeze_bundle(alias)
+
+    def test_approved_pilot_decisions_match_production_selection_contract(self):
+        projection = _trusted_projection()
+        decisions = validate_phase3_pilot_decisions(
+            approved_phase3_pilot_decisions(),
+            routing_manifest=projection["routing_manifest"],
+        )
+        self.assertEqual(decisions["execution"]["model"], "gpt-5.6-sol")
+        self.assertEqual(
+            decisions["execution"]["per_instance_budget"],
+            {"max_total_tokens": 1_500_000, "max_wall_time_seconds": 1_800},
+        )
+        authority = prepare_phase3_pilot_selection(
+            projection["routing_manifest"],
+            decisions,
+        )
+        self.assertEqual(
+            authority["selection"]["ordered_instance_ids"],
+            list(EXPECTED_SELECTION_PREVIEW),
+        )
+
     def _assert_trusted_arrow_projection_is_bound_gold_blind_and_byte_stable(self):
         first = _trusted_projection()
         second = _trusted_projection(copy.deepcopy(_trusted_arrow_rows()))

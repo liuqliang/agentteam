@@ -29,6 +29,7 @@ from .experiment_contract import (
     ExperimentContractError,
     canonical_json_bytes,
     canonical_json_sha256,
+    publish_immutable_json,
     schema_path,
 )
 from .phase3_pilot import (
@@ -58,6 +59,7 @@ DIRECT_TASKPACK_SCHEMA_VERSION = "phase3_direct_taskpack.v1"
 INSTANCE_MATERIALIZATION_SCHEMA_VERSION = "phase3_instance_materialization.v1"
 PILOT_PREFLIGHT_SCHEMA_VERSION = "phase3_pilot_preflight.v1"
 PILOT_PREFLIGHT_V2_SCHEMA_VERSION = "phase3_pilot_preflight.v2"
+SELECTION_FREEZE_RECEIPT_SCHEMA_VERSION = "phase3_selection_freeze_receipt.v1"
 PILOT_PREFLIGHT_DECISION_ID = "DEC-P3B-provider-free-preparation"
 READINESS_BINDING = {
     "gate_id": "P3-READY",
@@ -89,6 +91,27 @@ EXPECTED_ELIGIBLE_POPULATION_COUNTS = {
     "low": 20,
     "medium": 12,
 }
+APPROVED_PILOT_PROPOSAL_SHA256 = (
+    "622be205e6ab9ad9ec19a3551329fc3c6f775541826e982c0c54352007156c10"
+)
+APPROVED_PILOT_REVIEW_SHA256 = (
+    "d290d1b108fc2f08a56e841701b63035ed940f244a713de6d5bf99c55d0b4299"
+)
+APPROVED_PILOT_DECISION_INPUT_SHA256 = (
+    "c0bf2d520e24b94adf0650e3d3dca7563b4088b320d1a4dfccbb3d229fb2a094"
+)
+APPROVED_PROJECTION_SHA256 = (
+    "f103e61548af36b41ad5b32f6e05941827ab52ace24ec3ce4c1663ca01cb88e1"
+)
+APPROVED_ROUTING_MANIFEST_SHA256 = (
+    "ce7e368c34d2be326342134e6ad9c8bf6126b75b50f065bc2a309819c1def295"
+)
+APPROVED_SELECTION_SHA256 = (
+    "9103915631132adb25542da5df655802ee3b2fe974a3d5808fd62630619bbc77"
+)
+APPROVED_SELECTION_AUTHORITY_SHA256 = (
+    "4eef7bccd83662b27b2f359189ccc59943a494eb8af05de58f0bf8f29a64f09a"
+)
 EXPECTED_SELECTION_PREVIEW = (
     "psf__requests_v2.4.0_v2.4.1",
     "dask__dask_2023.3.2_2023.4.0",
@@ -352,6 +375,319 @@ def replay_phase3_complexity_selection(projection):
             "deterministic complexity selection does not match the approved preview"
         )
     return selection
+
+
+def approved_phase3_pilot_decisions():
+    """Return the operator-approved parameters bound by the Phase 3B proposal."""
+
+    return {
+        "schema_version": PILOT_DECISIONS_SCHEMA_VERSION,
+        "authority": {
+            "decision_id": "DEC-P3B-multi-instance-pilot",
+            "revision": 1,
+            "status": "approved",
+            "decided_by": "operator-semantic-authority",
+            "decided_at": "2026-08-12T00:00:00Z",
+        },
+        "complexity": {
+            "proxy": {
+                "name": COMPLEXITY_PROXY_NAME,
+                "source": "trusted fixed Arrow projection",
+                "extraction_rule": (
+                    'len(instance["PRs"]) then discard the count'
+                ),
+                "source_fields": ["complexity_stratum"],
+            },
+            "gold_blind": True,
+            "stratum_boundaries": [
+                {"stratum": "low", "boundary_rule": "0-2 PR records"},
+                {"stratum": "medium", "boundary_rule": "3-6 PR records"},
+                {"stratum": "high", "boundary_rule": "7 or more PR records"},
+            ],
+        },
+        "selection": {
+            "metadata_revision": COMPLEXITY_METADATA_REVISION,
+            "filters": {
+                "repositories": [],
+                "languages": [],
+                "required_tags": [],
+                "excluded_instance_ids": [EXCLUDED_CALIBRATION_INSTANCE_ID],
+            },
+            "seed": PILOT_SELECTION_SEED,
+            "stratum_quotas": dict(PILOT_STRATUM_QUOTAS),
+            "sample_size": sum(PILOT_STRATUM_QUOTAS.values()),
+        },
+        "execution": {
+            "model": "gpt-5.6-sol",
+            "reasoning_profile": "high",
+            "per_instance_budget": {
+                "max_total_tokens": 1_500_000,
+                "max_wall_time_seconds": 1_800,
+            },
+        },
+        "thresholds": {
+            "non_inferiority_margin": 0.10,
+            "max_token_cost_ratio": 2.0,
+            "max_wall_time_cost_ratio": 2.0,
+            "preselected_secondary_benefit_metric": "regressions",
+        },
+    }
+
+
+def publish_phase3_selection_freeze_bundle(
+    authority_root,
+    *,
+    projection,
+    proposal_sha256,
+    review_sha256,
+):
+    """Validate and immutably publish the approved selection authority chain."""
+
+    if proposal_sha256 != APPROVED_PILOT_PROPOSAL_SHA256:
+        raise Phase3PreparationError("approved pilot proposal digest changed")
+    if review_sha256 != APPROVED_PILOT_REVIEW_SHA256:
+        raise Phase3PreparationError("approved pilot review digest changed")
+    trusted_projection = validate_phase3_complexity_projection(projection)
+    routing = trusted_projection["routing_manifest"]
+    if trusted_projection["projection_sha256"] != APPROVED_PROJECTION_SHA256:
+        raise Phase3PreparationError("approved pilot projection digest changed")
+    if routing["manifest_sha256"] != APPROVED_ROUTING_MANIFEST_SHA256:
+        raise Phase3PreparationError("approved pilot routing digest changed")
+    decisions = validate_phase3_pilot_decisions(
+        approved_phase3_pilot_decisions(),
+        routing_manifest=routing,
+    )
+    if canonical_json_sha256(decisions) != APPROVED_PILOT_DECISION_INPUT_SHA256:
+        raise Phase3PreparationError("approved pilot decision input digest changed")
+    authority = prepare_phase3_pilot_selection(routing, decisions)
+    if authority.get("status") != "selection_frozen":
+        raise Phase3PreparationError("approved pilot selection did not freeze")
+    replay_phase3_pilot_selection(routing, decisions, authority)
+    if authority["selection"] != replay_phase3_complexity_selection(
+        trusted_projection
+    ):
+        raise Phase3PreparationError(
+            "approved decision selection differs from trusted projection replay"
+        )
+    if authority["selection"]["selection_sha256"] != APPROVED_SELECTION_SHA256:
+        raise Phase3PreparationError("approved pilot selection digest changed")
+    if (
+        authority["selection_authority_sha256"]
+        != APPROVED_SELECTION_AUTHORITY_SHA256
+    ):
+        raise Phase3PreparationError(
+            "approved pilot selection authority digest changed"
+        )
+
+    root = Path(authority_root)
+    artifacts = {
+        "decisions": ("decisions.json", decisions),
+        "projection": ("complexity-projection.json", trusted_projection),
+        "routing_manifest": ("routing-manifest.json", routing),
+        "selection_authority": ("selection-authority.json", authority),
+    }
+    publications = {}
+    for name, (filename, value) in artifacts.items():
+        publications[name] = publish_immutable_json(
+            root / filename,
+            value,
+            label=f"Phase 3 selection freeze {name}",
+        )
+    receipt_body = {
+        "status": "selection_frozen",
+        "provider_free": True,
+        "decision_id": decisions["authority"]["decision_id"],
+        "decision_revision": decisions["authority"]["revision"],
+        "proposal_sha256": proposal_sha256,
+        "review_sha256": review_sha256,
+        "dataset_artifact_sha256": FIXED_DATASET_ARTIFACT_SHA256,
+        "decision_input_sha256": canonical_json_sha256(decisions),
+        "projection_sha256": trusted_projection["projection_sha256"],
+        "routing_manifest_sha256": routing["manifest_sha256"],
+        "selection_authority_sha256": authority[
+            "selection_authority_sha256"
+        ],
+        "selection_sha256": authority["selection"]["selection_sha256"],
+        "ordered_instance_ids": authority["selection"]["ordered_instance_ids"],
+        "provider_calls": 0,
+        "scored_mode_executions": 0,
+    }
+    receipt = {
+        "schema_version": SELECTION_FREEZE_RECEIPT_SCHEMA_VERSION,
+        **receipt_body,
+    }
+    receipt["receipt_sha256"] = canonical_json_sha256(receipt)
+    validate_phase3_selection_freeze_receipt(
+        receipt,
+        decisions=decisions,
+        projection=trusted_projection,
+        selection_authority=authority,
+    )
+    publications["receipt"] = publish_immutable_json(
+        root / "receipt.json",
+        receipt,
+        label="Phase 3 selection freeze receipt",
+    )
+    return {
+        "receipt": receipt,
+        "publications": publications,
+    }
+
+
+def validate_phase3_selection_freeze_receipt(
+    receipt,
+    *,
+    decisions=None,
+    projection=None,
+    selection_authority=None,
+):
+    value = _json_object_snapshot(receipt)
+    expected = {
+        "schema_version",
+        "status",
+        "provider_free",
+        "decision_id",
+        "decision_revision",
+        "proposal_sha256",
+        "review_sha256",
+        "dataset_artifact_sha256",
+        "decision_input_sha256",
+        "projection_sha256",
+        "routing_manifest_sha256",
+        "selection_authority_sha256",
+        "selection_sha256",
+        "ordered_instance_ids",
+        "provider_calls",
+        "scored_mode_executions",
+        "receipt_sha256",
+    }
+    if value is None or set(value) != expected:
+        raise Phase3PreparationError("selection freeze receipt fields are invalid")
+    body = dict(value)
+    supplied_digest = body.pop("receipt_sha256")
+    if (
+        value["schema_version"] != SELECTION_FREEZE_RECEIPT_SCHEMA_VERSION
+        or value["status"] != "selection_frozen"
+        or value["provider_free"] is not True
+        or value["decision_id"] != "DEC-P3B-multi-instance-pilot"
+        or not isinstance(value["decision_revision"], int)
+        or isinstance(value["decision_revision"], bool)
+        or value["decision_revision"] != 1
+        or value["proposal_sha256"] != APPROVED_PILOT_PROPOSAL_SHA256
+        or value["review_sha256"] != APPROVED_PILOT_REVIEW_SHA256
+        or value["dataset_artifact_sha256"] != FIXED_DATASET_ARTIFACT_SHA256
+        or value["decision_input_sha256"]
+        != APPROVED_PILOT_DECISION_INPUT_SHA256
+        or value["projection_sha256"] != APPROVED_PROJECTION_SHA256
+        or value["routing_manifest_sha256"]
+        != APPROVED_ROUTING_MANIFEST_SHA256
+        or value["selection_authority_sha256"]
+        != APPROVED_SELECTION_AUTHORITY_SHA256
+        or value["selection_sha256"] != APPROVED_SELECTION_SHA256
+        or not isinstance(value["provider_calls"], int)
+        or isinstance(value["provider_calls"], bool)
+        or value["provider_calls"] != 0
+        or not isinstance(value["scored_mode_executions"], int)
+        or isinstance(value["scored_mode_executions"], bool)
+        or value["scored_mode_executions"] != 0
+        or supplied_digest != canonical_json_sha256(body)
+    ):
+        raise Phase3PreparationError("selection freeze receipt is invalid")
+    if (
+        not isinstance(value["ordered_instance_ids"], list)
+        or tuple(value["ordered_instance_ids"]) != EXPECTED_SELECTION_PREVIEW
+        or any(
+            not isinstance(value[name], str) or _SHA256.fullmatch(value[name]) is None
+            for name in (
+                "decision_input_sha256",
+                "projection_sha256",
+                "routing_manifest_sha256",
+                "selection_authority_sha256",
+                "selection_sha256",
+            )
+        )
+    ):
+        raise Phase3PreparationError("selection freeze receipt authority is invalid")
+    if decisions is not None:
+        decision = validate_phase3_pilot_decisions(decisions)
+        if (
+            decision != approved_phase3_pilot_decisions()
+            or value["decision_id"] != decision["authority"]["decision_id"]
+            or value["decision_revision"] != decision["authority"]["revision"]
+            or value["decision_input_sha256"] != canonical_json_sha256(decision)
+        ):
+            raise Phase3PreparationError("selection freeze decision binding changed")
+    if projection is not None:
+        projected = validate_phase3_complexity_projection(projection)
+        if (
+            value["projection_sha256"] != projected["projection_sha256"]
+            or value["routing_manifest_sha256"]
+            != projected["routing_manifest_sha256"]
+        ):
+            raise Phase3PreparationError("selection freeze projection binding changed")
+    if selection_authority is not None:
+        authority = validate_phase3_selection_authority(selection_authority)
+        if (
+            value["selection_authority_sha256"]
+            != authority["selection_authority_sha256"]
+            or value["selection_sha256"]
+            != authority["selection"]["selection_sha256"]
+            or value["ordered_instance_ids"]
+            != authority["selection"]["ordered_instance_ids"]
+        ):
+            raise Phase3PreparationError("selection freeze selection binding changed")
+    return value
+
+
+def load_phase3_selection_freeze_bundle(authority_root):
+    """Load and replay every authority in a published selection bundle."""
+
+    root = Path(authority_root)
+    if root.is_symlink() or not root.is_dir():
+        raise Phase3PreparationError("selection freeze root is unavailable")
+    names = {
+        "decisions": "decisions.json",
+        "projection": "complexity-projection.json",
+        "routing_manifest": "routing-manifest.json",
+        "selection_authority": "selection-authority.json",
+        "receipt": "receipt.json",
+    }
+    values = {}
+    for name, filename in names.items():
+        path = root / filename
+        if path.is_symlink() or not path.is_file():
+            raise Phase3PreparationError(
+                f"selection freeze {name} is unavailable"
+            )
+        try:
+            values[name] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise Phase3PreparationError(
+                f"selection freeze {name} is unavailable"
+            ) from exc
+    projection = validate_phase3_complexity_projection(values["projection"])
+    if values["routing_manifest"] != projection["routing_manifest"]:
+        raise Phase3PreparationError(
+            "selection freeze routing manifest differs from projection"
+        )
+    decisions = validate_phase3_pilot_decisions(
+        values["decisions"],
+        routing_manifest=values["routing_manifest"],
+    )
+    if decisions != approved_phase3_pilot_decisions():
+        raise Phase3PreparationError("selection freeze decisions are not approved")
+    authority = replay_phase3_pilot_selection(
+        values["routing_manifest"],
+        decisions,
+        values["selection_authority"],
+    )
+    validate_phase3_selection_freeze_receipt(
+        values["receipt"],
+        decisions=decisions,
+        projection=projection,
+        selection_authority=authority,
+    )
+    return values
 
 
 def convert_swe_evo_inventory(inventory, *, metadata_revision="swe-evo-fixed-r1"):
