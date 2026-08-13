@@ -1608,3 +1608,23 @@ blocking; attempt count alone never authorizes an upgrade.
 Do not pre-expand Phase 4 through Phase 6 into worker tasks. Their direction is
 fixed by the research authority, but their execution decisions depend on
 accepted evidence from the preceding phase.
+
+### Phase 3B Live Smoke Status
+
+The first live execution chain was exercised through epochs v12-v19. The
+runtime now reaches a real Codex worker, captures provider usage, seals a patch,
+launches the frozen official evaluator, and cleans resource parents. The v19
+Requests worker produced a substantive 3,523-byte patch and reported 993,892
+tokens, but the official evaluator timed out at 1,800 seconds and produced no
+valid score.
+
+Do not expand the pilot to all modes or instances until a new execution
+decision closes both prerequisites:
+
+1. stabilize or replace the Requests evaluator path so a timeout is not the
+   dominant outcome or wall-time signal;
+2. bind worker-visible verification to an environment equivalent to the
+   official benchmark container instead of host Python 3.12.
+
+The detailed epoch and cost audit is in
+[`2026-08-13-phase3b-live-smoke-v12-v19.md`](reports/2026-08-13-phase3b-live-smoke-v12-v19.md).
