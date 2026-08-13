@@ -451,6 +451,7 @@ class Phase3PilotRunnerTests(unittest.TestCase):
         visible = preregistrations[instance_id]["authorization"][
             "equal_input_bindings"
         ]["shared_visible_inputs"]
+        visible["task"]["acceptance_commands"] = [["pytest", "-q"]]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repository = root / "repository"
@@ -542,6 +543,11 @@ class Phase3PilotRunnerTests(unittest.TestCase):
 
             self.assertEqual(protocol["repository"]["source"], str(repository))
             self.assertEqual(protocol["seed"], 0)
+            self.assertEqual(
+                protocol["acceptance"]["command"][1:3],
+                ["-m", "pytest"],
+            )
+            self.assertTrue(Path(protocol["acceptance"]["command"][0]).is_absolute())
             self.assertEqual(first, replay)
             self.assertEqual(
                 first["semantic_authority_sha256"],

@@ -88,7 +88,7 @@ def build_phase3_experiment_protocol(
     _verify_repository_mirror(source, repository)
     repository["source"] = str(source)
     task = visible["task"]
-    command = _absolute_argv(task["acceptance_commands"][0])
+    command = _trusted_acceptance_argv(task["acceptance_commands"][0])
     evaluator = Path(common_evaluator_artifact).resolve(strict=True)
     if evaluator.is_symlink() or not evaluator.is_file():
         raise Phase3PilotRunnerError("common evaluator artifact is unsafe")
@@ -1128,6 +1128,15 @@ def _taskpack_acceptance_argv(command):
     ):
         return ["python3", "-m", "pytest", *command[1:]]
     return list(command)
+
+
+def _trusted_acceptance_argv(command):
+    """Resolve visible acceptance through an evaluator-approved executable."""
+
+    normalized = _taskpack_acceptance_argv(command)
+    if normalized[:3] == ["python3", "-m", "pytest"]:
+        return [str(Path(os.sys.executable).resolve()), *normalized[1:]]
+    return _absolute_argv(normalized)
 
 
 def _compact_id(value):
