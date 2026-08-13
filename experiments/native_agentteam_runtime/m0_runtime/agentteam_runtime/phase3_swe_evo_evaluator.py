@@ -89,7 +89,12 @@ class Phase3SweEvoEvaluator:
             command_runner=runner,
         )
         hierarchy.prepare(check_host=False)
-        request_id = hashlib.sha256(entry["entry_id"].encode("utf-8")).hexdigest()
+        execution_key = (
+            resource_hierarchy_reference["run_id"]
+            + "\0"
+            + entry["entry_id"]
+        )
+        request_id = hashlib.sha256(execution_key.encode("utf-8")).hexdigest()
         request_root = self.evaluator_root / "requests" / request_id
         request_root.mkdir(parents=True, exist_ok=True)
         request_path = request_root / "request.json"
@@ -143,6 +148,13 @@ class Phase3SweEvoEvaluator:
                 raise Phase3SweEvoEvaluatorError(
                     "resource-bound evaluator exceeded its timeout"
                 ) from exc
+            if completed.returncode != 0:
+                monitor.cancel()
+                hierarchy.stop_transient_unit(unit)
+                reason = (completed.stderr or completed.stdout or "").strip()[:500]
+                raise Phase3SweEvoEvaluatorError(
+                    f"resource-bound evaluator failed: {reason}"
+                )
             evidence = monitor.finish(
                 binding=resource_envelope_binding,
                 timed_out=timed_out,
@@ -151,11 +163,6 @@ class Phase3SweEvoEvaluator:
             monitor.cancel()
             hierarchy.stop_transient_unit(unit)
             raise
-        if completed.returncode != 0:
-            reason = (completed.stderr or completed.stdout or "").strip()[:500]
-            raise Phase3SweEvoEvaluatorError(
-                f"resource-bound evaluator failed: {reason}"
-            )
         score = _read_private_json(score_path, "resource-bound evaluator score")
         publish_immutable_json(
             evidence_path,

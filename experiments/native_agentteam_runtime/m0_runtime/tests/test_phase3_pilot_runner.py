@@ -443,6 +443,10 @@ class Phase3PilotRunnerTests(unittest.TestCase):
             self.assertEqual(result, score)
             self.assertTrue(observed["evaluator"])
             self.assertTrue(observed["command"][1].startswith("PYTHONPATH="))
+            self.assertNotIn(
+                hashlib.sha256(b"fixture-entry").hexdigest()[:16],
+                observed["unit"],
+            )
             self.assertEqual(observed["monitor"][1:], ("evaluator", True))
             self.assertEqual(json.loads(evidence.read_text())["scope"], "evaluator")
 
