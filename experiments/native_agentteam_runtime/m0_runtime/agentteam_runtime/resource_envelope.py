@@ -26,6 +26,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 RESOURCE_ENVELOPE_SCHEMA_VERSION = "phase3_resource_envelope.v2"
 RESOURCE_EVIDENCE_SCHEMA_VERSION = "phase3_resource_evidence.v1"
+RESOURCE_PREFLIGHT_SCHEMA_VERSION = "phase3_resource_preflight.v1"
 RESOURCE_FAILURE_CLASSIFICATION = "resource_limit_exhausted"
 RESOURCE_FAIRNESS_POLICY = (
     "equal_workload_slots_with_metered_agentteam_control_plane_allowance"
@@ -325,6 +326,23 @@ class SystemdResourceHierarchy:
             *_resource_wrapped_command(command, unit=self.control_scope),
         ]
         return arguments
+
+    def leaf_command(self, command, *, unit, evaluator=False):
+        if not isinstance(unit, str) or not unit.endswith(".service"):
+            raise ResourceEnvelopeError("resource leaf unit is invalid")
+        return [
+            "systemd-run",
+            "--user",
+            "--quiet",
+            "--wait",
+            "--pipe",
+            "--service-type=exec",
+            f"--unit={unit}",
+            *self.leaf_arguments(evaluator=evaluator),
+            "--property=KillMode=control-group",
+            "--",
+            *_resource_wrapped_command(command, unit=unit),
+        ]
 
     def verify_control_plane(self):
         envelope = mode_envelopes(self.binding, self.mode)[
@@ -811,6 +829,253 @@ class ResourceUnitMonitor:
             _publish_resource_monitor_ack(self._ack_path)
 
 
+def run_phase3_provider_free_resource_preflight(
+    binding,
+    *,
+    pilot_id,
+    command_runner=None,
+    owner_factory=Phase3PilotResourceOwner,
+    hierarchy_factory=SystemdResourceHierarchy,
+    monitor_factory=ResourceUnitMonitor,
+):
+    """Exercise the complete resource hierarchy without invoking a provider."""
+
+    validate_resource_envelope_binding(binding)
+    runner = command_runner or subprocess.run
+    owner = owner_factory(
+        binding,
+        pilot_id=pilot_id,
+        command_runner=runner,
+    )
+    records = []
+    aggregate = None
+    cleanup = None
+    references = None
+    digest = hashlib.sha256(pilot_id.encode("utf-8")).hexdigest()[:16]
+    probes = {
+        "single_codex": (("workload", False), ("evaluator", True)),
+        "agentteam_direct": (
+            ("control_plane", False),
+            ("workload", False),
+            ("evaluator", True),
+        ),
+        "agentteam_full": (
+            ("control_plane", False),
+            ("workload", False),
+            ("evaluator", True),
+        ),
+    }
+    try:
+        references = owner.prepare()
+        for mode in _MODES:
+            hierarchy = hierarchy_factory(
+                binding,
+                run_id=pilot_id,
+                mode=mode,
+                owner_reference=references[mode],
+                command_runner=runner,
+            )
+            hierarchy.prepare(check_host=False)
+            for scope, evaluator in probes[mode]:
+                token = f"{mode}-{scope}".replace("_", "-")
+                unit = f"agentteam-p3-{digest}-{token}-probe.service"
+                if scope == "control_plane":
+                    unit = hierarchy.control_scope
+                    command = hierarchy.control_plane_command(["/usr/bin/true"])
+                else:
+                    command = hierarchy.leaf_command(
+                        ["/usr/bin/true"],
+                        unit=unit,
+                        evaluator=evaluator,
+                    )
+                monitor = monitor_factory(
+                    hierarchy,
+                    unit,
+                    scope=scope,
+                    evaluator=evaluator,
+                ).start()
+                try:
+                    completed = runner(
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=False,
+                        timeout=15,
+                    )
+                    evidence = monitor.finish(binding=binding)
+                except Exception:
+                    monitor.cancel()
+                    hierarchy.stop_transient_unit(unit)
+                    raise
+                if completed.returncode != 0:
+                    hierarchy.stop_transient_unit(unit)
+                    raise ResourceEnvelopeUnavailable(
+                        f"resource preflight probe failed: {mode}/{scope}"
+                    )
+                records.append(
+                    {
+                        "probe_id": f"{mode}:{scope}",
+                        "mode": mode,
+                        "scope": scope,
+                        "returncode": completed.returncode,
+                        "evidence": evidence,
+                    }
+                )
+        aggregate = owner.evidence()
+    finally:
+        cleanup = owner.cleanup()
+    if aggregate is None or cleanup.get("cleanup_complete") is not True:
+        raise ResourceEnvelopeUnavailable(
+            "resource preflight aggregate or cleanup is incomplete"
+        )
+    receipt = {
+        "schema_version": RESOURCE_PREFLIGHT_SCHEMA_VERSION,
+        "status": "passed",
+        "provider_free": True,
+        "pilot_id": pilot_id,
+        "binding_sha256": canonical_resource_envelope_sha256(binding),
+        "probe_records": records,
+        "aggregate_evidence": aggregate,
+        "cleanup": cleanup,
+        "provider_reconciliation": {
+            "provider_calls": 0,
+            "model_invocations": 0,
+            "scored_mode_executions": 0,
+        },
+    }
+    receipt["receipt_sha256"] = _resource_preflight_sha256(receipt)
+    return validate_phase3_resource_preflight_receipt(receipt)
+
+
+def validate_phase3_resource_preflight_receipt(receipt):
+    value = deepcopy(receipt)
+    expected = {
+        "schema_version",
+        "status",
+        "provider_free",
+        "pilot_id",
+        "binding_sha256",
+        "probe_records",
+        "aggregate_evidence",
+        "cleanup",
+        "provider_reconciliation",
+        "receipt_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ResourceEnvelopeError("resource preflight receipt fields are invalid")
+    cleanup = value["cleanup"]
+    reconciliation = value["provider_reconciliation"]
+    if (
+        value["schema_version"] != RESOURCE_PREFLIGHT_SCHEMA_VERSION
+        or value["status"] != "passed"
+        or value["provider_free"] is not True
+        or not isinstance(reconciliation, dict)
+        or reconciliation
+        != {
+            "provider_calls": 0,
+            "model_invocations": 0,
+            "scored_mode_executions": 0,
+        }
+        or not isinstance(cleanup, dict)
+        or cleanup.get("cleanup_complete") is not True
+        or value["receipt_sha256"] != _resource_preflight_sha256(value)
+    ):
+        raise ResourceEnvelopeError("resource preflight receipt is invalid")
+    if (
+        not isinstance(value["pilot_id"], str)
+        or not _SAFE_ID.fullmatch(value["pilot_id"])
+        or value["binding_sha256"]
+        != canonical_resource_envelope_sha256(
+            approved_phase3_resource_envelope_binding()
+        )
+    ):
+        raise ResourceEnvelopeError("resource preflight authority is invalid")
+    expected_probes = [
+        "single_codex:workload",
+        "single_codex:evaluator",
+        "agentteam_direct:control_plane",
+        "agentteam_direct:workload",
+        "agentteam_direct:evaluator",
+        "agentteam_full:control_plane",
+        "agentteam_full:workload",
+        "agentteam_full:evaluator",
+    ]
+    if (
+        not isinstance(value["probe_records"], list)
+        or not all(isinstance(item, dict) for item in value["probe_records"])
+        or [item.get("probe_id") for item in value["probe_records"]]
+        != expected_probes
+    ):
+        raise ResourceEnvelopeError("resource preflight probe inventory is invalid")
+    for item in value["probe_records"]:
+        evidence = item.get("evidence")
+        mode, scope = item["probe_id"].split(":", 1)
+        if (
+            set(item) != {"probe_id", "mode", "scope", "returncode", "evidence"}
+            or item.get("returncode") != 0
+            or item.get("mode") != mode
+            or item.get("scope") != scope
+        ):
+            raise ResourceEnvelopeError("resource preflight probe evidence is invalid")
+        validate_resource_evidence(
+            evidence,
+            expected_binding_sha256=value["binding_sha256"],
+            expected_scope=scope,
+        )
+    aggregate = value["aggregate_evidence"]
+    if (
+        not isinstance(aggregate, dict)
+        or set(aggregate) != {"project", "modes"}
+        or not isinstance(aggregate.get("modes"), dict)
+        or set(aggregate["modes"]) != set(_MODES)
+        or not isinstance(cleanup.get("mode_cleanup"), dict)
+        or set(cleanup["mode_cleanup"]) != set(_MODES)
+        or not all(
+            isinstance(item, dict)
+            for item in cleanup["mode_cleanup"].values()
+        )
+        or any(
+            item.get("cleanup_complete") is not True
+            for item in cleanup["mode_cleanup"].values()
+        )
+    ):
+        raise ResourceEnvelopeError("resource preflight aggregate evidence is invalid")
+    validate_resource_evidence(
+        aggregate["project"],
+        expected_binding_sha256=value["binding_sha256"],
+        expected_scope="project",
+    )
+    for evidence in aggregate["modes"].values():
+        validate_resource_evidence(
+            evidence,
+            expected_binding_sha256=value["binding_sha256"],
+            expected_scope="mode",
+        )
+    return value
+
+
+def publish_phase3_resource_preflight_receipt(path, receipt):
+    """Persist one canonical real-host preflight receipt immutably."""
+
+    from .experiment_contract import publish_immutable_json
+
+    value = validate_phase3_resource_preflight_receipt(receipt)
+    return publish_immutable_json(
+        path,
+        value,
+        label="Phase 3 resource preflight receipt",
+    )
+
+
+def _resource_preflight_sha256(receipt):
+    body = deepcopy(receipt)
+    body.pop("receipt_sha256", None)
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _resource_monitor_ack_path(unit):
     if not isinstance(unit, str) or not unit.endswith(".service"):
         raise ResourceEnvelopeError("resource monitor unit is invalid")
@@ -981,6 +1246,72 @@ def build_resource_evidence(
         "timeout": {"timed_out": bool(timed_out)},
         "cleanup": deepcopy(cleanup),
     }
+
+
+def validate_resource_evidence(
+    evidence,
+    *,
+    expected_binding_sha256=None,
+    expected_scope=None,
+):
+    """Validate one resource record and its derived outcome."""
+
+    value = deepcopy(evidence)
+    expected_fields = {
+        "resource_evidence_schema_version",
+        "binding_sha256",
+        "scope",
+        "identity",
+        "counters",
+        "outcome",
+        "timeout",
+        "cleanup",
+    }
+    scopes = {"project", "mode", "control_plane", "workload", "evaluator"}
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected_fields
+        or value["resource_evidence_schema_version"]
+        != RESOURCE_EVIDENCE_SCHEMA_VERSION
+        or not isinstance(value["binding_sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", value["binding_sha256"]) is None
+        or not isinstance(value["scope"], str)
+        or value["scope"] not in scopes
+        or not isinstance(value["identity"], dict)
+        or not value["identity"]
+        or not isinstance(value["counters"], dict)
+        or not isinstance(value["timeout"], dict)
+        or set(value["timeout"]) != {"timed_out"}
+        or not isinstance(value["timeout"]["timed_out"], bool)
+        or (
+            value["cleanup"] is not None
+            and not isinstance(value["cleanup"], dict)
+        )
+    ):
+        raise ResourceEnvelopeError("resource evidence is invalid")
+    if any(
+        name in value["counters"]
+        and not isinstance(value["counters"][name], dict)
+        for name in ("cpu", "memory", "pids", "cgroup")
+    ):
+        raise ResourceEnvelopeError("resource evidence counters are invalid")
+    if (
+        expected_binding_sha256 is not None
+        and value["binding_sha256"] != expected_binding_sha256
+    ):
+        raise ResourceEnvelopeError("resource evidence binding is invalid")
+    if expected_scope is not None and value["scope"] != expected_scope:
+        raise ResourceEnvelopeError("resource evidence scope is invalid")
+    try:
+        expected_outcome = classify_resource_exhaustion(
+            value["counters"],
+            timed_out=value["timeout"]["timed_out"],
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ResourceEnvelopeError("resource evidence counters are invalid") from exc
+    if value["outcome"] != expected_outcome:
+        raise ResourceEnvelopeError("resource evidence outcome is invalid")
+    return value
 
 
 def _validate_envelope_values(envelope):

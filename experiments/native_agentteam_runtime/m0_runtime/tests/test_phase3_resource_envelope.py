@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -30,6 +31,9 @@ from agentteam_runtime.resource_envelope import (
     canonical_resource_envelope_sha256,
     classify_resource_exhaustion,
     read_resource_counters,
+    run_phase3_provider_free_resource_preflight,
+    validate_phase3_resource_preflight_receipt,
+    validate_resource_evidence,
     validate_resource_envelope_binding,
     verify_host_capacity,
 )
@@ -129,7 +133,279 @@ class _EvaluatorHierarchy:
         return {"cleanup_attempted": True, "cleanup_complete": True}
 
 
+class _PreflightOwner:
+    instance = None
+
+    def __init__(self, binding, *, pilot_id, command_runner=None):
+        self.binding = binding
+        self.pilot_id = pilot_id
+        self.command_runner = command_runner
+        self.cleaned = False
+        type(self).instance = self
+
+    def prepare(self):
+        return {
+            mode: {"run_id": self.pilot_id, "mode": mode}
+            for mode in ("single_codex", "agentteam_direct", "agentteam_full")
+        }
+
+    def evidence(self):
+        return {
+            "project": build_resource_evidence(
+                binding=self.binding,
+                scope="project",
+                identity={"control_group": "/project"},
+                counters={},
+            ),
+            "modes": {
+                mode: build_resource_evidence(
+                    binding=self.binding,
+                    scope="mode",
+                    identity={"control_group": f"/project/{mode}"},
+                    counters={},
+                )
+                for mode in (
+                    "single_codex",
+                    "agentteam_direct",
+                    "agentteam_full",
+                )
+            },
+        }
+
+    def cleanup(self):
+        self.cleaned = True
+        return {
+            "cleanup_attempted": True,
+            "cleanup_complete": True,
+            "mode_cleanup": {
+                mode: {"cleanup_complete": True}
+                for mode in (
+                    "single_codex",
+                    "agentteam_direct",
+                    "agentteam_full",
+                )
+            },
+        }
+
+
+class _PreflightHierarchy:
+    def __init__(
+        self,
+        binding,
+        *,
+        run_id,
+        mode,
+        owner_reference,
+        command_runner=None,
+    ):
+        self.binding = binding
+        self.run_id = run_id
+        self.mode = mode
+        self.owner_reference = owner_reference
+        self.command_runner = command_runner
+        self.control_scope = f"{mode}-control.service"
+
+    def prepare(self, *, check_host=False):
+        assert check_host is False
+
+    def control_plane_command(self, command):
+        return ["probe", self.mode, "control_plane", *command]
+
+    def leaf_command(self, command, *, unit, evaluator=False):
+        scope = "evaluator" if evaluator else "workload"
+        return ["probe", self.mode, scope, unit, *command]
+
+    def stop_transient_unit(self, _unit):
+        return True
+
+
+class _PreflightMonitor:
+    def __init__(self, hierarchy, unit, *, scope, evaluator=False):
+        self.hierarchy = hierarchy
+        self.unit = unit
+        self.scope = scope
+        self.evaluator = evaluator
+        self.cancelled = False
+
+    def start(self):
+        return self
+
+    def finish(self, *, binding):
+        return build_resource_evidence(
+            binding=binding,
+            scope=self.scope,
+            identity={"control_group": f"/{self.hierarchy.mode}/{self.scope}"},
+            counters={},
+        )
+
+    def cancel(self):
+        self.cancelled = True
+
+
 class Phase3ResourceEnvelopeTests(unittest.TestCase):
+    def test_provider_free_preflight_runs_exact_eight_probe_inventory(self):
+        commands = []
+
+        def runner(command, **_kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        receipt = run_phase3_provider_free_resource_preflight(
+            approved_phase3_resource_envelope_binding(),
+            pilot_id="PILOT-PROVIDER-FREE",
+            command_runner=runner,
+            owner_factory=_PreflightOwner,
+            hierarchy_factory=_PreflightHierarchy,
+            monitor_factory=_PreflightMonitor,
+        )
+        self.assertEqual(len(commands), 8)
+        self.assertEqual(len(receipt["probe_records"]), 8)
+        self.assertEqual(
+            receipt["provider_reconciliation"],
+            {
+                "provider_calls": 0,
+                "model_invocations": 0,
+                "scored_mode_executions": 0,
+            },
+        )
+        self.assertTrue(_PreflightOwner.instance.cleaned)
+
+    def test_provider_free_preflight_failure_still_cleans_owner(self):
+        calls = 0
+
+        def runner(command, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return subprocess.CompletedProcess(
+                command,
+                9 if calls == 3 else 0,
+                "",
+                "",
+            )
+
+        with self.assertRaisesRegex(
+            ResourceEnvelopeUnavailable,
+            "probe failed",
+        ):
+            run_phase3_provider_free_resource_preflight(
+                approved_phase3_resource_envelope_binding(),
+                pilot_id="PILOT-PROVIDER-FAILURE",
+                command_runner=runner,
+                owner_factory=_PreflightOwner,
+                hierarchy_factory=_PreflightHierarchy,
+                monitor_factory=_PreflightMonitor,
+            )
+        self.assertTrue(_PreflightOwner.instance.cleaned)
+
+    def test_provider_free_preflight_prepare_failure_still_cleans_owner(self):
+        class FailingOwner(_PreflightOwner):
+            def prepare(self):
+                raise ResourceEnvelopeUnavailable("prepare failed")
+
+        with self.assertRaisesRegex(
+            ResourceEnvelopeUnavailable,
+            "prepare failed",
+        ):
+            run_phase3_provider_free_resource_preflight(
+                approved_phase3_resource_envelope_binding(),
+                pilot_id="PILOT-PREPARE-FAILURE",
+                command_runner=lambda *_args, **_kwargs: None,
+                owner_factory=FailingOwner,
+                hierarchy_factory=_PreflightHierarchy,
+                monitor_factory=_PreflightMonitor,
+            )
+        self.assertTrue(FailingOwner.instance.cleaned)
+
+    def test_provider_free_preflight_receipt_mutation_fails_closed(self):
+        receipt = run_phase3_provider_free_resource_preflight(
+            approved_phase3_resource_envelope_binding(),
+            pilot_id="PILOT-PROVIDER-MUTATION",
+            command_runner=lambda command, **_kwargs: subprocess.CompletedProcess(
+                command, 0, "", ""
+            ),
+            owner_factory=_PreflightOwner,
+            hierarchy_factory=_PreflightHierarchy,
+            monitor_factory=_PreflightMonitor,
+        )
+        receipt["probe_records"].pop()
+        with self.assertRaisesRegex(
+            ResourceEnvelopeError,
+            "invalid",
+        ):
+            validate_phase3_resource_preflight_receipt(receipt)
+
+    def test_provider_free_preflight_rejects_rehashed_nested_evidence_drift(self):
+        receipt = run_phase3_provider_free_resource_preflight(
+            approved_phase3_resource_envelope_binding(),
+            pilot_id="PILOT-PROVIDER-EVIDENCE-DRIFT",
+            command_runner=lambda command, **_kwargs: subprocess.CompletedProcess(
+                command, 0, "", ""
+            ),
+            owner_factory=_PreflightOwner,
+            hierarchy_factory=_PreflightHierarchy,
+            monitor_factory=_PreflightMonitor,
+        )
+        receipt["probe_records"][0]["evidence"]["outcome"][
+            "resource_exhausted"
+        ] = True
+        body = deepcopy(receipt)
+        body.pop("receipt_sha256")
+        receipt["receipt_sha256"] = hashlib.sha256(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        with self.assertRaisesRegex(ResourceEnvelopeError, "outcome"):
+            validate_phase3_resource_preflight_receipt(receipt)
+
+    def test_provider_free_preflight_rejects_malformed_cleanup_as_contract_error(self):
+        receipt = run_phase3_provider_free_resource_preflight(
+            approved_phase3_resource_envelope_binding(),
+            pilot_id="PILOT-PROVIDER-CLEANUP-DRIFT",
+            command_runner=lambda command, **_kwargs: subprocess.CompletedProcess(
+                command, 0, "", ""
+            ),
+            owner_factory=_PreflightOwner,
+            hierarchy_factory=_PreflightHierarchy,
+            monitor_factory=_PreflightMonitor,
+        )
+        receipt["cleanup"] = []
+        with self.assertRaisesRegex(ResourceEnvelopeError, "receipt is invalid"):
+            validate_phase3_resource_preflight_receipt(receipt)
+
+    def test_resource_evidence_validator_rejects_scope_drift(self):
+        binding = approved_phase3_resource_envelope_binding()
+        evidence = build_resource_evidence(
+            binding=binding,
+            scope="workload",
+            identity={"control_group": "/workload"},
+            counters={},
+        )
+        with self.assertRaisesRegex(ResourceEnvelopeError, "scope"):
+            validate_resource_evidence(evidence, expected_scope="evaluator")
+
+    def test_resource_evidence_validator_rejects_non_string_scope(self):
+        evidence = build_resource_evidence(
+            binding=approved_phase3_resource_envelope_binding(),
+            scope="workload",
+            identity={"control_group": "/workload"},
+            counters={},
+        )
+        evidence["scope"] = []
+        with self.assertRaisesRegex(ResourceEnvelopeError, "evidence is invalid"):
+            validate_resource_evidence(evidence)
+
+    def test_resource_evidence_validator_rejects_malformed_nested_counters(self):
+        evidence = build_resource_evidence(
+            binding=approved_phase3_resource_envelope_binding(),
+            scope="workload",
+            identity={"control_group": "/workload"},
+            counters={},
+        )
+        evidence["counters"] = {"memory": []}
+        with self.assertRaisesRegex(ResourceEnvelopeError, "counters"):
+            validate_resource_evidence(evidence)
+
     def test_versioned_contract_has_exact_approved_envelopes(self):
         binding = approved_phase3_resource_envelope_binding()
         self.assertIs(validate_resource_envelope_binding(binding), binding)

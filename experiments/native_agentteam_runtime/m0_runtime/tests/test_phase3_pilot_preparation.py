@@ -43,6 +43,11 @@ from agentteam_runtime.phase3_pilot_preparation import (
     validate_phase3_selection_authority,
 )
 from agentteam_runtime.experiment_contract import canonical_json_sha256
+from agentteam_runtime.resource_envelope import (
+    approved_phase3_resource_envelope_binding,
+    build_resource_evidence,
+    canonical_resource_envelope_sha256,
+)
 from agentteam_runtime.phase3_pilot import (
     LIVE_AUTHORIZATION_SCHEMA_VERSION,
     Phase3PilotError,
@@ -64,6 +69,84 @@ def _inventory():
             for index in range(FIXED_DATASET_ROW_COUNT)
         ],
     }
+
+
+def _resource_preflight_receipt():
+    binding = approved_phase3_resource_envelope_binding()
+    binding_sha256 = canonical_resource_envelope_sha256(binding)
+    probe_specs = (
+        ("single_codex", "workload"),
+        ("single_codex", "evaluator"),
+        ("agentteam_direct", "control_plane"),
+        ("agentteam_direct", "workload"),
+        ("agentteam_direct", "evaluator"),
+        ("agentteam_full", "control_plane"),
+        ("agentteam_full", "workload"),
+        ("agentteam_full", "evaluator"),
+    )
+    receipt = {
+        "schema_version": "phase3_resource_preflight.v1",
+        "status": "passed",
+        "provider_free": True,
+        "pilot_id": "PILOT-PREPARATION-V2",
+        "binding_sha256": binding_sha256,
+        "probe_records": [
+            {
+                "probe_id": f"{mode}:{scope}",
+                "mode": mode,
+                "scope": scope,
+                "returncode": 0,
+                "evidence": build_resource_evidence(
+                    binding=binding,
+                    scope=scope,
+                    identity={"control_group": f"/{mode}/{scope}"},
+                    counters={},
+                ),
+            }
+            for mode, scope in probe_specs
+        ],
+        "aggregate_evidence": {
+            "project": build_resource_evidence(
+                binding=binding,
+                scope="project",
+                identity={"control_group": "/project"},
+                counters={},
+            ),
+            "modes": {
+                mode: build_resource_evidence(
+                    binding=binding,
+                    scope="mode",
+                    identity={"control_group": f"/project/{mode}"},
+                    counters={},
+                )
+                for mode in (
+                    "single_codex",
+                    "agentteam_direct",
+                    "agentteam_full",
+                )
+            },
+        },
+        "cleanup": {
+            "cleanup_attempted": True,
+            "cleanup_complete": True,
+            "mode_cleanup": {
+                mode: {"cleanup_complete": True}
+                for mode in (
+                    "single_codex",
+                    "agentteam_direct",
+                    "agentteam_full",
+                )
+            },
+        },
+        "provider_reconciliation": {
+            "provider_calls": 0,
+            "model_invocations": 0,
+            "scored_mode_executions": 0,
+        },
+    }
+    body = copy.deepcopy(receipt)
+    receipt["receipt_sha256"] = canonical_json_sha256(body)
+    return receipt
 
 
 def _trusted_arrow_rows():
@@ -1160,6 +1243,62 @@ class Phase3PilotPreparationTests(unittest.TestCase):
             first["live_authorization_reconciliation"]["admission_status"],
             "denied",
         )
+
+    def test_provider_free_preflight_v2_binds_dynamic_resource_preflight(self):
+        selection_authority, materialization, contract = _aggregate()
+        resource = _resource_preflight_receipt()
+        receipt = build_phase3_provider_free_preflight_receipt(
+            pilot_contract=contract,
+            selection_authority=selection_authority,
+            instance_materialization=materialization,
+            resource_preflight_receipt=resource,
+        )
+        self.assertEqual(receipt["schema_version"], "phase3_pilot_preflight.v2")
+        self.assertEqual(
+            receipt["bindings"]["resource_envelope_sha256"],
+            resource["binding_sha256"],
+        )
+        self.assertEqual(
+            receipt["bindings"]["resource_preflight_receipt_sha256"],
+            resource["receipt_sha256"],
+        )
+        self.assertIn(
+            "resource_hierarchy",
+            receipt["verification"]["results"],
+        )
+        self.assertEqual(
+            validate_phase3_provider_free_preflight_receipt(
+                receipt,
+                pilot_contract=contract,
+                selection_authority=selection_authority,
+                instance_materialization=materialization,
+                resource_preflight_receipt=resource,
+            ),
+            receipt,
+        )
+
+    def test_provider_free_preflight_v2_rejects_resource_receipt_drift(self):
+        selection_authority, materialization, contract = _aggregate()
+        resource = _resource_preflight_receipt()
+        receipt = build_phase3_provider_free_preflight_receipt(
+            pilot_contract=contract,
+            selection_authority=selection_authority,
+            instance_materialization=materialization,
+            resource_preflight_receipt=resource,
+        )
+        changed = copy.deepcopy(resource)
+        changed["pilot_id"] = "PILOT-PREPARATION-DRIFT"
+        changed_body = copy.deepcopy(changed)
+        changed_body.pop("receipt_sha256")
+        changed["receipt_sha256"] = canonical_json_sha256(changed_body)
+        with self.assertRaisesRegex(
+            Phase3PreparationError,
+            "does not bind resource preflight",
+        ):
+            validate_phase3_provider_free_preflight_receipt(
+                receipt,
+                resource_preflight_receipt=changed,
+            )
 
     def test_preflight_mutation_and_source_drift_fail_closed(self):
         selection_authority, materialization, contract = _aggregate()

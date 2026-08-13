@@ -36,6 +36,12 @@ from .phase3_pilot import (
     build_phase3_pilot_contract,
     validate_phase3_pilot_contract,
 )
+from .resource_envelope import (
+    ResourceEnvelopeError,
+    approved_phase3_resource_envelope_binding,
+    canonical_resource_envelope_sha256,
+    validate_phase3_resource_preflight_receipt,
+)
 
 FIXED_SOURCE_COMMIT = "9b83d5af943ba7a17567336f5b18239f73960219"
 FIXED_DATASET_ARTIFACT_SHA256 = "74e7c63160ada4ceba71d5d89a9bb7c9794f4574b384458d546eb65cdb730520"
@@ -51,6 +57,7 @@ SELECTION_AUTHORITY_SCHEMA_VERSION = "phase3_selection_authority.v1"
 DIRECT_TASKPACK_SCHEMA_VERSION = "phase3_direct_taskpack.v1"
 INSTANCE_MATERIALIZATION_SCHEMA_VERSION = "phase3_instance_materialization.v1"
 PILOT_PREFLIGHT_SCHEMA_VERSION = "phase3_pilot_preflight.v1"
+PILOT_PREFLIGHT_V2_SCHEMA_VERSION = "phase3_pilot_preflight.v2"
 PILOT_PREFLIGHT_DECISION_ID = "DEC-P3B-provider-free-preparation"
 READINESS_BINDING = {
     "gate_id": "P3-READY",
@@ -1238,6 +1245,7 @@ def build_phase3_provider_free_preflight_receipt(
     pilot_contract,
     selection_authority,
     instance_materialization,
+    resource_preflight_receipt=None,
 ):
     """Prove aggregate consistency without creating a live-launch permit."""
 
@@ -1273,6 +1281,16 @@ def build_phase3_provider_free_preflight_receipt(
         item["maximum_wall_time_seconds"]
         for item in body["instance_bindings"]
     )
+    resource_preflight = None
+    if resource_preflight_receipt is not None:
+        try:
+            resource_preflight = validate_phase3_resource_preflight_receipt(
+                resource_preflight_receipt
+            )
+        except ResourceEnvelopeError as exc:
+            raise Phase3PreparationError(
+                "resource preflight receipt is invalid"
+            ) from exc
     verification_results = {
         "selection_binding": _preflight_check(
             {
@@ -1323,6 +1341,21 @@ def build_phase3_provider_free_preflight_receipt(
             }
         ),
     }
+    if resource_preflight is not None:
+        verification_results["resource_hierarchy"] = _preflight_check(
+            {
+                "resource_envelope_sha256": resource_preflight[
+                    "binding_sha256"
+                ],
+                "resource_preflight_receipt_sha256": resource_preflight[
+                    "receipt_sha256"
+                ],
+                "probe_count": len(resource_preflight["probe_records"]),
+                "cleanup_complete": resource_preflight["cleanup"][
+                    "cleanup_complete"
+                ],
+            }
+        )
     verification = {
         "results": verification_results,
         "verification_sha256": canonical_json_sha256(verification_results),
@@ -1381,8 +1414,23 @@ def build_phase3_provider_free_preflight_receipt(
         },
         "verification": verification,
     }
+    if resource_preflight is not None:
+        receipt_body["bindings"].update(
+            {
+                "resource_envelope_sha256": resource_preflight[
+                    "binding_sha256"
+                ],
+                "resource_preflight_receipt_sha256": resource_preflight[
+                    "receipt_sha256"
+                ],
+            }
+        )
     receipt = {
-        "schema_version": PILOT_PREFLIGHT_SCHEMA_VERSION,
+        "schema_version": (
+            PILOT_PREFLIGHT_V2_SCHEMA_VERSION
+            if resource_preflight is not None
+            else PILOT_PREFLIGHT_SCHEMA_VERSION
+        ),
         **receipt_body,
     }
     receipt["receipt_sha256"] = canonical_json_sha256(receipt)
@@ -1391,6 +1439,7 @@ def build_phase3_provider_free_preflight_receipt(
         pilot_contract=pilot,
         selection_authority=authority,
         instance_materialization=materialization,
+        resource_preflight_receipt=resource_preflight,
     )
 
 
@@ -1403,6 +1452,7 @@ def validate_phase3_provider_free_preflight_receipt(
     pilot_contract=None,
     selection_authority=None,
     instance_materialization=None,
+    resource_preflight_receipt=None,
 ):
     """Validate a provider-absence receipt and optional source authorities."""
 
@@ -1414,6 +1464,32 @@ def validate_phase3_provider_free_preflight_receipt(
             encoding="utf-8"
         )
     )
+    if value.get("schema_version") == PILOT_PREFLIGHT_V2_SCHEMA_VERSION:
+        schema["properties"]["schema_version"]["const"] = (
+            PILOT_PREFLIGHT_V2_SCHEMA_VERSION
+        )
+        bindings = schema["properties"]["bindings"]
+        bindings["required"].extend(
+            [
+                "resource_envelope_sha256",
+                "resource_preflight_receipt_sha256",
+            ]
+        )
+        bindings["properties"].update(
+            {
+                "resource_envelope_sha256": {"$ref": "#/$defs/sha256"},
+                "resource_preflight_receipt_sha256": {
+                    "$ref": "#/$defs/sha256"
+                },
+            }
+        )
+        results = schema["properties"]["verification"]["properties"][
+            "results"
+        ]
+        results["required"].append("resource_hierarchy")
+        results["properties"]["resource_hierarchy"] = {
+            "$ref": "#/$defs/check"
+        }
     errors = sorted(
         Draft202012Validator(schema).iter_errors(value),
         key=lambda error: [str(part) for part in error.absolute_path],
@@ -1529,6 +1605,34 @@ def validate_phase3_provider_free_preflight_receipt(
             raise Phase3PreparationError(
                 "preflight receipt does not bind instance materialization"
             )
+    if value["schema_version"] == PILOT_PREFLIGHT_V2_SCHEMA_VERSION:
+        expected_binding_sha256 = canonical_resource_envelope_sha256(
+            approved_phase3_resource_envelope_binding()
+        )
+        if value["bindings"]["resource_envelope_sha256"] != (
+            expected_binding_sha256
+        ):
+            raise Phase3PreparationError(
+                "preflight receipt resource envelope binding changed"
+            )
+        if resource_preflight_receipt is not None:
+            try:
+                resource_preflight = validate_phase3_resource_preflight_receipt(
+                    resource_preflight_receipt
+                )
+            except ResourceEnvelopeError as exc:
+                raise Phase3PreparationError(
+                    "resource preflight receipt is invalid"
+                ) from exc
+            if (
+                value["bindings"]["resource_preflight_receipt_sha256"]
+                != resource_preflight["receipt_sha256"]
+                or value["bindings"]["resource_envelope_sha256"]
+                != resource_preflight["binding_sha256"]
+            ):
+                raise Phase3PreparationError(
+                    "aggregate preflight does not bind resource preflight"
+                )
     return value
 
 
