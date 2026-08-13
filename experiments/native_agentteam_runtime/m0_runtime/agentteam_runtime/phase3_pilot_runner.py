@@ -218,7 +218,9 @@ def materialize_phase3_runtime_taskpack(
         taskpack_id=task_id,
         read_scope=["."],
         write_scope=["benchmark-candidate-placeholder/"],
-        verification_command=task["tasks"][0]["acceptance_commands"][0],
+        verification_command=_taskpack_acceptance_argv(
+            task["tasks"][0]["acceptance_commands"][0]
+        ),
         codex_timeout_seconds=task["shared_budget"]["max_wall_time_seconds"],
         codex_model=model,
         role_routing=False,
@@ -1113,6 +1115,19 @@ def _absolute_argv(command):
             f"acceptance executable is unavailable: {command[0]}"
         )
     return [str(Path(executable).resolve()), *command[1:]]
+
+
+def _taskpack_acceptance_argv(command):
+    """Express common test frontends through the taskpack-safe Python entrypoint."""
+
+    if (
+        isinstance(command, list)
+        and command
+        and isinstance(command[0], str)
+        and Path(command[0]).name == "pytest"
+    ):
+        return ["python3", "-m", "pytest", *command[1:]]
+    return list(command)
 
 
 def _compact_id(value):

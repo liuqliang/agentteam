@@ -511,7 +511,7 @@ class Phase3PilotRunnerTests(unittest.TestCase):
                     "tasks": [
                         {
                             "objective": visible["task"]["goal"],
-                            "acceptance_commands": [["python3", "-m", "unittest"]],
+                            "acceptance_commands": [["pytest", "-q"]],
                         }
                     ],
                     "shared_budget": {"max_wall_time_seconds": 120},
@@ -546,6 +546,16 @@ class Phase3PilotRunnerTests(unittest.TestCase):
             self.assertEqual(
                 first["semantic_authority_sha256"],
                 semantic["taskpack_sha256"],
+            )
+            frozen_verification = json.loads(
+                (
+                    Path(first["frozen_taskpack_dir"])
+                    / "verification.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                frozen_verification["command"][:3],
+                ["python3", "-m", "pytest"],
             )
 
     def test_production_executor_uses_protocol_budget_for_single_codex(self):
