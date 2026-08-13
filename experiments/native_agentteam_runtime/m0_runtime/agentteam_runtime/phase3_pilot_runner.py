@@ -418,7 +418,11 @@ class Phase3ProductionExecutor:
                     "total_tokens",
                 )
             }
-            | {"coverage_percent": int(sealed["usage_coverage"]["coverage_percent"])},
+            | {
+                "coverage_percent": _usage_coverage_percent(
+                    sealed["usage_coverage"]
+                )
+            },
             "wall_time_seconds": (
                 float(sealed["budget_result"]["elapsed_wall_time_seconds"])
                 + float(score["wall_time_seconds"])
@@ -1060,6 +1064,29 @@ def _reject_forbidden_keys(value):
     elif isinstance(value, list):
         for nested in value:
             _reject_forbidden_keys(nested)
+
+
+def _usage_coverage_percent(coverage):
+    if not isinstance(coverage, dict):
+        raise Phase3PilotRunnerError("sealed usage coverage is invalid")
+    covered = coverage.get("covered_invocations")
+    total = coverage.get("total_invocations")
+    status = coverage.get("status")
+    if (
+        not isinstance(covered, int)
+        or isinstance(covered, bool)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or covered < 0
+        or total < 0
+        or covered > total
+        or status not in {"complete", "incomplete"}
+        or (status == "complete") != (covered == total)
+    ):
+        raise Phase3PilotRunnerError("sealed usage coverage is invalid")
+    if total == 0:
+        return 100 if status == "complete" else 0
+    return (covered * 100) // total
 
 
 def _variance_percent(values):

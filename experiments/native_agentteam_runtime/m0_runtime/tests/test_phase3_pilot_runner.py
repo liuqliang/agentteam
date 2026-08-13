@@ -14,6 +14,7 @@ from agentteam_runtime.phase3_pilot_runner import (
     Phase3PilotRunner,
     Phase3PilotRunnerError,
     Phase3ProductionExecutor,
+    _usage_coverage_percent,
     build_phase3_experiment_protocol,
     materialize_phase3_runtime_taskpack,
 )
@@ -580,6 +581,28 @@ class Phase3PilotRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(adapter.provider.timeout_seconds, 1800)
+
+    def test_sealed_usage_coverage_projects_to_percent(self):
+        self.assertEqual(
+            _usage_coverage_percent(
+                {
+                    "covered_invocations": 1,
+                    "total_invocations": 1,
+                    "status": "complete",
+                }
+            ),
+            100,
+        )
+        self.assertEqual(
+            _usage_coverage_percent(
+                {
+                    "covered_invocations": 1,
+                    "total_invocations": 2,
+                    "status": "incomplete",
+                }
+            ),
+            50,
+        )
 
     def test_full_provider_free_simulation_runs_all_counterbalanced_entries(self):
         with tempfile.TemporaryDirectory() as temporary:
