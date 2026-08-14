@@ -36,6 +36,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .model_context_budget import (
+    CONTEXT_BUDGET_POLICY_FIELDS,
+    HOOK_TRUST_BYPASS_OPTION,
+    LEGACY_CONTEXT_POLICY_FIELDS,
+    codex_context_policy_arguments,
+    normalize_context_budget_policy,
+)
+
 
 MAX_PROVIDER_STREAM_BYTES = 4 * 1024 * 1024
 HANDSHAKE_TIMEOUT_SECONDS = 30.0
@@ -3442,46 +3450,56 @@ def _validate_registered_codex_command(command, model_policy):
         raise ModelInvocationIntegrityError(
             "Codex command reasoning differs from experiment launch policy"
         )
-    context_fields = {
-        "tool_output_token_limit",
-        "web_search_policy",
-    }
-    present = context_fields.intersection(model_policy)
+    present = CONTEXT_BUDGET_POLICY_FIELDS.intersection(model_policy)
     if not present:
         return
-    if present != context_fields:
+    if present not in {
+        LEGACY_CONTEXT_POLICY_FIELDS,
+        CONTEXT_BUDGET_POLICY_FIELDS,
+    }:
         raise ModelInvocationIntegrityError(
             "experiment context policy fields are incomplete"
         )
-    expected_configurations = {
-        "tool_output_token_limit": (
-            "tool_output_token_limit="
-            f"{model_policy['tool_output_token_limit']}"
-        ),
-        "web_search_policy": (
-            f'web_search="{model_policy["web_search_policy"]}"'
-        ),
-    }
+    try:
+        policy = normalize_context_budget_policy(model_policy)
+        expected_arguments = codex_context_policy_arguments(policy)
+    except ValueError as exc:
+        raise ModelInvocationIntegrityError(
+            f"experiment context policy is invalid: {exc}"
+        ) from exc
     configurations = [
         command[index + 1]
         for index, value in enumerate(command)
         if value == "-c" and index + 1 < len(command)
     ]
-    configuration_keys = {
-        "tool_output_token_limit": "tool_output_token_limit=",
-        "web_search_policy": "web_search=",
-    }
-    for field, expected in expected_configurations.items():
-        matches = [
-            value
-            for value in configurations
-            if value.startswith(configuration_keys[field])
-        ]
-        if matches != [expected]:
-            raise ModelInvocationIntegrityError(
-                "Codex command context policy differs from experiment "
-                f"launch policy: {field}"
-            )
+    expected_configurations = [
+        expected_arguments[index + 1]
+        for index, value in enumerate(expected_arguments)
+        if value == "-c" and index + 1 < len(expected_arguments)
+    ]
+    configuration_prefixes = [
+        "tool_output_token_limit=",
+        "web_search=",
+        "model_auto_compact_token_limit=",
+        "hooks.PreToolUse=",
+        "hooks.PostToolUse=",
+    ]
+    controlled_configurations = [
+        value
+        for value in configurations
+        if any(value.startswith(prefix) for prefix in configuration_prefixes)
+    ]
+    if controlled_configurations != expected_configurations:
+        raise ModelInvocationIntegrityError(
+            "Codex command context policy differs from experiment launch policy"
+        )
+    expected_bypass_count = (
+        1 if set(policy) == CONTEXT_BUDGET_POLICY_FIELDS else 0
+    )
+    if command.count(HOOK_TRUST_BYPASS_OPTION) != expected_bypass_count:
+        raise ModelInvocationIntegrityError(
+            "Codex command hook trust policy differs from experiment launch policy"
+        )
 
 
 def _validate_call_context(context, *, supported):

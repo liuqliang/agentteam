@@ -171,6 +171,34 @@
         ],
         "web_search_policy": [
           "tool_output_token_limit"
+        ],
+        "model_auto_compact_token_limit": [
+          "tool_output_token_limit",
+          "web_search_policy",
+          "tool_call_soft_limit",
+          "tool_call_hard_limit",
+          "tool_budget_policy"
+        ],
+        "tool_call_soft_limit": [
+          "tool_output_token_limit",
+          "web_search_policy",
+          "model_auto_compact_token_limit",
+          "tool_call_hard_limit",
+          "tool_budget_policy"
+        ],
+        "tool_call_hard_limit": [
+          "tool_output_token_limit",
+          "web_search_policy",
+          "model_auto_compact_token_limit",
+          "tool_call_soft_limit",
+          "tool_budget_policy"
+        ],
+        "tool_budget_policy": [
+          "tool_output_token_limit",
+          "web_search_policy",
+          "model_auto_compact_token_limit",
+          "tool_call_soft_limit",
+          "tool_call_hard_limit"
         ]
       },
       "required": [
@@ -237,6 +265,24 @@
         },
         "web_search_policy": {
           "const": "disabled"
+        },
+        "model_auto_compact_token_limit": {
+          "type": "integer",
+          "minimum": 8192,
+          "maximum": 1000000
+        },
+        "tool_call_soft_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "tool_call_hard_limit": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 1000
+        },
+        "tool_budget_policy": {
+          "const": "codex_pre_tool_budget.v1"
         },
         "host_class": {
           "type": "string",

@@ -72,9 +72,11 @@ provider usage reached `3,042,089` tokens and crossed the preregistered
 
 Transcript profiling found 38 completed direct-mode commands and 538,643
 characters of command output. One full test command returned 332,589
-characters. The frozen `tool_output_token_limit=4000` setting therefore did
-not bound command output returned by Codex CLI, and repeated context replay
-remained the dominant cost mechanism.
+characters in the complete operator JSONL. Codex truncates tool results when
+recording model history while retaining fuller execution events, so those
+event sizes do not establish model-visible size. The screen instead shows that
+a per-tool limit did not bound cumulative input across 41 completed tool calls
+and repeated sampling rounds.
 
 The screen rejects the current containment policy as sufficient for
 orchestrated modes. Phase 3 expansion remains unauthorized. See

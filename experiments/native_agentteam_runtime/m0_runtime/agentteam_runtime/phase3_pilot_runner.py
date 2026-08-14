@@ -81,6 +81,10 @@ _CANDIDATE_PATCH_POLICY = {
 }
 _TOOL_OUTPUT_TOKEN_LIMIT = 4_000
 _WEB_SEARCH_POLICY = "disabled"
+_MODEL_AUTO_COMPACT_TOKEN_LIMIT = 32_768
+_TOOL_CALL_SOFT_LIMIT = 12
+_TOOL_CALL_HARD_LIMIT = 16
+_TOOL_BUDGET_POLICY = "codex_pre_tool_budget.v1"
 _FORBIDDEN_RESULT_KEYS = {
     "gold_patch",
     "test_patch",
@@ -176,6 +180,12 @@ def build_phase3_experiment_protocol(
             "tool_allowlist": ["exec_command", "apply_patch"],
             "tool_output_token_limit": _TOOL_OUTPUT_TOKEN_LIMIT,
             "web_search_policy": _WEB_SEARCH_POLICY,
+            "model_auto_compact_token_limit": (
+                _MODEL_AUTO_COMPACT_TOKEN_LIMIT
+            ),
+            "tool_call_soft_limit": _TOOL_CALL_SOFT_LIMIT,
+            "tool_call_hard_limit": _TOOL_CALL_HARD_LIMIT,
+            "tool_budget_policy": _TOOL_BUDGET_POLICY,
             "host_class": execution["host_class"],
             "cpu_limit": execution["cpu_limit"],
             "memory_limit_bytes": execution["memory_limit_bytes"],

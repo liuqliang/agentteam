@@ -23,6 +23,8 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
 
+from .model_context_budget import normalize_context_budget_policy
+
 
 PROTOCOL_SCHEMA_VERSION = "experiment_protocol.v1"
 RUN_MANIFEST_SCHEMA_VERSION = "experiment_run_manifest.v2"
@@ -133,6 +135,12 @@ def validate_experiment_protocol(protocol):
         "experiment_protocol.schema.json",
         "experiment protocol",
     )
+    try:
+        normalize_context_budget_policy(protocol["environment"])
+    except ValueError as exc:
+        raise ExperimentContractError(
+            f"experiment protocol model context policy is invalid: {exc}"
+        ) from exc
     return protocol
 
 

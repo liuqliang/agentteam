@@ -809,6 +809,22 @@ index b859599..f06e5bb 100644
                 "disabled",
             )
             self.assertEqual(
+                protocol["environment"]["model_auto_compact_token_limit"],
+                32_768,
+            )
+            self.assertEqual(
+                protocol["environment"]["tool_call_soft_limit"],
+                12,
+            )
+            self.assertEqual(
+                protocol["environment"]["tool_call_hard_limit"],
+                16,
+            )
+            self.assertEqual(
+                protocol["environment"]["tool_budget_policy"],
+                "codex_pre_tool_budget.v1",
+            )
+            self.assertEqual(
                 protocol["evaluator"]["candidate_patch_policy"],
                 {
                     "submission": "complete_candidate_patch",

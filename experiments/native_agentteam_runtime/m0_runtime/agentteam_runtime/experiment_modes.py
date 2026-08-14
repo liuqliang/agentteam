@@ -63,6 +63,10 @@ from .model_invocation import (
     ModelInvocationCall,
     is_supported_codex_command,
 )
+from .model_context_budget import (
+    codex_context_policy_arguments,
+    normalize_context_budget_policy,
+)
 from .experiment_protocol import validate_protocol_resource_envelope
 from .resource_envelope import SystemdResourceHierarchy
 from .taskpack import (
@@ -1579,18 +1583,14 @@ def _model_policy(protocol):
             "max_inflight_model_invocations"
         ],
     }
-    context_fields = {
-        "tool_output_token_limit",
-        "web_search_policy",
-    }
-    present = context_fields.intersection(environment)
-    if present:
-        if present != context_fields:
-            raise ExperimentModeError(
-                "experiment context policy fields must be bound together"
-            )
-        for field in sorted(context_fields):
-            policy[field] = copy.deepcopy(environment[field])
+    try:
+        context_policy = normalize_context_budget_policy(environment)
+    except ValueError as exc:
+        raise ExperimentModeError(
+            f"experiment context policy is invalid: {exc}"
+        ) from exc
+    for field, value in context_policy.items():
+        policy[field] = copy.deepcopy(value)
     return policy
 
 
@@ -1598,26 +1598,13 @@ def _with_experiment_codex_context_policy(command, model_policy):
     """Append the frozen model-context controls to one Codex command."""
 
     command = list(command)
-    context_fields = {
-        "tool_output_token_limit",
-        "web_search_policy",
-    }
-    present = context_fields.intersection(model_policy)
-    if not present:
-        return command
-    if present != context_fields:
+    try:
+        arguments = codex_context_policy_arguments(model_policy)
+    except ValueError as exc:
         raise ExperimentModeError(
-            "experiment context policy fields must be bound together"
-        )
-    command.extend(
-        [
-            "-c",
-            "tool_output_token_limit="
-            f"{model_policy['tool_output_token_limit']}",
-            "-c",
-            f'web_search="{model_policy["web_search_policy"]}"',
-        ]
-    )
+            f"experiment context policy is invalid: {exc}"
+        ) from exc
+    command.extend(arguments)
     return command
 
 

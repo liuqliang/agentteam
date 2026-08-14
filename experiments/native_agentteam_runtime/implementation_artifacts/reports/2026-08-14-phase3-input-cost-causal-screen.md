@@ -88,9 +88,15 @@ Direct 最大输出来自：
 python3 -m pytest -q tests/test_requests.py
 ```
 
-其输出达到 `332,589` 字符。说明当前 `tool_output_token_limit=4000`
-并没有约束 Codex CLI 写入模型上下文的命令输出。Direct 模式执行更多轮命令，
-历史输出又被重复缓存和回放，最终 cached input 达到 `2,625,536` tokens。
+其完整执行事件达到 `332,589` 字符，但这不能证明这些字符全部进入模型上下文。
+Codex 会在把工具结果写入模型历史时应用 `tool_output_token_limit`，同时在 JSONL
+中保留更完整的 operator event。此前把 JSONL 大小直接解释为模型可见大小是不
+准确的。
+
+真正得到数据支持的是累计轮次问题：direct 共完成 `38` 次命令和 `3` 次文件
+修改，即 `41` 次工具调用。即使单次结果被截断，每次后续 sampling 仍会重新
+计入已有上下文，最终 cached input 达到 `2,625,536` tokens。单次工具限制并不
+等价于整个 worker 的累计输入预算。
 
 禁用 web search 生效了，但它只移除了旧 direct 的 6 次搜索，不足以抵消命令
 输出和多轮上下文累积。
@@ -123,15 +129,18 @@ python3 -m pytest -q tests/test_requests.py
 
 ## 后续约束
 
-下一步先做 provider-free 修复，不启动新 benchmark：
+后续 provider-free 修复采用两层边界：
 
-1. 在命令输出进入模型上下文前实施真实的字节或 token 截断，并保留完整输出
-   作为外部 artifact；
-2. 对测试命令提供确定性的摘要通道，默认只返回失败节点、首尾诊断和 artifact
-   引用；
-3. 给多步 worker 增加可执行的命令数、回传字节数或阶段预算，不能只依赖调用
-   结束后的 provider usage；
-4. 用 provider-free transcript replay 证明上限确实生效，再决定是否重新运行
-   Requests 或选择新 SWE-EVO 实例。
+1. 保留 Codex 的 `tool_output_token_limit=4000`，不再把完整 JSONL event 当成
+   模型可见内容；
+2. 新增 `model_auto_compact_token_limit=32768`，限制 active context 的增长；
+3. 用 Codex PreToolUse hook 原子预留工具名额：第 12 次提醒收尾，第 16 次是
+   最后一个允许执行的工具，第 17 次起全部拒绝；并行请求也不能突破上限，同时
+   模型仍可生成最终回答和 terminal usage；
+4. provider-free replay 表明旧有效路径为 `5-13` 次工具调用，异常 direct 为
+   `41` 次，因此边界保留旧有效样本的余量并能截断本次异常循环。
+
+这套机制仍需冻结新 release 和 bundle，之后才能由新决策选择重跑 Requests 或
+新 SWE-EVO 实例。当前实现本身不授权 provider 调用。
 
 在这些机制通过前，继续增加实例只会扩大成本，不能提高实验结论的可信度。

@@ -772,14 +772,12 @@ def _complete_fake_experiment_invocation(
     if registration is not None and "tool_output_token_limit" in registration[
         "model_policy"
     ]:
+        from agentteam_runtime.model_context_budget import (
+            codex_context_policy_arguments,
+        )
+
         command.extend(
-            [
-                "-c",
-                "tool_output_token_limit="
-                f"{registration['model_policy']['tool_output_token_limit']}",
-                "-c",
-                "web_search=\"disabled\"",
-            ]
+            codex_context_policy_arguments(registration["model_policy"])
         )
     execution = invocation.execute(
         command,
@@ -6967,6 +6965,7 @@ class ExperimentModeAdapterTests(unittest.TestCase):
         *,
         direct_taskpack_sha256=None,
         context_policy=False,
+        context_budget=False,
     ):
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
@@ -6978,6 +6977,17 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 {
                     "tool_output_token_limit": 4_000,
                     "web_search_policy": "disabled",
+                }
+            )
+        if context_budget:
+            protocol["environment"].update(
+                {
+                    "tool_output_token_limit": 4_000,
+                    "web_search_policy": "disabled",
+                    "model_auto_compact_token_limit": 32_768,
+                    "tool_call_soft_limit": 12,
+                    "tool_call_hard_limit": 16,
+                    "tool_budget_policy": "codex_pre_tool_budget.v1",
                 }
             )
         for seed in range(100):
@@ -7237,7 +7247,7 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             fixture = self._fixture(
                 tmp,
                 "single_codex",
-                context_policy=True,
+                context_budget=True,
             )
             with self._mode_execution_boundary(), patch(
                 "agentteam_runtime.model_invocation."
@@ -7327,7 +7337,7 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             fixture = self._fixture(
                 tmp,
                 "single_codex",
-                context_policy=True,
+                context_budget=True,
             )
             provider = NativeSingleCodexProvider()
             with self._mode_execution_boundary(), patch(
@@ -7355,6 +7365,22 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             self.assertIn(
                 'web_search="disabled"',
                 FakeGatedRunner.command,
+            )
+            self.assertIn(
+                "model_auto_compact_token_limit=32768",
+                FakeGatedRunner.command,
+            )
+            self.assertTrue(
+                any(
+                    value.startswith("hooks.PreToolUse=")
+                    for value in FakeGatedRunner.command
+                )
+            )
+            self.assertEqual(
+                FakeGatedRunner.command.count(
+                    "--dangerously-bypass-hook-trust"
+                ),
+                1,
             )
 
     def test_single_provider_classifies_missing_code_mode_host(self):
@@ -8953,6 +8979,57 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                     context_policy,
                 )
 
+        from agentteam_runtime.model_context_budget import (
+            HOOK_TRUST_BYPASS_OPTION,
+            TOOL_BUDGET_POLICY,
+            codex_context_policy_arguments,
+        )
+
+        bounded_policy = {
+            **context_policy,
+            "model_auto_compact_token_limit": 32_768,
+            "tool_call_soft_limit": 12,
+            "tool_call_hard_limit": 16,
+            "tool_budget_policy": TOOL_BUDGET_POLICY,
+        }
+        bounded_command = [
+            "codex",
+            "exec",
+            "-m",
+            "codex-test-model",
+            "-c",
+            "model_reasoning_effort=high",
+            *codex_context_policy_arguments(bounded_policy),
+        ]
+        _validate_registered_codex_command(
+            bounded_command,
+            bounded_policy,
+        )
+        for invalid in (
+            [
+                value
+                for value in bounded_command
+                if value != HOOK_TRUST_BYPASS_OPTION
+            ],
+            [*bounded_command, HOOK_TRUST_BYPASS_OPTION],
+            [
+                (
+                    "model_auto_compact_token_limit=65536"
+                    if value == "model_auto_compact_token_limit=32768"
+                    else value
+                )
+                for value in bounded_command
+            ],
+        ):
+            with self.assertRaisesRegex(
+                ModelInvocationIntegrityError,
+                "context policy|hook trust policy",
+            ):
+                _validate_registered_codex_command(
+                    invalid,
+                    bounded_policy,
+                )
+
 
 class ExperimentContractSchemaTests(unittest.TestCase):
     def test_protocol_context_policy_is_atomic_and_legacy_compatible(self):
@@ -8976,6 +9053,32 @@ class ExperimentContractSchemaTests(unittest.TestCase):
             partial["environment"].pop(field)
             with self.assertRaises(ExperimentContractError):
                 validate_experiment_protocol(partial)
+
+        bounded = copy.deepcopy(extended)
+        bounded["environment"].update(
+            {
+                "model_auto_compact_token_limit": 32_768,
+                "tool_call_soft_limit": 12,
+                "tool_call_hard_limit": 16,
+                "tool_budget_policy": "codex_pre_tool_budget.v1",
+            }
+        )
+        self.assertIs(validate_experiment_protocol(bounded), bounded)
+        for field in (
+            "model_auto_compact_token_limit",
+            "tool_call_soft_limit",
+            "tool_call_hard_limit",
+            "tool_budget_policy",
+        ):
+            partial = copy.deepcopy(bounded)
+            partial["environment"].pop(field)
+            with self.assertRaises(ExperimentContractError):
+                validate_experiment_protocol(partial)
+
+        invalid_order = copy.deepcopy(bounded)
+        invalid_order["environment"]["tool_call_soft_limit"] = 16
+        with self.assertRaisesRegex(ExperimentContractError, "must exceed"):
+            validate_experiment_protocol(invalid_order)
 
     def test_protocol_run_binding_and_state_schemas_are_executable(self):
         protocol = _protocol()

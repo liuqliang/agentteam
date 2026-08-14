@@ -1,0 +1,48 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-cumulative-context-budget-v1",
+  "revision": 1,
+  "decision_kind": "execution",
+  "subject": "phase3_cumulative_context_budget",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-input-cost-causal-screen-v1",
+  "supersedes_decision_id": null,
+  "statement": "Implement provider-free cumulative context and tool-call controls for all Phase 3 Codex provider positions without launching another benchmark instance.",
+  "selected_option": "bind 32768-token active-context compaction with a 12-call soft warning and a 16-slot atomic PreToolUse execution boundary",
+  "alternatives": [
+    {
+      "option": "terminate Codex externally at the hard boundary",
+      "rejected_reason": "Killing the process can lose terminal provider usage and weakens recovery evidence."
+    },
+    {
+      "option": "rely only on prompt instructions",
+      "rejected_reason": "Prompt compliance is not a deterministic execution boundary."
+    },
+    {
+      "option": "lower only the per-tool output limit",
+      "rejected_reason": "The Requests screen shows that cumulative sampling rounds dominate even when individual tool outputs are bounded."
+    }
+  ],
+  "rationale": "Retained valid provider positions completed 5 to 13 tool calls, while the failed treatment direct worker completed 41. The selected 12-call warning and 16-call hard boundary preserve headroom above every retained valid sample and reject later tools in the observed diagnostic loop. PreToolUse reserves each admitted slot under a file lock before execution, so parallel requests cannot overshoot. Codex auto-compaction bounds active history, while blocked tools do not prevent a final response or terminal usage. All controls are frozen into the protocol, launch registration, and exact Codex command.",
+  "scope": [
+    "model_auto_compact_token_limit:32768",
+    "tool_call_soft_limit:12",
+    "tool_call_hard_limit:16",
+    "tool_budget_policy:codex_pre_tool_budget.v1",
+    "provider_positions:single_codex,agentteam_direct,agentteam_full_author,agentteam_full_worker",
+    "provider_calls_authorized:0"
+  ],
+  "expected_outcome": "Produce a backward-compatible, provider-free tested execution boundary that can be frozen into a later scored bundle by a separate authorization.",
+  "acceptance_refs": [
+    "plans/2026-08-14-phase3-cumulative-context-budget.md",
+    "protocol rejects partial policy fields and invalid soft-hard ordering",
+    "registered commands require exact compaction and PreToolUse configuration",
+    "hook tests prove warning, hard rejection, per-turn isolation, and locked concurrent counting",
+    "transcript replay leaves retained valid samples below the hard boundary",
+    "complete provider-free regression passes"
+  ],
+  "status": "completed",
+  "created_at": "2026-08-14T09:11:28Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": null
+}

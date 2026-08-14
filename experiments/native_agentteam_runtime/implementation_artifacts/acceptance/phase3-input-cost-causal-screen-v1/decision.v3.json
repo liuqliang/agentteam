@@ -1,0 +1,42 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-input-cost-causal-screen-v1",
+  "revision": 3,
+  "decision_kind": "acceptance",
+  "subject": "phase3_input_cost_containment",
+  "authority_level": "L2",
+  "parent_decision_id": null,
+  "supersedes_decision_id": null,
+  "statement": "Correct the transcript interpretation while retaining the completed decision to reject Phase 3 expansion under the measured containment policy.",
+  "selected_option": "treat complete Codex JSONL output as operator evidence, attribute the measured regression to cumulative multi-round input rather than unproven failure of per-tool truncation, and retain the budget stop",
+  "alternatives": [
+    {
+      "option": "retain the claim that all JSONL command output entered model context",
+      "rejected_reason": "Codex applies tool output truncation when recording model history and may retain a fuller execution event, so JSONL byte length alone does not support that claim."
+    },
+    {
+      "option": "discard the cost-screen conclusion because one mechanism was misinterpreted",
+      "rejected_reason": "Provider usage, 41 completed tool calls, the 10.4196 direct-to-single ratio, and the aggregate budget stop remain valid evidence that the policy did not contain cumulative cost."
+    }
+  ],
+  "rationale": "The treatment direct transcript contains 38 completed commands and 3 file changes, but complete event output is not identical to model-visible history. Codex source and tests apply tool_output_token_limit while recording function output. The direct worker nevertheless reported 2754757 input tokens and 2625536 cached input tokens over 41 tool calls. The corrected mechanism is repeated sampling over a growing history: per-tool truncation can be effective while cumulative provider input still becomes excessive. This correction narrows the causal explanation without changing the observed cost failure or the decision not to expand.",
+  "scope": [
+    "instance:psf__requests_v2.12.2_v2.12.3",
+    "run_root:/tmp/agentteam-phase3-input-cost-causal-screen-v1-run-v3",
+    "completed_tool_calls:single_codex=11,agentteam_direct=41",
+    "direct_total_tokens:2775697",
+    "direct_cached_input_tokens:2625536",
+    "stop_reason:aggregate_token_budget_exhausted"
+  ],
+  "expected_outcome": "Preserve accurate cost evidence and require a cumulative context and tool-round boundary before another scored execution.",
+  "acceptance_refs": [
+    "reports/2026-08-14-phase3-input-cost-causal-screen.md",
+    "plans/2026-08-14-phase3-cumulative-context-budget.md",
+    "provider-free replay counts completed command_execution and file_change events",
+    "no new provider call is authorized by this correction"
+  ],
+  "status": "completed",
+  "created_at": "2026-08-14T09:11:28Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": "b9892d697725f0212ff20a34ef9ed36d648e9b43b58eb5735cc3ba2d75d7df48"
+}
