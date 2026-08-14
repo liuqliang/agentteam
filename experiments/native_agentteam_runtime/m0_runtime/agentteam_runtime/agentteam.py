@@ -13930,7 +13930,9 @@ def _run_frozen_taskpack(
         resource_hierarchy.reset_transient_unit(
             resource_hierarchy.control_scope
         )
-        command = resource_hierarchy.control_plane_command(command)
+        command = resource_hierarchy.control_plane_command(
+            _runtime_module_environment_command(command)
+        )
         resource_monitor = ResourceUnitMonitor(
             resource_hierarchy,
             resource_hierarchy.control_scope,
@@ -13970,6 +13972,17 @@ def _run_frozen_taskpack(
         run_dir=run_paths["run_dir"],
         control_plane_resource_evidence=control_plane_resource_evidence,
     )
+
+
+def _runtime_module_environment_command(command):
+    """Bind a nested systemd service to the runtime release importing it."""
+
+    runtime_root = Path(__file__).resolve().parent.parent
+    return [
+        "/usr/bin/env",
+        f"PYTHONPATH={runtime_root}",
+        *list(command),
+    ]
 
 
 def _run_controller_only_taskpack(

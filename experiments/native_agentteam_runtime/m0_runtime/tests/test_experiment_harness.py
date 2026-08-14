@@ -7826,6 +7826,7 @@ class ExperimentModeAdapterTests(unittest.TestCase):
     def test_runtime_launcher_result_is_persisted_before_controller_finalization(self):
         from agentteam_runtime.agentteam import (
             _experiment_runtime_launcher_result,
+            _runtime_module_environment_command,
         )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -7850,6 +7851,23 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             self.assertEqual(
                 value["diagnostic_sha256"],
                 reference["sha256"],
+            )
+            command = _runtime_module_environment_command(
+                [sys.executable, "-m", "agentteam_runtime.cli"]
+            )
+            self.assertEqual(command[0], "/usr/bin/env")
+            self.assertEqual(
+                command[1],
+                "PYTHONPATH="
+                + str(
+                    Path(inspect.getfile(_experiment_runtime_launcher_result))
+                    .resolve()
+                    .parent.parent
+                ),
+            )
+            self.assertEqual(
+                command[2:],
+                [sys.executable, "-m", "agentteam_runtime.cli"],
             )
 
     def test_direct_mode_verifies_digest_and_overrides_project_root(self):
