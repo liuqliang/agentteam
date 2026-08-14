@@ -1705,3 +1705,19 @@ generated hook and compaction configuration without a provider call. The
 bundle has no live authorization; another provider call still requires a
 separate execution decision. Detailed evidence is recorded in
 [`2026-08-14-phase3-cumulative-context-budget.md`](reports/2026-08-14-phase3-cumulative-context-budget.md).
+
+The separately authorized bounded Requests retest is now complete. It ran all
+three modes for `853,231` aggregate tokens, a `59.796%` reduction from the
+retained historical total. Direct/single cost fell to `1.2893x` and
+full/single to `1.9505x`, but Phase 3 expansion remains unauthorized. Direct
+mode exhausted its common 16-tool boundary before post-patch verification, and
+full mode's candidate test overlapped the evaluator-only test patch. Only
+single received an official score, which remained unresolved at FAIL_TO_PASS
+`0/4`, PASS_TO_PASS `104/109`, and partial `0.290826`.
+
+The next ordered Phase 3 work is provider-free: define a role-aware or
+phase-aware verification reserve, freeze a uniform candidate-test policy for
+benchmark submissions, replay both controls deterministically, and re-freeze
+the runtime and protocol. Do not authorize a new SWE-EVO instance until those
+gates pass. The retained execution evidence is in
+[`2026-08-14-phase3-requests-cumulative-context-retest.md`](reports/2026-08-14-phase3-requests-cumulative-context-retest.md).

@@ -1,6 +1,7 @@
 # Phase 3 cumulative context budget
 
-Status: provider-free implementation complete
+Status: provider-free implementation and bounded Requests retest complete;
+Phase 3 expansion remains unauthorized
 
 ## Problem correction
 
@@ -104,3 +105,24 @@ No model-provider call was made during implementation or verification.
 
 The frozen artifact identities and independent replay result are recorded in
 [`2026-08-14-phase3-cumulative-context-budget.md`](../reports/2026-08-14-phase3-cumulative-context-budget.md).
+
+## Scored retest result
+
+The separately authorized Requests retest completed one serial execution of
+all three modes with `853,231` aggregate tokens, `59.796%` below the retained
+historical total. This validates containment on the selected control, not the
+shared hard boundary as a production default:
+
+- single completed with 8 tools and `201,242` tokens, but retained the same
+  unresolved official score;
+- direct used all 16 admitted tools and could not run post-patch verification,
+  so its unintegrated empty candidate was `candidate_patch_invalid`;
+- full used 4 author tools plus 15 worker tools and passed common acceptance,
+  but its candidate test overlapped the evaluator-only test patch and was
+  rejected as `evaluator_patch_conflict`.
+
+The next provider-free task must replace the undifferentiated hard limit with a
+role-aware or phase-aware verification reserve and freeze a uniform benchmark
+candidate-test policy. Do not select a new scored instance before both are
+accepted. Full evidence is in
+[`2026-08-14-phase3-requests-cumulative-context-retest.md`](../reports/2026-08-14-phase3-requests-cumulative-context-retest.md).

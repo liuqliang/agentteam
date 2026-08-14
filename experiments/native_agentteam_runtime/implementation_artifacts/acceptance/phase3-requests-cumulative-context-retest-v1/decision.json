@@ -1,0 +1,54 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-requests-cumulative-context-retest-v1",
+  "revision": 1,
+  "decision_kind": "execution",
+  "subject": "phase3_requests_cumulative_context_retest",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-cumulative-context-budget-v1",
+  "supersedes_decision_id": null,
+  "statement": "Run one bounded Requests historical-control retest to measure the accepted cumulative-context and tool-call policy before selecting a new SWE-EVO instance.",
+  "selected_option": "run one serial repetition of single_codex, agentteam_direct, and agentteam_full with a 1000000-token per-mode ceiling and 3000000-token aggregate ceiling",
+  "alternatives": [
+    {
+      "option": "select a new SWE-EVO instance immediately",
+      "rejected_reason": "Changing the task would confound the first measurement of the cumulative-context policy against retained Requests results."
+    },
+    {
+      "option": "run only the previously failing agentteam_direct mode",
+      "rejected_reason": "A same-epoch single-agent reference is needed to interpret model-service and task-specific cost variation."
+    },
+    {
+      "option": "remove the aggregate ceiling because the tool-call boundary is deterministic",
+      "rejected_reason": "Tool count limits execution rounds but does not prove a fixed provider-token cost for each admitted round."
+    }
+  ],
+  "rationale": "The retained Requests runs hold source, task, model profile, public verification, and official evaluator constant. The replacement release adds active-context compaction at 32768 tokens and an atomic 12-call warning and 16-call hard boundary. Repeating the same three-mode order provides the narrowest available engineering estimate of the new mechanism. The experiment remains a historical-control retest rather than a randomized causal benchmark.",
+  "scope": [
+    "instance:psf__requests_v2.12.2_v2.12.3",
+    "accepted_mechanism_commit:b83c9805574ca45b1f703fafb6b78da051402820",
+    "execution_runtime_commit:82cf95332c9d612749aca2ec8d7dcb54424f38aa",
+    "preparation_bundle:0431260bc6618402c72b965455e197c951d90528793c78d451c785c41d26d416",
+    "authorized_bundle:66dd5f04ac05a25907575efa2f3bebbaa26286590dc15a070128e478959ffc19",
+    "discarded_prelaunch_bundle:1f73f54759626a174f35b0b900ac262d9fe8ba8c0ef16914db604dce8a47a9c8",
+    "discarded_prelaunch_run:/tmp/agentteam-phase3-requests-cumulative-context-retest-v1-run-v1:provider_calls=0",
+    "mode_order:single_codex,agentteam_direct,agentteam_full",
+    "per_mode_token_ceiling:1000000",
+    "aggregate_token_ceiling:3000000",
+    "maximum_mode_executions:3",
+    "max_inflight_model_invocations:1"
+  ],
+  "expected_outcome": "Measure provider-reported token cost, tool-call count, official quality, and wall time for the accepted policy, then decide whether evidence supports moving to a new instance.",
+  "acceptance_refs": [
+    "all provider positions bind the complete six-field context policy",
+    "provider usage coverage is 100 percent for every launched invocation",
+    "tool execution does not exceed 16 reservations per provider turn",
+    "candidate patch compatibility and official evaluator evidence are retained",
+    "stop before the next mode when aggregate usage reaches 3000000 tokens",
+    "no corrective operator intervention occurs inside a mode execution"
+  ],
+  "status": "active",
+  "created_at": "2026-08-14T11:58:12Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": null
+}
