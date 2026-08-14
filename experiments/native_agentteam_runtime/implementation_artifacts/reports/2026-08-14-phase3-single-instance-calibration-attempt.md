@@ -138,6 +138,30 @@ engineering result: recovery, resource binding, timeout propagation, and
 usage attribution must be proven provider-free before spending on scored
 runs.
 
+## Input-Cost Profile And Containment
+
+The retained transcripts show that provider input cost was amplified by model
+context replay. Failed test commands returned between 243,125 and 331,745
+characters to the model, and those results remained in later requests. The
+direct worker also made six web searches despite having a frozen repository
+and sufficient public task authority. This evidence does not support SQLite or
+decision-trace writes as the primary cost source.
+
+Commit `d2f22075c8858faddc4223438c35b2a9c9b886bc` adds a scored-protocol model
+context policy: every single-mode call, direct worker, full-mode author, and
+full-mode worker receives Codex's `tool_output_token_limit=4000` and
+`web_search="disabled"` settings. Command registration rejects absent,
+duplicated, or mismatched settings before provider launch. Provider access,
+controller verification, complete candidate patches, and official evaluation
+remain unchanged.
+
+The implementation passes 1,198 provider-free tests with 7 skips. Release
+`phase3-calibration-d2f2207` and bundle
+`a54007b0620f8e0db8930937c2f951426cc6359ee394213588c1e297c4c54a79`
+were materialized, and a zero-execution initialization validated the bundle
+and completed resource cleanup without creating provider evidence. These are
+mechanism results only; no post-change token or quality result exists yet.
+
 ## Disposition
 
 - Single-instance calibration mechanism: `completed`
@@ -147,8 +171,10 @@ runs.
 - Cost conclusion: both AgentTeam modes fail the `2.0x` token gate
 - Pilot expansion: `not_authorized`
 
-The next execution decision must re-freeze a bundle against a runtime release
-that contains the accepted candidate-patch policy. Then use a new instance or
-preregistered repetition to test whether context reuse and role routing can
-reduce AgentTeam input cost without changing evaluator semantics. Do not infer
-general performance from this single calibration.
+A replacement bundle is now frozen against a runtime release that contains
+both the accepted candidate-patch policy and the input-cost containment
+policy. It has only completed provider-free initialization. Before a scored
+call, record a new execution decision that either selects a new instance or
+classifies a bounded Requests repetition as a cost-containment experiment with
+an explicit token ceiling. Do not infer general performance from this single
+calibration.

@@ -1,6 +1,6 @@
 # Phase 3 input-cost containment
 
-Status: implementation contract
+Status: completed provider-free
 
 ## Decision
 
@@ -61,3 +61,23 @@ mechanism. First complete provider-free validation and re-profile the retained
 JSONL as the baseline. The next real call must use a new instance or a
 preregistered cost-containment repetition whose decision states the expected
 information gain and token ceiling.
+
+## Implementation Evidence
+
+- Runtime commit: `d2f22075c8858faddc4223438c35b2a9c9b886bc`
+- Runtime release: `phase3-calibration-d2f2207`
+- Frozen bundle SHA-256:
+  `a54007b0620f8e0db8930937c2f951426cc6359ee394213588c1e297c4c54a79`
+- Protocol artifact SHA-256:
+  `672df3aea7ef9523248d6ed611d77f5e1dd0b1389e40eeee89d9fb4031b53d98`
+- Provider-free suite: `1,198` tests passed, `7` skipped.
+- The zero-execution initialization at
+  `/tmp/agentteam-phase3-calibration-preflight-d2f2207` materialized and
+  validated the frozen policy with no provider evidence files and zero
+  reported usage.
+- Resource cleanup completed for `single_codex`, `agentteam_direct`, and
+  `agentteam_full`; all experiment-owned systemd slices were removed.
+
+This proves policy propagation and pre-launch rejection behavior. It does not
+yet prove a reduction in provider-reported tokens. That claim requires a
+subsequent scored execution under a separately frozen execution decision.

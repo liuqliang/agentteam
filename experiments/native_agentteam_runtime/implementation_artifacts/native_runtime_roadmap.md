@@ -1661,5 +1661,21 @@ The accepted policy retains the complete candidate patch, requires clean
 hidden-test composition before scoring, and records `candidate_patch_invalid`
 or `evaluator_patch_conflict` without a quality score. Provider cost remains
 accounted as `invalid_execution`, not infrastructure waste. New protocols bind
-this policy explicitly; historical artifacts remain unchanged, so the next
-scored run requires a newly frozen bundle and runtime release.
+this policy explicitly; historical artifacts remain unchanged. The replacement
+runtime release and bundle described below satisfy the re-freeze requirement.
+
+Input-cost profiling attributes the largest avoidable context growth to failed
+test outputs of 243,125-331,745 characters and, in direct mode, six unnecessary
+web searches. Runtime commit `d2f2207` therefore freezes a 4,000-token
+per-tool-output model-context limit and disables web search for all four Phase
+3 provider positions while leaving provider access and evaluation unchanged.
+The mechanism passes 1,198 provider-free tests with 7 skips. Frozen bundle
+`a54007b0620f8e0db8930937c2f951426cc6359ee394213588c1e297c4c54a79`
+completed zero-execution initialization and resource cleanup without a model
+call.
+
+No cost-reduction claim follows from that provider-free result. Do not rerun
+the same Requests instance merely as a smoke test. The next scored decision
+must either select a new instance for broader evidence or preregister a bounded
+Requests repetition specifically to estimate the containment policy's causal
+effect, including its expected information gain and token ceiling.
