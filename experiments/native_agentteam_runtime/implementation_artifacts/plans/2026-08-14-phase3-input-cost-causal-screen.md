@@ -1,6 +1,6 @@
 # Phase 3 input-cost causal screen
 
-Status: authorized execution
+Status: completed; stopped at the aggregate token gate
 
 ## Authority
 
@@ -54,3 +54,28 @@ performance.
 Proceed to a new SWE-EVO instance only if the treatment execution is valid,
 usage coverage is complete, and the result provides enough evidence to judge
 the containment policy. Do not expand automatically.
+
+## Outcome
+
+The final clean treatment run completed `single_codex` and
+`agentteam_direct`. It did not launch `agentteam_full` because cumulative
+provider usage reached `3,042,089` tokens and crossed the preregistered
+`3,000,000`-token aggregate boundary.
+
+- `single_codex` used `266,392` total tokens, `16.25%` below the retained
+  historical baseline, with unchanged official quality.
+- `agentteam_direct` used `2,775,697` total tokens, `153.93%` above its
+  historical baseline and `10.4196x` the treatment single-agent cost.
+- The direct candidate conflicted with the evaluator-only test patch and was
+  retained as an invalid execution without a quality score.
+- `agentteam_full` and a new SWE-EVO instance were not launched.
+
+Transcript profiling found 38 completed direct-mode commands and 538,643
+characters of command output. One full test command returned 332,589
+characters. The frozen `tool_output_token_limit=4000` setting therefore did
+not bound command output returned by Codex CLI, and repeated context replay
+remained the dominant cost mechanism.
+
+The screen rejects the current containment policy as sufficient for
+orchestrated modes. Phase 3 expansion remains unauthorized. See
+[`2026-08-14-phase3-input-cost-causal-screen.md`](../reports/2026-08-14-phase3-input-cost-causal-screen.md).

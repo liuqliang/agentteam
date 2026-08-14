@@ -1,0 +1,52 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-input-cost-causal-screen-v1",
+  "revision": 2,
+  "decision_kind": "acceptance",
+  "subject": "phase3_input_cost_containment",
+  "authority_level": "L2",
+  "parent_decision_id": null,
+  "supersedes_decision_id": null,
+  "statement": "Complete the Requests historical-control screen at its aggregate budget boundary and reject the current context-containment policy as sufficient for AgentTeam orchestration.",
+  "selected_option": "retain the valid single result and cost-valid direct execution, stop before full mode, and require provider-free containment repair before any new SWE-EVO instance",
+  "alternatives": [
+    {
+      "option": "launch agentteam_full after the aggregate ceiling was crossed",
+      "rejected_reason": "The preregistered stop rule forbids another provider launch after cumulative usage exceeds 3000000 tokens."
+    },
+    {
+      "option": "expand directly to a new SWE-EVO instance",
+      "rejected_reason": "Direct mode consumed 10.4196 times the treatment single-agent tokens, so the containment mechanism has not met its operational objective."
+    },
+    {
+      "option": "discard direct-mode cost because its candidate patch conflicted with the evaluator patch",
+      "rejected_reason": "Patch conflict invalidates quality scoring but not provider-cost evidence; the execution completed and reported 100 percent usage coverage."
+    }
+  ],
+  "rationale": "The final clean run reduced single-agent total tokens from 318079 to 266392, but increased direct-mode total tokens from 1093093 to 2775697. Direct mode issued 38 commands and received 538643 characters of command output, including one 332589-character pytest result. This demonstrates that the 4000-token model-context setting did not bound Codex CLI command output and did not prevent multi-step context replay. Cumulative usage reached 3042089 tokens, so the registered aggregate stop rule correctly prevented full mode from starting. The historical-control design and one repetition do not establish a general causal effect, but the direct-mode regression is sufficient to reject expansion under this policy.",
+  "scope": [
+    "instance:psf__requests_v2.12.2_v2.12.3",
+    "baseline_bundle:ee9b336411f15a2b1cfe4a525542895f3b6e3d7f730f07477da90dee1a65edb4",
+    "treatment_bundle:f1b504fd7f10d02511208baa06e6e5c77d87d8464f60986a9033b0e57626c2dc",
+    "runtime_commit:7dd1fa7e170ba1fbb0843ae98c2b9ff5b757d38e",
+    "run_root:/tmp/agentteam-phase3-input-cost-causal-screen-v1-run-v3",
+    "launched_modes:single_codex,agentteam_direct",
+    "skipped_mode:agentteam_full",
+    "observed_total_tokens:3042089",
+    "stop_reason:aggregate_token_budget_exhausted"
+  ],
+  "expected_outcome": "Preserve the bounded screen as negative cost-containment evidence and prevent further scored execution until command-output and multi-step context growth have enforceable provider-free controls.",
+  "acceptance_refs": [
+    "reports/2026-08-14-phase3-input-cost-causal-screen.md",
+    "single provider usage: total=266392 input=262751 output=3641 coverage=100_percent",
+    "direct provider usage: total=2775697 input=2754757 output=20940 coverage=100_percent",
+    "single official quality: fail_to_pass=0/4 pass_to_pass=104/109 partial=0.290826",
+    "direct outcome: evaluator_patch_conflict without quality score",
+    "resource cleanup completed for both launched modes",
+    "agentteam_full has no provider invocation in the final run"
+  ],
+  "status": "completed",
+  "created_at": "2026-08-14T08:37:06Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": "4a1ce7a34b74808ba604f8c9a7a2f30e4ee1aadd8be046559100b3949f3fdc68"
+}

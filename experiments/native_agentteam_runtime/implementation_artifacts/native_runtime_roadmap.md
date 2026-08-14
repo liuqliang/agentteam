@@ -1679,3 +1679,18 @@ the same Requests instance merely as a smoke test. The next scored decision
 must either select a new instance for broader evidence or preregister a bounded
 Requests repetition specifically to estimate the containment policy's causal
 effect, including its expected information gain and token ceiling.
+
+The bounded Requests historical-control screen is now complete and stopped at
+its aggregate token gate. Single-agent total usage fell from `318,079` to
+`266,392` tokens, but direct AgentTeam usage rose from `1,093,093` to
+`2,775,697` tokens and reached `10.4196x` the treatment single-agent cost.
+After cumulative usage reached `3,042,089` tokens, the controller correctly
+did not launch full mode. Transcript profiling found 538,643 characters of
+direct-mode command output, including one 332,589-character pytest result;
+the configured 4,000-token setting did not bound that Codex CLI output.
+
+Phase 3 expansion remains unauthorized. Before another provider call,
+implement and replay-test a real command-output boundary plus bounded
+multi-step worker execution. The decision closure and detailed evidence are
+recorded in
+[`2026-08-14-phase3-input-cost-causal-screen.md`](reports/2026-08-14-phase3-input-cost-causal-screen.md).
