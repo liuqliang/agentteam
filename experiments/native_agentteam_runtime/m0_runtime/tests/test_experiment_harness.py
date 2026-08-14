@@ -6762,6 +6762,7 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                     {"adapter_output": {}},
                     {"sha256": "a" * 64},
                     evaluator_path,
+                    {"evaluator_started": True},
                 )
                 index = json.loads(
                     (run_dir / reference["resource_evidence_relative_path"])
@@ -6782,7 +6783,67 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                         {"adapter_output": {}},
                         {"sha256": "a" * 64},
                         evaluator_path,
+                        {"evaluator_started": True},
                     )
+
+    def test_resource_index_omits_evaluator_when_evaluation_was_blocked(self):
+        binding = approved_phase3_resource_envelope_binding()
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            authority_root = run_dir / "authority"
+            invocation_root = run_dir / "lifecycle"
+            resource_path = (
+                invocation_root
+                / "model_invocations"
+                / "INV-RESOURCE-BLOCKED"
+                / "resource.json"
+            )
+            resource_path.parent.mkdir(parents=True)
+            publish_immutable_json(
+                resource_path,
+                build_resource_evidence(
+                    binding=binding,
+                    scope="workload",
+                    identity={"control_group": "/project/mode/workload"},
+                    counters={"cpu": {}, "memory": {}, "pids": {}, "cgroup": {}},
+                ),
+            )
+            request = Mock(
+                resource_envelope_binding=binding,
+                authority_root=str(authority_root),
+                run_dir=str(run_dir),
+                run_manifest={
+                    "experiment_run_id": "RUN-RESOURCE-BLOCKED",
+                    "mode": "single_codex",
+                },
+            )
+            manifest = {
+                "invocation_sets": [
+                    {
+                        "lifecycle_authority_root": str(invocation_root),
+                        "invocation_ids": ["INV-RESOURCE-BLOCKED"],
+                    }
+                ]
+            }
+            with patch(
+                "agentteam_runtime.experiment_modes."
+                "load_model_invocation_set_reference",
+                return_value=manifest,
+            ):
+                reference = _publish_resource_evidence_index(
+                    request,
+                    {"adapter_output": {}},
+                    {"sha256": "a" * 64},
+                    run_dir / "artifacts" / "common-evaluation.json",
+                    {"evaluator_started": False},
+                )
+            index = json.loads(
+                (run_dir / reference["resource_evidence_relative_path"]).read_text()
+            )
+            self.assertEqual(
+                [item["evidence_id"] for item in index["records"]],
+                ["INV-RESOURCE-BLOCKED"],
+            )
 
     def test_resource_sidecar_is_bound_into_common_mode_contract(self):
         protocol = _protocol()
@@ -10028,6 +10089,54 @@ class ExperimentSandboxTests(unittest.TestCase):
                     cwd=fixture["repository"],
                     environment={"PATH": "/usr/bin:/bin"},
                     descriptor=fixture["descriptor"],
+                )
+            public_environment = Path(tmp) / "public-environment"
+            public_python = public_environment / "bin" / "python3.9"
+            public_python.parent.mkdir(parents=True)
+            public_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            public_python.chmod(0o700)
+            public_descriptor = build_provider_sandbox_descriptor(
+                fixture["repository"],
+                runtime_views=[{"source": "/usr", "target": "/usr"}],
+                library_views=[
+                    {
+                        "source": str(public_environment),
+                        "target": "/opt/agentteam/benchmark-env",
+                    }
+                ],
+                bwrap_path="/usr/bin/bwrap",
+                forbidden_paths=[fixture["canary"]],
+            )
+            self.assertEqual(
+                _approved_acceptance_executable(
+                    "/opt/agentteam/benchmark-env/bin/python3.9",
+                    cwd=fixture["repository"],
+                    environment={"PATH": "/usr/bin:/bin"},
+                    descriptor=public_descriptor,
+                ),
+                public_python,
+            )
+            runtime_public_descriptor = build_provider_sandbox_descriptor(
+                fixture["repository"],
+                runtime_views=[
+                    {"source": "/usr", "target": "/usr"},
+                    {
+                        "source": str(public_environment),
+                        "target": "/opt/agentteam/benchmark-env",
+                    },
+                ],
+                bwrap_path="/usr/bin/bwrap",
+                forbidden_paths=[fixture["canary"]],
+            )
+            with self.assertRaisesRegex(
+                ExperimentSandboxError,
+                "executable is not approved",
+            ):
+                _approved_acceptance_executable(
+                    "/opt/agentteam/benchmark-env/bin/python3.9",
+                    cwd=fixture["repository"],
+                    environment={"PATH": "/usr/bin:/bin"},
+                    descriptor=runtime_public_descriptor,
                 )
             symlink_runtime = Path(tmp) / "symlink-runtime"
             (symlink_runtime / "bin").mkdir(parents=True)

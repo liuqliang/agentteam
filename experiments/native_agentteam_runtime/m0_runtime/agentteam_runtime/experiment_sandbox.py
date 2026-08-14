@@ -4965,36 +4965,39 @@ def _approved_acceptance_executable(
             "acceptance command executable must be an absolute path"
         )
     mapped_sources = []
-    for view in (
-        *descriptor["runtime_views"],
-        *descriptor["library_views"],
+    for view_kind, views in (
+        ("runtime", descriptor["runtime_views"]),
+        ("library", descriptor["library_views"]),
     ):
-        source_root = Path(view["source"])
-        try:
-            relative = value_path.relative_to(Path(view["target"]))
-        except ValueError:
-            continue
-        candidate = source_root
-        try:
-            for part in relative.parts:
-                candidate = candidate / part
-                metadata = candidate.lstat()
-                if stat.S_ISLNK(metadata.st_mode):
-                    raise ExperimentSandboxError(
-                        "acceptance executable namespace path contains a symlink"
-                    )
-            metadata = candidate.stat()
-        except OSError as exc:
-            raise ExperimentSandboxError(
-                "acceptance executable namespace mapping is unavailable"
-            ) from exc
-        if stat.S_ISREG(metadata.st_mode) and os.access(candidate, os.X_OK):
-            mapped_sources.append(candidate)
-    if len(set(mapped_sources)) != 1:
+        for view in views:
+            source_root = Path(view["source"])
+            try:
+                relative = value_path.relative_to(Path(view["target"]))
+            except ValueError:
+                continue
+            candidate = source_root
+            try:
+                for part in relative.parts:
+                    candidate = candidate / part
+                    metadata = candidate.lstat()
+                    if stat.S_ISLNK(metadata.st_mode):
+                        raise ExperimentSandboxError(
+                            "acceptance executable namespace path contains a symlink"
+                        )
+                metadata = candidate.stat()
+            except OSError as exc:
+                raise ExperimentSandboxError(
+                    "acceptance executable namespace mapping is unavailable"
+                ) from exc
+            if stat.S_ISREG(metadata.st_mode) and os.access(candidate, os.X_OK):
+                mapped_sources.append(
+                    (candidate, view_kind, Path(view["target"]))
+                )
+    if len({item[0] for item in mapped_sources}) != 1:
         raise ExperimentSandboxError(
             "acceptance command executable is not uniquely mapped"
         )
-    executable = mapped_sources[0]
+    executable, view_kind, target_root = mapped_sources[0]
     approved_system_paths = {
         path.resolve()
         for path in (
@@ -5005,6 +5008,12 @@ def _approved_acceptance_executable(
         if path.is_file()
     }
     if executable in approved_system_paths:
+        return executable
+    public_environment_root = Path("/opt/agentteam/benchmark-env")
+    if view_kind == "library" and (
+        target_root == public_environment_root
+        or public_environment_root in target_root.parents
+    ):
         return executable
     raise ExperimentSandboxError(
         "acceptance command executable is not approved"

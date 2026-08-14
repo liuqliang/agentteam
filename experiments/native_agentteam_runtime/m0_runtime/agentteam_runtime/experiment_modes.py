@@ -274,6 +274,7 @@ class ExperimentCommonFinalizer:
             mode_result,
             invocation_set_reference,
             evaluation_path,
+            evaluation,
         )
         bundle = _build_common_result_bundle(
             request,
@@ -2195,6 +2196,7 @@ def _publish_resource_evidence_index(
     mode_result,
     invocation_set_reference,
     evaluation_path,
+    evaluation,
 ):
     if request.resource_envelope_binding is None:
         return None
@@ -2249,11 +2251,12 @@ def _publish_resource_evidence_index(
                 scope="workload",
                 evidence_id=invocation_id,
             )
-    register(
-        Path(str(evaluation_path) + ".resources.json"),
-        scope="evaluator",
-        evidence_id="official-evaluator",
-    )
+    if evaluation.get("evaluator_started") is True:
+        register(
+            Path(str(evaluation_path) + ".resources.json"),
+            scope="evaluator",
+            evidence_id="visible-acceptance-evaluator",
+        )
     if request.run_manifest["mode"] != "single_codex":
         adapter_output = mode_result.get("adapter_output")
         control = (
