@@ -36,13 +36,22 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .model_context_budget import (
-    CONTEXT_BUDGET_POLICY_FIELDS,
-    HOOK_TRUST_BYPASS_OPTION,
-    LEGACY_CONTEXT_POLICY_FIELDS,
-    codex_context_policy_arguments,
-    normalize_context_budget_policy,
-)
+if __package__:
+    from .model_context_budget import (
+        CONTEXT_BUDGET_POLICY_FIELDS,
+        HOOK_TRUST_BYPASS_OPTION,
+        LEGACY_CONTEXT_POLICY_FIELDS,
+        codex_context_policy_arguments,
+        normalize_context_budget_policy,
+    )
+else:  # The systemd supervisor executes this module by its file path.
+    from model_context_budget import (
+        CONTEXT_BUDGET_POLICY_FIELDS,
+        HOOK_TRUST_BYPASS_OPTION,
+        LEGACY_CONTEXT_POLICY_FIELDS,
+        codex_context_policy_arguments,
+        normalize_context_budget_policy,
+    )
 
 
 MAX_PROVIDER_STREAM_BYTES = 4 * 1024 * 1024

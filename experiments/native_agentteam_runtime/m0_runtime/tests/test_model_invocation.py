@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -82,6 +83,22 @@ class _ResourceRunner:
 
 
 class ModelInvocationResourceTests(unittest.TestCase):
+    def test_internal_helper_imports_when_executed_by_file_path(self):
+        module_path = (
+            RUNTIME_ROOT / "agentteam_runtime" / "model_invocation.py"
+        )
+        completed = subprocess.run(
+            [sys.executable, str(module_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("internal runtime helper", completed.stderr)
+        self.assertNotIn("ImportError", completed.stderr)
+
     def test_prelaunch_failure_discards_unstarted_invocation_directory(self):
         class FailingResourceRunner(_ResourceRunner):
             def prepare_resources_before_admission(self):
