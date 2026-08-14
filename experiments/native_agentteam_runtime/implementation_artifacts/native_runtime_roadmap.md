@@ -1644,3 +1644,15 @@ selection and completes item 4:
 
 The detailed epoch and cost audit is in
 [`2026-08-13-phase3b-live-smoke-v12-v19.md`](reports/2026-08-13-phase3b-live-smoke-v12-v19.md).
+
+The first single-instance replacement calibration attempt is retained as
+infrastructure-failure evidence in
+[`2026-08-14-phase3-single-instance-calibration-attempt.md`](reports/2026-08-14-phase3-single-instance-calibration-attempt.md).
+It exposed a failed transient-unit relaunch, 148 unbounded worker restarts,
+pre-start invocation-directory pollution, hidden finalizer diagnostics, and
+2,324,769 tokens omitted by the old unsealed-run cost projection. The repair
+keeps pre-start failures out of invocation authority, caps experiment worker
+restarts at three, resets stale control units, publishes finalizer diagnostics,
+and accounts complete unsealed terminal usage as infrastructure waste. The
+three-mode calibration remains incomplete and must be re-frozen against a new
+runtime release after provider-free preflight.

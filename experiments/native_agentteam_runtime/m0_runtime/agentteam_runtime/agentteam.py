@@ -13881,6 +13881,9 @@ def _run_frozen_taskpack(
             if experiment_runtime_context is not None
             else None
         ),
+        worker_max_restart_count=(
+            3 if experiment_runtime_context is not None else None
+        ),
     )
     publish_run_decision_binding(
         inferred_work_root,
@@ -13924,6 +13927,9 @@ def _run_frozen_taskpack(
             ],
         )
         resource_hierarchy.prepare(check_host=False)
+        resource_hierarchy.reset_transient_unit(
+            resource_hierarchy.control_scope
+        )
         command = resource_hierarchy.control_plane_command(command)
         resource_monitor = ResourceUnitMonitor(
             resource_hierarchy,

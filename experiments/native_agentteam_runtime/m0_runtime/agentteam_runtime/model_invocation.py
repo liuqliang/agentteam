@@ -773,6 +773,27 @@ class InvocationLifecycle:
     def is_started(self):
         return self.started_path.exists()
 
+    def discard_before_start(self):
+        """Remove a failed prelaunch allocation that never became authority."""
+
+        lock_path = self.authority_root / "model_invocations.lock"
+        lock_path.touch(mode=0o600, exist_ok=True)
+        with lock_path.open("r+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                if self.is_started:
+                    return False
+                if self.terminal_path.exists():
+                    raise ModelInvocationIntegrityError(
+                        "unstarted invocation unexpectedly has terminal authority"
+                    )
+                if self.invocation_dir.exists():
+                    shutil.rmtree(self.invocation_dir)
+                    _fsync_directory(self.invocation_dir.parent)
+                return True
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
     def publish_start(self, identity):
         record = {
             "start_schema_version": "model_invocation_started.v1",
@@ -988,6 +1009,30 @@ class ModelInvocationCall:
         self.provider_admission = None
 
     def execute(
+        self,
+        command,
+        *,
+        cwd,
+        input_text,
+        timeout_seconds,
+        progress_callback=None,
+        progress_interval_seconds=30.0,
+    ):
+        try:
+            return self._execute(
+                command,
+                cwd=cwd,
+                input_text=input_text,
+                timeout_seconds=timeout_seconds,
+                progress_callback=progress_callback,
+                progress_interval_seconds=progress_interval_seconds,
+            )
+        except Exception:
+            if not self.lifecycle.is_started:
+                self.lifecycle.discard_before_start()
+            raise
+
+    def _execute(
         self,
         command,
         *,

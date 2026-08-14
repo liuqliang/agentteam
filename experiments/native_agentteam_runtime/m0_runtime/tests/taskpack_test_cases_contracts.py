@@ -312,6 +312,7 @@ class ContractsMixin:
                 daemon=True,
                 max_inflight=2,
                 commit_verified_integration=False,
+                worker_max_restart_count=3,
             )
 
             self.assertEqual(
@@ -328,6 +329,7 @@ class ContractsMixin:
             self.assertEqual(_arg_value(args, "--max-steps"), "45000")
             self.assertEqual(_arg_value(args, "--codex-timeout-seconds"), "1800")
             self.assertEqual(_arg_value(args, "--lease-timeout-seconds"), "1860")
+            self.assertEqual(_arg_value(args, "--worker-max-restart-count"), "3")
             self.assertIn("--integrate-accepted-patch", args)
             self.assertNotIn("--commit-verified-integration", args)
             self.assertTrue((run_root / "runtime-args").exists())

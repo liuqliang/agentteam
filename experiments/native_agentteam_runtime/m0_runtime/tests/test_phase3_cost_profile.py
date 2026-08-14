@@ -134,6 +134,52 @@ class Phase3CostProfileTests(unittest.TestCase):
         self.assertIn("sealed_result_missing", profile["evidence_gaps"])
         self.assertEqual(profile["runs"][0]["terminal_status"], "unsealed")
 
+    def test_profiles_unsealed_raw_terminal_and_reports_prelaunch_allocations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = self._write_run(root, evaluator_failure=False)
+            (run_dir / "results" / "terminal" / "result.json").unlink()
+            (run_dir / "binding.json").write_text(
+                json.dumps(
+                    {
+                        "experiment_run_id": run_dir.name,
+                        "mode": "agentteam_direct",
+                        "repetition_index": 0,
+                    }
+                ),
+                encoding="ascii",
+            )
+            reference = (
+                run_dir
+                / "authority"
+                / "experiment_authority"
+                / "model-invocation-set.invocation-set.json"
+            )
+            reference.unlink()
+            valid = (
+                run_dir
+                / "authority"
+                / "experiment_lifecycles"
+                / "worker"
+                / "model_invocations"
+                / "INV-fixture"
+            )
+            (valid / "started.json").write_text("{}", encoding="ascii")
+            (valid.parent / "INV-prelaunch-only").mkdir()
+
+            profile = profile_phase3_pilot(root)
+
+        self.assertEqual(profile["run_count"], 1)
+        self.assertEqual(profile["reported_token_totals"]["total_tokens"], 110)
+        self.assertIn(
+            "unsealed_invocation_set_reference_missing",
+            profile["evidence_gaps"],
+        )
+        self.assertIn(
+            "unstarted_invocation_allocations_present:1",
+            profile["evidence_gaps"],
+        )
+
     def test_rejects_unsealed_run_with_incomplete_usage(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

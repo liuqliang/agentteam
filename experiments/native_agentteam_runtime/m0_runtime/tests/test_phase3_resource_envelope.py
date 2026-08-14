@@ -837,6 +837,35 @@ class Phase3ResourceEnvelopeTests(unittest.TestCase):
             [["systemctl", "--user", "stop", "leaf.service"]],
         )
 
+    def test_reset_transient_unit_stops_and_clears_failed_state(self):
+        binding = approved_phase3_resource_envelope_binding()
+        runner = _SystemdRunner()
+        hierarchy = SystemdResourceHierarchy(
+            binding,
+            run_id="PILOT-RESET-TRANSIENT",
+            mode="agentteam_direct",
+            command_runner=runner,
+        )
+        runner.hierarchy = hierarchy
+        hierarchy.prepare(check_host=False)
+        runner.commands.clear()
+
+        result = hierarchy.reset_transient_unit(hierarchy.control_scope)
+
+        self.assertEqual(result["unit"], hierarchy.control_scope)
+        self.assertEqual(
+            runner.commands,
+            [
+                ["systemctl", "--user", "stop", hierarchy.control_scope],
+                [
+                    "systemctl",
+                    "--user",
+                    "reset-failed",
+                    hierarchy.control_scope,
+                ],
+            ],
+        )
+
     def test_counters_and_exhaustion_are_not_model_quality_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             cgroup = Path(tmp) / "project" / "mode" / "leaf"

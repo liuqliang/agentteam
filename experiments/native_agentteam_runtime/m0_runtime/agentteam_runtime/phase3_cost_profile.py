@@ -57,7 +57,7 @@ def profile_phase3_pilot(pilot_root):
             else None
         )
         binding = _read_optional_json(run_dir / "binding.json")
-        if sealed is None and not _has_invocation_reference(run_dir):
+        if sealed is None and not _has_invocation_evidence(run_dir):
             continue
         identity = sealed["bundle"] if sealed is not None else binding
         if not isinstance(identity, dict):
@@ -218,7 +218,11 @@ def _profile_mode_run(
             else None
         ),
     )
-    invocation_profile = _profile_invocations(reference)
+    invocation_profile = (
+        _profile_invocations(reference)
+        if reference is not None
+        else _profile_unsealed_invocations(run_dir)
+    )
     if (
         bundle is None
         and invocation_profile["usage_coverage"]["status"] != "complete"
@@ -271,7 +275,7 @@ def _profile_mode_run(
         if isinstance(official_score, dict)
         else "incomplete_execution"
     )
-    evidence_gaps = []
+    evidence_gaps = list(invocation_profile.get("evidence_gaps", []))
     if bundle is None:
         evidence_gaps.append("sealed_result_missing")
     if controller_failed:
@@ -317,6 +321,10 @@ def _profile_mode_run(
 
 def _profile_invocations(reference_path):
     manifest = _read_json(reference_path, "model invocation set reference")
+    return _profile_invocation_manifest(manifest)
+
+
+def _profile_invocation_manifest(manifest):
     if manifest.get("schema_version") != "experiment_model_invocation_manifest.v1":
         raise Phase3CostProfileError("model invocation set reference is invalid")
     totals = _empty_tokens()
@@ -397,7 +405,70 @@ def _profile_invocations(reference_path):
         "model_wall_time_seconds": model_wall,
         "by_stage": dict(sorted(stages.items())),
         "by_role": dict(sorted(roles.items())),
+        "evidence_gaps": [],
     }
+
+
+def _profile_unsealed_invocations(run_dir):
+    registry = Path(run_dir) / "authority" / "experiment_lifecycles"
+    invocation_sets = []
+    unstarted_count = 0
+    open_count = 0
+    for lifecycle_root in sorted(registry.iterdir()):
+        if lifecycle_root.is_symlink() or not lifecycle_root.is_dir():
+            raise Phase3CostProfileError(
+                "unsealed invocation registry contains an unsafe lifecycle"
+            )
+        invocation_root = lifecycle_root / "model_invocations"
+        if not invocation_root.is_dir() or invocation_root.is_symlink():
+            continue
+        invocation_ids = []
+        for invocation_dir in sorted(invocation_root.iterdir()):
+            if invocation_dir.is_symlink() or not invocation_dir.is_dir():
+                raise Phase3CostProfileError(
+                    "unsealed invocation registry contains an unsafe entry"
+                )
+            started = invocation_dir / "started.json"
+            terminal = invocation_dir / "terminal.json"
+            if terminal.is_file() and not started.is_file():
+                raise Phase3CostProfileError(
+                    "unsealed invocation terminal has no durable start"
+                )
+            if not started.is_file():
+                unstarted_count += 1
+                continue
+            if not terminal.is_file():
+                open_count += 1
+                continue
+            invocation_ids.append(invocation_dir.name)
+        if invocation_ids:
+            invocation_sets.append(
+                {
+                    "invocation_ids": invocation_ids,
+                    "lifecycle_authority_root": str(lifecycle_root),
+                }
+            )
+    manifest = {
+        "schema_version": "experiment_model_invocation_manifest.v1",
+        "run_id": Path(run_dir).name,
+        "invocation_sets": invocation_sets,
+    }
+    profile = _profile_invocation_manifest(manifest)
+    if open_count:
+        coverage = profile["usage_coverage"]
+        coverage["total_invocations"] += open_count
+        coverage["status"] = (
+            "partial" if coverage["covered_invocations"] else "unavailable"
+        )
+    gaps = ["unsealed_invocation_set_reference_missing"]
+    if unstarted_count:
+        gaps.append(
+            f"unstarted_invocation_allocations_present:{unstarted_count}"
+        )
+    if open_count:
+        gaps.append(f"open_durable_invocations_present:{open_count}")
+    profile["evidence_gaps"] = gaps
+    return profile
 
 
 def _find_invocation_reference(run_dir, expected_sha256=None):
@@ -413,6 +484,8 @@ def _find_invocation_reference(run_dir, expected_sha256=None):
             )
         ):
             matches.append(path)
+    if not matches and expected_sha256 is None:
+        return None
     if len(matches) != 1:
         raise Phase3CostProfileError(
             "exactly one bound model invocation set reference is required"
@@ -420,11 +493,17 @@ def _find_invocation_reference(run_dir, expected_sha256=None):
     return matches[0]
 
 
-def _has_invocation_reference(run_dir):
+def _has_invocation_evidence(run_dir):
     authority = Path(run_dir) / "authority" / "experiment_authority"
-    return any(
+    if any(
         not path.is_symlink() and path.is_file()
         for path in authority.glob("*.invocation-set.json")
+    ):
+        return True
+    registry = Path(run_dir) / "authority" / "experiment_lifecycles"
+    return registry.is_dir() and any(
+        path.is_file() and not path.is_symlink()
+        for path in registry.glob("*/model_invocations/INV-*/terminal.json")
     )
 
 

@@ -32,3 +32,11 @@ cannot silently weaken the formal research contract.
 4. The report compares total, input, cached input, uncached work, output,
    reasoning, provider wall time, end-to-end wall time, and official score.
 5. No result from this calibration is promoted as a general quality claim.
+
+## Execution Note
+
+The first attempt stopped before `agentteam_full` after direct-mode
+infrastructure defects polluted invocation authority and the frozen token
+budget was exceeded. It is not a completed calibration. Findings and repair
+evidence are recorded in
+[`2026-08-14-phase3-single-instance-calibration-attempt.md`](../reports/2026-08-14-phase3-single-instance-calibration-attempt.md).

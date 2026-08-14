@@ -82,6 +82,7 @@ from agentteam_runtime.experiment_modes import (
     _begin_mode_execution,
     _complete_mode_execution,
     _publish_candidate_patch,
+    _publish_failure_finalization_diagnostic,
     _publish_mode_order_authority,
     _common_mode_contract,
     _publish_resource_evidence_index,
@@ -6703,6 +6704,39 @@ class ExperimentResultBundleTests(unittest.TestCase):
 
 
 class ExperimentModeAdapterTests(unittest.TestCase):
+    def test_failure_finalization_diagnostic_preserves_root_cause(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            request = Mock(
+                run_dir=tmp,
+                run_manifest={
+                    "experiment_run_id": "RUN-DIAGNOSTIC",
+                    "mode": "agentteam_direct",
+                },
+            )
+            _publish_failure_finalization_diagnostic(
+                request,
+                original_error=OSError("runtime failed"),
+                finalizer_error=ExperimentModeError(
+                    "registered model invocation is non-terminal"
+                ),
+            )
+
+            paths = list(
+                (Path(tmp) / "results" / "failure-finalization-diagnostics").glob(
+                    "*.json"
+                )
+            )
+            self.assertEqual(len(paths), 1)
+            diagnostic = json.loads(paths[0].read_text(encoding="utf-8"))
+            self.assertEqual(
+                diagnostic["finalizer_error"]["type"],
+                "ExperimentModeError",
+            )
+            self.assertEqual(
+                diagnostic["finalizer_error"]["message"],
+                "registered model invocation is non-terminal",
+            )
+
     def test_resource_evidence_index_requires_every_registered_invocation(self):
         binding = approved_phase3_resource_envelope_binding()
         with tempfile.TemporaryDirectory() as tmp:
@@ -12812,7 +12846,9 @@ class ExperimentSandboxTests(unittest.TestCase):
                         input_text="",
                         timeout_seconds=10,
                     )
-                shutil.rmtree(cross_invocation.lifecycle.invocation_dir)
+                self.assertFalse(
+                    cross_invocation.lifecycle.invocation_dir.exists()
+                )
                 worker_authority = experiment_lifecycle_authority_root(
                     root,
                     "worker-output",

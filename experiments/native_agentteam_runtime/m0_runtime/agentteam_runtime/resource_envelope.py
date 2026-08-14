@@ -405,6 +405,25 @@ class SystemdResourceHierarchy:
             ignore_errors=True,
         ).returncode == 0
 
+    def reset_transient_unit(self, unit):
+        """Clear a prior failed transient service before an idempotent relaunch."""
+
+        if not isinstance(unit, str) or not unit.endswith(".service"):
+            raise ResourceEnvelopeError("transient resource unit is invalid")
+        stopped = self._checked(
+            ["systemctl", "--user", "stop", unit],
+            ignore_errors=True,
+        )
+        reset = self._checked(
+            ["systemctl", "--user", "reset-failed", unit],
+            ignore_errors=True,
+        )
+        return {
+            "unit": unit,
+            "stop_returncode": stopped.returncode,
+            "reset_failed_returncode": reset.returncode,
+        }
+
     def identity(self):
         return {
             "binding_sha256": self.binding_sha256,

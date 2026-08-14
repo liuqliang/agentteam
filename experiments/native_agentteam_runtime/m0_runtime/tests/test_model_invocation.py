@@ -12,6 +12,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 from agentteam_runtime.model_invocation import (
     ExecutionGroupIdentity,
     ModelInvocationCall,
+    ModelInvocationIntegrityError,
     ProviderExecution,
     _systemd_gated_supervisor_command,
     invocation_context_from_message,
@@ -81,6 +82,93 @@ class _ResourceRunner:
 
 
 class ModelInvocationResourceTests(unittest.TestCase):
+    def test_prelaunch_failure_discards_unstarted_invocation_directory(self):
+        class FailingResourceRunner(_ResourceRunner):
+            def prepare_resources_before_admission(self):
+                raise RuntimeError("resource parent unavailable")
+
+        message = {
+            "to_agent": "agent-worker",
+            "payload": {
+                "project": "phase3",
+                "run_id": "RUN-P3B-PRELAUNCH-FAILURE",
+                "taskpack_id": "phase3-taskpack",
+                "attempt_id": "ATTEMPT-PRELAUNCH-FAILURE",
+                "runtime_execution_session_id": "SESSION-PRELAUNCH-FAILURE",
+                "lifecycle_owner_token": "OWNER-PRELAUNCH-FAILURE",
+                "agent_id": "agent-worker",
+                "agent_role": "implementation_worker",
+                "usage_stage": "implementation_worker",
+                "coverage_class": "supported_model_invocation",
+                "experiment_mode": "agentteam_direct",
+                "resource_envelope_required": True,
+                "resource_envelope_binding": (
+                    approved_phase3_resource_envelope_binding()
+                ),
+                "resource_hierarchy_reference": {
+                    "schema_version": "phase3_resource_hierarchy_reference.v1",
+                    "binding_sha256": "a" * 64,
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            call = ModelInvocationCall(
+                tmp,
+                invocation_context_from_message(message, model="gpt-test"),
+                supported=True,
+                systemd_runner_factory=FailingResourceRunner,
+            )
+            with self.assertRaisesRegex(RuntimeError, "resource parent unavailable"):
+                call.execute(
+                    ["/bin/true"],
+                    cwd="/",
+                    input_text="",
+                    timeout_seconds=5,
+                )
+            self.assertEqual(
+                list((Path(tmp) / "model_invocations").glob("INV-*")),
+                [],
+            )
+
+    def test_early_context_failure_discards_unstarted_invocation_directory(self):
+        message = {
+            "to_agent": "agent-worker",
+            "payload": {
+                "project": "phase3",
+                "run_id": "RUN-P3B-EARLY-FAILURE",
+                "taskpack_id": "phase3-taskpack",
+                "attempt_id": "ATTEMPT-EARLY-FAILURE",
+                "runtime_execution_session_id": "SESSION-EARLY-FAILURE",
+                "lifecycle_owner_token": "OWNER-EARLY-FAILURE",
+                "agent_id": "agent-worker",
+                "agent_role": "implementation_worker",
+                "usage_stage": "implementation_worker",
+                "coverage_class": "supported_model_invocation",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            call = ModelInvocationCall(
+                tmp,
+                invocation_context_from_message(message, model="gpt-test"),
+                supported=True,
+                systemd_runner_factory=_ResourceRunner,
+            )
+            call.lifecycle.context["experiment_sandbox_required"] = True
+            with self.assertRaisesRegex(
+                ModelInvocationIntegrityError,
+                "experiment provider sandbox is required",
+            ):
+                call.execute(
+                    ["/bin/true"],
+                    cwd="/",
+                    input_text="",
+                    timeout_seconds=5,
+                )
+            self.assertEqual(
+                list((Path(tmp) / "model_invocations").glob("INV-*")),
+                [],
+            )
+
     def test_supervisor_command_applies_leaf_limits_before_exec_separator(self):
         command = _systemd_gated_supervisor_command(
             "worker.service",

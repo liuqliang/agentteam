@@ -744,8 +744,48 @@ class ExperimentModeController:
                 mode_result=failure_result,
                 invocation_set_reference=invocation_set_reference,
             )
-        except Exception:
+        except Exception as finalizer_error:
+            _publish_failure_finalization_diagnostic(
+                request,
+                original_error=error,
+                finalizer_error=finalizer_error,
+            )
             return None
+
+
+def _publish_failure_finalization_diagnostic(
+    request,
+    *,
+    original_error,
+    finalizer_error,
+):
+    payload = {
+        "schema_version": "experiment_failure_finalization_diagnostic.v1",
+        "experiment_run_id": request.run_manifest["experiment_run_id"],
+        "mode": request.run_manifest["mode"],
+        "original_error": {
+            "type": type(original_error).__name__,
+            "message_sha256": hashlib.sha256(
+                str(original_error).encode("utf-8")
+            ).hexdigest(),
+        },
+        "finalizer_error": {
+            "type": type(finalizer_error).__name__,
+            "message": str(finalizer_error)[:2000],
+            "message_sha256": hashlib.sha256(
+                str(finalizer_error).encode("utf-8")
+            ).hexdigest(),
+        },
+    }
+    diagnostic_id = canonical_json_sha256(payload)
+    publish_immutable_json(
+        Path(request.run_dir)
+        / "results"
+        / "failure-finalization-diagnostics"
+        / f"{diagnostic_id}.json",
+        payload,
+        label="experiment failure finalization diagnostic",
+    )
 
 
 def execute_bound_experiment_mode(

@@ -3520,6 +3520,7 @@ def build_taskpack_runtime_args(
     trusted_project_root=None,
     trusted_model=None,
     trusted_verification_command=None,
+    worker_max_restart_count=None,
 ):
     taskpack_dir = Path(frozen_taskpack_dir).resolve()
     loaded = load_taskpack(taskpack_dir)
@@ -3620,6 +3621,18 @@ def build_taskpack_runtime_args(
         args.extend(["--daemon-run-until-idle", "--daemon-two-phase-worker-pool"])
         args.extend(["--max-inflight", str(max_inflight), "--max-attempts", str(max_attempts)])
         args.extend(["--max-steps", str(max_steps)])
+        if worker_max_restart_count is not None:
+            if (
+                not isinstance(worker_max_restart_count, int)
+                or isinstance(worker_max_restart_count, bool)
+                or worker_max_restart_count < 0
+            ):
+                raise TaskpackValidationError(
+                    "worker_max_restart_count must be a non-negative integer"
+                )
+            args.extend(
+                ["--worker-max-restart-count", str(worker_max_restart_count)]
+            )
         if codex_timeout_seconds is not None:
             args.extend(
                 [
