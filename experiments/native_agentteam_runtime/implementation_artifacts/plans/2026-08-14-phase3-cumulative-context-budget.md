@@ -80,9 +80,12 @@ usage, evaluator evidence, and the decision record remain authoritative.
 - The Requests report is corrected so full transcript output is not described
   as model-visible output.
 
-No new SWE-EVO execution is authorized by this implementation. A later
-decision must freeze a replacement bundle and choose whether to rerun Requests
-or select a new instance.
+No new SWE-EVO execution is authorized by this implementation. Provider-free
+acceptance subsequently froze runtime release `phase3-calibration-b83c980` and
+preparation bundle
+`0431260bc6618402c72b965455e197c951d90528793c78d451c785c41d26d416`.
+The bundle has no live authorization. A later decision must still choose
+whether to rerun Requests or select a new instance.
 
 ## Verification result
 
@@ -98,3 +101,6 @@ or select a new instance.
   `11` and `41`.
 
 No model-provider call was made during implementation or verification.
+
+The frozen artifact identities and independent replay result are recorded in
+[`2026-08-14-phase3-cumulative-context-budget.md`](../reports/2026-08-14-phase3-cumulative-context-budget.md).

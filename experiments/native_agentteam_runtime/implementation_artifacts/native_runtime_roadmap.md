@@ -1691,14 +1691,17 @@ these are complete operator events, not evidence that the same bytes entered
 model history. The supported conclusion is that a 4,000-token per-tool limit
 did not bound cumulative input across 41 tool calls and repeated sampling.
 
-Phase 3 expansion remains unauthorized. Before another provider call,
-freeze the implemented cumulative-context policy: active context compacts at
-32,768 tokens, PreToolUse reserves at most 16 execution slots under a lock,
-warns at call 12, and rejects call 17 onward while leaving final response and
-terminal usage available. Parallel tool requests cannot overshoot the limit.
+Phase 3 expansion remains unauthorized. Runtime release
+`phase3-calibration-b83c980` and provider-free preparation bundle
+`0431260bc6618402c72b965455e197c951d90528793c78d451c785c41d26d416`
+now freeze the cumulative-context policy: active context compacts at 32,768
+tokens, PreToolUse reserves at most 16 execution slots under a lock, warns at
+call 12, and rejects call 17 onward while leaving final response and terminal
+usage available. Parallel tool requests cannot overshoot the limit.
 Provider-free replay measured 5-13 calls for retained valid positions and 41
 for the failed treatment direct worker. The implementation passes all 1,209
 provider-free tests with 7 skips, and installed Codex 0.147.0 accepts the exact
 generated hook and compaction configuration without a provider call. The
-decision closure and detailed evidence are recorded in
-[`2026-08-14-phase3-input-cost-causal-screen.md`](reports/2026-08-14-phase3-input-cost-causal-screen.md).
+bundle has no live authorization; another provider call still requires a
+separate execution decision. Detailed evidence is recorded in
+[`2026-08-14-phase3-cumulative-context-budget.md`](reports/2026-08-14-phase3-cumulative-context-budget.md).

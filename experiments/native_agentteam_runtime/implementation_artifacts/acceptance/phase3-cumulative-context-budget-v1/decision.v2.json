@@ -1,0 +1,50 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-cumulative-context-budget-v1",
+  "revision": 2,
+  "decision_kind": "acceptance",
+  "subject": "phase3_cumulative_context_budget",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-input-cost-causal-screen-v1",
+  "supersedes_decision_id": null,
+  "statement": "Accept the provider-free cumulative-context implementation and freeze a replacement runtime release and single-instance preparation bundle without authorizing a scored provider call.",
+  "selected_option": "bind runtime commit b83c980 and the complete six-field context policy in a provider-free Requests preparation bundle whose live authorization remains absent",
+  "alternatives": [
+    {
+      "option": "reuse the previous authorized bundle and replace only runtime-release.json",
+      "rejected_reason": "The preregistration, pilot, calibration, protocol, and taskpack digests all depend on the runtime or context policy and must be rebuilt together."
+    },
+    {
+      "option": "freeze a new live authorization during provider-free acceptance",
+      "rejected_reason": "Implementation acceptance does not decide whether the next paid execution should rerun Requests or select a new SWE-EVO instance."
+    },
+    {
+      "option": "defer release and bundle materialization until the next scored decision",
+      "rejected_reason": "A provider-free freeze independently proves that the accepted policy is reproducible and launchable before any further token spend."
+    }
+  ],
+  "rationale": "Release phase3-calibration-b83c980 was copied from the clean accepted commit. The replacement bundle mechanically rebuilt the runtime-visible input, direct taskpack, preregistration, pilot contract, bounded calibration contract, executable protocol, and frozen runtime taskpack. Independent replay validated every canonical artifact digest, the runtime release, taskpack digest, public environment, resource envelope, and exact Codex hook configuration. The bundle contains no live epoch or live authorization and no provider evidence, so it cannot be mistaken for permission to run the benchmark.",
+  "scope": [
+    "runtime_release:phase3-calibration-b83c980",
+    "runtime_commit:b83c9805574ca45b1f703fafb6b78da051402820",
+    "release_root:/tmp/agentteam-phase3-calibration-release-v12",
+    "bundle_root:/tmp/agentteam-phase3-calibration-bundle-requests-3738-v14",
+    "bundle_sha256:0431260bc6618402c72b965455e197c951d90528793c78d451c785c41d26d416",
+    "validation_receipt_sha256:6f8eda29c6b6c9c2a26ecec81720a46c4c662f53b436dbd67658d3cf41a39cb0",
+    "provider_calls_authorized:0",
+    "live_authorization:not_authorized"
+  ],
+  "expected_outcome": "Provide a digest-bound, provider-free launch candidate for the next separately authorized Phase 3 experiment while preventing accidental scored execution.",
+  "acceptance_refs": [
+    "reports/2026-08-14-phase3-cumulative-context-budget.md",
+    "complete provider-free suite: 1209 passed, 7 skipped",
+    "bundle artifact replay validates all 14 canonical JSON bindings",
+    "frozen runtime taskpack digest verified",
+    "Codex 0.147.0 configuration probe returned zero",
+    "bundle contains no live authorization or provider invocation evidence"
+  ],
+  "status": "completed",
+  "created_at": "2026-08-14T09:29:57Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": "7eb2d8ad6015df1edcb9f1e532ac4128465071b5dc928facdb3512f908520ba9"
+}

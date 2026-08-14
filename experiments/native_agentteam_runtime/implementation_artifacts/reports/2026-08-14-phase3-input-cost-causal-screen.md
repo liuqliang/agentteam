@@ -140,7 +140,10 @@ Codex 会在把工具结果写入模型历史时应用 `tool_output_token_limit`
 4. provider-free replay 表明旧有效路径为 `5-13` 次工具调用，异常 direct 为
    `41` 次，因此边界保留旧有效样本的余量并能截断本次异常循环。
 
-这套机制仍需冻结新 release 和 bundle，之后才能由新决策选择重跑 Requests 或
-新 SWE-EVO 实例。当前实现本身不授权 provider 调用。
+后续 provider-free acceptance 已冻结新 runtime release
+`phase3-calibration-b83c980` 与 bundle
+`0431260bc6618402c72b965455e197c951d90528793c78d451c785c41d26d416`。
+bundle 不含 live authorization；仍需由新的执行决策选择重跑 Requests 或新
+SWE-EVO 实例。当前实现与 bundle 本身都不授权 provider 调用。
 
 在这些机制通过前，继续增加实例只会扩大成本，不能提高实验结论的可信度。
