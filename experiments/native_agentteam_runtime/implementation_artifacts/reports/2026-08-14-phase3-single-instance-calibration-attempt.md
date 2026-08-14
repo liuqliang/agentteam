@@ -1,81 +1,144 @@
-# Phase 3 Single-Instance Calibration Attempt
+# Phase 3 Single-Instance Calibration
 
 ## Status
 
-The first authorized execution attempt is invalid for the planned three-mode
-comparison and is retained as infrastructure-failure evidence. It completed
-`single_codex`, reached one terminal `agentteam_direct` provider call, and did
-not launch `agentteam_full`. No comparative quality or efficiency claim is
-allowed from this attempt.
+The replacement calibration completed one valid, sealed execution of
+`single_codex`, `agentteam_direct`, and `agentteam_full` on the same SWE-EVO
+instance. All three modes had complete provider usage, resource, patch, and
+official-evaluator evidence.
+
+The result does not support expanding the pilot yet. All modes had the same
+official quality result, while both AgentTeam modes exceeded the preregistered
+maximum token-cost ratio of `2.0` relative to `single_codex`.
 
 ## Frozen Identity
 
 - Instance: `psf__requests_v2.12.2_v2.12.3`
 - Source commit: `ca15d4808734c86801c8f3d80c9152c35a163dc3`
-- Runtime commit: `42bc51d6c46474730d5603268d8037769b26a35b`
+- Source tree: `ed5a1585a8be3af46f525730afb5db31b3825812`
+- Runtime commit: `f2165fe587c5afe1e0dafa530f7841a860cb177e`
 - Bundle SHA-256:
-  `f1213fe75965a5e039d072a6e8fb191da1ec326ddde5a40580c3ebe918616074`
+  `ee9b336411f15a2b1cfe4a525542895f3b6e3d7f730f07477da90dee1a65edb4`
 - Model and reasoning profile: `gpt-5.6-sol`, `high`
-- Valid attempt root:
-  `/tmp/agentteam-phase3-calibration-run-requests-3738-v2`
+- Execution root:
+  `/tmp/agentteam-phase3-calibration-run-requests-3738-v6`
+- Completion time: `2026-08-14T05:21:59Z`
 
-## Observed Cost
+The state field `third_repetition_planned=true` is inherited pilot
+bookkeeping. The calibration runner deliberately froze one repetition per
+mode, scheduled no third repetition, and ended in `completed` state.
 
-Provider-reported total tokens equal input plus output; reasoning is a subset
-of output and is not added again.
+## Valid Comparison
 
-| Mode | Input | Cached input | Uncached input | Output | Reasoning | Total | Provider wall |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `single_codex` | 412,040 | 354,304 | 57,736 | 5,946 | 1,681 | 417,986 | 155 s |
-| `agentteam_direct` | 2,313,482 | 2,162,176 | 151,306 | 11,287 | 3,327 | 2,324,769 | 313 s |
-| retained attempt total | 2,725,522 | 2,516,480 | 209,042 | 17,233 | 5,008 | 2,742,755 | 468 s |
+Provider-reported total tokens equal input plus output. Reasoning tokens are a
+subset of output and are not added again. Total wall time includes provider,
+controller/common-acceptance, and official-evaluator time.
 
-An earlier discarded launch consumed another 324,023 tokens before a public
-verification executable-binding defect stopped it. That cost is
-infrastructure waste and is not mixed into the table above. Total provider
-cost spent across both attempts was therefore 3,066,778 tokens.
+| Mode | Input | Cached | Uncached | Output | Reasoning | Total | Model wall | Control wall | Evaluator wall | Total wall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `single_codex` | 314,086 | 258,304 | 55,782 | 3,993 | 1,238 | 318,079 | 104 s | 7.662 s | 21.562 s | 133.224 s |
+| `agentteam_direct` | 1,085,665 | 999,424 | 86,241 | 7,428 | 2,046 | 1,093,093 | 218 s | 170.669 s | 21.984 s | 410.653 s |
+| `agentteam_full` | 698,501 | 613,632 | 84,869 | 12,589 | 3,959 | 711,090 | 288 s | 473.580 s | 21.704 s | 783.284 s |
+| valid comparison total | 2,098,252 | 1,871,360 | 226,892 | 24,010 | 7,243 | 2,122,262 | 610 s | 651.911 s | 65.251 s | 1,327.161 s |
 
-The frozen protocol budget was 1,500,000 total tokens. The retained attempt
-exceeded it by 1,242,755 tokens. `agentteam_full` was not launched after this
-was observed.
+`agentteam_full` comprises a taskpack-author invocation of 110,929 tokens and
+an implementation-worker invocation of 600,161 tokens. It used 34.95% fewer
+tokens than `agentteam_direct`, but took 90.74% longer because controller and
+orchestration time dominated the difference.
 
-## Quality Evidence
+Relative to `single_codex`:
 
-`single_codex` produced a patch that passed the public assertion but did not
-resolve the official instance: FAIL_TO_PASS was 0/4 and PASS_TO_PASS was
-104/109. `agentteam_direct` produced the expected source condition and focused
-regression tests, but the mode could not be sealed or officially evaluated.
-Its quality outcome is therefore unknown, not failed or passed.
+| Mode | Token ratio | Wall-time ratio | Preregistered token gate |
+| --- | ---: | ---: | --- |
+| `agentteam_direct` | 3.4365x | 3.0824x | fail |
+| `agentteam_full` | 2.2356x | 5.8795x | fail |
 
-## Infrastructure Findings
+## Quality
 
-1. The first direct-mode control-plane service failed and remained as a failed
-   transient systemd unit. Reusing the stable unit name prevented clean
-   relaunch and made resource readback fail.
-2. While the resource parent was unavailable, the resident worker restarted
-   148 times because experiment launches had no worker restart ceiling.
-3. Every failed prelaunch allocated an `INV-*` directory before durable
-   `started.json` publication. The 148 empty directories made invocation-set
-   sealing impossible even though the one real provider call had complete
-   terminal usage.
-4. Failure finalization swallowed its secondary exception, reducing the
-   operator-visible error to `terminal_ready`/registry symptoms.
-5. The cost profiler previously ignored an unsealed run without an invocation
-   set reference, hiding 2,324,769 reported tokens.
+All three modes produced the same production-code condition in
+`requests/models.py` and received the same official result:
 
-## Repairs
+- FAIL_TO_PASS: `0/4`
+- PASS_TO_PASS: `104/109`
+- partial score: `0.290826`
+- outcome: unresolved
 
-- Discard an invocation allocation after any exception that occurs before its
-  durable start record.
-- Limit experiment worker restarts to three while retaining ordinary runtime
-  defaults outside experiments.
-- Stop and reset a prior failed control-plane transient unit before relaunch.
-- Publish bounded failure-finalization diagnostics with the secondary error.
-- Profile complete durable terminals from an unsealed run as explicitly
-  labelled infrastructure waste, while reporting prelaunch allocation counts
-  as evidence gaps.
+Therefore this instance provides no evidence that orchestration improved
+quality. One instance and one repetition are also insufficient for a general
+quality or efficiency claim, even if a mode had won this comparison.
 
-Focused tests, the 194-test Phase 3 harness, and the 394-test taskpack suite
-pass after these repairs. A new runtime release and provider-free live
-preflight are required before another scored calibration attempt.
+## Patch-Compatibility Audit
 
+An older direct-mode attempt reported FAIL_TO_PASS `2/4` and PASS_TO_PASS
+`106/109`. That candidate modified the same hidden-test insertion region, and
+the official test patch fails to apply at `tests/test_requests.py:2177` after
+the candidate patch. The old score is therefore excluded as contaminated
+benchmark evidence.
+
+A deterministic clean-check was performed by applying each candidate to the
+frozen source commit and then running `git apply --check` for the evaluator-only
+test patch. The three retained candidates all pass; the excluded old direct
+candidate fails. This confirms that the retained quality tie is not caused by
+the same patch collision.
+
+This audit exposes a protocol choice that must be resolved before a larger
+pilot: either continue evaluating the full candidate patch and reject any
+candidate that conflicts with evaluator tests, or separate worker-added tests
+from the production patch submitted to the official evaluator. The latter
+changes benchmark semantics and requires a new frozen protocol rather than an
+implicit evaluator change.
+
+## Infrastructure Closure
+
+The replacement runtime closes the infrastructure failures found in earlier
+attempts:
+
+- the full-mode author and implementation worker are both bound to the frozen
+  resource envelope;
+- the experiment-owned 1,800-second provider timeout overrides a taskpack's
+  lower generated timeout;
+- all provider invocations have terminal usage and `resource.json` evidence;
+- no worker restarted and no empty invocation directory was retained;
+- all three mode results and evaluator results are sealed.
+
+The repair sequence is represented by runtime commits `5c27597`, `922fa53`,
+`51d0ca5`, and `f2165fe`. Before execution, the complete provider-free suite
+passed 1,187 tests with 7 skips. Focused resource/timeout tests, 438 taskpack
+and scheduler tests with 2 skips, and 222 experiment tests with 5 skips also
+passed.
+
+## Calibration Development Cost
+
+Only the 2,122,262-token replacement run belongs in the mode comparison.
+Earlier calls remain useful for infrastructure accounting, but not for model
+quality comparison.
+
+| Iteration | Known tokens | Classification |
+| --- | ---: | --- |
+| v1 | 324,023 | infrastructure waste |
+| v2 | 2,742,755 | partial run plus infrastructure waste |
+| v3 | 267,016 | diagnostic scored execution |
+| v4 | 162,555 | diagnostic scored execution |
+| v5 | 1,852,284 | incomplete comparison; excludes one timed-out repo-map call whose usage is unavailable |
+| v7 retained run | 2,122,262 | valid three-mode comparison |
+| known total | 7,470,895 | plus the unavailable v5 repo-map usage |
+
+The large gap between comparison cost and total calibration cost is itself an
+engineering result: recovery, resource binding, timeout propagation, and
+usage attribution must be proven provider-free before spending on scored
+runs.
+
+## Disposition
+
+- Single-instance calibration mechanism: `completed`
+- Usage coverage: `3/3`, `100%`
+- Resource-evidence coverage: `3/3`, `100%`
+- Quality conclusion: no mode advantage on this instance
+- Cost conclusion: both AgentTeam modes fail the `2.0x` token gate
+- Pilot expansion: `not_authorized`
+
+The next execution decision should first freeze the candidate-test policy.
+After that, use a new instance or preregistered repetition to test whether
+context reuse and role routing can reduce AgentTeam input cost without
+changing evaluator semantics. Do not infer general performance from this
+single calibration.

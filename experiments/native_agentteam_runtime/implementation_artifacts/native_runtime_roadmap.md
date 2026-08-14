@@ -1645,14 +1645,19 @@ selection and completes item 4:
 The detailed epoch and cost audit is in
 [`2026-08-13-phase3b-live-smoke-v12-v19.md`](reports/2026-08-13-phase3b-live-smoke-v12-v19.md).
 
-The first single-instance replacement calibration attempt is retained as
-infrastructure-failure evidence in
+The single-instance replacement calibration and its preceding infrastructure
+failures are recorded in
 [`2026-08-14-phase3-single-instance-calibration-attempt.md`](reports/2026-08-14-phase3-single-instance-calibration-attempt.md).
-It exposed a failed transient-unit relaunch, 148 unbounded worker restarts,
-pre-start invocation-directory pollution, hidden finalizer diagnostics, and
-2,324,769 tokens omitted by the old unsealed-run cost projection. The repair
-keeps pre-start failures out of invocation authority, caps experiment worker
-restarts at three, resets stale control units, publishes finalizer diagnostics,
-and accounts complete unsealed terminal usage as infrastructure waste. The
-three-mode calibration remains incomplete and must be re-frozen against a new
-runtime release after provider-free preflight.
+The retained run completed one sealed repetition of `single_codex`,
+`agentteam_direct`, and `agentteam_full` with complete usage and resource
+evidence. All modes tied at FAIL_TO_PASS `0/4`, PASS_TO_PASS `104/109`, and
+partial score `0.290826`. Direct and full orchestration consumed respectively
+`3.4365x` and `2.2356x` the single-agent tokens, so neither satisfies the
+preregistered `2.0x` token gate and pilot expansion is not authorized.
+
+An excluded older candidate conflicts with the evaluator-only test patch,
+while all retained candidates pass deterministic patch-compatibility checks.
+Before another scored execution, freeze whether evaluator submission retains
+worker-added tests with collision rejection or strips those tests into a
+separate evidence channel. The latter is a protocol change and cannot be
+introduced retroactively.
