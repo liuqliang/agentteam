@@ -9,6 +9,10 @@ import json
 from pathlib import Path
 
 from .experiment_results import load_experiment_result_bundle
+from .phase3_swe_evo_evaluator import (
+    Phase3SweEvoEvaluatorError,
+    validate_patch_compatibility_receipt,
+)
 
 
 PROFILE_SCHEMA_VERSION = "phase3_cost_profile.v1"
@@ -252,11 +256,27 @@ def _profile_mode_run(
     evaluator_failure = _read_optional_json(
         run_dir / "results" / "official-evaluator-failure.json"
     )
+    evaluator_rejection = _read_optional_json(
+        run_dir / "results" / "official-evaluator-rejection.json"
+    )
+    if sum(
+        isinstance(value, dict)
+        for value in (official_score, evaluator_failure, evaluator_rejection)
+    ) > 1:
+        raise Phase3CostProfileError(
+            "multiple official evaluator terminal artifacts exist"
+        )
+    if isinstance(evaluator_rejection, dict):
+        evaluator_rejection = _validate_evaluator_rejection(
+            run_dir, evaluator_rejection
+        )
     official_wall = 0.0
     if isinstance(official_score, dict):
         official_wall = float(official_score.get("wall_time_seconds", 0.0))
     elif isinstance(evaluator_failure, dict):
         official_wall = float(evaluator_failure.get("wall_time_seconds", 0.0))
+    elif isinstance(evaluator_rejection, dict):
+        official_wall = float(evaluator_rejection.get("wall_time_seconds", 0.0))
     infrastructure_failed = (
         bundle is None
         or controller_failed
@@ -271,6 +291,8 @@ def _profile_mode_run(
     cost_outcome = (
         "infrastructure_waste"
         if infrastructure_failed
+        else "invalid_execution"
+        if isinstance(evaluator_rejection, dict)
         else "scored_execution"
         if isinstance(official_score, dict)
         else "incomplete_execution"
@@ -280,7 +302,11 @@ def _profile_mode_run(
         evidence_gaps.append("sealed_result_missing")
     if controller_failed:
         evidence_gaps.append("pilot_controller_failed_after_provider_usage")
-    if official_score is None and evaluator_failure is None:
+    if (
+        official_score is None
+        and evaluator_failure is None
+        and evaluator_rejection is None
+    ):
         evidence_gaps.append("official_evaluator_terminal_evidence_missing")
     wall = {
         "model_invocations": model_wall,
@@ -592,6 +618,55 @@ def _file_sha256(path):
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _validate_evaluator_rejection(run_dir, rejection):
+    required = {
+        "schema_version",
+        "status",
+        "failure_class",
+        "compatibility_sha256",
+        "wall_time_seconds",
+    }
+    if set(rejection) != required or (
+        rejection["schema_version"]
+        != "phase3_official_evaluator_rejection.v1"
+        or rejection["status"] != "rejected"
+        or rejection["failure_class"]
+        not in {"candidate_patch_invalid", "evaluator_patch_conflict"}
+    ):
+        raise Phase3CostProfileError("official evaluator rejection is invalid")
+    try:
+        compatibility = validate_patch_compatibility_receipt(
+            _read_json(
+                Path(run_dir) / "results" / "official-patch-compatibility.json",
+                "official patch compatibility",
+            )
+        )
+    except Phase3SweEvoEvaluatorError as exc:
+        raise Phase3CostProfileError(
+            "official patch compatibility is invalid"
+        ) from exc
+    digest = hashlib.sha256(
+        json.dumps(
+            compatibility,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+    ).hexdigest()
+    wall = rejection["wall_time_seconds"]
+    if (
+        rejection["compatibility_sha256"] != digest
+        or not isinstance(wall, (int, float))
+        or isinstance(wall, bool)
+        or wall < 0
+    ):
+        raise Phase3CostProfileError(
+            "official evaluator rejection evidence changed"
+        )
+    return rejection
 
 
 def main(argv=None):

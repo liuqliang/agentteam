@@ -89,6 +89,57 @@ class Phase3CostProfileTests(unittest.TestCase):
             render_phase3_cost_profile(profile),
         )
 
+    def test_evaluator_rejection_cost_is_invalid_not_infrastructure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = self._write_run(root, evaluator_failure=False)
+            compatibility = {
+                "schema_version": "phase3_patch_compatibility.v1",
+                "status": "evaluator_patch_conflict",
+                "source_commit": "a" * 40,
+                "source_tree": "b" * 40,
+                "candidate_patch_sha256": "c" * 64,
+                "test_patch_sha256": "d" * 64,
+                "conflict_file": "tests/test_source.py",
+                "conflict_line": 1,
+                "diagnostic_sha256": "e" * 64,
+            }
+            (
+                run_dir / "results" / "official-patch-compatibility.json"
+            ).write_text(json.dumps(compatibility), encoding="ascii")
+            compatibility_sha256 = hashlib.sha256(
+                json.dumps(
+                    compatibility,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("ascii")
+            ).hexdigest()
+            (run_dir / "results" / "official-evaluator-rejection.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "phase3_official_evaluator_rejection.v1",
+                        "status": "rejected",
+                        "failure_class": "evaluator_patch_conflict",
+                        "compatibility_sha256": compatibility_sha256,
+                        "wall_time_seconds": 0.5,
+                    }
+                ),
+                encoding="ascii",
+            )
+
+            with patch(
+                "agentteam_runtime.phase3_cost_profile.load_experiment_result_bundle",
+                return_value={"bundle": self._bundle(run_dir)},
+            ):
+                profile = profile_phase3_pilot(root)
+
+        run = profile["runs"][0]
+        self.assertEqual(run["cost_outcome"], "invalid_execution")
+        self.assertEqual(run["wall_time_seconds"]["official_evaluator"], 0.5)
+        self.assertIn("invalid_execution", profile["by_outcome"])
+        self.assertNotIn("infrastructure_waste", profile["by_outcome"])
+
     def test_rejects_sealed_usage_that_differs_from_invocation_authority(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

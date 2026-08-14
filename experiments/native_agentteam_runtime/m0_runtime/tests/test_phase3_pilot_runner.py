@@ -21,6 +21,7 @@ from agentteam_runtime.phase3_pilot_runner import (
 from agentteam_runtime.experiment_modes import _integration_candidate_workspace
 from agentteam_runtime.phase3_live_pilot import _live_sandbox_configuration
 from agentteam_runtime.phase3_swe_evo_evaluator import (
+    Phase3EvaluatorPatchRejected,
     Phase3SweEvoEvaluator,
     Phase3SweEvoEvaluatorError,
     _aggregate_upstream_report,
@@ -410,6 +411,152 @@ class Phase3PilotRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(Phase3SweEvoEvaluatorError, "gold binding"):
             Phase3SweEvoEvaluator._verify_gold_bindings(row, bindings)
 
+    def test_patch_compatibility_accepts_non_overlapping_candidate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evaluator, row = self._patch_compatibility_fixture(root)
+            candidate = root / "candidate.patch"
+            candidate.write_text(
+                """diff --git a/source.py b/source.py
+index 77d2f6a..c19c212 100644
+--- a/source.py
++++ b/source.py
+@@ -1 +1 @@
+-value = 1
++value = 2
+""",
+                encoding="ascii",
+            )
+
+            with patch.object(evaluator, "_load_row", return_value=row):
+                receipt = evaluator.check_patch_compatibility(
+                    {"instance_id": "fixture"}, candidate
+                )
+
+            self.assertEqual(receipt["status"], "compatible")
+            self.assertIsNone(receipt["conflict_file"])
+
+    def test_patch_compatibility_rejects_hidden_test_collision(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evaluator, row = self._patch_compatibility_fixture(root)
+            candidate = root / "candidate.patch"
+            candidate.write_text(
+                """diff --git a/tests/test_source.py b/tests/test_source.py
+index b859599..17fd4cf 100644
+--- a/tests/test_source.py
++++ b/tests/test_source.py
+@@ -1 +1 @@
+-assert value == 1
++assert value in {1, 2}
+""",
+                encoding="ascii",
+            )
+
+            with patch.object(evaluator, "_load_row", return_value=row):
+                with self.assertRaises(Phase3EvaluatorPatchRejected) as raised:
+                    evaluator.check_patch_compatibility(
+                        {"instance_id": "fixture"}, candidate
+                    )
+
+            receipt = raised.exception.receipt
+            self.assertEqual(receipt["status"], "evaluator_patch_conflict")
+            self.assertEqual(receipt["conflict_file"], "tests/test_source.py")
+            self.assertEqual(receipt["conflict_line"], 1)
+            self.assertNotIn("assert value != 2", json.dumps(receipt))
+
+    def test_patch_compatibility_rejects_invalid_candidate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evaluator, row = self._patch_compatibility_fixture(root)
+            candidate = root / "candidate.patch"
+            candidate.write_text(
+                """diff --git a/missing.py b/missing.py
+index 77d2f6a..c19c212 100644
+--- a/missing.py
++++ b/missing.py
+@@ -1 +1 @@
+-value = 1
++value = 2
+""",
+                encoding="ascii",
+            )
+
+            with patch.object(evaluator, "_load_row", return_value=row):
+                with self.assertRaises(Phase3EvaluatorPatchRejected) as raised:
+                    evaluator.check_patch_compatibility(
+                        {"instance_id": "fixture"}, candidate
+                    )
+
+            self.assertEqual(
+                raised.exception.receipt["status"], "candidate_patch_invalid"
+            )
+
+    @staticmethod
+    def _patch_compatibility_fixture(root):
+        repository = root / "repository"
+        repository.mkdir()
+        subprocess.run(["git", "init", "--quiet"], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=repository,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=repository, check=True
+        )
+        (repository / "source.py").write_text("value = 1\n", encoding="ascii")
+        tests = repository / "tests"
+        tests.mkdir()
+        (tests / "test_source.py").write_text(
+            "assert value == 1\n", encoding="ascii"
+        )
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "fixture"], cwd=repository, check=True
+        )
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+        ).strip()
+        tree = subprocess.check_output(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True
+        ).strip()
+        test_patch = """diff --git a/tests/test_source.py b/tests/test_source.py
+index b859599..f06e5bb 100644
+--- a/tests/test_source.py
++++ b/tests/test_source.py
+@@ -1 +1,2 @@
+ assert value == 1
++assert value != 2
+"""
+        row = {
+            "patch": "gold",
+            "test_patch": test_patch,
+            "all_patch": "all",
+            "FAIL_TO_PASS": "[]",
+            "PASS_TO_PASS": "[]",
+        }
+        bindings = {
+            "patch_sha256": hashlib.sha256(b"gold").hexdigest(),
+            "test_patch_sha256": hashlib.sha256(test_patch.encode()).hexdigest(),
+            "all_patch_sha256": canonical_json_sha256("all"),
+            "fail_to_pass_sha256": canonical_json_sha256("[]"),
+            "pass_to_pass_sha256": canonical_json_sha256("[]"),
+        }
+        evaluator = object.__new__(Phase3SweEvoEvaluator)
+        evaluator.instances = {
+            "fixture": {
+                "worker_visible": {
+                    "repository": {"commit": commit, "tree": tree}
+                },
+                "evaluator_only": {"gold_bindings": bindings},
+            }
+        }
+        evaluator.repository_sources = {"fixture": repository.resolve()}
+        evaluator.evaluator_root = root / "evaluator"
+        evaluator.evaluator_root.mkdir()
+        return evaluator, row
+
     def test_partial_score_does_not_reward_unapplied_patch(self):
         aggregate = _aggregate_upstream_report(
             json.dumps(
@@ -621,6 +768,16 @@ class Phase3PilotRunnerTests(unittest.TestCase):
             self.assertEqual(protocol["repository"]["source"], str(repository))
             self.assertEqual(protocol["seed"], 0)
             self.assertEqual(
+                protocol["evaluator"]["candidate_patch_policy"],
+                {
+                    "submission": "complete_candidate_patch",
+                    "hidden_test_composition": "require_clean_git_apply",
+                    "candidate_invalid_outcome": "candidate_patch_invalid",
+                    "conflict_outcome": "evaluator_patch_conflict",
+                    "score_rejected_candidate": False,
+                },
+            )
+            self.assertEqual(
                 protocol["acceptance"]["command"][1:3],
                 ["-m", "pytest"],
             )
@@ -761,6 +918,97 @@ class Phase3PilotRunnerTests(unittest.TestCase):
                 entry, root, None, evaluator_failed=True
             )
 
+    def test_production_executor_seals_patch_rejection_without_scoring(self):
+        executor = object.__new__(Phase3ProductionExecutor)
+        executor.sandbox_configuration = {}
+        executor.runtime_release = {}
+        executor.resource_envelope_binding = None
+        executor.resource_references = {}
+        entry = {
+            "entry_id": "fixture--r0--single_codex",
+            "instance_id": "fixture",
+            "mode": "single_codex",
+            "repetition_index": 0,
+        }
+        receipt = {
+            "schema_version": "phase3_patch_compatibility.v1",
+            "status": "evaluator_patch_conflict",
+            "source_commit": "a" * 40,
+            "source_tree": "b" * 40,
+            "candidate_patch_sha256": "c" * 64,
+            "test_patch_sha256": "d" * 64,
+            "conflict_file": "tests/test_source.py",
+            "conflict_line": 1,
+            "diagnostic_sha256": "e" * 64,
+        }
+
+        class RejectingEvaluator:
+            @staticmethod
+            def check_patch_compatibility(_entry, _patch):
+                raise Phase3EvaluatorPatchRejected(receipt)
+
+            def __call__(self, _entry, _patch):
+                raise AssertionError("rejected patch reached scoring")
+
+        executor.official_evaluator = RejectingEvaluator()
+        expected = {"terminal_status": "failed"}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evaluator = root / "evaluator.py"
+            evaluator.write_text("# fixture\n", encoding="ascii")
+            executor.common_evaluator_artifact = str(evaluator)
+            (root / "results").mkdir()
+            (root / "artifacts").mkdir()
+            (root / "artifacts" / "candidate.patch").write_text(
+                "diff --git a/a b/a\n", encoding="ascii"
+            )
+            with patch.object(
+                executor, "_allocation", return_value={"run_dir": temporary}
+            ), patch.object(executor, "_adapter", return_value=object()), patch(
+                "agentteam_runtime.phase3_pilot_runner.execute_bound_experiment_mode"
+            ), patch(
+                "agentteam_runtime.phase3_pilot_runner.load_experiment_result_bundle",
+                return_value={"bundle": {"terminal_status": "completed"}},
+            ), patch.object(
+                executor, "_terminal_result", return_value=expected
+            ) as terminal:
+                result = executor.execute(entry, 0)
+
+            rejection = json.loads(
+                (root / "results" / "official-evaluator-rejection.json").read_text()
+            )
+            compatibility = json.loads(
+                (root / "results" / "official-patch-compatibility.json").read_text()
+            )
+
+        self.assertEqual(result, expected)
+        self.assertEqual(rejection["failure_class"], "evaluator_patch_conflict")
+        self.assertEqual(compatibility, receipt)
+        terminal.assert_called_once_with(
+            entry, root, None, evaluator_rejected=True
+        )
+
+    def test_production_executor_rejects_ambiguous_evaluator_terminal(self):
+        executor = object.__new__(Phase3ProductionExecutor)
+        entry = {"entry_id": "fixture"}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "results").mkdir()
+            (root / "results" / "official-score.json").write_text(
+                "{}\n", encoding="ascii"
+            )
+            (root / "results" / "official-evaluator-rejection.json").write_text(
+                "{}\n", encoding="ascii"
+            )
+            with patch.object(
+                executor, "_allocation", return_value={"run_dir": temporary}
+            ):
+                with self.assertRaisesRegex(
+                    Phase3PilotRunnerError,
+                    "multiple official evaluator terminal artifacts",
+                ):
+                    executor.execute(entry, 0)
+
     def test_evaluator_failure_projection_preserves_usage_and_wall_time(self):
         executor = object.__new__(Phase3ProductionExecutor)
         entry = {"entry_id": "fixture--r0--single_codex"}
@@ -800,6 +1048,69 @@ class Phase3PilotRunnerTests(unittest.TestCase):
         self.assertEqual(result["usage"]["total_tokens"], 993892)
         self.assertEqual(result["usage"]["coverage_percent"], 100)
         self.assertEqual(result["wall_time_seconds"], 2100.0)
+
+    def test_patch_conflict_projection_is_invalid_not_infrastructure(self):
+        executor = object.__new__(Phase3ProductionExecutor)
+        entry = {"entry_id": "fixture--r0--single_codex"}
+        bundle = {
+            "terminal_status": "completed",
+            "usage_totals": {
+                "input_tokens": 100,
+                "cached_input_tokens": 80,
+                "output_tokens": 10,
+                "reasoning_tokens": 3,
+                "total_tokens": 110,
+            },
+            "usage_coverage": {
+                "covered_invocations": 1,
+                "total_invocations": 1,
+                "status": "complete",
+            },
+            "budget_result": {"elapsed_wall_time_seconds": 12.0},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "results").mkdir()
+            compatibility = {
+                "schema_version": "phase3_patch_compatibility.v1",
+                "status": "evaluator_patch_conflict",
+                "source_commit": "a" * 40,
+                "source_tree": "b" * 40,
+                "candidate_patch_sha256": "c" * 64,
+                "test_patch_sha256": "d" * 64,
+                "conflict_file": "tests/test_source.py",
+                "conflict_line": 1,
+                "diagnostic_sha256": "e" * 64,
+            }
+            (
+                root / "results" / "official-patch-compatibility.json"
+            ).write_text(json.dumps(compatibility), encoding="ascii")
+            (root / "results" / "official-evaluator-rejection.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "phase3_official_evaluator_rejection.v1",
+                        "status": "rejected",
+                        "failure_class": "evaluator_patch_conflict",
+                        "compatibility_sha256": canonical_json_sha256(
+                            compatibility
+                        ),
+                        "wall_time_seconds": 0.5,
+                    }
+                ),
+                encoding="ascii",
+            )
+            with patch(
+                "agentteam_runtime.phase3_pilot_runner.load_experiment_result_bundle",
+                return_value={"bundle": bundle},
+            ):
+                result = executor._terminal_result(
+                    entry, root, None, evaluator_rejected=True
+                )
+
+        self.assertEqual(result["terminal_status"], "failed")
+        self.assertEqual(result["failure_class"], "evaluator_patch_conflict")
+        self.assertEqual(result["official_score"]["status"], "failed")
+        self.assertEqual(result["wall_time_seconds"], 12.5)
 
     def test_sealed_usage_coverage_projects_to_percent(self):
         self.assertEqual(
@@ -892,6 +1203,44 @@ class Phase3PilotRunnerTests(unittest.TestCase):
             ],
         )
         self.assertEqual(len(executor.calls), 14)
+
+    def test_patch_rejection_does_not_trigger_quality_repetition(self):
+        selection, _, _ = _build()
+        rejected_instance = selection["ordered_instance_ids"][0]
+
+        def result_factory(entry, _attempt):
+            if (
+                entry["instance_id"] == rejected_instance
+                and entry["mode"] == "single_codex"
+                and entry["repetition_index"] == 0
+            ):
+                result = _result(
+                    entry,
+                    resolved=False,
+                    failure_class="evaluator_patch_conflict",
+                )
+                result["official_score"] = {
+                    "status": "failed",
+                    "resolved": False,
+                    "reason": "evaluator_patch_conflict",
+                }
+                return result
+            return _result(entry)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            executor = _Executor(result_factory)
+            state = _runner(temporary, executor).run()
+
+        self.assertEqual(state["status"], "completed")
+        self.assertFalse(
+            any(
+                entry["instance_id"] == rejected_instance
+                and entry["mode"] == "single_codex"
+                and entry["repetition_index"] == 2
+                for entry in state["schedule"]
+            )
+        )
+        self.assertEqual(len(executor.calls), 12)
 
     def test_resume_reuses_terminal_checkpoint_without_reexecution(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1015,6 +1364,29 @@ class Phase3PilotRunnerTests(unittest.TestCase):
         self.assertEqual(
             state["stop_reason"], "provider_infrastructure_error"
         )
+        self.assertEqual(len(executor.calls), 1)
+
+    def test_patch_conflict_is_terminal_without_stopping_pilot(self):
+        def result_factory(entry, _attempt):
+            result = _result(
+                entry,
+                resolved=False,
+                failure_class="evaluator_patch_conflict",
+            )
+            result["official_score"] = {
+                "status": "failed",
+                "resolved": False,
+                "reason": "evaluator_patch_conflict",
+            }
+            return result
+
+        with tempfile.TemporaryDirectory() as temporary:
+            executor = _Executor(result_factory)
+            state = _runner(temporary, executor).run(max_executions=1)
+
+        self.assertEqual(state["status"], "running")
+        self.assertIsNone(state["stop_reason"])
+        self.assertEqual(len(state["terminal_results"]), 1)
         self.assertEqual(len(executor.calls), 1)
 
     def test_incomplete_usage_stops_pilot(self):

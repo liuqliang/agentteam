@@ -1657,7 +1657,9 @@ preregistered `2.0x` token gate and pilot expansion is not authorized.
 
 An excluded older candidate conflicts with the evaluator-only test patch,
 while all retained candidates pass deterministic patch-compatibility checks.
-Before another scored execution, freeze whether evaluator submission retains
-worker-added tests with collision rejection or strips those tests into a
-separate evidence channel. The latter is a protocol change and cannot be
-introduced retroactively.
+The accepted policy retains the complete candidate patch, requires clean
+hidden-test composition before scoring, and records `candidate_patch_invalid`
+or `evaluator_patch_conflict` without a quality score. Provider cost remains
+accounted as `invalid_execution`, not infrastructure waste. New protocols bind
+this policy explicitly; historical artifacts remain unchanged, so the next
+scored run requires a newly frozen bundle and runtime release.

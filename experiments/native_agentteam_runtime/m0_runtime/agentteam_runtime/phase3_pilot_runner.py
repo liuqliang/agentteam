@@ -44,6 +44,10 @@ from .phase3_public_verification import (
     public_environment_taskpack_command,
     validate_public_verification_environment,
 )
+from .phase3_swe_evo_evaluator import (
+    Phase3EvaluatorPatchRejected,
+    validate_patch_compatibility_receipt,
+)
 from .taskpack import draft_taskpack_files, freeze_taskpack
 from .taskpack import BENCHMARK_REPOSITORY_WRITE_SCOPE
 
@@ -63,6 +67,17 @@ _RETRYABLE_FAILURES = {
 _INFRASTRUCTURE_FAILURES = {
     "provider_infrastructure_error",
     "evaluator_failure",
+}
+_EVALUATOR_REJECTIONS = {
+    "candidate_patch_invalid",
+    "evaluator_patch_conflict",
+}
+_CANDIDATE_PATCH_POLICY = {
+    "submission": "complete_candidate_patch",
+    "hidden_test_composition": "require_clean_git_apply",
+    "candidate_invalid_outcome": "candidate_patch_invalid",
+    "conflict_outcome": "evaluator_patch_conflict",
+    "score_rejected_candidate": False,
 }
 _FORBIDDEN_RESULT_KEYS = {
     "gold_patch",
@@ -186,6 +201,7 @@ def build_phase3_experiment_protocol(
         "evaluator": {
             "version": "phase3-visible-acceptance.v1",
             "artifact_sha256": hashlib.sha256(evaluator.read_bytes()).hexdigest(),
+            "candidate_patch_policy": copy.deepcopy(_CANDIDATE_PATCH_POLICY),
         },
         "direct_taskpack": {
             "sha256": direct_digest,
@@ -330,14 +346,28 @@ class Phase3ProductionExecutor:
         )
         for protocol in self.protocols.values():
             validate_experiment_protocol(protocol)
+            if protocol["evaluator"].get("candidate_patch_policy") != (
+                _CANDIDATE_PATCH_POLICY
+            ):
+                raise Phase3PilotRunnerError(
+                    "Phase 3 candidate patch policy is absent or changed"
+                )
 
     def execute(self, entry, attempt_index):
         allocation = self._allocation(entry, attempt_index)
         run_dir = Path(allocation["run_dir"])
         official_path = run_dir / "results" / "official-score.json"
         failure_path = run_dir / "results" / "official-evaluator-failure.json"
+        rejection_path = run_dir / "results" / "official-evaluator-rejection.json"
+        _reject_ambiguous_evaluator_terminal(
+            official_path, failure_path, rejection_path
+        )
         if official_path.is_file():
             return self._terminal_result(entry, run_dir, _read_json(official_path, "official score"))
+        if rejection_path.is_file():
+            return self._terminal_result(
+                entry, run_dir, None, evaluator_rejected=True
+            )
         if failure_path.is_file():
             return self._terminal_result(
                 entry, run_dir, None, evaluator_failed=True
@@ -361,6 +391,15 @@ class Phase3ProductionExecutor:
             evaluator_started = time.monotonic()
             score = self._evaluate_official(entry, run_dir)
             score = _validate_official_score(score)
+        except Phase3EvaluatorPatchRejected as exc:
+            self._publish_evaluator_rejection(
+                run_dir,
+                exc,
+                wall_time_seconds=time.monotonic() - evaluator_started,
+            )
+            return self._terminal_result(
+                entry, run_dir, None, evaluator_rejected=True
+            )
         except Exception as exc:
             self._publish_evaluator_failure(
                 run_dir,
@@ -379,11 +418,19 @@ class Phase3ProductionExecutor:
         run_dir = self._run_dir(entry)
         official_path = run_dir / "results" / "official-score.json"
         failure_path = run_dir / "results" / "official-evaluator-failure.json"
+        rejection_path = run_dir / "results" / "official-evaluator-rejection.json"
+        _reject_ambiguous_evaluator_terminal(
+            official_path, failure_path, rejection_path
+        )
         if official_path.is_file():
             return self._terminal_result(
                 entry,
                 run_dir,
                 _read_json(official_path, "official score"),
+            )
+        if rejection_path.is_file():
+            return self._terminal_result(
+                entry, run_dir, None, evaluator_rejected=True
             )
         if failure_path.is_file():
             return self._terminal_result(
@@ -398,6 +445,15 @@ class Phase3ProductionExecutor:
             try:
                 evaluator_started = time.monotonic()
                 score = self._evaluate_official(entry, run_dir)
+            except Phase3EvaluatorPatchRejected as exc:
+                self._publish_evaluator_rejection(
+                    run_dir,
+                    exc,
+                    wall_time_seconds=time.monotonic() - evaluator_started,
+                )
+                return self._terminal_result(
+                    entry, run_dir, None, evaluator_rejected=True
+                )
             except Exception as exc:
                 self._publish_evaluator_failure(
                     run_dir,
@@ -431,8 +487,53 @@ class Phase3ProductionExecutor:
             label="Phase 3 official evaluator failure",
         )
 
+    @staticmethod
+    def _publish_evaluator_rejection(run_dir, error, *, wall_time_seconds):
+        receipt = validate_patch_compatibility_receipt(error.receipt)
+        publish_immutable_json(
+            Path(run_dir) / "results" / "official-evaluator-rejection.json",
+            {
+                "schema_version": "phase3_official_evaluator_rejection.v1",
+                "status": "rejected",
+                "failure_class": receipt["status"],
+                "compatibility_sha256": canonical_json_sha256(receipt),
+                "wall_time_seconds": max(float(wall_time_seconds), 0.0),
+            },
+            label="Phase 3 official evaluator rejection",
+        )
+
     def _evaluate_official(self, entry, run_dir):
         patch = run_dir / "artifacts" / "candidate.patch"
+        check = getattr(self.official_evaluator, "check_patch_compatibility", None)
+        if not callable(check):
+            raise Phase3PilotRunnerError(
+                "official evaluator patch compatibility check is unavailable"
+            )
+        compatibility_path = (
+            Path(run_dir) / "results" / "official-patch-compatibility.json"
+        )
+        compatibility_started = time.monotonic()
+        try:
+            compatibility = check(copy.deepcopy(entry), patch)
+        except Phase3EvaluatorPatchRejected as exc:
+            receipt = validate_patch_compatibility_receipt(exc.receipt)
+            publish_immutable_json(
+                compatibility_path,
+                receipt,
+                label="Phase 3 official patch compatibility",
+            )
+            raise
+        compatibility = validate_patch_compatibility_receipt(compatibility)
+        if compatibility["status"] != "compatible":
+            raise Phase3PilotRunnerError(
+                "official evaluator returned a non-terminal compatibility status"
+            )
+        publish_immutable_json(
+            compatibility_path,
+            compatibility,
+            label="Phase 3 official patch compatibility",
+        )
+        compatibility_wall = time.monotonic() - compatibility_started
         bound = getattr(self.official_evaluator, "evaluate_resource_bound", None)
         if self.resource_envelope_binding is not None:
             reference = self.resource_references.get(entry["mode"])
@@ -451,6 +552,10 @@ class Phase3ProductionExecutor:
             )
         else:
             score = self.official_evaluator(copy.deepcopy(entry), patch)
+        score = copy.deepcopy(score)
+        score["wall_time_seconds"] = (
+            float(score.get("wall_time_seconds", 0.0)) + compatibility_wall
+        )
         return _validate_official_score(score)
 
     def _allocation(self, entry, attempt_index):
@@ -532,21 +637,77 @@ class Phase3ProductionExecutor:
             ) from exc
 
     def _terminal_result(
-        self, entry, run_dir, score, *, evaluator_failed=False
+        self,
+        entry,
+        run_dir,
+        score,
+        *,
+        evaluator_failed=False,
+        evaluator_rejected=False,
     ):
         sealed = load_experiment_result_bundle(run_dir)["bundle"]
         usage = sealed["usage_totals"]
         infrastructure_failed = sealed["terminal_status"] == "infrastructure_failed"
         evaluator_failure_wall = 0.0
+        rejection_class = None
         if evaluator_failed:
             failure = _read_json(
                 Path(run_dir) / "results" / "official-evaluator-failure.json",
                 "official evaluator failure",
             )
             evaluator_failure_wall = float(failure["wall_time_seconds"])
+        if evaluator_rejected:
+            rejection = _read_json(
+                Path(run_dir) / "results" / "official-evaluator-rejection.json",
+                "official evaluator rejection",
+            )
+            compatibility = validate_patch_compatibility_receipt(
+                _read_json(
+                    Path(run_dir)
+                    / "results"
+                    / "official-patch-compatibility.json",
+                    "official patch compatibility",
+                )
+            )
+            if (
+                set(rejection)
+                != {
+                    "schema_version",
+                    "status",
+                    "failure_class",
+                    "compatibility_sha256",
+                    "wall_time_seconds",
+                }
+                or rejection.get("schema_version")
+                != "phase3_official_evaluator_rejection.v1"
+                or rejection.get("status") != "rejected"
+                or rejection.get("compatibility_sha256")
+                != canonical_json_sha256(compatibility)
+                or rejection.get("failure_class") != compatibility["status"]
+            ):
+                raise Phase3PilotRunnerError(
+                    "official evaluator rejection evidence is invalid"
+                )
+            rejection_class = rejection["failure_class"]
+            if rejection_class not in _EVALUATOR_REJECTIONS:
+                raise Phase3PilotRunnerError(
+                    "official evaluator rejection classification is invalid"
+                )
+            rejection_wall = rejection["wall_time_seconds"]
+            if (
+                not isinstance(rejection_wall, (int, float))
+                or isinstance(rejection_wall, bool)
+                or rejection_wall < 0
+            ):
+                raise Phase3PilotRunnerError(
+                    "official evaluator rejection wall time is invalid"
+                )
+            evaluator_failure_wall = float(rejection_wall)
         failure_class = (
             "provider_infrastructure_error"
             if infrastructure_failed
+            else rejection_class
+            if evaluator_rejected
             else "evaluator_failure"
             if evaluator_failed
             else None
@@ -556,6 +717,8 @@ class Phase3ProductionExecutor:
             "terminal_status": (
                 "infrastructure_failed"
                 if evaluator_failed
+                else "failed"
+                if evaluator_rejected
                 else sealed["terminal_status"]
             ),
             "failure_class": failure_class,
@@ -874,6 +1037,11 @@ class Phase3PilotRunner:
         ]
         if any(not isinstance(result, dict) for result in results):
             raise Phase3PilotRunnerError("initial repetition result is missing")
+        if any(
+            result.get("failure_class") in _EVALUATOR_REJECTIONS
+            for result in results
+        ):
+            return False
         outcomes = [result["official_score"]["resolved"] for result in results]
         if outcomes[0] != outcomes[1]:
             return True
@@ -1122,6 +1290,13 @@ def _schedule_entry(instance_id, mode, repetition_index):
     }
 
 
+def _reject_ambiguous_evaluator_terminal(*paths):
+    if sum(Path(path).is_file() for path in paths) > 1:
+        raise Phase3PilotRunnerError(
+            "multiple official evaluator terminal artifacts exist"
+        )
+
+
 def _validate_terminal_result(result, entry):
     if not isinstance(result, dict):
         raise Phase3PilotRunnerError("pilot executor returned no result")
@@ -1157,12 +1332,26 @@ def _validate_terminal_result(result, entry):
         or not isinstance(score.get("resolved"), bool)
     ):
         raise Phase3PilotRunnerError("pilot official score is invalid")
-    if value.get("failure_class") is not None and value["failure_class"] not in (
+    failure_class = value.get("failure_class")
+    if failure_class is not None and failure_class not in (
         _RETRYABLE_FAILURES
         | _INFRASTRUCTURE_FAILURES
+        | _EVALUATOR_REJECTIONS
         | {"resource_limit_exhausted", "evaluator_failure"}
     ):
         raise Phase3PilotRunnerError("pilot failure classification is invalid")
+    if failure_class in _EVALUATOR_REJECTIONS and (
+        value["terminal_status"] != "failed"
+        or score
+        != {
+            "status": "failed",
+            "resolved": False,
+            "reason": failure_class,
+        }
+    ):
+        raise Phase3PilotRunnerError(
+            "pilot evaluator rejection outcome is invalid"
+        )
     _reject_forbidden_keys(value)
     return value
 

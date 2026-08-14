@@ -81,12 +81,22 @@ test patch. The three retained candidates all pass; the excluded old direct
 candidate fails. This confirms that the retained quality tie is not caused by
 the same patch collision.
 
-This audit exposes a protocol choice that must be resolved before a larger
-pilot: either continue evaluating the full candidate patch and reject any
-candidate that conflicts with evaluator tests, or separate worker-added tests
-from the production patch submitted to the official evaluator. The latter
-changes benchmark semantics and requires a new frozen protocol rather than an
-implicit evaluator change.
+The accepted protocol keeps the complete candidate patch. Before official
+scoring, the evaluator applies that patch to the frozen source commit and
+requires the evaluator-only test patch to pass `git apply --check`. An invalid
+candidate becomes `candidate_patch_invalid`; a composition conflict becomes
+`evaluator_patch_conflict`. Both outcomes retain provider cost but receive no
+quality score and are not classified as infrastructure failures.
+
+New Phase 3 protocols bind this policy as
+`evaluator.candidate_patch_policy`. The compatibility receipt records source,
+candidate, and test-patch digests plus bounded conflict location diagnostics;
+it never includes hidden-test content. Historical artifacts are not rewritten.
+The retained three-mode result remains valid because its candidates passed the
+same deterministic compatibility audit before this policy was implemented.
+The implementation passes all 1,196 provider-free tests with 7 skips, and a
+real-artifact replay classifies the excluded v5 direct patch as
+`evaluator_patch_conflict` while accepting all three retained v7 patches.
 
 ## Infrastructure Closure
 
@@ -137,8 +147,8 @@ runs.
 - Cost conclusion: both AgentTeam modes fail the `2.0x` token gate
 - Pilot expansion: `not_authorized`
 
-The next execution decision should first freeze the candidate-test policy.
-After that, use a new instance or preregistered repetition to test whether
-context reuse and role routing can reduce AgentTeam input cost without
-changing evaluator semantics. Do not infer general performance from this
-single calibration.
+The next execution decision must re-freeze a bundle against a runtime release
+that contains the accepted candidate-patch policy. Then use a new instance or
+preregistered repetition to test whether context reuse and role routing can
+reduce AgentTeam input cost without changing evaluator semantics. Do not infer
+general performance from this single calibration.

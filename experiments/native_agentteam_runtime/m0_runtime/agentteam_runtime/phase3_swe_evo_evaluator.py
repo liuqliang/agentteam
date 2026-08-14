@@ -7,9 +7,11 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -17,6 +19,14 @@ from pathlib import Path
 
 class Phase3SweEvoEvaluatorError(RuntimeError):
     """Raised when frozen evaluator authority cannot be honored exactly."""
+
+
+class Phase3EvaluatorPatchRejected(Phase3SweEvoEvaluatorError):
+    """Raised when a candidate cannot enter the frozen official evaluator."""
+
+    def __init__(self, receipt):
+        self.receipt = validate_patch_compatibility_receipt(receipt)
+        super().__init__(self.receipt["status"])
 
 
 class Phase3SweEvoEvaluator:
@@ -32,6 +42,7 @@ class Phase3SweEvoEvaluator:
         instances_by_id,
         evaluator_root,
         resource_envelope_binding,
+        repository_sources_by_instance=None,
         docker_socket="unix:///run/user/1013/podman/podman.sock",
         timeout_seconds=1800,
     ):
@@ -39,6 +50,19 @@ class Phase3SweEvoEvaluator:
         self.harness_root = Path(harness_root).resolve(strict=True)
         self.harness_commit = harness_commit
         self.instances = copy.deepcopy(instances_by_id)
+        self.repository_sources = {
+            instance_id: Path(source).resolve(strict=True)
+            for instance_id, source in (
+                repository_sources_by_instance or {}
+            ).items()
+        }
+        if (
+            repository_sources_by_instance is not None
+            and set(self.repository_sources) != set(self.instances)
+        ):
+            raise Phase3SweEvoEvaluatorError(
+                "patch compatibility sources do not cover evaluator instances"
+            )
         self.evaluator_root = Path(evaluator_root).resolve()
         self.evaluator_root.mkdir(parents=True, exist_ok=True)
         if self.evaluator_root.is_symlink():
@@ -178,6 +202,10 @@ class Phase3SweEvoEvaluator:
             "harness_root": str(self.harness_root),
             "harness_commit": self.harness_commit,
             "instances_by_id": copy.deepcopy(self.instances),
+            "repository_sources_by_instance": {
+                instance_id: str(source)
+                for instance_id, source in self.repository_sources.items()
+            },
             "evaluator_root": str(self.evaluator_root),
             "resource_envelope_binding": {
                 "schema_version": "phase3_resource_envelope.v2",
@@ -186,6 +214,128 @@ class Phase3SweEvoEvaluator:
             "docker_socket": self.docker_socket,
             "timeout_seconds": self.timeout_seconds,
         }
+
+    def check_patch_compatibility(self, entry, patch_path):
+        """Prove candidate and hidden tests compose on the frozen source."""
+
+        instance_id = entry.get("instance_id")
+        authority = self.instances.get(instance_id)
+        visible = authority.get("worker_visible") if isinstance(authority, dict) else None
+        repository = visible.get("repository") if isinstance(visible, dict) else None
+        source = self.repository_sources.get(instance_id)
+        if not isinstance(repository, dict) or source is None:
+            raise Phase3SweEvoEvaluatorError(
+                "patch compatibility source authority is missing"
+            )
+        commit = repository.get("commit")
+        tree = repository.get("tree")
+        if (
+            not isinstance(commit, str)
+            or not isinstance(tree, str)
+            or _git_output(source, "rev-parse", f"{commit}^{{tree}}") != tree
+        ):
+            raise Phase3SweEvoEvaluatorError(
+                "patch compatibility source authority changed"
+            )
+        patch_path = Path(patch_path).resolve(strict=True)
+        candidate = patch_path.read_bytes()
+        row = self._load_row(instance_id)
+        evaluator = authority.get("evaluator_only")
+        if not isinstance(evaluator, dict):
+            raise Phase3SweEvoEvaluatorError(
+                "patch compatibility evaluator authority is missing"
+            )
+        self._verify_gold_bindings(row, evaluator["gold_bindings"])
+        test_patch = row["test_patch"]
+        receipt = {
+            "schema_version": "phase3_patch_compatibility.v1",
+            "status": "compatible",
+            "source_commit": commit,
+            "source_tree": tree,
+            "candidate_patch_sha256": hashlib.sha256(candidate).hexdigest(),
+            "test_patch_sha256": hashlib.sha256(test_patch.encode()).hexdigest(),
+            "conflict_file": None,
+            "conflict_line": None,
+            "diagnostic_sha256": None,
+        }
+        with tempfile.TemporaryDirectory(
+            prefix="patch-compatibility-",
+            dir=self.evaluator_root,
+        ) as temporary:
+            checkout = Path(temporary) / "repository"
+            cloned = subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--quiet",
+                    "--no-checkout",
+                    "--local",
+                    str(source),
+                    str(checkout),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+            if cloned.returncode != 0:
+                raise Phase3SweEvoEvaluatorError(
+                    "patch compatibility checkout failed"
+                )
+            subprocess.run(
+                ["git", "-C", str(checkout), "checkout", "--quiet", "--detach", commit],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60,
+            )
+            candidate_result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(checkout),
+                    "apply",
+                    "--whitespace=nowarn",
+                    str(patch_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+            if candidate_result.returncode != 0:
+                receipt.update(
+                    _patch_rejection_diagnostic(
+                        "candidate_patch_invalid",
+                        candidate_result.stderr or candidate_result.stdout,
+                    )
+                )
+                raise Phase3EvaluatorPatchRejected(receipt)
+            test_result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(checkout),
+                    "apply",
+                    "--check",
+                    "--whitespace=nowarn",
+                    "-",
+                ],
+                input=test_patch,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+            if test_result.returncode != 0:
+                receipt.update(
+                    _patch_rejection_diagnostic(
+                        "evaluator_patch_conflict",
+                        test_result.stderr or test_result.stdout,
+                    )
+                )
+                raise Phase3EvaluatorPatchRejected(receipt)
+        return validate_patch_compatibility_receipt(receipt)
 
     def __call__(self, entry, patch_path):
         started = time.monotonic()
@@ -367,6 +517,104 @@ def _file_sha256(path):
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _patch_rejection_diagnostic(status, diagnostic):
+    text = str(diagnostic or "")
+    match = re.search(r"patch failed: ([^\r\n]+?):(\d+)", text)
+    conflict_file = None
+    conflict_line = None
+    if match:
+        candidate = Path(match.group(1))
+        if not candidate.is_absolute() and ".." not in candidate.parts:
+            conflict_file = candidate.as_posix()
+            conflict_line = int(match.group(2))
+    return {
+        "status": status,
+        "conflict_file": conflict_file,
+        "conflict_line": conflict_line,
+        "diagnostic_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
+def validate_patch_compatibility_receipt(receipt):
+    required = {
+        "schema_version",
+        "status",
+        "source_commit",
+        "source_tree",
+        "candidate_patch_sha256",
+        "test_patch_sha256",
+        "conflict_file",
+        "conflict_line",
+        "diagnostic_sha256",
+    }
+    if not isinstance(receipt, dict) or set(receipt) != required:
+        raise Phase3SweEvoEvaluatorError(
+            "patch compatibility receipt fields are invalid"
+        )
+    value = copy.deepcopy(receipt)
+    if value["schema_version"] != "phase3_patch_compatibility.v1":
+        raise Phase3SweEvoEvaluatorError(
+            "patch compatibility receipt version is invalid"
+        )
+    if value["status"] not in {
+        "compatible",
+        "candidate_patch_invalid",
+        "evaluator_patch_conflict",
+    }:
+        raise Phase3SweEvoEvaluatorError(
+            "patch compatibility receipt status is invalid"
+        )
+    for field in ("source_commit", "source_tree"):
+        if not _is_hex_digest(value[field], lengths={40, 64}):
+            raise Phase3SweEvoEvaluatorError(
+                "patch compatibility receipt digest is invalid"
+            )
+    for field in ("candidate_patch_sha256", "test_patch_sha256"):
+        if not _is_hex_digest(value[field], lengths={64}):
+            raise Phase3SweEvoEvaluatorError(
+                "patch compatibility receipt digest is invalid"
+            )
+    if value["status"] == "compatible":
+        if any(
+            value[field] is not None
+            for field in ("conflict_file", "conflict_line", "diagnostic_sha256")
+        ):
+            raise Phase3SweEvoEvaluatorError(
+                "compatible patch receipt contains rejection diagnostics"
+            )
+    else:
+        path = value["conflict_file"]
+        line = value["conflict_line"]
+        if path is not None and (
+            not isinstance(path, str)
+            or not path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+        ):
+            raise Phase3SweEvoEvaluatorError(
+                "patch compatibility conflict path is invalid"
+            )
+        if line is not None and (
+            not isinstance(line, int) or isinstance(line, bool) or line < 1
+        ):
+            raise Phase3SweEvoEvaluatorError(
+                "patch compatibility conflict line is invalid"
+            )
+        if not _is_hex_digest(value["diagnostic_sha256"], lengths={64}):
+            raise Phase3SweEvoEvaluatorError(
+                "patch compatibility diagnostic digest is invalid"
+            )
+    return value
+
+
+def _is_hex_digest(value, *, lengths):
+    return (
+        isinstance(value, str)
+        and len(value) in lengths
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _git_output(root, *arguments):

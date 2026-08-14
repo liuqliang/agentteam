@@ -267,6 +267,7 @@ def run_phase3_live_bundle(bundle_root, pilot_root, *, max_executions=None):
             harness_root=evaluator_environment["harness_root"],
             harness_commit=evaluator_environment["harness_commit"],
             instances_by_id=candidate["instances_by_id"],
+            repository_sources_by_instance=values["repository-sources.json"],
             evaluator_root=Path(pilot_root).resolve() / "evaluator",
             resource_envelope_binding=binding,
             docker_socket=evaluator_environment["docker_socket"],
