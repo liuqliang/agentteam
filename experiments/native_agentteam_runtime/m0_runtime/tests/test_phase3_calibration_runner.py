@@ -112,6 +112,57 @@ class Phase3CalibrationRunnerTests(unittest.TestCase):
         ):
             build_phase3_single_instance_calibration_contract(contract)
 
+    def test_bounded_contract_narrows_parent_pilot_permit(self):
+        selection, preregistrations, contract = self._authorities()
+        calibration = build_phase3_single_instance_calibration_contract(
+            contract,
+            maximum_total_tokens=300,
+            maximum_wall_time_seconds=30,
+        )
+        executor = _Executor()
+        with tempfile.TemporaryDirectory() as temporary:
+            runner = Phase3SingleInstanceCalibrationRunner(
+                Path(temporary),
+                pilot_id="bounded-single-instance-calibration",
+                pilot_contract=contract,
+                live_authorization=_live_authorization(contract),
+                selection=selection,
+                preregistrations_by_instance=preregistrations,
+                expected_epoch_number=1,
+                expected_epoch_sha256="6" * 64,
+                executor=executor,
+                calibration_contract=calibration,
+            )
+            state = runner.initialize()
+
+        self.assertEqual(
+            state["schedule"],
+            runner._initial_schedule(runner._expected_manifest()),
+        )
+        self.assertEqual(runner.permit["maximum_total_tokens"], 300)
+        self.assertEqual(runner.permit["maximum_wall_time_seconds"], 30)
+        self.assertEqual(
+            runner._expected_manifest()["aggregate_budget_ceiling"],
+            {
+                "maximum_total_tokens": 300,
+                "maximum_wall_time_seconds": 30,
+                "max_inflight_model_invocations": 1,
+            },
+        )
+
+    def test_bounded_contract_rejects_budget_above_parent(self):
+        _, _, contract = self._authorities()
+        ceiling = contract["contract"]["aggregate_budget_ceiling"]
+        with self.assertRaisesRegex(
+            Phase3PilotRunnerError,
+            "bounded calibration budget is invalid",
+        ):
+            build_phase3_single_instance_calibration_contract(
+                contract,
+                maximum_total_tokens=ceiling["maximum_total_tokens"] + 1,
+                maximum_wall_time_seconds=ceiling["maximum_wall_time_seconds"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

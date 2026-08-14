@@ -10,9 +10,15 @@ from .phase3_pilot_runner import Phase3PilotRunner, Phase3PilotRunnerError
 
 
 CALIBRATION_CONTRACT_VERSION = "phase3_single_instance_calibration.v1"
+BOUNDED_CALIBRATION_CONTRACT_VERSION = "phase3_single_instance_calibration.v2"
 
 
-def build_phase3_single_instance_calibration_contract(pilot_contract):
+def build_phase3_single_instance_calibration_contract(
+    pilot_contract,
+    *,
+    maximum_total_tokens=None,
+    maximum_wall_time_seconds=None,
+):
     """Bind a pilot authority to exactly one repetition of all three modes."""
 
     pilot = validate_phase3_pilot_contract(pilot_contract)
@@ -23,7 +29,12 @@ def build_phase3_single_instance_calibration_contract(pilot_contract):
             "single-instance calibration requires exactly one selected instance"
         )
     contract = {
-        "schema_version": CALIBRATION_CONTRACT_VERSION,
+        "schema_version": (
+            BOUNDED_CALIBRATION_CONTRACT_VERSION
+            if maximum_total_tokens is not None
+            or maximum_wall_time_seconds is not None
+            else CALIBRATION_CONTRACT_VERSION
+        ),
         "decision_id": "DEC-P3B-single-instance-calibration",
         "pilot_contract_sha256": pilot["contract_sha256"],
         "instance_id": instance_ids[0],
@@ -33,6 +44,9 @@ def build_phase3_single_instance_calibration_contract(pilot_contract):
         "maximum_mode_executions": len(EXPERIMENT_MODES),
         "continuation": "forbidden",
     }
+    if contract["schema_version"] == BOUNDED_CALIBRATION_CONTRACT_VERSION:
+        contract["maximum_total_tokens"] = maximum_total_tokens
+        contract["maximum_wall_time_seconds"] = maximum_wall_time_seconds
     contract["calibration_contract_sha256"] = canonical_json_sha256(contract)
     return validate_phase3_single_instance_calibration_contract(
         contract,
@@ -63,6 +77,11 @@ def validate_phase3_single_instance_calibration_contract(
         "continuation",
         "calibration_contract_sha256",
     }
+    version = value.get("schema_version")
+    if version == BOUNDED_CALIBRATION_CONTRACT_VERSION:
+        expected_fields.update(
+            {"maximum_total_tokens", "maximum_wall_time_seconds"}
+        )
     if set(value) != expected_fields:
         raise Phase3PilotRunnerError("calibration contract fields are invalid")
     digest_body = dict(value)
@@ -70,7 +89,11 @@ def validate_phase3_single_instance_calibration_contract(
     body = pilot["contract"]
     instance_ids = body["selection"]["ordered_instance_ids"]
     if (
-        value["schema_version"] != CALIBRATION_CONTRACT_VERSION
+        version
+        not in {
+            CALIBRATION_CONTRACT_VERSION,
+            BOUNDED_CALIBRATION_CONTRACT_VERSION,
+        }
         or value["decision_id"] != "DEC-P3B-single-instance-calibration"
         or value["pilot_contract_sha256"] != pilot["contract_sha256"]
         or len(instance_ids) != 1
@@ -84,6 +107,25 @@ def validate_phase3_single_instance_calibration_contract(
         or digest != canonical_json_sha256(digest_body)
     ):
         raise Phase3PilotRunnerError("calibration contract is invalid")
+    if version == BOUNDED_CALIBRATION_CONTRACT_VERSION:
+        pilot_ceiling = body["aggregate_budget_ceiling"]
+        maximum_total_tokens = value["maximum_total_tokens"]
+        maximum_wall_time_seconds = value["maximum_wall_time_seconds"]
+        if (
+            not isinstance(maximum_total_tokens, int)
+            or isinstance(maximum_total_tokens, bool)
+            or maximum_total_tokens < 1
+            or maximum_total_tokens
+            > pilot_ceiling["maximum_total_tokens"]
+            or not isinstance(maximum_wall_time_seconds, (int, float))
+            or isinstance(maximum_wall_time_seconds, bool)
+            or maximum_wall_time_seconds <= 0
+            or maximum_wall_time_seconds
+            > pilot_ceiling["maximum_wall_time_seconds"]
+        ):
+            raise Phase3PilotRunnerError(
+                "bounded calibration budget is invalid"
+            )
     return value
 
 
@@ -107,7 +149,29 @@ class Phase3SingleInstanceCalibrationRunner(Phase3PilotRunner):
             "maximum_mode_executions": len(EXPERIMENT_MODES),
             "continuation": "forbidden",
         }
+        if self.calibration_contract["schema_version"] == (
+            BOUNDED_CALIBRATION_CONTRACT_VERSION
+        ):
+            manifest["calibration"]["maximum_total_tokens"] = (
+                self.calibration_contract["maximum_total_tokens"]
+            )
+            manifest["calibration"]["maximum_wall_time_seconds"] = (
+                self.calibration_contract["maximum_wall_time_seconds"]
+            )
         return manifest
+
+    def _validate_authorities(self):
+        super()._validate_authorities()
+        if self.calibration_contract["schema_version"] == (
+            BOUNDED_CALIBRATION_CONTRACT_VERSION
+        ):
+            self.permit = copy.deepcopy(self.permit)
+            self.permit["maximum_total_tokens"] = self.calibration_contract[
+                "maximum_total_tokens"
+            ]
+            self.permit["maximum_wall_time_seconds"] = (
+                self.calibration_contract["maximum_wall_time_seconds"]
+            )
 
     def _initial_schedule(self, manifest):
         instance_id = self.calibration_contract["instance_id"]
