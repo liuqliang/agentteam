@@ -55,6 +55,9 @@ DEFAULT_MAX_CREDENTIAL_BYTES = 1024 * 1024
 DEFAULT_MAX_CREDENTIAL_FILES = 32
 DEFAULT_MAX_SCAN_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_SCAN_FILES = 10_000
+DEPENDENCY_TREE_MAX_BYTES = 512 * 1024 * 1024
+DEPENDENCY_TREE_MAX_ENTRIES = 20_000
+DEPENDENCY_TREE_IDENTITY_POLICY = "bounded_dependency_tree.v1"
 DEFAULT_MAX_EVALUATOR_OUTPUT_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_RUNTIME_FILE_BYTES = 512 * 1024 * 1024
 MAX_EVALUATION_TIMEOUT_SECONDS = 3600
@@ -4121,19 +4124,37 @@ def _normalize_views(views, label):
         if isinstance(view, (str, os.PathLike)):
             source = _existing_path(view, f"{label} view {index}")
             target = _absolute_target(source, f"{label} view {index}")
-        elif isinstance(view, dict) and set(view) == {"source", "target"}:
+        elif isinstance(view, dict) and set(view) in (
+            {"source", "target"},
+            {"source", "target", "identity_policy"},
+        ):
             source = _existing_path(view["source"], f"{label} view {index}")
             target = _absolute_target(view["target"], f"{label} view {index}")
         else:
             raise ExperimentSandboxError(f"invalid {label} view {index}")
-        normalized.append(
-            {
-                "source": str(source),
-                "target": str(target),
-                "writable": False,
-                "source_identity": _mount_source_identity(source),
-            }
+        identity_policy = (
+            view.get("identity_policy") if isinstance(view, dict) else None
         )
+        if identity_policy not in (None, DEPENDENCY_TREE_IDENTITY_POLICY):
+            raise ExperimentSandboxError(
+                f"invalid {label} view {index} identity policy"
+            )
+        if identity_policy is not None and not source.is_dir():
+            raise ExperimentSandboxError(
+                f"{label} view {index} dependency tree must be a directory"
+            )
+        normalized_view = {
+            "source": str(source),
+            "target": str(target),
+            "writable": False,
+            "source_identity": _mount_source_identity(
+                source,
+                dependency_tree=(identity_policy is not None),
+            ),
+        }
+        if identity_policy is not None:
+            normalized_view["identity_policy"] = identity_policy
+        normalized.append(normalized_view)
     _deny_duplicate_targets(normalized)
     return normalized
 
@@ -4142,17 +4163,43 @@ def _validate_normalized_views(views, label):
     if not isinstance(views, list):
         raise ExperimentSandboxError(f"{label} views must be a list")
     for index, view in enumerate(views):
+        valid_fields = (
+            {"source", "target", "writable", "source_identity"},
+            {
+                "source",
+                "target",
+                "writable",
+                "source_identity",
+                "identity_policy",
+            },
+        )
         if (
             not isinstance(view, dict)
-            or set(view)
-            != {"source", "target", "writable", "source_identity"}
+            or set(view) not in valid_fields
             or view.get("writable") is not False
         ):
             raise ExperimentSandboxError(f"invalid {label} view {index}")
+        identity_policy = view.get("identity_policy")
+        if identity_policy not in (None, DEPENDENCY_TREE_IDENTITY_POLICY):
+            raise ExperimentSandboxError(
+                f"invalid {label} view {index} identity policy"
+            )
+        identity_kind = (
+            view.get("source_identity", {}).get("kind")
+            if isinstance(view.get("source_identity"), dict)
+            else None
+        )
+        if (identity_policy is not None) != (
+            identity_kind == "bounded_dependency_directory"
+        ):
+            raise ExperimentSandboxError(
+                f"{label} view {index} identity policy differs from identity"
+            )
         _validate_mount_source(
             view["source"],
             view["source_identity"],
             f"{label} view {index}",
+            require_directory=identity_policy is not None,
         )
         _absolute_target(view["target"], f"{label} view {index}")
     _deny_duplicate_targets(views)
@@ -5033,7 +5080,12 @@ def _existing_path(
     return resolved
 
 
-def _mount_source_identity(path, *, hash_directory=True):
+def _mount_source_identity(
+    path,
+    *,
+    hash_directory=True,
+    dependency_tree=False,
+):
     path = Path(path)
     try:
         metadata = path.lstat()
@@ -5055,6 +5107,15 @@ def _mount_source_identity(path, *, hash_directory=True):
         elif _is_privileged_system_tree(path):
             kind = "privileged_system_directory"
             content_sha256 = None
+        elif dependency_tree:
+            tree = _bounded_tree_identity(
+                path,
+                excluded_roots=set(),
+                max_entries=DEPENDENCY_TREE_MAX_ENTRIES,
+                max_bytes=DEPENDENCY_TREE_MAX_BYTES,
+            )
+            kind = "bounded_dependency_directory"
+            content_sha256 = tree["sha256"]
         else:
             tree = _bounded_tree_identity(
                 path,
@@ -5206,12 +5267,14 @@ def _validate_mount_source(
         f"{label} source",
         require_directory=require_directory,
     )
-    hash_directory = expected_identity.get("kind") != "directory_root"
+    identity_kind = expected_identity.get("kind")
+    hash_directory = identity_kind != "directory_root"
     if (
         resolved != lexical
         or _mount_source_identity(
             lexical,
             hash_directory=hash_directory,
+            dependency_tree=(identity_kind == "bounded_dependency_directory"),
         )
         != expected_identity
     ):

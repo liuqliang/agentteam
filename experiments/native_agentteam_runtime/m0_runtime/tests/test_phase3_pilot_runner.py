@@ -25,6 +25,9 @@ from agentteam_runtime.phase3_swe_evo_evaluator import (
     Phase3SweEvoEvaluatorError,
     _aggregate_upstream_report,
 )
+from agentteam_runtime.phase3_public_verification import (
+    build_public_verification_environment,
+)
 from agentteam_runtime.experiment_sandbox import _candidate_source_unchanged
 from agentteam_runtime.resource_envelope import approved_phase3_resource_envelope_binding
 from agentteam_runtime.experiment_contract import canonical_json_sha256
@@ -574,12 +577,29 @@ class Phase3PilotRunnerTests(unittest.TestCase):
                 },
             }
             semantic["taskpack_sha256"] = canonical_json_sha256(semantic["taskpack"])
+            dependency_root = root / "public-environment"
+            (dependency_root / "bin").mkdir(parents=True)
+            dependency_python = dependency_root / "bin" / "python3.9"
+            dependency_python.write_text(
+                "#!/bin/sh\nprintf 'Python 3.9.20\\n'\n",
+                encoding="ascii",
+            )
+            dependency_python.chmod(0o755)
+            public_environment = build_public_verification_environment(
+                instance_id=instance_id,
+                image_reference=(
+                    "example.invalid/fixture@sha256:" + "a" * 64
+                ),
+                image_digest="sha256:" + "a" * 64,
+                source_root=dependency_root,
+            )
 
             protocol = build_phase3_experiment_protocol(
                 instance_id=instance_id,
                 preregistration=preregistrations[instance_id],
                 repository_source=repository,
                 common_evaluator_artifact=evaluator,
+                public_verification_environment=public_environment,
             )
             first = materialize_phase3_runtime_taskpack(
                 instance_id=instance_id,
@@ -587,6 +607,7 @@ class Phase3PilotRunnerTests(unittest.TestCase):
                 project_root=repository,
                 output_root=root / "taskpack",
                 model="gpt-test",
+                public_verification_environment=public_environment,
             )
             replay = materialize_phase3_runtime_taskpack(
                 instance_id=instance_id,
@@ -594,6 +615,7 @@ class Phase3PilotRunnerTests(unittest.TestCase):
                 project_root=repository,
                 output_root=root / "taskpack",
                 model="gpt-test",
+                public_verification_environment=public_environment,
             )
 
             self.assertEqual(protocol["repository"]["source"], str(repository))
@@ -602,7 +624,15 @@ class Phase3PilotRunnerTests(unittest.TestCase):
                 protocol["acceptance"]["command"][1:3],
                 ["-m", "pytest"],
             )
-            self.assertTrue(Path(protocol["acceptance"]["command"][0]).is_absolute())
+            self.assertEqual(
+                protocol["acceptance"]["command"][0],
+                "/opt/agentteam/benchmark-env/bin/python3.9",
+            )
+            self.assertEqual(
+                protocol["environment"]["dependency_cache_policy"],
+                "declared_equal_read_only:"
+                + public_environment["authority_sha256"],
+            )
             self.assertEqual(first, replay)
             self.assertEqual(
                 first["semantic_authority_sha256"],
@@ -630,6 +660,27 @@ class Phase3PilotRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(adapter.provider.timeout_seconds, 1800)
+
+    def test_production_executor_routes_instance_verification_authority(self):
+        executor = object.__new__(Phase3ProductionExecutor)
+        executor.sandbox_configuration = {"legacy": True}
+        executor.integration_verification_command = ["legacy"]
+        executor.sandbox_configurations_by_instance = {
+            "instance-a": {"environment": "a"},
+        }
+        executor.integration_verification_commands_by_instance = {
+            "instance-a": ["/bound/python", "-c", "pass"],
+        }
+        entry = {"instance_id": "instance-a"}
+
+        self.assertEqual(
+            executor._sandbox_configuration(entry),
+            {"environment": "a"},
+        )
+        self.assertEqual(
+            executor._integration_verification_command(entry),
+            ["/bound/python", "-c", "pass"],
+        )
 
     def test_production_executor_skips_official_evaluator_after_infrastructure_failure(self):
         executor = object.__new__(Phase3ProductionExecutor)

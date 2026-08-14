@@ -32,6 +32,12 @@ from .phase3_pilot_runner import (
     build_phase3_experiment_protocol,
     materialize_phase3_runtime_taskpack,
 )
+from .phase3_public_verification import (
+    public_environment_host_command,
+    public_environment_library_view,
+    public_environment_path,
+    validate_public_verification_environment,
+)
 from .phase3_swe_evo_evaluator import Phase3SweEvoEvaluator
 from .resource_envelope import (
     Phase3PilotResourceOwner,
@@ -67,6 +73,7 @@ def build_phase3_live_bundle(
     operator_identity,
     epoch_number=1,
     docker_socket="unix:///run/user/1013/podman/podman.sock",
+    public_verification_environments=None,
 ):
     """Materialize a provider-authorized bundle from frozen provider-free inputs."""
 
@@ -137,12 +144,18 @@ def build_phase3_live_bundle(
         repository_sources,
         selection["selection"]["ordered_instance_ids"],
     )
+    public_environments = _validate_public_verification_environments(
+        public_verification_environments,
+        selection["selection"]["ordered_instance_ids"],
+    )
     for instance_id in selection["selection"]["ordered_instance_ids"]:
+        public_environment = public_environments[instance_id]
         protocols[instance_id] = build_phase3_experiment_protocol(
             instance_id=instance_id,
             preregistration=materialization["preregistrations_by_instance"][instance_id],
             repository_source=sources[instance_id],
             common_evaluator_artifact=evaluator_artifact,
+            public_verification_environment=public_environment,
         )
         runtime_taskpacks[instance_id] = materialize_phase3_runtime_taskpack(
             instance_id=instance_id,
@@ -150,6 +163,7 @@ def build_phase3_live_bundle(
             project_root=sources[instance_id],
             output_root=root / "taskpacks" / _compact_id(instance_id),
             model=pilot_contract["contract"]["execution_profile"]["model"]["model"],
+            public_verification_environment=public_environment,
         )
     evaluator_environment = {
         "schema_version": "phase3_evaluator_environment.v1",
@@ -177,6 +191,7 @@ def build_phase3_live_bundle(
         "repository-sources.json": sources,
         "evaluator-environment.json": evaluator_environment,
     }
+    authorities["public-verification-environments.json"] = public_environments
     artifact_sha256 = {}
     for filename, value in authorities.items():
         publication = publish_immutable_json(
@@ -238,6 +253,7 @@ def run_phase3_live_bundle(bundle_root, pilot_root, *, max_executions=None):
         values["selection-authority.json"]
     )
     materialization = values["instance-materialization.json"]
+    public_environments = values.get("public-verification-environments.json")
     binding = approved_phase3_resource_envelope_binding()
     pilot_id = "phase3-live-" + bundle["bundle_sha256"][:16]
     owner = Phase3PilotResourceOwner(binding, pilot_id=pilot_id)
@@ -260,7 +276,35 @@ def run_phase3_live_bundle(bundle_root, pilot_root, *, max_executions=None):
             protocols_by_instance=values["protocols.json"],
             runtime_release=values["runtime-release.json"],
             runtime_taskpacks_by_instance=values["runtime-taskpacks.json"],
-            sandbox_configuration=_live_sandbox_configuration(pilot_root),
+            sandbox_configuration=(
+                _live_sandbox_configuration(pilot_root)
+                if public_environments is None
+                else None
+            ),
+            sandbox_configurations_by_instance=(
+                None
+                if public_environments is None
+                else {
+                    instance_id: _live_sandbox_configuration(
+                        pilot_root,
+                        public_environment=public_environments[instance_id],
+                    )
+                    for instance_id in bundle["ordered_instance_ids"]
+                }
+            ),
+            integration_verification_commands_by_instance=(
+                None
+                if public_environments is None
+                else {
+                    instance_id: public_environment_host_command(
+                        public_environments[instance_id],
+                        values["protocols.json"][instance_id]["acceptance"][
+                            "command"
+                        ],
+                    )
+                    for instance_id in bundle["ordered_instance_ids"]
+                }
+            ),
             common_evaluator_artifact=(
                 Path(values["runtime-release.json"]["runtime_root"])
                 / "agentteam_runtime"
@@ -334,7 +378,7 @@ def _build_live_authorization(pilot_contract, epoch, *, operator_identity):
     }
 
 
-def _live_sandbox_configuration(pilot_root):
+def _live_sandbox_configuration(pilot_root, public_environment=None):
     root = Path(pilot_root).resolve()
     root.mkdir(parents=True, mode=0o700, exist_ok=True)
     canary = root / "gold-canary"
@@ -360,6 +404,16 @@ def _live_sandbox_configuration(pilot_root):
         "PATH": "/opt/agentteam/bin:/usr/bin:/bin",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+    dependency_view = None
+    if public_environment is not None:
+        public_environment = validate_public_verification_environment(
+            public_environment
+        )
+        dependency_view = public_environment_library_view(public_environment)
+        environment["PATH"] = public_environment_path(
+            public_environment,
+            environment["PATH"],
+        )
     for name in (
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
         "http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -386,7 +440,7 @@ def _live_sandbox_configuration(pilot_root):
                 "/etc/nsswitch.conf", "/etc/gai.conf", "/etc/ssl/certs",
             )
             if Path(path).exists()
-        ],
+        ] + ([dependency_view] if dependency_view is not None else []),
         "credential_mounts": credentials,
         "environment": environment,
         "canary_path": str(canary),
@@ -410,6 +464,24 @@ def _validate_repository_sources(sources, ordered_ids):
     if not isinstance(sources, dict) or set(sources) != set(ordered_ids):
         raise Phase3LivePilotError("repository sources do not cover selection")
     return {key: str(Path(sources[key]).resolve(strict=True)) for key in ordered_ids}
+
+
+def _validate_public_verification_environments(environments, ordered_ids):
+    if environments is None:
+        raise Phase3LivePilotError(
+            "new live bundles require public verification environments"
+        )
+    if not isinstance(environments, dict) or set(environments) != set(ordered_ids):
+        raise Phase3LivePilotError(
+            "public verification environments do not cover selection"
+        )
+    return {
+        instance_id: validate_public_verification_environment(
+            environments[instance_id],
+            instance_id=instance_id,
+        )
+        for instance_id in ordered_ids
+    }
 
 
 def _codex_version():

@@ -1626,16 +1626,19 @@ time separate. It also accounts for provider usage in unsealed failed runs as
 infrastructure waste. Frozen experiment result schemas and historical run
 artifacts remain unchanged.
 
-Do not expand the pilot to all modes or instances until a new execution
-decision closes both prerequisites:
+Provider-free implementation now closes the environment mechanism in items
+1-3 below for the unused `psf__requests_v2.12.2_v2.12.3` probe. It does not
+retroactively repair v12-v19 and does not authorize a provider call. Do not
+expand the pilot until a new execution decision freezes the replacement
+selection and completes item 4:
 
-1. replace the Requests calibration instance with a deterministic task whose
-   public tests do not make network latency the dominant wall-time signal;
-2. freeze a controller-owned public verification runner with that instance so
+1. freeze the selected deterministic Requests task whose focused public
+   assertion does not use network latency;
+2. bind the controller-owned public verification environment so
    taskpack, integration, and common acceptance use an environment equivalent
    to the official benchmark image;
-3. prove that the public runner exposes neither the Podman control socket nor
-   evaluator-only Arrow fields, gold patches, or hidden test patches;
+3. retain the proof that the public runner exposes neither the Podman control
+   socket nor evaluator-only Arrow fields, gold patches, or hidden test patches;
 4. execute one repetition of each mode before expanding to the full pilot, and
    compare quality per total and uncached token rather than raw totals alone.
 

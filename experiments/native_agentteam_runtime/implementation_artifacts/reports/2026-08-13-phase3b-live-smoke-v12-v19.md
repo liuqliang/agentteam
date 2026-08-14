@@ -2,7 +2,8 @@
 
 - Decision: `DEC-P3B-live-pilot-execution`
 - Evidence level: `L3`
-- Status: execution plumbing proven; scored comparison blocked
+- Status: execution plumbing and fair public verification proven; new scored
+  epoch not frozen
 - Cost-profiler implementation base: `1c73bcb`
 
 ## Result
@@ -91,6 +92,45 @@ The live execution path was corrected to:
 The affected suite passed 84 tests with 5 environment skips. The complete
 runtime suite passed 1,162 tests with 7 skips.
 
+## Public verification repair
+
+Provider-free follow-up on 2026-08-14 implemented
+`phase3_public_verification_environment.v1`. New live bundles now require one
+digest-bound environment authority per instance. The controller extracts only
+`/opt/miniconda3/envs/testbed` from the digest-pinned official image and binds
+the complete tree, Python executable, Python version, instance ID, image digest,
+and fixed namespace path. The environment is mounted read-only; the Podman
+socket, Arrow dataset, evaluator harness, gold patch, and hidden test patch are
+not provider views.
+
+The unused `psf__requests_v2.12.2_v2.12.3` instance was selected for a
+provider-free calibration probe. Its exact image environment contains Python
+3.9.20 and a 191,394,742-byte dependency tree with 9,019 files. A public
+behavior assertion for parameter handling on `http+unix` URLs produced:
+
+| State | Repetitions | Result | Per-run wall time |
+| --- | ---: | --- | ---: |
+| Frozen base commit | 3 | RED | 0.04 s |
+| Independently derived one-line fix | 3 | GREEN | 0.04-0.10 s |
+
+The same RED and GREEN results were reproduced inside the actual bubblewrap
+provider namespace. Environment extraction plus authority creation took 2.40
+seconds; a complete sandbox authority, canary probe, source revalidation, and
+assertion launch took 5.62 seconds. This is deterministic controller overhead,
+not model-token cost.
+
+The runtime taskpack retains a portable `python3` command. Worker PATH,
+integration verification, and common visible evaluation resolve that command
+to the same bound Python 3.9 environment. The protocol binds the environment
+authority digest through `dependency_cache_policy`. Ordinary library views keep
+their prior 64 MiB/10,000-entry integrity bounds; only an explicit
+`bounded_dependency_tree.v1` view receives the 512 MiB/20,000-entry bound.
+
+No provider call or scored execution was made during this repair. The
+diagnostic Requests change was removed from the temporary source worktree after
+the RED/GREEN proof. The focused Phase 3 runner and environment suite passed 32
+tests. The complete runtime suite passed 1,173 tests with 7 environment skips.
+
 ## Blocking findings
 
 The full 18-to-27 execution pilot must not start yet.
@@ -100,11 +140,10 @@ The full 18-to-27 execution pilot must not start yet.
    real v19 patch reached the frozen 1,800-second timeout. Quality may still be
    measurable after an evaluator repair, but total wall time is not currently
    a controlled mode-comparison metric.
-2. Worker-visible verification is not environment-equivalent to the official
-   evaluator. The common and taskpack acceptance commands use host Python 3.12,
-   where Requests 2.4.0 cannot import its vendored urllib3, while the official
-   container uses Python 3.9. Direct and full modes could therefore reject a
-   correct patch before official scoring.
+2. Epochs v12-v19 remain bound to host Python 3.12 and are not valid comparison
+   samples. The implementation now enforces image-equivalent public Python for
+   every newly built live bundle, but a new selection, protocol, and epoch must
+   be frozen before that repair has scored evidence.
 3. Historical failed epochs did not project provider usage into pilot state.
    Commit `449be49` fixes future recovery and sealing, but historical states
    remain immutable and are accounted for by this report.
@@ -130,5 +169,6 @@ provider output and evaluator logs:
 - frozen SWE-bench commit:
   `9b83d5af943ba7a17567336f5b18239f73960219`
 
-The next execution decision must repair and re-preflight evaluator stability
-and equal-input verification before authorizing another scored epoch.
+The next execution decision must freeze the unused deterministic instance, its
+public assertion, and its new environment authority, then run exactly one
+repetition per mode before considering a wider scored pilot.

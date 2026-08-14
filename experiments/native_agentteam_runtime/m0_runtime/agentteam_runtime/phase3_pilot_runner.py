@@ -39,6 +39,11 @@ from .phase3_pilot import (
     admit_phase3_live_launch,
     validate_phase3_pilot_contract,
 )
+from .phase3_public_verification import (
+    public_environment_namespace_command,
+    public_environment_taskpack_command,
+    validate_public_verification_environment,
+)
 from .taskpack import draft_taskpack_files, freeze_taskpack
 from .taskpack import BENCHMARK_REPOSITORY_WRITE_SCOPE
 
@@ -78,6 +83,7 @@ def build_phase3_experiment_protocol(
     preregistration,
     repository_source,
     common_evaluator_artifact,
+    public_verification_environment=None,
 ):
     """Translate one frozen benchmark authority into executable protocol v1."""
 
@@ -93,7 +99,18 @@ def build_phase3_experiment_protocol(
     _verify_repository_mirror(source, repository)
     repository["source"] = str(source)
     task = visible["task"]
-    command = _trusted_acceptance_argv(task["acceptance_commands"][0])
+    if public_verification_environment is None:
+        raise Phase3PilotRunnerError(
+            "public verification environment is required"
+        )
+    public_environment = validate_public_verification_environment(
+        public_verification_environment,
+        instance_id=instance_id,
+    )
+    command = _trusted_acceptance_argv(
+        task["acceptance_commands"][0],
+        public_verification_environment=public_environment,
+    )
     evaluator = Path(common_evaluator_artifact).resolve(strict=True)
     if evaluator.is_symlink() or not evaluator.is_file():
         raise Phase3PilotRunnerError("common evaluator artifact is unsafe")
@@ -143,7 +160,8 @@ def build_phase3_experiment_protocol(
             "host_class": execution["host_class"],
             "cpu_limit": execution["cpu_limit"],
             "memory_limit_bytes": execution["memory_limit_bytes"],
-            "dependency_cache_policy": "declared_equal_read_only",
+            "dependency_cache_policy": "declared_equal_read_only:"
+            + public_environment["authority_sha256"],
             "max_inflight_model_invocations": 1,
         },
         "seed": 0,
@@ -187,6 +205,7 @@ def materialize_phase3_runtime_taskpack(
     project_root,
     output_root,
     model,
+    public_verification_environment=None,
 ):
     """Build the runtime taskpack paired with one benchmark semantic authority."""
 
@@ -200,6 +219,14 @@ def materialize_phase3_runtime_taskpack(
     if semantic_digest != canonical_json_sha256(benchmark_taskpack["taskpack"]):
         raise Phase3PilotRunnerError("benchmark direct taskpack digest changed")
     project_root = Path(project_root).resolve(strict=True)
+    if public_verification_environment is None:
+        raise Phase3PilotRunnerError(
+            "public verification environment is required"
+        )
+    public_environment = validate_public_verification_environment(
+        public_verification_environment,
+        instance_id=instance_id,
+    )
     output_root = Path(output_root).resolve()
     draft_root = output_root / "draft"
     frozen_root = output_root / "frozen"
@@ -223,8 +250,9 @@ def materialize_phase3_runtime_taskpack(
         taskpack_id=task_id,
         read_scope=["."],
         write_scope=["benchmark-candidate-placeholder/"],
-        verification_command=_taskpack_acceptance_argv(
-            task["tasks"][0]["acceptance_commands"][0]
+        verification_command=public_environment_taskpack_command(
+            public_environment,
+            task["tasks"][0]["acceptance_commands"][0],
         ),
         codex_timeout_seconds=task["shared_budget"]["max_wall_time_seconds"],
         codex_model=model,
@@ -271,6 +299,8 @@ class Phase3ProductionExecutor:
         common_evaluator_artifact,
         official_evaluator,
         integration_verification_command=None,
+        sandbox_configurations_by_instance=None,
+        integration_verification_commands_by_instance=None,
         resource_envelope_binding=None,
         resource_hierarchy_references=None,
     ):
@@ -287,6 +317,12 @@ class Phase3ProductionExecutor:
         self.official_evaluator = official_evaluator
         self.integration_verification_command = copy.deepcopy(
             integration_verification_command
+        )
+        self.sandbox_configurations_by_instance = copy.deepcopy(
+            sandbox_configurations_by_instance
+        )
+        self.integration_verification_commands_by_instance = copy.deepcopy(
+            integration_verification_commands_by_instance
         )
         self.resource_envelope_binding = copy.deepcopy(resource_envelope_binding)
         self.resource_references = copy.deepcopy(
@@ -309,7 +345,7 @@ class Phase3ProductionExecutor:
         adapter = self._adapter(entry)
         execute_bound_experiment_mode(
             allocation,
-            sandbox_configuration=self.sandbox_configuration,
+            sandbox_configuration=self._sandbox_configuration(entry),
             adapter=adapter,
             common_finalizer=ExperimentCommonFinalizer(
                 evaluator_artifact=self.common_evaluator_artifact,
@@ -438,6 +474,7 @@ class Phase3ProductionExecutor:
 
     def _adapter(self, entry):
         mode = entry["mode"]
+        verification_command = self._integration_verification_command(entry)
         if mode == "single_codex":
             return SingleCodexModeAdapter(
                 provider=NativeSingleCodexProvider(
@@ -448,15 +485,51 @@ class Phase3ProductionExecutor:
             )
         if mode == "agentteam_full":
             return AgentTeamFullModeAdapter(
-                integration_verification_command=self.integration_verification_command
+                integration_verification_command=verification_command
             )
         taskpack = self.taskpacks[entry["instance_id"]]
         return AgentTeamDirectModeAdapter(
             taskpack["frozen_taskpack_dir"],
             semantic_authority_sha256=taskpack["semantic_authority_sha256"],
             runtime_taskpack_sha256=taskpack["runtime_taskpack_sha256"],
-            integration_verification_command=self.integration_verification_command,
+            integration_verification_command=verification_command,
         )
+
+    def _sandbox_configuration(self, entry):
+        configurations = getattr(
+            self,
+            "sandbox_configurations_by_instance",
+            None,
+        )
+        if configurations is None:
+            return copy.deepcopy(self.sandbox_configuration)
+        try:
+            return copy.deepcopy(
+                configurations[entry["instance_id"]]
+            )
+        except (KeyError, TypeError) as exc:
+            raise Phase3PilotRunnerError(
+                "instance sandbox configuration is unavailable"
+            ) from exc
+
+    def _integration_verification_command(self, entry):
+        commands = getattr(
+            self,
+            "integration_verification_commands_by_instance",
+            None,
+        )
+        if commands is None:
+            return copy.deepcopy(
+                getattr(self, "integration_verification_command", None)
+            )
+        try:
+            return copy.deepcopy(
+                commands[entry["instance_id"]]
+            )
+        except (KeyError, TypeError) as exc:
+            raise Phase3PilotRunnerError(
+                "instance integration verification command is unavailable"
+            ) from exc
 
     def _terminal_result(
         self, entry, run_dir, score, *, evaluator_failed=False
@@ -1255,19 +1328,30 @@ def _absolute_argv(command):
 def _taskpack_acceptance_argv(command):
     """Express common test frontends through the taskpack-safe Python entrypoint."""
 
-    if (
-        isinstance(command, list)
-        and command
-        and isinstance(command[0], str)
-        and Path(command[0]).name == "pytest"
+    if not isinstance(command, list) or not command or not isinstance(
+        command[0], str
     ):
+        return list(command)
+    executable = Path(command[0]).name
+    if executable == "pytest":
         return ["python3", "-m", "pytest", *command[1:]]
+    if executable.startswith("python"):
+        return ["python3", *command[1:]]
     return list(command)
 
 
-def _trusted_acceptance_argv(command):
+def _trusted_acceptance_argv(
+    command,
+    *,
+    public_verification_environment=None,
+):
     """Resolve visible acceptance through an evaluator-approved executable."""
 
+    if public_verification_environment is not None:
+        return public_environment_namespace_command(
+            public_verification_environment,
+            command,
+        )
     normalized = _taskpack_acceptance_argv(command)
     if normalized[:3] == ["python3", "-m", "pytest"]:
         return [str(Path(os.sys.executable).resolve()), *normalized[1:]]
