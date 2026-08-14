@@ -7767,6 +7767,91 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             with self.assertRaises(ExperimentContractError):
                 _publish_mode_order_authority(root, changed)
 
+    def test_failed_runtime_without_provider_preserves_launcher_cause(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp, "agentteam_direct")
+
+            frozen = Path(tmp) / "frozen"
+            frozen.mkdir()
+            adapter = AgentTeamDirectModeAdapter(frozen)
+            failed = {
+                "terminal_status": "failed",
+                "adapter_output": {
+                    "returncode": 1,
+                    "scheduler_status": None,
+                    "stderr": "bounded launcher failure\n",
+                },
+                "launcher_diagnostic": {
+                    "sha256": "a" * 64,
+                },
+            }
+            with self._mode_execution_boundary(), patch.object(
+                AgentTeamDirectModeAdapter,
+                "preflight",
+                return_value=None,
+            ), patch.object(
+                AgentTeamDirectModeAdapter,
+                "execute",
+                return_value=failed,
+            ), patch.object(
+                AgentTeamDirectModeAdapter,
+                "failure_context",
+                return_value={
+                    "candidate_workspace": str(fixture["snapshot"]),
+                    "taskpack": None,
+                    "adapter_output": {},
+                },
+            ), self.assertRaisesRegex(
+                ExperimentModeError,
+                "runtime failed before provider registration.*returncode=1",
+            ):
+                self._controller(fixture).execute(adapter)
+            diagnostic = next(
+                (
+                    fixture["run_dir"]
+                    / "results"
+                    / "failure-finalization-diagnostics"
+                ).glob("*.json")
+            )
+            value = json.loads(diagnostic.read_text(encoding="utf-8"))
+            self.assertEqual(
+                value["original_error"]["type"],
+                "ExperimentModeError",
+            )
+            self.assertEqual(
+                value["finalizer_error"]["message"],
+                "experiment lifecycle registry is empty",
+            )
+
+    def test_runtime_launcher_result_is_persisted_before_controller_finalization(self):
+        from agentteam_runtime.agentteam import (
+            _experiment_runtime_launcher_result,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = _experiment_runtime_launcher_result(
+                subprocess.CompletedProcess(
+                    ["agentteam-runtime"],
+                    1,
+                    stdout="runtime stdout\n",
+                    stderr="runtime stderr\n",
+                ),
+                run_dir=tmp,
+            )
+            reference = result["launcher_diagnostic"]
+            path = Path(reference["path"])
+            self.assertTrue(path.is_file())
+            value = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(value["terminal_status"], "failed")
+            self.assertEqual(
+                value["adapter_output"]["stderr"],
+                "runtime stderr\n",
+            )
+            self.assertEqual(
+                value["diagnostic_sha256"],
+                reference["sha256"],
+            )
+
     def test_direct_mode_verifies_digest_and_overrides_project_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

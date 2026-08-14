@@ -14114,7 +14114,7 @@ def _experiment_runtime_launcher_result(
         terminal_status = "completed"
     else:
         terminal_status = "infrastructure_failed"
-    return {
+    result = {
         "terminal_status": terminal_status,
         "adapter_output": {
             "returncode": returncode,
@@ -14127,6 +14127,37 @@ def _experiment_runtime_launcher_result(
         },
         "runtime_run_dir": str(Path(run_dir).resolve()),
     }
+    diagnostic_body = {
+        "schema_version": "experiment_runtime_launcher_diagnostic.v1",
+        "terminal_status": result["terminal_status"],
+        "adapter_output": copy.deepcopy(result["adapter_output"]),
+        "runtime_run_dir": result["runtime_run_dir"],
+    }
+    diagnostic_id = canonical_json_sha256(diagnostic_body)
+    diagnostic = {
+        **diagnostic_body,
+        "diagnostic_sha256": diagnostic_id,
+    }
+    diagnostic_path = (
+        Path(run_dir)
+        / "results"
+        / "runtime-launcher-diagnostics"
+        / f"{diagnostic_id}.json"
+    )
+    if diagnostic_path.exists():
+        if json.loads(diagnostic_path.read_text(encoding="utf-8")) != diagnostic:
+            raise AgentTeamCliError(
+                "experiment runtime launcher diagnostic conflicts",
+                diagnostic_path=str(diagnostic_path),
+            )
+    else:
+        _atomic_write_json(diagnostic_path, diagnostic, replace=False)
+        diagnostic_path.chmod(0o400)
+    result["launcher_diagnostic"] = {
+        "path": str(diagnostic_path.resolve()),
+        "sha256": diagnostic_id,
+    }
+    return result
 
 
 def _publish_experiment_runtime_context(run_dir, context):

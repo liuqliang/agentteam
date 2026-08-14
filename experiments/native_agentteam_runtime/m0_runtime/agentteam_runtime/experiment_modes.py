@@ -46,6 +46,7 @@ from .experiment_sandbox import (
     build_provider_sandbox_descriptor,
     certify_candidate_repository,
     ExperimentEvaluationBlocked,
+    ExperimentSandboxError,
     experiment_lifecycle_authority_root,
     publish_evaluator_reference,
     publish_experiment_launch_registration,
@@ -572,12 +573,25 @@ class ExperimentModeController:
         result = None
         try:
             adapter_result = adapter.execute(request)
-            invocation_set_reference = (
-                publish_registered_model_invocation_set_reference(
-                    request.authority_root,
-                    request.run_manifest["experiment_run_id"],
+            try:
+                invocation_set_reference = (
+                    publish_registered_model_invocation_set_reference(
+                        request.authority_root,
+                        request.run_manifest["experiment_run_id"],
+                    )
                 )
-            )
+            except ExperimentSandboxError as exc:
+                if (
+                    str(exc) == "experiment lifecycle registry is empty"
+                    and isinstance(adapter_result, dict)
+                    and adapter_result.get("terminal_status")
+                    not in {"completed", "budget_stopped"}
+                ):
+                    raise _runtime_launcher_failure(
+                        adapter_result,
+                        mode=mode,
+                    ) from exc
+                raise
             invocation_manifest = load_model_invocation_set_reference(
                 invocation_set_reference,
                 request.authority_root,
@@ -1400,6 +1414,27 @@ def _normalize_runtime_launcher_output(
             or str(Path(fallback_workspace).resolve(strict=True))
         )
     return result
+
+
+def _runtime_launcher_failure(result, *, mode):
+    output = (
+        result.get("adapter_output")
+        if isinstance(result.get("adapter_output"), dict)
+        else {}
+    )
+    stderr = str(output.get("stderr") or "")
+    diagnostic = (
+        result.get("launcher_diagnostic")
+        if isinstance(result.get("launcher_diagnostic"), dict)
+        else {}
+    )
+    return ExperimentModeError(
+        f"{mode} AgentTeam runtime failed before provider registration: "
+        f"returncode={output.get('returncode')!r} "
+        f"scheduler_status={output.get('scheduler_status')!r} "
+        f"stderr_sha256={hashlib.sha256(stderr.encode('utf-8')).hexdigest()} "
+        f"launcher_diagnostic_sha256={diagnostic.get('sha256')!r}"
+    )
 
 
 def _normalize_mode_result(
