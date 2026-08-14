@@ -3978,7 +3978,7 @@ def _experiment_mode(value):
 
 
 def _normalize_experiment_model_policy(value):
-    required = {
+    base_fields = {
         "backend",
         "codex_cli_version",
         "model",
@@ -3990,7 +3990,14 @@ def _normalize_experiment_model_policy(value):
         "tool_allowlist",
         "max_inflight_model_invocations",
     }
-    if not isinstance(value, dict) or set(value) != required:
+    context_fields = {
+        "tool_output_token_limit",
+        "web_search_policy",
+    }
+    if not isinstance(value, dict) or set(value) not in (
+        base_fields,
+        base_fields | context_fields,
+    ):
         raise ExperimentSandboxError(
             "experiment model policy fields are invalid"
         )
@@ -4027,6 +4034,22 @@ def _normalize_experiment_model_policy(value):
             "experiment model policy tool allowlist is invalid"
         )
     normalized["tool_allowlist"] = list(tools)
+    if context_fields.issubset(value):
+        token_limit = value["tool_output_token_limit"]
+        if (
+            not isinstance(token_limit, int)
+            or isinstance(token_limit, bool)
+            or not 256 <= token_limit <= 100_000
+        ):
+            raise ExperimentSandboxError(
+                "experiment model policy tool output token limit is invalid"
+            )
+        if value["web_search_policy"] != "disabled":
+            raise ExperimentSandboxError(
+                "experiment model policy web search must be disabled"
+            )
+        normalized["tool_output_token_limit"] = token_limit
+        normalized["web_search_policy"] = "disabled"
     if value["max_inflight_model_invocations"] != 1:
         raise ExperimentSandboxError(
             "experiment model policy must use one provider lane"

@@ -13751,6 +13751,7 @@ def _run_frozen_taskpack(
     experiment_runtime_context=None,
     inherit_launcher_selection=True,
     trusted_verification_command=None,
+    trusted_codex_command=None,
 ):
     loaded = load_taskpack(frozen_taskpack_dir)
     loaded_taskpack = loaded["taskpack"]
@@ -13876,6 +13877,7 @@ def _run_frozen_taskpack(
         initial_integration_base_ref=initial_integration_base_ref,
         trusted_project_root=trusted_project_root,
         trusted_verification_command=trusted_verification_command,
+        trusted_codex_command=trusted_codex_command,
         trusted_model=(
             experiment_runtime_context["model_policy"]["model"]
             if experiment_runtime_context is not None

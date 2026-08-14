@@ -1038,8 +1038,12 @@ class NativeSingleCodexProvider:
                 "model_reasoning_effort="
                 f"{model_policy['reasoning_profile']}"
             ),
-            "-",
         ]
+        command = _with_experiment_codex_context_policy(
+            command,
+            model_policy,
+        )
+        command.append("-")
         supported = is_supported_codex_command(command)
         if not supported:
             raise ExperimentModeError(
@@ -1194,6 +1198,12 @@ class AgentTeamDirectModeAdapter:
             experiment_runtime_context=(
                 _experiment_runtime_context(request)
             ),
+            trusted_codex_command=(
+                _with_experiment_codex_context_policy(
+                    ["codex", "exec"],
+                    request.model_policy,
+                )
+            ),
             inherit_launcher_selection=False,
         )
         result = _normalize_runtime_launcher_output(
@@ -1282,6 +1292,10 @@ class AgentTeamFullModeAdapter:
             draft_root=str(draft_root),
             taskpack_id="experiment-full-mode-author",
             author_runtime="codex",
+            codex_command=_with_experiment_codex_context_policy(
+                ["codex", "exec"],
+                request.model_policy,
+            ),
             codex_model=request.model_policy["model"],
             codex_timeout_seconds=int(
                 request.protocol["budgets"]["max_wall_time_seconds"]
@@ -1342,6 +1356,12 @@ class AgentTeamFullModeAdapter:
             ),
             experiment_runtime_context=(
                 _experiment_runtime_context(request)
+            ),
+            trusted_codex_command=(
+                _with_experiment_codex_context_policy(
+                    ["codex", "exec"],
+                    request.model_policy,
+                )
             ),
             inherit_launcher_selection=False,
         )
@@ -1541,7 +1561,7 @@ def _common_mode_contract(
 
 def _model_policy(protocol):
     environment = protocol["environment"]
-    return {
+    policy = {
         "backend": environment["backend"],
         "codex_cli_version": environment["codex_cli_version"],
         "model": environment["model"],
@@ -1559,6 +1579,46 @@ def _model_policy(protocol):
             "max_inflight_model_invocations"
         ],
     }
+    context_fields = {
+        "tool_output_token_limit",
+        "web_search_policy",
+    }
+    present = context_fields.intersection(environment)
+    if present:
+        if present != context_fields:
+            raise ExperimentModeError(
+                "experiment context policy fields must be bound together"
+            )
+        for field in sorted(context_fields):
+            policy[field] = copy.deepcopy(environment[field])
+    return policy
+
+
+def _with_experiment_codex_context_policy(command, model_policy):
+    """Append the frozen model-context controls to one Codex command."""
+
+    command = list(command)
+    context_fields = {
+        "tool_output_token_limit",
+        "web_search_policy",
+    }
+    present = context_fields.intersection(model_policy)
+    if not present:
+        return command
+    if present != context_fields:
+        raise ExperimentModeError(
+            "experiment context policy fields must be bound together"
+        )
+    command.extend(
+        [
+            "-c",
+            "tool_output_token_limit="
+            f"{model_policy['tool_output_token_limit']}",
+            "-c",
+            f'web_search="{model_policy["web_search_policy"]}"',
+        ]
+    )
+    return command
 
 
 def _single_codex_prompt(protocol):

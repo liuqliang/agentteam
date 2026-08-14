@@ -3431,6 +3431,46 @@ def _validate_registered_codex_command(command, model_policy):
         raise ModelInvocationIntegrityError(
             "Codex command reasoning differs from experiment launch policy"
         )
+    context_fields = {
+        "tool_output_token_limit",
+        "web_search_policy",
+    }
+    present = context_fields.intersection(model_policy)
+    if not present:
+        return
+    if present != context_fields:
+        raise ModelInvocationIntegrityError(
+            "experiment context policy fields are incomplete"
+        )
+    expected_configurations = {
+        "tool_output_token_limit": (
+            "tool_output_token_limit="
+            f"{model_policy['tool_output_token_limit']}"
+        ),
+        "web_search_policy": (
+            f'web_search="{model_policy["web_search_policy"]}"'
+        ),
+    }
+    configurations = [
+        command[index + 1]
+        for index, value in enumerate(command)
+        if value == "-c" and index + 1 < len(command)
+    ]
+    configuration_keys = {
+        "tool_output_token_limit": "tool_output_token_limit=",
+        "web_search_policy": "web_search=",
+    }
+    for field, expected in expected_configurations.items():
+        matches = [
+            value
+            for value in configurations
+            if value.startswith(configuration_keys[field])
+        ]
+        if matches != [expected]:
+            raise ModelInvocationIntegrityError(
+                "Codex command context policy differs from experiment "
+                f"launch policy: {field}"
+            )
 
 
 def _validate_call_context(context, *, supported):

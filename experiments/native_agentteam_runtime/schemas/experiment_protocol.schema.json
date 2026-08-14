@@ -165,6 +165,14 @@
     "environment": {
       "type": "object",
       "additionalProperties": false,
+      "dependentRequired": {
+        "tool_output_token_limit": [
+          "web_search_policy"
+        ],
+        "web_search_policy": [
+          "tool_output_token_limit"
+        ]
+      },
       "required": [
         "backend",
         "codex_cli_version",
@@ -221,6 +229,14 @@
             "type": "string",
             "minLength": 1
           }
+        },
+        "tool_output_token_limit": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 100000
+        },
+        "web_search_policy": {
+          "const": "disabled"
         },
         "host_class": {
           "type": "string",

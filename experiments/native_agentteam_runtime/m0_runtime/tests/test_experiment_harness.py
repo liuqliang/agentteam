@@ -751,18 +751,38 @@ def _complete_fake_experiment_invocation(
         supported=True,
         systemd_runner_factory=FakeGatedRunner,
     )
+    command = [
+        "codex",
+        "exec",
+        "-m",
+        context["model"],
+        "-c",
+        (
+            "model_reasoning_effort="
+            f"{context['reasoning_profile']}"
+        ),
+    ]
+    from agentteam_runtime.experiment_sandbox import (
+        load_experiment_launch_registration,
+    )
+
+    registration = load_experiment_launch_registration(
+        context["model_invocation_authority_root"]
+    )
+    if registration is not None and "tool_output_token_limit" in registration[
+        "model_policy"
+    ]:
+        command.extend(
+            [
+                "-c",
+                "tool_output_token_limit="
+                f"{registration['model_policy']['tool_output_token_limit']}",
+                "-c",
+                "web_search=\"disabled\"",
+            ]
+        )
     execution = invocation.execute(
-        [
-            "codex",
-            "exec",
-            "-m",
-            context["model"],
-            "-c",
-            (
-                "model_reasoning_effort="
-                f"{context['reasoning_profile']}"
-            ),
-        ],
+        command,
         cwd=workspace_root,
         input_text="deterministic experiment fixture",
         timeout_seconds=10,
@@ -6941,12 +6961,25 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             self.assertEqual(patch_path.stat().st_mode & 0o777, 0o400)
 
     @staticmethod
-    def _fixture(root, mode, *, direct_taskpack_sha256=None):
+    def _fixture(
+        root,
+        mode,
+        *,
+        direct_taskpack_sha256=None,
+        context_policy=False,
+    ):
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         repository = _fixture_repository(root)
         protocol = copy.deepcopy(_protocol())
         protocol["repository"] = repository["repository"]
+        if context_policy:
+            protocol["environment"].update(
+                {
+                    "tool_output_token_limit": 4_000,
+                    "web_search_policy": "disabled",
+                }
+            )
         for seed in range(100):
             seeded_order = sorted(
                 protocol["modes"],
@@ -7201,7 +7234,11 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 return None
 
         with tempfile.TemporaryDirectory() as tmp:
-            fixture = self._fixture(tmp, "single_codex")
+            fixture = self._fixture(
+                tmp,
+                "single_codex",
+                context_policy=True,
+            )
             with self._mode_execution_boundary(), patch(
                 "agentteam_runtime.model_invocation."
                 "SystemdGatedExecution",
@@ -7287,7 +7324,11 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 return None
 
         with tempfile.TemporaryDirectory() as tmp:
-            fixture = self._fixture(tmp, "single_codex")
+            fixture = self._fixture(
+                tmp,
+                "single_codex",
+                context_policy=True,
+            )
             provider = NativeSingleCodexProvider()
             with self._mode_execution_boundary(), patch(
                 "agentteam_runtime.model_invocation."
@@ -7305,6 +7346,14 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             )
             self.assertIn(
                 "model_reasoning_effort=high",
+                FakeGatedRunner.command,
+            )
+            self.assertIn(
+                "tool_output_token_limit=4000",
+                FakeGatedRunner.command,
+            )
+            self.assertIn(
+                'web_search="disabled"',
                 FakeGatedRunner.command,
             )
 
@@ -7898,6 +7947,7 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 direct_taskpack_sha256=frozen["manifest"][
                     "digest_sha256"
                 ],
+                context_policy=True,
             )
             launches = []
 
@@ -7963,6 +8013,17 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             self.assertEqual(
                 launches[0]["trusted_verification_command"],
                 fixture["protocol"]["acceptance"]["command"],
+            )
+            self.assertEqual(
+                launches[0]["trusted_codex_command"],
+                [
+                    "codex",
+                    "exec",
+                    "-c",
+                    "tool_output_token_limit=4000",
+                    "-c",
+                    'web_search="disabled"',
+                ],
             )
             self.assertEqual(
                 launches[0]["run_root"],
@@ -8417,7 +8478,11 @@ class ExperimentModeAdapterTests(unittest.TestCase):
 
     def test_full_mode_authors_without_direct_taskpack_input(self):
         with tempfile.TemporaryDirectory() as tmp:
-            fixture = self._fixture(tmp, "agentteam_full")
+            fixture = self._fixture(
+                tmp,
+                "agentteam_full",
+                context_policy=True,
+            )
             calls = {"author": [], "freeze": [], "launch": []}
             authored_dir = Path(tmp) / "authored"
             authored_dir.mkdir()
@@ -8524,6 +8589,21 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             self.assertEqual(
                 calls["author"][0]["codex_model"],
                 fixture["protocol"]["environment"]["model"],
+            )
+            self.assertEqual(
+                calls["author"][0]["codex_command"],
+                [
+                    "codex",
+                    "exec",
+                    "-c",
+                    "tool_output_token_limit=4000",
+                    "-c",
+                    'web_search="disabled"',
+                ],
+            )
+            self.assertEqual(
+                calls["launch"][0]["trusted_codex_command"],
+                calls["author"][0]["codex_command"],
             )
             self.assertEqual(
                 calls["author"][0]["codex_timeout_seconds"],
@@ -8829,8 +8909,62 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 policy,
             )
 
+        context_policy = {
+            **policy,
+            "tool_output_token_limit": 4_000,
+            "web_search_policy": "disabled",
+        }
+        command = [
+            "codex",
+            "exec",
+            "-m",
+            "codex-test-model",
+            "-c",
+            "model_reasoning_effort=high",
+            "-c",
+            "tool_output_token_limit=4000",
+            "-c",
+            'web_search="disabled"',
+        ]
+        _validate_registered_codex_command(command, context_policy)
+        for invalid in (
+            command[:-2],
+            [*command, "-c", 'web_search="live"'],
+            [*command, "-c", "tool_output_token_limit=4000"],
+        ):
+            with self.assertRaisesRegex(
+                ModelInvocationIntegrityError,
+                "context policy differs",
+            ):
+                _validate_registered_codex_command(
+                    invalid,
+                    context_policy,
+                )
+
 
 class ExperimentContractSchemaTests(unittest.TestCase):
+    def test_protocol_context_policy_is_atomic_and_legacy_compatible(self):
+        legacy = _protocol()
+        self.assertIs(validate_experiment_protocol(legacy), legacy)
+
+        extended = copy.deepcopy(legacy)
+        extended["environment"].update(
+            {
+                "tool_output_token_limit": 4_000,
+                "web_search_policy": "disabled",
+            }
+        )
+        self.assertIs(validate_experiment_protocol(extended), extended)
+
+        for field in (
+            "tool_output_token_limit",
+            "web_search_policy",
+        ):
+            partial = copy.deepcopy(extended)
+            partial["environment"].pop(field)
+            with self.assertRaises(ExperimentContractError):
+                validate_experiment_protocol(partial)
+
     def test_protocol_run_binding_and_state_schemas_are_executable(self):
         protocol = _protocol()
         manifest = build_experiment_run_manifest(

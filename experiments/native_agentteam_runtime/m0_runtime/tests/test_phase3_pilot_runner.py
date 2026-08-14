@@ -768,6 +768,14 @@ index b859599..f06e5bb 100644
             self.assertEqual(protocol["repository"]["source"], str(repository))
             self.assertEqual(protocol["seed"], 0)
             self.assertEqual(
+                protocol["environment"]["tool_output_token_limit"],
+                4_000,
+            )
+            self.assertEqual(
+                protocol["environment"]["web_search_policy"],
+                "disabled",
+            )
+            self.assertEqual(
                 protocol["evaluator"]["candidate_patch_policy"],
                 {
                     "submission": "complete_candidate_patch",

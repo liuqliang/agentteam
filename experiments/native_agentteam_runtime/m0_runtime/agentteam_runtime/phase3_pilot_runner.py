@@ -79,6 +79,8 @@ _CANDIDATE_PATCH_POLICY = {
     "conflict_outcome": "evaluator_patch_conflict",
     "score_rejected_candidate": False,
 }
+_TOOL_OUTPUT_TOKEN_LIMIT = 4_000
+_WEB_SEARCH_POLICY = "disabled"
 _FORBIDDEN_RESULT_KEYS = {
     "gold_patch",
     "test_patch",
@@ -172,6 +174,8 @@ def build_phase3_experiment_protocol(
             "permission_policy": "never",
             "network_policy": "provider_access",
             "tool_allowlist": ["exec_command", "apply_patch"],
+            "tool_output_token_limit": _TOOL_OUTPUT_TOKEN_LIMIT,
+            "web_search_policy": _WEB_SEARCH_POLICY,
             "host_class": execution["host_class"],
             "cpu_limit": execution["cpu_limit"],
             "memory_limit_bytes": execution["memory_limit_bytes"],

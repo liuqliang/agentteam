@@ -410,6 +410,43 @@ class ContractsMixin:
             )
 
 
+    def test_build_taskpack_runtime_args_appends_trusted_codex_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Bind benchmark Codex context controls.",
+                draft_root=tmp_path / "drafts",
+                taskpack_id="trusted-codex-command",
+                write_scope=["src/"],
+            )
+            frozen = freeze_taskpack(
+                result["taskpack_dir"],
+                tmp_path / "frozen",
+            )
+            trusted_command = [
+                "codex",
+                "exec",
+                "-c",
+                "tool_output_token_limit=4000",
+                "-c",
+                'web_search="disabled"',
+            ]
+
+            args = build_taskpack_runtime_args(
+                frozen["frozen_taskpack_dir"],
+                run_root=tmp_path / "runs",
+                trusted_codex_command=trusted_command,
+            )
+
+            self.assertEqual(
+                args[-len(trusted_command) - 1 :],
+                ["--codex-command", *trusted_command],
+            )
+
+
     def test_build_taskpack_runtime_args_rejects_unbound_trusted_verification(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

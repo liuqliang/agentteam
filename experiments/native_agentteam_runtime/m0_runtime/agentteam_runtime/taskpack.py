@@ -3521,6 +3521,7 @@ def build_taskpack_runtime_args(
     trusted_model=None,
     trusted_codex_timeout_seconds=None,
     trusted_verification_command=None,
+    trusted_codex_command=None,
     worker_max_restart_count=None,
 ):
     taskpack_dir = Path(frozen_taskpack_dir).resolve()
@@ -3577,6 +3578,19 @@ def build_taskpack_runtime_args(
                 "trusted Codex timeout must be an integer from 1 to 86400"
             )
         codex_timeout_seconds = trusted_codex_timeout_seconds
+    if trusted_codex_command is not None:
+        if (
+            runtime_backend != "codex"
+            or not isinstance(trusted_codex_command, list)
+            or not trusted_codex_command
+            or not all(
+                isinstance(part, str) and part
+                for part in trusted_codex_command
+            )
+        ):
+            raise TaskpackValidationError(
+                "trusted Codex command must be a non-empty string array"
+            )
     declared_project_root = taskpack.get("project_root")
     if not isinstance(declared_project_root, str) or not declared_project_root:
         raise TaskpackValidationError("project_root must be a non-empty string")
@@ -3665,6 +3679,8 @@ def build_taskpack_runtime_args(
         args.extend(["--initial-integration-base-ref", str(initial_integration_base_ref)])
     if commit_verified_integration:
         args.append("--commit-verified-integration")
+    if trusted_codex_command is not None:
+        args.extend(["--codex-command", *trusted_codex_command])
     return args
 
 
