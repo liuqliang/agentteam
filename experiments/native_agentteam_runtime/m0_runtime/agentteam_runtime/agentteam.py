@@ -13881,6 +13881,11 @@ def _run_frozen_taskpack(
             if experiment_runtime_context is not None
             else None
         ),
+        trusted_codex_timeout_seconds=(
+            experiment_runtime_context["provider_timeout_seconds"]
+            if experiment_runtime_context is not None
+            else None
+        ),
         worker_max_restart_count=(
             3 if experiment_runtime_context is not None else None
         ),

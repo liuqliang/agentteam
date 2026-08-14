@@ -3519,6 +3519,7 @@ def build_taskpack_runtime_args(
     initial_integration_base_ref=None,
     trusted_project_root=None,
     trusted_model=None,
+    trusted_codex_timeout_seconds=None,
     trusted_verification_command=None,
     worker_max_restart_count=None,
 ):
@@ -3565,6 +3566,17 @@ def build_taskpack_runtime_args(
                 "trusted model requires a Codex taskpack"
             )
         codex_model = trusted_model.strip()
+    if trusted_codex_timeout_seconds is not None:
+        if (
+            runtime_backend != "codex"
+            or not isinstance(trusted_codex_timeout_seconds, int)
+            or isinstance(trusted_codex_timeout_seconds, bool)
+            or not 1 <= trusted_codex_timeout_seconds <= 86400
+        ):
+            raise TaskpackValidationError(
+                "trusted Codex timeout must be an integer from 1 to 86400"
+            )
+        codex_timeout_seconds = trusted_codex_timeout_seconds
     declared_project_root = taskpack.get("project_root")
     if not isinstance(declared_project_root, str) or not declared_project_root:
         raise TaskpackValidationError("project_root must be a non-empty string")

@@ -5,6 +5,40 @@ except ImportError:
 
 
 class AuthoringMixin:
+    def test_author_invocation_context_preserves_experiment_resource_binding(self):
+        binding = {"schema_version": "phase3_resource_envelope.v1"}
+        hierarchy = {
+            "schema_version": "resource_hierarchy_reference.v1",
+            "run_id": "RUN-RESOURCE-AUTHOR",
+        }
+
+        context = _author_model_invocation_context(
+            taskpack_id="resource-author",
+            draft_root=Path("/tmp/resource-author"),
+            model="test-model",
+            supported=True,
+            supplied={
+                "project": "project",
+                "experiment_mode": "agentteam_full",
+                "resource_envelope_binding": binding,
+                "resource_envelope_required": True,
+                "resource_project_id": "RUN-RESOURCE-AUTHOR",
+                "resource_hierarchy_reference": hierarchy,
+            },
+        )
+
+        self.assertEqual(context["experiment_mode"], "agentteam_full")
+        self.assertEqual(context["resource_envelope_binding"], binding)
+        self.assertIs(context["resource_envelope_required"], True)
+        self.assertEqual(
+            context["resource_project_id"],
+            "RUN-RESOURCE-AUTHOR",
+        )
+        self.assertEqual(
+            context["resource_hierarchy_reference"],
+            hierarchy,
+        )
+
     def test_codex_taskpack_author_defaults_to_workspace_write_sandbox(self):
         command = taskpack_author_module._codex_author_jsonl_command(
             ["codex", "exec", "--skip-git-repo-check"],

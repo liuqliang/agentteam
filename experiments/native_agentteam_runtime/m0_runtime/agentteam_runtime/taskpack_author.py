@@ -960,7 +960,7 @@ def _author_model_invocation_context(
         or f"AUTHOR-OWNER-{uuid.uuid4().hex}"
     )
     project = supplied.get("project") or Path(draft_root).parent.name or "agentteam"
-    return {
+    context = {
         "project": str(project),
         "run_id": str(supplied.get("run_id") or taskpack_id),
         "pursue_id": supplied.get("pursue_id"),
@@ -1011,6 +1011,25 @@ def _author_model_invocation_context(
             "model_invocation_authority_root"
         ),
     }
+    if supplied.get("resource_envelope_binding") is not None:
+        context.update(
+            {
+                "experiment_mode": supplied.get("experiment_mode"),
+                "resource_envelope_binding": supplied[
+                    "resource_envelope_binding"
+                ],
+                "resource_envelope_required": (
+                    supplied.get("resource_envelope_required") is True
+                ),
+                "resource_project_id": supplied.get(
+                    "resource_project_id"
+                ),
+                "resource_hierarchy_reference": supplied.get(
+                    "resource_hierarchy_reference"
+                ),
+            }
+        )
+    return context
 
 
 def _author_lifecycle_result(result_path):

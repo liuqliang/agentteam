@@ -3762,6 +3762,7 @@ def _load_experiment_runtime_context(output_dir):
     }
     optional = {
         "usage_stage",
+        "provider_timeout_seconds",
         "resource_envelope_binding",
         "resource_envelope_required",
         "resource_project_id",
@@ -3776,6 +3777,17 @@ def _load_experiment_runtime_context(output_dir):
         or value["independent_attempt_workspaces"] is not True
     ):
         raise ValueError("experiment runtime context fields are invalid")
+    if (
+        "provider_timeout_seconds" in value
+        and (
+            not isinstance(value["provider_timeout_seconds"], int)
+            or isinstance(value["provider_timeout_seconds"], bool)
+            or not 1 <= value["provider_timeout_seconds"] <= 86400
+        )
+    ):
+        raise ValueError(
+            "experiment runtime provider timeout is invalid"
+        )
     resource_binding = value.get("resource_envelope_binding")
     if resource_binding is not None:
         from .resource_envelope import validate_resource_envelope_binding

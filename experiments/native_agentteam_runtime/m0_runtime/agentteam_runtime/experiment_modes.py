@@ -1283,6 +1283,9 @@ class AgentTeamFullModeAdapter:
             taskpack_id="experiment-full-mode-author",
             author_runtime="codex",
             codex_model=request.model_policy["model"],
+            codex_timeout_seconds=int(
+                request.protocol["budgets"]["max_wall_time_seconds"]
+            ),
             verification_profile=verification_profile,
             author_invocation_context=_register_provider_launch(
                 request,
@@ -1658,6 +1661,9 @@ def _experiment_runtime_context(request, usage_stage=None):
         "controller_required": True,
         "independent_attempt_workspaces": True,
         "model_policy": copy.deepcopy(request.model_policy),
+        "provider_timeout_seconds": int(
+            request.protocol["budgets"]["max_wall_time_seconds"]
+        ),
         "sandbox_configuration": copy.deepcopy(
             request.sandbox_configuration
         ),

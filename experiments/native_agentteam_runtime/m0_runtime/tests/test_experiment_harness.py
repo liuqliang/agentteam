@@ -8526,6 +8526,20 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 fixture["protocol"]["environment"]["model"],
             )
             self.assertEqual(
+                calls["author"][0]["codex_timeout_seconds"],
+                fixture["protocol"]["budgets"][
+                    "max_wall_time_seconds"
+                ],
+            )
+            self.assertEqual(
+                calls["launch"][0]["experiment_runtime_context"][
+                    "provider_timeout_seconds"
+                ],
+                fixture["protocol"]["budgets"][
+                    "max_wall_time_seconds"
+                ],
+            )
+            self.assertEqual(
                 calls["author"][0]["verification_profile"],
                 {
                     "correctness": {

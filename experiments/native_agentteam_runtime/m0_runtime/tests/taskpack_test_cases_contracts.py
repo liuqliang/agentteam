@@ -462,6 +462,68 @@ class ContractsMixin:
             self.assertEqual(_arg_value(args, "--codex-timeout-seconds"), "123")
 
 
+    def test_build_taskpack_runtime_args_uses_trusted_experiment_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            run_root = tmp_path / "runs"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Build runtime args with a frozen experiment timeout.",
+                draft_root=drafts,
+                taskpack_id="trusted-timeout-runtime-args",
+                write_scope=["src/"],
+                codex_timeout_seconds=120,
+            )
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+
+            args = build_taskpack_runtime_args(
+                frozen["frozen_taskpack_dir"],
+                run_root=run_root,
+                trusted_codex_timeout_seconds=1800,
+            )
+
+            self.assertEqual(
+                _arg_value(args, "--codex-timeout-seconds"),
+                "1800",
+            )
+            self.assertEqual(
+                _arg_value(args, "--lease-timeout-seconds"),
+                "1860",
+            )
+
+
+    def test_build_taskpack_runtime_args_rejects_invalid_trusted_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            frozen_root = tmp_path / "frozen"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Reject an invalid trusted timeout.",
+                draft_root=drafts,
+                taskpack_id="invalid-trusted-timeout",
+                write_scope=["src/"],
+            )
+            frozen = freeze_taskpack(result["taskpack_dir"], frozen_root)
+
+            for invalid in (True, 0, 86401, "1800"):
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                    TaskpackValidationError,
+                    "trusted Codex timeout",
+                ):
+                    build_taskpack_runtime_args(
+                        frozen["frozen_taskpack_dir"],
+                        run_root=tmp_path / f"runs-{invalid}",
+                        trusted_codex_timeout_seconds=invalid,
+                    )
+
+
     def test_reuse_repo_map_handoff_in_taskpack_removes_repo_map_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
