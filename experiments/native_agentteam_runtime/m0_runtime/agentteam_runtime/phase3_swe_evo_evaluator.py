@@ -215,6 +215,21 @@ class Phase3SweEvoEvaluator:
             "timeout_seconds": self.timeout_seconds,
         }
 
+    def validate_environment(self):
+        """Fail before provider launch when frozen harness imports are unusable."""
+
+        modules = self._harness_modules()
+        required = {"docker", "make_test_spec", "run_instance"}
+        if not isinstance(modules, dict) or not required.issubset(modules):
+            raise Phase3SweEvoEvaluatorError(
+                "frozen SWE-bench evaluator dependencies are incomplete"
+            )
+        return {
+            "schema_version": "phase3_evaluator_environment_preflight.v1",
+            "status": "ready",
+            "required_modules": sorted(required),
+        }
+
     def check_patch_compatibility(self, entry, patch_path):
         """Prove candidate and hidden tests compose on the frozen source."""
 

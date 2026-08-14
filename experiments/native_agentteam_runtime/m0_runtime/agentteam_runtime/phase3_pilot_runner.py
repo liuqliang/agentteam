@@ -335,6 +335,20 @@ class Phase3ProductionExecutor:
         if not callable(official_evaluator):
             raise Phase3PilotRunnerError("official evaluator must be callable")
         self.official_evaluator = official_evaluator
+        evaluator_preflight = getattr(
+            self.official_evaluator,
+            "validate_environment",
+            None,
+        )
+        if callable(evaluator_preflight):
+            try:
+                self.evaluator_environment_preflight = evaluator_preflight()
+            except Exception as exc:
+                raise Phase3PilotRunnerError(
+                    "official evaluator environment preflight failed"
+                ) from exc
+        else:
+            self.evaluator_environment_preflight = None
         self.integration_verification_command = copy.deepcopy(
             integration_verification_command
         )

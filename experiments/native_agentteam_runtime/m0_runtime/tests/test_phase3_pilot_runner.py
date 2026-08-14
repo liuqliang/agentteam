@@ -411,6 +411,39 @@ class Phase3PilotRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(Phase3SweEvoEvaluatorError, "gold binding"):
             Phase3SweEvoEvaluator._verify_gold_bindings(row, bindings)
 
+    def test_swe_evo_evaluator_preflights_harness_dependencies(self):
+        evaluator = object.__new__(Phase3SweEvoEvaluator)
+        modules = {
+            "docker": object(),
+            "make_test_spec": object(),
+            "run_instance": object(),
+        }
+        with patch.object(
+            evaluator,
+            "_harness_modules",
+            return_value=modules,
+        ) as load:
+            receipt = evaluator.validate_environment()
+
+        self.assertEqual(receipt["status"], "ready")
+        self.assertEqual(
+            receipt["required_modules"],
+            ["docker", "make_test_spec", "run_instance"],
+        )
+        load.assert_called_once_with()
+
+    def test_swe_evo_evaluator_preflight_rejects_incomplete_dependencies(self):
+        evaluator = object.__new__(Phase3SweEvoEvaluator)
+        with patch.object(
+            evaluator,
+            "_harness_modules",
+            return_value={"docker": object()},
+        ), self.assertRaisesRegex(
+            Phase3SweEvoEvaluatorError,
+            "dependencies are incomplete",
+        ):
+            evaluator.validate_environment()
+
     def test_patch_compatibility_accepts_non_overlapping_candidate(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

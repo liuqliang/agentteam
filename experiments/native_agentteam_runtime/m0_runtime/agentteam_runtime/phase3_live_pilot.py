@@ -165,9 +165,12 @@ def build_phase3_live_bundle(
             model=pilot_contract["contract"]["execution_profile"]["model"]["model"],
             public_verification_environment=public_environment,
         )
+    evaluator_python = Path(os.path.abspath(os.fspath(evaluator_python)))
+    if not evaluator_python.is_file() or not os.access(evaluator_python, os.X_OK):
+        raise Phase3LivePilotError("evaluator Python is not executable")
     evaluator_environment = {
-        "schema_version": "phase3_evaluator_environment.v1",
-        "python": str(Path(evaluator_python).resolve(strict=True)),
+        "schema_version": "phase3_evaluator_environment.v2",
+        "python": str(evaluator_python),
         "environment_lock_path": str(frozen_lock),
         "environment_lock_sha256": _file_sha256(frozen_lock),
         "arrow_path": str(Path(arrow_path).resolve(strict=True)),
@@ -240,9 +243,18 @@ def run_phase3_live_bundle(bundle_root, pilot_root, *, max_executions=None):
         evaluator_environment["environment_lock_sha256"]
     ):
         raise Phase3LivePilotError("frozen evaluator environment lock changed")
-    if Path(os.path.realpath(os.sys.executable)) != Path(
-        os.path.realpath(evaluator_environment["python"])
-    ):
+    evaluator_environment_version = evaluator_environment.get("schema_version")
+    if evaluator_environment_version == "phase3_evaluator_environment.v1":
+        python_matches = Path(os.path.realpath(os.sys.executable)) == Path(
+            os.path.realpath(evaluator_environment["python"])
+        )
+    elif evaluator_environment_version == "phase3_evaluator_environment.v2":
+        python_matches = Path(os.path.abspath(os.sys.executable)) == Path(
+            evaluator_environment["python"]
+        )
+    else:
+        raise Phase3LivePilotError("evaluator environment version is invalid")
+    if not python_matches:
         raise Phase3LivePilotError(
             "live pilot must run with the frozen evaluator Python"
         )
