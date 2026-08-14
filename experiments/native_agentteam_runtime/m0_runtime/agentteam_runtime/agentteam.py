@@ -13907,12 +13907,19 @@ def _run_frozen_taskpack(
         {"work_root": str(inferred_work_root)},
         run_paths["run_dir"],
     )
+    notification_args = []
     if notification_project:
-        runtime_args.extend(["--notification-project", notification_project])
+        notification_args.extend(["--notification-project", notification_project])
     if feishu_webhook_env:
-        runtime_args.extend(["--feishu-webhook-env", feishu_webhook_env])
+        notification_args.extend(["--feishu-webhook-env", feishu_webhook_env])
     if feishu_signing_secret_env:
-        runtime_args.extend(["--feishu-signing-secret-env", feishu_signing_secret_env])
+        notification_args.extend(
+            ["--feishu-signing-secret-env", feishu_signing_secret_env]
+        )
+    runtime_args = _insert_before_codex_command_remainder(
+        runtime_args,
+        notification_args,
+    )
     command = [sys.executable, "-m", "agentteam_runtime.cli", *runtime_args]
     resource_hierarchy = None
     if (
@@ -13978,6 +13985,24 @@ def _run_frozen_taskpack(
         completed,
         run_dir=run_paths["run_dir"],
         control_plane_resource_evidence=control_plane_resource_evidence,
+    )
+
+
+def _insert_before_codex_command_remainder(runtime_args, additional_args):
+    """Keep AgentTeam options outside argparse's Codex command remainder."""
+
+    runtime_args = list(runtime_args)
+    additional_args = list(additional_args)
+    if not additional_args:
+        return runtime_args
+    try:
+        remainder_index = runtime_args.index("--codex-command")
+    except ValueError:
+        remainder_index = len(runtime_args)
+    return (
+        runtime_args[:remainder_index]
+        + additional_args
+        + runtime_args[remainder_index:]
     )
 
 

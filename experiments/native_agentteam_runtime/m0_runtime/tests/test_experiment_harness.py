@@ -8927,6 +8927,18 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             'web_search="disabled"',
         ]
         _validate_registered_codex_command(command, context_policy)
+        with self.assertRaisesRegex(
+            ModelInvocationIntegrityError,
+            "AgentTeam runtime options",
+        ):
+            _validate_registered_codex_command(
+                [
+                    *command,
+                    "--notification-project",
+                    "agentteam",
+                ],
+                context_policy,
+            )
         for invalid in (
             command[:-2],
             [*command, "-c", 'web_search="live"'],

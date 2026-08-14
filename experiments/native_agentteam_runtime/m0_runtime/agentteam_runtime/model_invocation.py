@@ -3409,6 +3409,17 @@ def _validate_registered_codex_command(command, model_policy):
         raise ModelInvocationIntegrityError(
             "registered live experiment launch is not a Codex command"
         )
+    agentteam_only_options = {
+        "--notification-project",
+        "--feishu-webhook-env",
+        "--feishu-signing-secret-env",
+    }
+    leaked_options = sorted(agentteam_only_options.intersection(command))
+    if leaked_options:
+        raise ModelInvocationIntegrityError(
+            "registered Codex command contains AgentTeam runtime options: "
+            + ", ".join(leaked_options)
+        )
     models = []
     reasoning_profiles = []
     for index, value in enumerate(command):

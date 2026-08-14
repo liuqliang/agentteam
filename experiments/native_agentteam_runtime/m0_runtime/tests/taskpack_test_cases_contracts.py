@@ -446,6 +446,27 @@ class ContractsMixin:
                 ["--codex-command", *trusted_command],
             )
 
+    def test_notification_args_precede_trusted_codex_command_remainder(self):
+        args = agentteam_module._insert_before_codex_command_remainder(
+            [
+                "--runtime",
+                "codex",
+                "--codex-command",
+                "codex",
+                "exec",
+                "-c",
+                "tool_output_token_limit=4000",
+            ],
+            ["--notification-project", "agentteam"],
+        )
+
+        marker = args.index("--codex-command")
+        self.assertEqual(
+            args[marker - 2 : marker],
+            ["--notification-project", "agentteam"],
+        )
+        self.assertNotIn("--notification-project", args[marker + 1 :])
+
 
     def test_build_taskpack_runtime_args_rejects_unbound_trusted_verification(self):
         with tempfile.TemporaryDirectory() as tmp:
