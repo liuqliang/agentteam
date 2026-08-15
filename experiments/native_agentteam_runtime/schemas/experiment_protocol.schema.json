@@ -409,32 +409,72 @@
           "$ref": "#/$defs/sha256"
         },
         "candidate_patch_policy": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "submission",
-            "hidden_test_composition",
-            "candidate_invalid_outcome",
-            "conflict_outcome",
-            "score_rejected_candidate"
-          ],
-          "properties": {
-            "submission": {
-              "const": "complete_candidate_patch"
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "submission",
+                "hidden_test_composition",
+                "candidate_invalid_outcome",
+                "conflict_outcome",
+                "score_rejected_candidate"
+              ],
+              "properties": {
+                "submission": {
+                  "const": "complete_candidate_patch"
+                },
+                "hidden_test_composition": {
+                  "const": "require_clean_git_apply"
+                },
+                "candidate_invalid_outcome": {
+                  "const": "candidate_patch_invalid"
+                },
+                "conflict_outcome": {
+                  "const": "evaluator_patch_conflict"
+                },
+                "score_rejected_candidate": {
+                  "const": false
+                }
+              }
             },
-            "hidden_test_composition": {
-              "const": "require_clean_git_apply"
-            },
-            "candidate_invalid_outcome": {
-              "const": "candidate_patch_invalid"
-            },
-            "conflict_outcome": {
-              "const": "evaluator_patch_conflict"
-            },
-            "score_rejected_candidate": {
-              "const": false
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "submission",
+                "test_change_handling",
+                "test_path_classification",
+                "hidden_test_composition",
+                "candidate_invalid_outcome",
+                "conflict_outcome",
+                "score_rejected_candidate"
+              ],
+              "properties": {
+                "submission": {
+                  "const": "production_with_supplemental_tests"
+                },
+                "test_change_handling": {
+                  "const": "retain_supplemental_unscored"
+                },
+                "test_path_classification": {
+                  "const": "public_conventional_test_paths.v1"
+                },
+                "hidden_test_composition": {
+                  "const": "require_clean_git_apply"
+                },
+                "candidate_invalid_outcome": {
+                  "const": "candidate_patch_invalid"
+                },
+                "conflict_outcome": {
+                  "const": "evaluator_patch_conflict"
+                },
+                "score_rejected_candidate": {
+                  "const": false
+                }
+              }
             }
-          }
+          ]
         }
       }
     },

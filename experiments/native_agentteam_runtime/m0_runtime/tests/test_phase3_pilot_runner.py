@@ -14,6 +14,7 @@ from agentteam_runtime.phase3_pilot_runner import (
     Phase3PilotRunner,
     Phase3PilotRunnerError,
     Phase3ProductionExecutor,
+    _scored_candidate_patch_path,
     _usage_coverage_percent,
     build_phase3_experiment_protocol,
     materialize_phase3_runtime_taskpack,
@@ -827,7 +828,9 @@ index b859599..f06e5bb 100644
             self.assertEqual(
                 protocol["evaluator"]["candidate_patch_policy"],
                 {
-                    "submission": "complete_candidate_patch",
+                    "submission": "production_with_supplemental_tests",
+                    "test_change_handling": "retain_supplemental_unscored",
+                    "test_path_classification": "public_conventional_test_paths.v1",
                     "hidden_test_composition": "require_clean_git_apply",
                     "candidate_invalid_outcome": "candidate_patch_invalid",
                     "conflict_outcome": "evaluator_patch_conflict",
@@ -852,6 +855,16 @@ index b859599..f06e5bb 100644
                 first["semantic_authority_sha256"],
                 semantic["taskpack_sha256"],
             )
+            frozen_taskpack = json.loads(
+                (
+                    Path(first["frozen_taskpack_dir"])
+                    / "taskpack.yaml"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertIn(
+                "supplemental verification evidence",
+                frozen_taskpack["goal"],
+            )
             frozen_verification = json.loads(
                 (
                     Path(first["frozen_taskpack_dir"])
@@ -861,6 +874,44 @@ index b859599..f06e5bb 100644
             self.assertEqual(
                 frozen_verification["command"][:3],
                 ["python3", "-m", "pytest"],
+            )
+
+    def test_scored_candidate_path_obeys_frozen_protocol_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            legacy = artifacts / "candidate.patch"
+            scored = artifacts / "scored-candidate.patch"
+            legacy.write_text("legacy\n", encoding="ascii")
+            scored.write_text("scored\n", encoding="ascii")
+            self.assertEqual(
+                _scored_candidate_patch_path(
+                    {
+                        "evaluator": {
+                            "candidate_patch_policy": {
+                                "submission": "complete_candidate_patch"
+                            }
+                        }
+                    },
+                    root,
+                ),
+                legacy,
+            )
+            self.assertEqual(
+                _scored_candidate_patch_path(
+                    {
+                        "evaluator": {
+                            "candidate_patch_policy": {
+                                "submission": (
+                                    "production_with_supplemental_tests"
+                                )
+                            }
+                        }
+                    },
+                    root,
+                ),
+                scored,
             )
 
     def test_production_executor_uses_protocol_budget_for_single_codex(self):
@@ -981,6 +1032,15 @@ index b859599..f06e5bb 100644
         executor.runtime_release = {}
         executor.resource_envelope_binding = None
         executor.resource_references = {}
+        executor.protocols = {
+            "fixture": {
+                "evaluator": {
+                    "candidate_patch_policy": {
+                        "submission": "production_with_supplemental_tests"
+                    }
+                }
+            }
+        }
         entry = {
             "entry_id": "fixture--r0--single_codex",
             "instance_id": "fixture",
@@ -1017,6 +1077,9 @@ index b859599..f06e5bb 100644
             (root / "results").mkdir()
             (root / "artifacts").mkdir()
             (root / "artifacts" / "candidate.patch").write_text(
+                "diff --git a/a b/a\n", encoding="ascii"
+            )
+            (root / "artifacts" / "scored-candidate.patch").write_text(
                 "diff --git a/a b/a\n", encoding="ascii"
             )
             with patch.object(
@@ -1108,7 +1171,20 @@ index b859599..f06e5bb 100644
 
     def test_patch_conflict_projection_is_invalid_not_infrastructure(self):
         executor = object.__new__(Phase3ProductionExecutor)
-        entry = {"entry_id": "fixture--r0--single_codex"}
+        executor.protocols = {
+            "fixture": {
+                "evaluator": {
+                    "candidate_patch_policy": {
+                        "submission": "production_with_supplemental_tests",
+                        "test_change_handling": "retain_supplemental_unscored",
+                    }
+                }
+            }
+        }
+        entry = {
+            "entry_id": "fixture--r0--single_codex",
+            "instance_id": "fixture",
+        }
         bundle = {
             "terminal_status": "completed",
             "usage_totals": {
@@ -1168,6 +1244,14 @@ index b859599..f06e5bb 100644
         self.assertEqual(result["failure_class"], "evaluator_patch_conflict")
         self.assertEqual(result["official_score"]["status"], "failed")
         self.assertEqual(result["wall_time_seconds"], 12.5)
+        self.assertEqual(
+            result["scored_candidate_relative_path"],
+            "artifacts/scored-candidate.patch",
+        )
+        self.assertEqual(
+            result["candidate_patch_policy"]["test_change_handling"],
+            "retain_supplemental_unscored",
+        )
 
     def test_sealed_usage_coverage_projects_to_percent(self):
         self.assertEqual(

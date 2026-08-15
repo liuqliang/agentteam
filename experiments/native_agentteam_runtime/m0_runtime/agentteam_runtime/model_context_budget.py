@@ -97,13 +97,18 @@ _HOOK_SOURCE = textwrap.dedent(
             "AgentTeam tool budget warning: "
             f"{remaining} tool calls remain. Stop broad exploration, "
             "preserve the candidate patch, run only essential focused "
-            "checks, and finalize."
+            "checks, and finalize. If implementation is complete but "
+            "verification cannot finish, return the explicit "
+            "verification_deferred tool_budget_exhausted handoff with "
+            "controller-runnable verification additions."
         )
         if count >= hard_limit:
             message = (
                 "AgentTeam hard tool-call limit reached. No further tools "
                 "will be admitted. Preserve the current workspace and "
-                "provide the final report now."
+                "provide the final report now. If only verification is "
+                "unfinished, use the explicit verification_deferred "
+                "tool_budget_exhausted handoff."
             )
         response = {
             "hookSpecificOutput": {

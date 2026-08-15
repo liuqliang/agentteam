@@ -34,6 +34,7 @@ from .m0_runtime import (
     run_integration_verification,
     skip_integration_baseline_commit,
     snapshot_runtime_artifacts,
+    validate_verification_additions,
     write_patch_artifact,
 )
 from .model_routing import default_model_routing_policy, select_model_route
@@ -1266,6 +1267,16 @@ class TwoPhaseFileScheduler:
             else None
         )
         outcome = classify_attempt_outcome(runtime_result, task, diff_audit=diff_audit)
+        deferred_verification = _controller_verification_recovery(
+            runtime_result,
+            task,
+            diff_audit,
+            patch_path,
+            integrate_accepted_patch=self.integrate_accepted_patch,
+            integration_verification_command=self.integration_verification_command,
+        )
+        if deferred_verification is not None:
+            outcome = deferred_verification["outcome"]
         runtime_artifacts = []
         permission_request = (
             _permission_request_payload(inflight, runtime_result)
@@ -1347,6 +1358,12 @@ class TwoPhaseFileScheduler:
             "integration_queue_path": str(integration_queue_path(self.output_dir)),
             "pre_integration_controller_observation": None,
             "post_integration_controller_observation": None,
+            "worker_result_status": runtime_result["result_status"],
+            "controller_verification_recovery": (
+                deepcopy(deferred_verification["recovery"])
+                if deferred_verification is not None
+                else None
+            ),
         }
         result.update(_runtime_evidence_summary(task, runtime_result))
         code_state = None
@@ -1579,6 +1596,25 @@ class TwoPhaseFileScheduler:
                     else []
                 ),
                 *code_state_events,
+                *(
+                    [
+                        self._event(
+                            "worker_verification_deferred",
+                            "verification-integration-controller",
+                            inflight["agent_id"],
+                            f"verification-deferred:{inflight['attempt_id']}",
+                            inflight["correlation_id"],
+                            {
+                                "task_id": inflight["task_id"],
+                                "attempt_id": inflight["attempt_id"],
+                                "lease_id": inflight["lease_id"],
+                                **deepcopy(deferred_verification["recovery"]),
+                            },
+                        )
+                    ]
+                    if deferred_verification is not None
+                    else []
+                ),
                 *(
                     [
                         self._event(
@@ -4387,6 +4423,56 @@ def _runtime_verification_additions(runtime_result):
         else {}
     )
     return output.get("verification_additions", [])
+
+
+def _controller_verification_recovery(
+    runtime_result,
+    task,
+    diff_audit,
+    patch_path,
+    *,
+    integrate_accepted_patch,
+    integration_verification_command,
+):
+    if runtime_result.get("result_status") != "failed":
+        return None
+    output = runtime_result.get("output")
+    if not isinstance(output, dict):
+        return None
+    if output.get("verification_deferred") is not True:
+        return None
+    if output.get("verification_deferred_reason") != "tool_budget_exhausted":
+        return None
+    if output.get("error") not in (None, "tool_budget_exhausted"):
+        return None
+    if not patch_path or not diff_audit or not diff_audit.get("actual_changed_files"):
+        return None
+    if not integrate_accepted_patch or not integration_verification_command:
+        return None
+    try:
+        additions = validate_verification_additions(
+            output.get("verification_additions")
+        )
+    except ValueError:
+        return None
+    recovered_result = deepcopy(runtime_result)
+    recovered_result["result_status"] = "completed"
+    outcome = classify_attempt_outcome(
+        recovered_result,
+        task,
+        diff_audit=diff_audit,
+    )
+    if outcome["validation_status"] != "accepted":
+        return None
+    return {
+        "outcome": outcome,
+        "recovery": {
+            "recovery_status": "controller_verification_required",
+            "worker_result_status": "failed",
+            "verification_deferred_reason": "tool_budget_exhausted",
+            "verification_addition_count": len(additions),
+        },
+    }
 
 
 def _integration_blocked_by_evidence(result, patch_path):

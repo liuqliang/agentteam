@@ -1,0 +1,49 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-controller-verification-handoff-v1",
+  "revision": 1,
+  "decision_kind": "execution",
+  "subject": "phase3_controller_verification_handoff",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-requests-cumulative-context-retest-v1",
+  "supersedes_decision_id": null,
+  "statement": "Implement provider-free controller-owned verification recovery and deterministic candidate test separation before any further Phase 3 scored execution.",
+  "selected_option": "preserve the 12/16 cost boundary, recover only explicitly deferred scope-valid patches through mandatory controller verification, and freeze production-with-supplemental-tests candidate publication for new protocols",
+  "alternatives": [
+    {
+      "option": "increase the common hard tool limit",
+      "rejected_reason": "A larger undifferentiated limit does not guarantee final verification and weakens the measured containment boundary."
+    },
+    {
+      "option": "accept every failed result that contains a patch",
+      "rejected_reason": "Worker failure can represent semantic, permission, environment, or implementation errors and cannot be converted into acceptance without an explicit narrow handoff plus controller verification."
+    },
+    {
+      "option": "remove candidate test hunks only after an evaluator conflict",
+      "rejected_reason": "Post-hoc mutation depends on hidden evaluator outcomes and invalidates the frozen experiment contract."
+    }
+  ],
+  "rationale": "The Requests direct worker already supplied a complete patch artifact and a structured focused verification command, while the scheduler already owns isolated integration verification and rollback. A narrow verification-deferred state connects those existing mechanisms without adding model calls. The full-mode conflict also shows that complete implementation authority and scored benchmark submission need separate immutable identities. Freezing public test-path classification before execution preserves all worker output and prevents evaluator outcomes from deciding which hunks are scored.",
+  "scope": [
+    "provider_calls_authorized:0",
+    "scored_mode_executions_authorized:0",
+    "tool_limits:unchanged:soft=12:hard=16",
+    "verification_recovery:explicit_and_controller_gated",
+    "candidate_policy:production_with_supplemental_tests.v1",
+    "legacy_protocols:backward_compatible",
+    "historical_artifacts:immutable"
+  ],
+  "expected_outcome": "A bounded worker can hand a completed patch to deterministic runtime verification without falsely claiming worker-side tests, while new Phase 3 runs retain candidate-authored tests without allowing hidden evaluator conflicts or post-hoc edits to define the scored production patch.",
+  "acceptance_refs": [
+    "plans/2026-08-15-phase3-controller-verification-handoff.md",
+    "focused scheduler recovery tests",
+    "focused candidate publication and evaluator selection tests",
+    "legacy protocol compatibility tests",
+    "complete provider-free regression",
+    "artifact lint and decision-chain validation"
+  ],
+  "status": "active",
+  "created_at": "2026-08-15T13:41:54Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": null
+}

@@ -72,8 +72,17 @@ _EVALUATOR_REJECTIONS = {
     "candidate_patch_invalid",
     "evaluator_patch_conflict",
 }
-_CANDIDATE_PATCH_POLICY = {
+_LEGACY_CANDIDATE_PATCH_POLICY = {
     "submission": "complete_candidate_patch",
+    "hidden_test_composition": "require_clean_git_apply",
+    "candidate_invalid_outcome": "candidate_patch_invalid",
+    "conflict_outcome": "evaluator_patch_conflict",
+    "score_rejected_candidate": False,
+}
+_CANDIDATE_PATCH_POLICY = {
+    "submission": "production_with_supplemental_tests",
+    "test_change_handling": "retain_supplemental_unscored",
+    "test_path_classification": "public_conventional_test_paths.v1",
     "hidden_test_composition": "require_clean_git_apply",
     "candidate_invalid_outcome": "candidate_patch_invalid",
     "conflict_outcome": "evaluator_patch_conflict",
@@ -85,6 +94,12 @@ _MODEL_AUTO_COMPACT_TOKEN_LIMIT = 32_768
 _TOOL_CALL_SOFT_LIMIT = 12
 _TOOL_CALL_HARD_LIMIT = 16
 _TOOL_BUDGET_POLICY = "codex_pre_tool_budget.v1"
+_CANDIDATE_TEST_INSTRUCTION = (
+    "Candidate-authored changes under conventional public test paths are "
+    "retained as supplemental verification evidence but are excluded from "
+    "the production patch submitted to the official evaluator. Production "
+    "code changes remain fully scored."
+)
 _FORBIDDEN_RESULT_KEYS = {
     "gold_patch",
     "test_patch",
@@ -149,7 +164,11 @@ def build_phase3_experiment_protocol(
         "repository": repository,
         "goal": {
             "summary": task["goal"],
-            "constraints": [*task["constraints"], *task["non_goals"]],
+            "constraints": [
+                *task["constraints"],
+                *task["non_goals"],
+                _CANDIDATE_TEST_INSTRUCTION,
+            ],
         },
         "acceptance": {
             "command": command,
@@ -275,7 +294,11 @@ def materialize_phase3_runtime_taskpack(
         shutil.rmtree(draft_path)
     built = draft_taskpack_files(
         project_root=project_root,
-        goal=task["tasks"][0]["objective"],
+        goal=(
+            task["tasks"][0]["objective"]
+            + "\n\nCandidate patch policy:\n- "
+            + _CANDIDATE_TEST_INSTRUCTION
+        ),
         draft_root=draft_root,
         taskpack_id=task_id,
         read_scope=["."],
@@ -374,8 +397,9 @@ class Phase3ProductionExecutor:
         )
         for protocol in self.protocols.values():
             validate_experiment_protocol(protocol)
-            if protocol["evaluator"].get("candidate_patch_policy") != (
-                _CANDIDATE_PATCH_POLICY
+            if protocol["evaluator"].get("candidate_patch_policy") not in (
+                _LEGACY_CANDIDATE_PATCH_POLICY,
+                _CANDIDATE_PATCH_POLICY,
             ):
                 raise Phase3PilotRunnerError(
                     "Phase 3 candidate patch policy is absent or changed"
@@ -531,7 +555,10 @@ class Phase3ProductionExecutor:
         )
 
     def _evaluate_official(self, entry, run_dir):
-        patch = run_dir / "artifacts" / "candidate.patch"
+        patch = _scored_candidate_patch_path(
+            self.protocols[entry["instance_id"]],
+            run_dir,
+        )
         check = getattr(self.official_evaluator, "check_patch_compatibility", None)
         if not callable(check):
             raise Phase3PilotRunnerError(
@@ -740,6 +767,17 @@ class Phase3ProductionExecutor:
             if evaluator_failed
             else None
         )
+        protocols = getattr(self, "protocols", {})
+        protocol = (
+            protocols.get(entry.get("instance_id"))
+            if isinstance(protocols, dict)
+            else None
+        )
+        candidate_policy = (
+            copy.deepcopy(protocol["evaluator"]["candidate_patch_policy"])
+            if isinstance(protocol, dict)
+            else None
+        )
         return {
             "entry_id": entry["entry_id"],
             "terminal_status": (
@@ -780,7 +818,19 @@ class Phase3ProductionExecutor:
                 else copy.deepcopy(score)
             ),
             "mode_result_bundle_sha256": canonical_json_sha256(sealed),
-        }
+        } | (
+            {
+                "candidate_patch_policy": candidate_policy,
+                "scored_candidate_relative_path": (
+                    "artifacts/scored-candidate.patch"
+                    if candidate_policy.get("submission")
+                    == "production_with_supplemental_tests"
+                    else "artifacts/candidate.patch"
+                ),
+            }
+            if candidate_policy is not None
+            else {}
+        )
 
 
 class Phase3PilotRunner:
@@ -1382,6 +1432,19 @@ def _validate_terminal_result(result, entry):
         )
     _reject_forbidden_keys(value)
     return value
+
+
+def _scored_candidate_patch_path(protocol, run_dir):
+    policy = protocol["evaluator"]["candidate_patch_policy"]
+    filename = (
+        "scored-candidate.patch"
+        if policy.get("submission") == "production_with_supplemental_tests"
+        else "candidate.patch"
+    )
+    path = Path(run_dir) / "artifacts" / filename
+    if path.is_symlink() or not path.is_file():
+        raise Phase3PilotRunnerError("scored candidate patch is missing or unsafe")
+    return path
 
 
 def _validate_official_score(score):

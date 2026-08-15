@@ -1715,9 +1715,17 @@ full mode's candidate test overlapped the evaluator-only test patch. Only
 single received an official score, which remained unresolved at FAIL_TO_PASS
 `0/4`, PASS_TO_PASS `104/109`, and partial `0.290826`.
 
-The next ordered Phase 3 work is provider-free: define a role-aware or
-phase-aware verification reserve, freeze a uniform candidate-test policy for
-benchmark submissions, replay both controls deterministically, and re-freeze
-the runtime and protocol. Do not authorize a new SWE-EVO instance until those
-gates pass. The retained execution evidence is in
-[`2026-08-14-phase3-requests-cumulative-context-retest.md`](reports/2026-08-14-phase3-requests-cumulative-context-retest.md).
+The ordered provider-free repair is now complete. The shared `12/16` boundary
+remains unchanged, but a complete scope-valid patch can explicitly defer only
+its unfinished verification to the existing isolated controller. New Phase 3
+protocols also retain complete candidate output while separating conventional
+candidate tests from the production patch submitted to official evaluation.
+Legacy protocols retain complete-patch behavior. The implementation passes
+`1215` provider-free tests with `7` skips and made zero model calls.
+
+Phase 3 expansion remains unauthorized. The next ordered work is to review and
+freeze a runtime release and protocol from this implementation, then make a
+separate execution decision for either a new SWE-EVO instance or a bounded
+causal repetition. Do not infer cost or quality improvement from provider-free
+tests. The repair evidence is in
+[`2026-08-15-phase3-controller-verification-handoff.md`](reports/2026-08-15-phase3-controller-verification-handoff.md).

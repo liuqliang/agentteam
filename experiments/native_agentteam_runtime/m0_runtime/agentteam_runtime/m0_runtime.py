@@ -771,6 +771,8 @@ class CodexRuntimeAdapter:
                 "operator_summary must be natural language, not a patch dump: include what_changed, measured_result, verification_summary, merge_recommendation, and next_steps.",
                 "operator_summary natural-language fields must be written in Chinese (zh-CN); keep code symbols, file paths, commands, and metric names literal.",
                 "If you add or modify tests, include output.verification_additions as a list of objects with label, command, and reason.",
+                "If implementation is complete but the frozen tool budget prevents worker-side verification, keep result_status failed, set output.verification_deferred=true and output.verification_deferred_reason=tool_budget_exhausted, and provide valid non-empty output.verification_additions for controller-owned verification.",
+                "Do not use verification_deferred for implementation errors, environment failures, permission requests, missing operator decisions, or an incomplete candidate patch.",
                 "Each verification_additions command must be a JSON list such as [\"python3\",\"-m\",\"unittest\",\"tests.test_example\"], not a shell string.",
                 "Each verification_additions command runs from the repository root; make every path and module name valid from that directory.",
                 "Allowed verification_additions executables are python, python3, python3.x, and pytest.",
@@ -4016,6 +4018,19 @@ def run_integration_verification_additions(additions, integration_worktree_path)
         ),
         "integration_verification_additions": results,
     }
+
+
+def validate_verification_additions(additions):
+    """Return normalized controller-runnable verification additions."""
+
+    normalized = _normalize_verification_additions(additions)
+    if not normalized:
+        raise ValueError("verification additions must be a non-empty list")
+    for addition in normalized:
+        rejection = _verification_addition_rejection(addition)
+        if rejection:
+            raise ValueError(rejection)
+    return deepcopy(normalized)
 
 
 def _integration_verification_env(integration_worktree_path):

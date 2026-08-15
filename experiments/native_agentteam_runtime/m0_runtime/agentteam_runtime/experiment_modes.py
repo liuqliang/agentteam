@@ -77,6 +77,26 @@ from .taskpack import (
 
 
 MODE_RESULT_SCHEMA_VERSION = "experiment_mode_lifecycle_result.v1"
+_CANDIDATE_TEST_PATH_CLASSIFICATION = "public_conventional_test_paths.v1"
+_TEST_DIRECTORY_COMPONENTS = frozenset(
+    {"test", "tests", "__tests__", "spec", "specs"}
+)
+_TEST_FILENAME_SUFFIXES = (
+    "_test.py",
+    "_test.go",
+    "_test.rs",
+    "_test.rb",
+    "_test.java",
+    "_test.kt",
+    ".test.js",
+    ".test.jsx",
+    ".test.ts",
+    ".test.tsx",
+    ".spec.js",
+    ".spec.jsx",
+    ".spec.ts",
+    ".spec.tsx",
+)
 _MODES = {
     "single_codex",
     "agentteam_direct",
@@ -2079,7 +2099,27 @@ def _publish_candidate_patch(request, candidate_workspace):
     artifacts.mkdir(parents=True, mode=0o700, exist_ok=True)
     patch_path = artifacts / "candidate.patch"
     reference_path = artifacts / "candidate-patch.json"
-    if patch_path.exists() or reference_path.exists():
+    scored_path = artifacts / "scored-candidate.patch"
+    supplemental_path = artifacts / "supplemental-tests.patch"
+    policy = (
+        request.protocol.get("evaluator", {}).get("candidate_patch_policy", {})
+        if isinstance(request.protocol, dict)
+        else {}
+    )
+    split_tests = policy.get("submission") == (
+        "production_with_supplemental_tests"
+    )
+    if split_tests and (
+        policy.get("test_change_handling")
+        != "retain_supplemental_unscored"
+        or policy.get("test_path_classification")
+        != _CANDIDATE_TEST_PATH_CLASSIFICATION
+    ):
+        raise ExperimentModeError("candidate test separation policy is invalid")
+    guarded_paths = [patch_path, reference_path]
+    if split_tests:
+        guarded_paths.extend([scored_path, supplemental_path])
+    if any(path.exists() or path.is_symlink() for path in guarded_paths):
         raise ExperimentModeError(
             "candidate patch authority already exists"
         )
@@ -2102,6 +2142,125 @@ def _publish_candidate_patch(request, candidate_workspace):
             stderr=subprocess.PIPE,
             check=True,
         )
+        changed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(candidate_workspace),
+                "diff",
+                "--cached",
+                "--name-only",
+                "-z",
+                base_commit,
+            ],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        changed_paths = sorted(
+            item.decode("utf-8")
+            for item in changed.stdout.split(b"\0")
+            if item
+        )
+        patch = _staged_candidate_patch(
+            candidate_workspace,
+            environment,
+            base_commit,
+            changed_paths,
+        )
+        test_paths = sorted(
+            path for path in changed_paths if _is_candidate_test_path(path)
+        )
+        production_paths = sorted(set(changed_paths) - set(test_paths))
+        scored_patch = (
+            _staged_candidate_patch(
+                candidate_workspace,
+                environment,
+                base_commit,
+                production_paths,
+            )
+            if split_tests
+            else None
+        )
+        supplemental_patch = (
+            _staged_candidate_patch(
+                candidate_workspace,
+                environment,
+                base_commit,
+                test_paths,
+            )
+            if split_tests
+            else None
+        )
+    except (subprocess.CalledProcessError, UnicodeDecodeError) as exc:
+        raise ExperimentModeError(
+            "candidate patch publication failed"
+        ) from exc
+    finally:
+        index_path.unlink(missing_ok=True)
+    if len(patch) > 64 * 1024 * 1024:
+        raise ExperimentModeError(
+            "candidate patch exceeds its retained artifact bound"
+        )
+    try:
+        _write_immutable_patch(patch_path, patch)
+        if split_tests:
+            _write_immutable_patch(scored_path, scored_patch)
+            _write_immutable_patch(supplemental_path, supplemental_patch)
+    except OSError as exc:
+        patch_path.unlink(missing_ok=True)
+        scored_path.unlink(missing_ok=True)
+        supplemental_path.unlink(missing_ok=True)
+        raise ExperimentModeError(
+            "candidate patch publication failed"
+        ) from exc
+    reference = {
+            "schema_version": "experiment_candidate_patch.v1",
+            "experiment_run_id": request.run_manifest[
+                "experiment_run_id"
+            ],
+            "mode": request.run_manifest["mode"],
+            "base_commit": base_commit,
+            "relative_path": "artifacts/candidate.patch",
+            "sha256": hashlib.sha256(patch).hexdigest(),
+            "bytes": len(patch),
+        }
+    if split_tests:
+        reference.update(
+            {
+                "schema_version": "experiment_candidate_patch.v2",
+                "submission_policy": "production_with_supplemental_tests",
+                "test_path_classification": _CANDIDATE_TEST_PATH_CLASSIFICATION,
+                "scored_relative_path": "artifacts/scored-candidate.patch",
+                "scored_sha256": hashlib.sha256(scored_patch).hexdigest(),
+                "scored_bytes": len(scored_patch),
+                "supplemental_relative_path": "artifacts/supplemental-tests.patch",
+                "supplemental_sha256": hashlib.sha256(
+                    supplemental_patch
+                ).hexdigest(),
+                "supplemental_bytes": len(supplemental_patch),
+                "production_paths": production_paths,
+                "supplemental_test_paths": test_paths,
+            }
+        )
+    publish_immutable_json(
+        reference_path,
+        reference,
+        label="candidate patch reference",
+    )
+
+
+def _staged_candidate_patch(
+    candidate_workspace,
+    environment,
+    base_commit,
+    paths,
+):
+    if not paths:
+        return b""
+    chunks = []
+    for offset in range(0, len(paths), 256):
         completed = subprocess.run(
             [
                 "git",
@@ -2113,52 +2272,36 @@ def _publish_candidate_patch(request, candidate_workspace):
                 "--full-index",
                 "--no-ext-diff",
                 base_commit,
+                "--",
+                *paths[offset : offset + 256],
             ],
             env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=True,
         )
-    except subprocess.CalledProcessError as exc:
-        raise ExperimentModeError(
-            "candidate patch publication failed"
-        ) from exc
-    finally:
-        index_path.unlink(missing_ok=True)
-    patch = bytes(completed.stdout)
-    if len(patch) > 64 * 1024 * 1024:
-        raise ExperimentModeError(
-            "candidate patch exceeds its retained artifact bound"
-        )
+        chunks.append(bytes(completed.stdout))
+    return b"".join(chunks)
+
+
+def _write_immutable_patch(path, content):
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
     flags |= getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(patch_path, flags, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(patch)
-            handle.flush()
-            os.fsync(handle.fileno())
-        patch_path.chmod(0o400)
-    except OSError as exc:
-        patch_path.unlink(missing_ok=True)
-        raise ExperimentModeError(
-            "candidate patch publication failed"
-        ) from exc
-    publish_immutable_json(
-        reference_path,
-        {
-            "schema_version": "experiment_candidate_patch.v1",
-            "experiment_run_id": request.run_manifest[
-                "experiment_run_id"
-            ],
-            "mode": request.run_manifest["mode"],
-            "base_commit": base_commit,
-            "relative_path": "artifacts/candidate.patch",
-            "sha256": hashlib.sha256(patch).hexdigest(),
-            "bytes": len(patch),
-        },
-        label="candidate patch reference",
-    )
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    path.chmod(0o400)
+
+
+def _is_candidate_test_path(path):
+    candidate = Path(path)
+    lowered_parts = [part.lower() for part in candidate.parts]
+    if any(part in _TEST_DIRECTORY_COMPONENTS for part in lowered_parts[:-1]):
+        return True
+    name = candidate.name.lower()
+    return name.startswith("test_") or name.endswith(_TEST_FILENAME_SUFFIXES)
 
 
 def _build_common_result_bundle(

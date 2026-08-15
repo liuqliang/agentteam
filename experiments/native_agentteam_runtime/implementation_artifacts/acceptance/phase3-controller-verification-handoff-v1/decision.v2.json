@@ -1,0 +1,49 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-controller-verification-handoff-v1",
+  "revision": 2,
+  "decision_kind": "acceptance",
+  "subject": "phase3_controller_verification_handoff",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-requests-cumulative-context-retest-v1",
+  "supersedes_decision_id": null,
+  "statement": "Accept the provider-free controller verification handoff and deterministic candidate-test separation implementation while keeping Phase 3 scored expansion unauthorized.",
+  "selected_option": "retain the 12/16 boundary, permit only explicit tool-budget verification deferral through mandatory controller verification, and use production-with-supplemental-tests publication for new Phase 3 protocols",
+  "alternatives": [
+    {
+      "option": "raise the direct worker hard tool limit",
+      "rejected_reason": "A larger undifferentiated limit does not reserve a verification phase and would weaken the measured containment boundary."
+    },
+    {
+      "option": "treat every failed worker patch as provisional",
+      "rejected_reason": "Failure may represent incomplete implementation, invalid scope, environment failure, permissions, or missing decisions; only the explicit narrow handoff is recoverable."
+    },
+    {
+      "option": "remove candidate tests after an evaluator conflict",
+      "rejected_reason": "Post-hoc mutation would depend on evaluator outcomes and violate the frozen experiment contract."
+    }
+  ],
+  "rationale": "The runtime now retains the worker's failed status while allowing a complete, scope-valid candidate with structured verification additions to enter existing isolated controller verification. It also derives complete, scored-production, and supplemental-test patches from one staged diff using only public deterministic path rules. Legacy contracts remain supported, all provider-free tests pass, artifact lint passes, and no model call occurred.",
+  "scope": [
+    "provider_calls:0",
+    "tool_limits:unchanged:soft=12:hard=16",
+    "verification_recovery:controller_owned_and_explicit",
+    "candidate_policy:production_with_supplemental_tests.v1",
+    "legacy_protocols:compatible",
+    "provider_free_tests:1215_passed:7_skipped",
+    "artifact_lint:passed:203_json:1_jsonl",
+    "phase3_expansion:not_authorized"
+  ],
+  "expected_outcome": "A later separately authorized Phase 3 execution can retain complete candidate evidence, score only the frozen production patch, and finish verification through the controller when a worker's final tool budget is exhausted without silently accepting other worker failures.",
+  "acceptance_refs": [
+    "plans/2026-08-15-phase3-controller-verification-handoff.md",
+    "reports/2026-08-15-phase3-controller-verification-handoff.md",
+    "complete provider-free unittest discovery: 1215 passed, 7 skipped",
+    "artifact lint: 203 JSON and 1 JSONL checked, zero errors",
+    "decision schema validation: passed"
+  ],
+  "status": "completed",
+  "created_at": "2026-08-15T14:35:00Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": "9ba8761ab9ae27f914999cc214cf253e79ce2fff6d4bd856be0fee99c9bcaea3"
+}

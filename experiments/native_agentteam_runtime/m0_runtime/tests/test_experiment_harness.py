@@ -82,6 +82,7 @@ from agentteam_runtime.experiment_modes import (
     _begin_mode_execution,
     _complete_mode_execution,
     _publish_candidate_patch,
+    _is_candidate_test_path,
     _publish_failure_finalization_diagnostic,
     _publish_mode_order_authority,
     _common_mode_contract,
@@ -6957,6 +6958,88 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             )
             self.assertEqual((repository / ".git/index").read_bytes(), index_before)
             self.assertEqual(patch_path.stat().st_mode & 0o777, 0o400)
+
+    def test_candidate_tests_are_retained_but_excluded_from_scored_patch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "runs" / "candidate-test-split"
+            repository = run_dir / "repository"
+            (repository / "tests").mkdir(parents=True)
+            _git(repository, "init", "--quiet")
+            _git(repository, "config", "user.name", "Experiment Fixture")
+            _git(repository, "config", "user.email", "fixture@example.invalid")
+            (repository / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+            (repository / "tests/test_source.py").write_text(
+                "def test_value():\n    assert True\n", encoding="utf-8"
+            )
+            _git(repository, "add", ".")
+            _git(repository, "commit", "--quiet", "-m", "baseline")
+            baseline = _git(repository, "rev-parse", "HEAD").stdout.strip()
+            index_before = (repository / ".git/index").read_bytes()
+            (repository / "source.py").write_text("VALUE = 2\n", encoding="utf-8")
+            (repository / "tests/test_source.py").write_text(
+                "def test_value():\n    assert 2 == 2\n", encoding="utf-8"
+            )
+            request = Mock(
+                run_dir=str(run_dir),
+                protocol={
+                    "repository": {"commit": baseline},
+                    "evaluator": {
+                        "candidate_patch_policy": {
+                            "submission": "production_with_supplemental_tests",
+                            "test_change_handling": "retain_supplemental_unscored",
+                            "test_path_classification": (
+                                "public_conventional_test_paths.v1"
+                            ),
+                        }
+                    },
+                },
+                run_manifest={
+                    "experiment_run_id": "candidate-test-split",
+                    "mode": "agentteam_direct",
+                },
+            )
+
+            _publish_candidate_patch(request, repository)
+
+            artifacts = run_dir / "artifacts"
+            complete = (artifacts / "candidate.patch").read_text(encoding="utf-8")
+            scored = (artifacts / "scored-candidate.patch").read_text(
+                encoding="utf-8"
+            )
+            supplemental = (artifacts / "supplemental-tests.patch").read_text(
+                encoding="utf-8"
+            )
+            reference = json.loads(
+                (artifacts / "candidate-patch.json").read_text(encoding="utf-8")
+            )
+            source_header = "diff --git a/source.py b/source.py"
+            test_header = (
+                "diff --git a/tests/test_source.py b/tests/test_source.py"
+            )
+            self.assertIn(source_header, complete)
+            self.assertIn(test_header, complete)
+            self.assertIn(source_header, scored)
+            self.assertNotIn(test_header, scored)
+            self.assertNotIn(source_header, supplemental)
+            self.assertIn(test_header, supplemental)
+            self.assertEqual(reference["schema_version"], "experiment_candidate_patch.v2")
+            self.assertEqual(reference["production_paths"], ["source.py"])
+            self.assertEqual(
+                reference["supplemental_test_paths"], ["tests/test_source.py"]
+            )
+            self.assertEqual((repository / ".git/index").read_bytes(), index_before)
+            for name in (
+                "candidate.patch",
+                "scored-candidate.patch",
+                "supplemental-tests.patch",
+            ):
+                self.assertEqual((artifacts / name).stat().st_mode & 0o777, 0o400)
+
+    def test_candidate_test_path_classification_is_public_and_conventional(self):
+        self.assertTrue(_is_candidate_test_path("tests/test_source.py"))
+        self.assertTrue(_is_candidate_test_path("pkg/source_test.go"))
+        self.assertTrue(_is_candidate_test_path("ui/button.spec.tsx"))
+        self.assertFalse(_is_candidate_test_path("src/testing_helpers.py"))
 
     @staticmethod
     def _fixture(

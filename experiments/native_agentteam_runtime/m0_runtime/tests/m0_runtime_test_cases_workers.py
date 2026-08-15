@@ -227,6 +227,154 @@ class WorkersMixin:
             self.assertEqual(_git_rev_parse(repo, "HEAD"), source_head)
 
 
+    def test_two_phase_recovers_explicit_verification_deferred_patch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            source_head = _git_rev_parse(repo, "HEAD")
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-001", write_scope=["generated/"])],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                integrate_accepted_patch=True,
+                integration_verification_command=[
+                    sys.executable,
+                    "-c",
+                    "import pathlib; assert pathlib.Path('generated/deferred.json').exists()",
+                ],
+                commit_verified_integration=True,
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            worktree_path = Path(inflight["worktree_path"])
+            target = worktree_path / "generated" / "deferred.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"ok": True}), encoding="utf-8")
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "failed",
+                ["generated/deferred.json"],
+                {
+                    "verification_deferred": True,
+                    "verification_deferred_reason": "tool_budget_exhausted",
+                    "operator_summary": {
+                        "what_changed": ["完成候选文件，等待 controller 验证。"],
+                        "measured_result": ["worker 工具额度在验证前耗尽。"],
+                        "verification_summary": ["验证已明确延后。"],
+                        "merge_recommendation": "仅在 controller 验证通过后合并。",
+                        "next_steps": ["运行结构化补充验证。"],
+                    },
+                    "verification_additions": [
+                        {
+                            "label": "deferred-json-check",
+                            "command": [
+                                sys.executable,
+                                "-c",
+                                "import json, pathlib; assert json.loads(pathlib.Path('generated/deferred.json').read_text())['ok'] is True",
+                            ],
+                            "reason": "验证延后候选的语义内容。",
+                        }
+                    ],
+                },
+            )
+
+            result = scheduler.collect_ready_results()["results"][0]
+            event_types = {
+                event["event_type"]
+                for event in _read_jsonl_for_test(output_dir / "events.jsonl")
+            }
+
+            self.assertEqual(result["worker_result_status"], "failed")
+            self.assertEqual(
+                result["controller_verification_recovery"]["recovery_status"],
+                "controller_verification_required",
+            )
+            self.assertEqual(result["integration_verification_status"], "passed")
+            self.assertEqual(
+                result["integration_verification_additions_status"], "passed"
+            )
+            self.assertEqual(result["task_status"], "done")
+            self.assertEqual(result["integration_commit_status"], "committed")
+            self.assertIn("worker_verification_deferred", event_types)
+            self.assertEqual(_git_rev_parse(repo, "HEAD"), source_head)
+
+
+    def test_two_phase_rejects_unverifiable_deferred_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            output_dir = tmp_path / "run"
+            agent_pool_path = tmp_path / "agent_pool.json"
+            _init_git_repo(repo)
+            backlog_path = _write_backlog(
+                tmp_path,
+                write_scope=["generated/"],
+                tasks=[_backlog_task("TASK-001", write_scope=["generated/"])],
+            )
+            _write_agent_pool_with_agent_ids(agent_pool_path, ["agent-repo-map"])
+            scheduler = TwoPhaseFileScheduler(
+                agent_pool_path,
+                backlog_path,
+                output_dir,
+                clock=FixedClock(),
+                project_root=repo,
+                integrate_accepted_patch=True,
+                integration_verification_command=[sys.executable, "-c", "pass"],
+                commit_verified_integration=True,
+            )
+
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            worktree_path = Path(inflight["worktree_path"])
+            target = worktree_path / "generated" / "unverified.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("{}", encoding="utf-8")
+            _append_runtime_result_with_output(
+                inflight["outbox_path"],
+                inflight["message_id"],
+                inflight["task_id"],
+                inflight["attempt_id"],
+                inflight["lease_id"],
+                "failed",
+                ["generated/unverified.json"],
+                {
+                    "verification_deferred": True,
+                    "verification_deferred_reason": "tool_budget_exhausted",
+                    "operator_summary": {
+                        "what_changed": ["写入未验证候选。"],
+                        "measured_result": ["没有补充验证命令。"],
+                        "verification_summary": ["验证不完整。"],
+                        "merge_recommendation": "不要合并。",
+                        "next_steps": ["补充验证。"],
+                    },
+                    "verification_additions": [],
+                },
+            )
+
+            result = scheduler.collect_ready_results()["results"][0]
+
+            self.assertIsNone(result["controller_verification_recovery"])
+            self.assertEqual(result["validation_status"], "rejected")
+            self.assertEqual(result["integration_status"], "not_requested")
+            self.assertNotEqual(result["task_status"], "done")
+
+
     def test_two_phase_worker_verification_addition_failure_blocks_baseline(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
