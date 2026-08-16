@@ -108,3 +108,29 @@ preserved the same nine changed paths. The three checkpoints were `725`, `980`,
 and `949` bytes. The regenerated Git diff was `18` bytes larger than the
 retained patch because of diff serialization; stable patch identity is assessed
 with `git patch-id --stable`, not raw patch bytes.
+
+## Invalid Live Startup And Repair Continuation
+
+The first live startup settled one locate invocation with `53280` total tokens
+(`50834` input, `30976` cached input, `2446` output) and no source changes. It
+is an invalid infrastructure trial, not a task-quality result:
+
+1. the initial experimental `8/12` hook route exhausted after only one
+   host-recorded command, so the model correctly reported incomplete locating;
+2. the ordinary Codex adapter returned complete token fields without the
+   experiment-terminal `usage_status` wrapper, which the new aggregator
+   initially rejected;
+3. the model returned `remaining_objective` as a string list because the prompt
+   did not state the field type.
+
+The provider result and terminal authority were retained and recovered without
+relaunching locate. The controller published a `3617`-byte checkpoint and
+sealed the startup as `worker_turn_not_completed`.
+
+A repair continuation is authorized under the same aggregate live budget. The
+invalid startup's `53280` tokens count, leaving `546720` settled tokens for the
+continuation. The continuation uses the existing L2 worker `28/40` route for
+locate and implementation, accepts either complete adapter or terminal usage
+shape without changing the numeric fields, explicitly binds checkpoint field
+types, and supports recovery of a settled provider stage without reexecution.
+No historical-control rerun is authorized.

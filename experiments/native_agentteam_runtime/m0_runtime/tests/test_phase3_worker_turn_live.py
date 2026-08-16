@@ -9,7 +9,11 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from agentteam_runtime.phase3_worker_turn_live import _patch_id, main
+from agentteam_runtime.phase3_worker_turn_live import (
+    _patch_id,
+    _recover_stage_result,
+    main,
+)
 
 
 class Phase3WorkerTurnLiveTests(unittest.TestCase):
@@ -65,6 +69,37 @@ class Phase3WorkerTurnLiveTests(unittest.TestCase):
             identity = _patch_id(patch_path)
             self.assertEqual(len(identity), 40)
             self.assertEqual(identity, _patch_id(patch_path))
+
+    def test_recovers_settled_provider_stage_without_reexecution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            attempt_id = "ATTEMPT-LOCATE"
+            result_dir = stage / "codex_results"
+            terminal_dir = stage / "model_invocations" / "INV-1"
+            result_dir.mkdir(parents=True)
+            terminal_dir.mkdir(parents=True)
+            (result_dir / f"codex_result_{attempt_id}.json").write_text(
+                '{"result_status":"failed","changed_files":[],"output":{}}',
+                encoding="utf-8",
+            )
+            (terminal_dir / "terminal.json").write_text(
+                """{
+                  "usage_status": "reported",
+                  "usage_source": "codex_jsonl",
+                  "input_tokens": 90,
+                  "cached_input_tokens": 50,
+                  "output_tokens": 10,
+                  "reasoning_tokens": 1,
+                  "total_tokens": 100
+                }""",
+                encoding="utf-8",
+            )
+            result = _recover_stage_result(
+                stage,
+                {"payload": {"attempt_id": attempt_id}},
+            )
+            self.assertEqual(result["result_status"], "failed")
+            self.assertEqual(result["token_usage"]["total_tokens"], 100)
 
 
 if __name__ == "__main__":

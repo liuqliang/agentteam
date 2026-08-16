@@ -181,6 +181,22 @@ class WorkerTurnCheckpointTests(unittest.TestCase):
         self.assertEqual(result["totals"]["total_tokens"], 330)
         self.assertEqual(result["totals"]["uncached_input_tokens"], 90)
 
+        without_status = aggregate_worker_turn_usage(
+            [
+                {
+                    "turn_stage": "locate",
+                    "token_usage": {
+                        "input_tokens": 90,
+                        "cached_input_tokens": 50,
+                        "output_tokens": 10,
+                        "reasoning_tokens": 1,
+                        "total_tokens": 100,
+                    },
+                }
+            ]
+        )
+        self.assertEqual(without_status["totals"]["total_tokens"], 100)
+
         with self.assertRaisesRegex(WorkerTurnCheckpointError, "unavailable"):
             aggregate_worker_turn_usage([{"turn_stage": "verify", "token_usage": {}}])
 
@@ -222,6 +238,24 @@ class WorkerTurnCheckpointTests(unittest.TestCase):
             self.assertEqual(profile["command_count"], 2)
             self.assertEqual(profile["cross_turn_repeated_reads"], 1)
             self.assertEqual(profile["source_path_turn_counts"]["source.py"], 2)
+
+    def test_remaining_objective_list_is_normalized_for_provider_compatibility(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = self._repo(Path(temporary))
+            semantic = self._semantic()
+            semantic["remaining_objective"] = ["Inspect source.py", "Implement change"]
+            checkpoint = build_worker_turn_checkpoint(
+                task_id="TASK-1",
+                attempt_id="ATTEMPT-1",
+                turn_index=1,
+                stage="locate",
+                worktree_path=repo,
+                semantic_state=semantic,
+            )
+            self.assertEqual(
+                checkpoint["remaining_objective"],
+                "- Inspect source.py\n- Implement change",
+            )
 
 
 if __name__ == "__main__":

@@ -195,7 +195,14 @@ def aggregate_worker_turn_usage(turn_results):
     stages = []
     for result in turn_results:
         usage = result.get("token_usage") if isinstance(result, dict) else None
-        if not isinstance(usage, dict) or usage.get("usage_status") != "reported":
+        if (
+            not isinstance(usage, dict)
+            or usage.get("usage_status") not in {None, "reported"}
+            or not all(
+                isinstance(usage.get(field), int)
+                for field in ("input_tokens", "output_tokens", "total_tokens")
+            )
+        ):
             raise WorkerTurnCheckpointError("worker turn usage is unavailable")
         stage = result.get("turn_stage")
         stage_usage = {"stage": stage}
@@ -284,8 +291,15 @@ def _validate_semantic_state(value, *, stage):
         if not isinstance(items, list) or len(items) > MAX_COLLECTION_ITEMS:
             raise WorkerTurnCheckpointError(f"checkpoint {field} is invalid")
         result[field] = [_bounded_json_item(item, field) for item in items]
+    remaining = value.get("remaining_objective")
+    if isinstance(remaining, list) and all(
+        isinstance(item, str) and item.strip() for item in remaining
+    ):
+        remaining = "\n".join(f"- {item}" for item in remaining)
     result["remaining_objective"] = _bounded_text(
-        value.get("remaining_objective"), "remaining_objective", allow_empty=stage == "verify"
+        remaining,
+        "remaining_objective",
+        allow_empty=stage == "verify",
     )
     source_paths = value.get("source_paths", [])
     _validate_paths(source_paths, "source_paths")

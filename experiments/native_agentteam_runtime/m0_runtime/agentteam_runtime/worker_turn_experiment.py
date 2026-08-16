@@ -241,6 +241,7 @@ class WorkerTurnExperimentRunner:
                     "output_field": "output.turn_checkpoint",
                     "required_fields": list(CHECKPOINT_FIELDS),
                     "maximum_items_per_collection": 32,
+                    "remaining_objective": "one string; use an empty string only for verify",
                     "source_paths": "repository-relative paths only",
                 },
             },
