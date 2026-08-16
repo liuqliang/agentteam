@@ -1,0 +1,217 @@
+{
+  "schema_version": "phase3_dvc_post_repair_calibration_result.v1",
+  "decision_id": "DEC-P3-dvc-post-repair-calibration-v1",
+  "decision_revision": 1,
+  "status": "completed_not_promoted",
+  "instance_id": "iterative__dvc_2.19.0_2.20.0",
+  "source_commit": "78dd045d29f274960bcaf48fd2d055366abaf2c1",
+  "source_tree": "ddbe1d3231306250970a0b6ff9384838643d31d3",
+  "runtime_commit": "21cb46e164430355b0353e93899e04f982efcaaa",
+  "release_id": "phase3-post-repair-21cb46e",
+  "release_manifest_sha256": "07aecb43da57b49e8f2283b4eb2201652333278750739a0fdc00277246665a0f",
+  "bundle_sha256": "037aab2c985f495033b43c8720a6d01dd40c9257237eee33ab178376d257335c",
+  "pilot_state_sha256": "742e54b39bacf43c9e1d6b5716fd79b22953a3cb906e9b705fc7b868de744370",
+  "run_root": "/tmp/agentteam-phase3-dvc-post-repair-run-v1",
+  "provider_free_preflight": {
+    "status": "passed",
+    "provider_calls": 0,
+    "receipt_sha256": "408641d146b9105f5626d2a94e10a6805e66664b7793eede90bd514a4787486e",
+    "published_artifact_sha256": "96adaf2b41285e16666fe38866a5aa384004665fe872bf28fa6e629ede69cfd3"
+  },
+  "usage": {
+    "input_tokens": 2730031,
+    "cached_input_tokens": 2339328,
+    "uncached_input_tokens": 390703,
+    "output_tokens": 58456,
+    "reasoning_tokens": 10860,
+    "total_tokens": 2788487,
+    "coverage_percent": 100,
+    "controller_wall_time_seconds": 2691.1245963159786,
+    "frozen_aggregate_token_ceiling": 1800000,
+    "aggregate_overshoot_tokens": 988487
+  },
+  "modes": [
+    {
+      "mode": "single_codex",
+      "terminal_status": "completed",
+      "failure_class": null,
+      "input_tokens": 612683,
+      "cached_input_tokens": 506112,
+      "uncached_input_tokens": 106571,
+      "output_tokens": 14018,
+      "reasoning_tokens": 1573,
+      "total_tokens": 626701,
+      "provider_wall_time_seconds": 539.0,
+      "controller_wall_time_seconds": 1017.0976294939918,
+      "official_evaluator_wall_time_seconds": 443.5035938959918,
+      "budget_overshoot_tokens": 26701,
+      "completed_codex_command_events": 25,
+      "completed_codex_file_change_events": 2,
+      "changed_files": [
+        ".github/workflows/packages.yaml",
+        "dvc/commands/data_sync.py",
+        "dvc/commands/imp.py",
+        "dvc/commands/imp_url.py",
+        "dvc/commands/update.py",
+        "dvc/output.py",
+        "dvc/repo/__init__.py",
+        "dvc/repo/fetch.py",
+        "dvc/repo/imp_url.py",
+        "dvc/repo/index.py",
+        "dvc/repo/update.py",
+        "dvc/stage/imports.py"
+      ],
+      "official_score": {
+        "status": "completed",
+        "patch_applied": true,
+        "resolved": false,
+        "f2p_success": 0,
+        "f2p_total": 14,
+        "p2p_success": 45,
+        "p2p_total": 66,
+        "swe_style_partial_score": 0.236364
+      },
+      "result_sha256": "62e0e8509b1ae61d250591be6362ae40f9da25325cd1548ce448953d7b3b33da"
+    },
+    {
+      "mode": "agentteam_direct",
+      "terminal_status": "failed",
+      "failure_class": "candidate_patch_invalid",
+      "input_tokens": 1078542,
+      "cached_input_tokens": 941568,
+      "uncached_input_tokens": 136974,
+      "output_tokens": 19989,
+      "reasoning_tokens": 3882,
+      "total_tokens": 1098531,
+      "provider_wall_time_seconds": 762.0,
+      "controller_wall_time_seconds": 793.9814869399956,
+      "official_evaluator_wall_time_seconds": 0.0,
+      "budget_overshoot_tokens": 498531,
+      "tool_route": {
+        "risk_target": "L2",
+        "soft_limit": 28,
+        "hard_limit": 40
+      },
+      "completed_codex_command_events": 35,
+      "completed_codex_file_change_events": 2,
+      "published_changed_files": [],
+      "worker_changed_files": [
+        ".github/workflows/packages.yaml",
+        "dvc/commands/imp_url.py",
+        "dvc/commands/update.py",
+        "dvc/repo/imp_url.py",
+        "dvc/repo/ls.py",
+        "dvc/repo/update.py",
+        "dvc/stage/__init__.py",
+        "dvc/stage/imports.py"
+      ],
+      "retained_worker_patch": {
+        "bytes": 7480,
+        "sha256": "9123fe39da6357012a2f5e08320838573d25d75d71e43afa7f1ac17f28d9765f"
+      },
+      "official_score": {
+        "status": "failed",
+        "reason": "candidate_patch_invalid",
+        "resolved": false
+      },
+      "failure_evidence": [
+        "the worker produced an eight-file patch and a complete Chinese operator summary",
+        "terminal reconciliation replaced the mailbox result with usage-only replay output",
+        "semantic validation therefore reported every required deliverable missing and rejected the patch"
+      ],
+      "result_sha256": "7ee34429e21c828a17c21dbd3816bf611a08da9434d97c2ea44f52098aa97f67"
+    },
+    {
+      "mode": "agentteam_full",
+      "terminal_status": "failed",
+      "failure_class": "candidate_patch_invalid",
+      "input_tokens": 1038806,
+      "cached_input_tokens": 891648,
+      "uncached_input_tokens": 147158,
+      "output_tokens": 24449,
+      "reasoning_tokens": 5405,
+      "total_tokens": 1063255,
+      "provider_wall_time_seconds": 822.0,
+      "controller_wall_time_seconds": 880.045479881991,
+      "official_evaluator_wall_time_seconds": 0.0,
+      "budget_overshoot_tokens": 463255,
+      "published_changed_files": [],
+      "worker_changed_files": [
+        ".github/workflows/packages.yaml",
+        "dvc/commands/imp_url.py",
+        "dvc/commands/update.py",
+        "dvc/repo/imp_url.py",
+        "dvc/repo/ls.py",
+        "dvc/repo/update.py",
+        "tests/unit/command/ls/test_ls.py",
+        "tests/unit/command/test_imp_url.py",
+        "tests/unit/command/test_update.py"
+      ],
+      "retained_worker_patch": {
+        "bytes": 8656,
+        "sha256": "aa3bdcc0dbbcea455e4141b91f338233aada996663c517149ac93caf54c48c58"
+      },
+      "official_score": {
+        "status": "failed",
+        "reason": "candidate_patch_invalid",
+        "resolved": false
+      },
+      "stage_usage": [
+        {
+          "stage": "taskpack_author",
+          "terminal_status": "completed",
+          "total_tokens": 233300,
+          "provider_wall_time_seconds": 167.0,
+          "completed_codex_command_events": 8,
+          "completed_codex_file_change_events": 2
+        },
+        {
+          "stage": "repo_map",
+          "terminal_status": "not_launched_deterministic_handoff_reused",
+          "total_tokens": 0,
+          "provider_wall_time_seconds": 0.0
+        },
+        {
+          "stage": "implementation_worker",
+          "terminal_status": "failed",
+          "total_tokens": 829955,
+          "provider_wall_time_seconds": 655.0,
+          "completed_codex_command_events": 36,
+          "completed_codex_file_change_events": 3
+        }
+      ],
+      "stage_token_result": {
+        "authoring_limit_tokens": 360000,
+        "implementation_reserve_tokens": 240000,
+        "authoring_tokens": 233300,
+        "authoring_overshoot_tokens": 0,
+        "implementation_reserve_violated": false,
+        "implementation_worker_launched": true
+      },
+      "failure_evidence": [
+        "deterministic repository grounding avoided a model repo-map invocation",
+        "the implementation worker launched after authoring and retained an incomplete nine-file patch",
+        "the generated write scope omitted dvc/stage paths required to propagate no_download",
+        "the worker reproduced a Stage.update TypeError and correctly recommended against merging"
+      ],
+      "result_sha256": "1b6b1d17a9d34a8cfc12f70bc0fc055e35b51998425e56fa63817307ef41fb34"
+    }
+  ],
+  "comparison_to_v7": {
+    "v7_total_tokens": 1341524,
+    "post_repair_total_tokens": 2788487,
+    "delta_total_tokens": 1446963,
+    "single_v7_partial_score": 0.593939,
+    "single_post_repair_partial_score": 0.236364,
+    "direct_worker_patch_generated": true,
+    "direct_candidate_published": false,
+    "full_implementation_worker_started": true,
+    "full_model_repo_map_invocations": 0
+  },
+  "common_acceptance": {
+    "status": "non_discriminating",
+    "command": "python -m pytest --continue-on-collection-errors -rA",
+    "result": "failed or produced truncated output in every mode",
+    "score_authority": "official SWE-EVO evaluator"
+  }
+}

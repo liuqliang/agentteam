@@ -1,0 +1,47 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-dvc-post-repair-calibration-v1",
+  "revision": 1,
+  "decision_kind": "evaluation",
+  "subject": "phase3_dvc_post_repair_calibration",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-dvc-medium-calibration-v1",
+  "supersedes_decision_id": null,
+  "statement": "Close the post-repair DVC calibration without scored-pilot promotion and repair result publication plus taskpack scope inference before another live benchmark.",
+  "selected_option": "retain all three outcomes as calibration evidence, reject promotion, and prepare provider-free runtime repairs",
+  "alternatives": [
+    {
+      "option": "promote because full mode launched implementation",
+      "rejected_reason": "Launching implementation verifies the stage-reserve mechanism but produced no valid scored candidate."
+    },
+    {
+      "option": "classify direct and full as model-quality failures",
+      "rejected_reason": "Direct lost a completed semantic result during terminal reconciliation, while full was bounded by an incomplete generated write scope."
+    },
+    {
+      "option": "rerun immediately with a larger token budget",
+      "rejected_reason": "The observed failures are deterministic runtime-contract defects, and another live run would spend provider tokens before those defects are repaired."
+    }
+  ],
+  "rationale": "The run completed the frozen three-mode sequence with complete usage accounting. Dynamic L2 tool routing, deterministic grounding reuse, and full-mode stage reservation worked. However, direct and full published empty candidates despite retained worker patches, total usage reached 2788487 tokens, and the framework exposed result-reconciliation, artifact-modeling, and cross-layer scope defects. These findings do not support promotion or another unmodified live run.",
+  "scope": [
+    "instance:iterative__dvc_2.19.0_2.20.0",
+    "runtime_commit:21cb46e164430355b0353e93899e04f982efcaaa",
+    "bundle_sha256:037aab2c985f495033b43c8720a6d01dd40c9257237eee33ab178376d257335c",
+    "run_root:/tmp/agentteam-phase3-dvc-post-repair-run-v1",
+    "aggregate_tokens:2788487",
+    "promotion:not_authorized"
+  ],
+  "expected_outcome": "Provider-free tests prove mailbox semantic preservation, typed expected artifacts, and cross-layer write-scope completion before any new provider-backed calibration is authorized.",
+  "acceptance_refs": [
+    "result.json",
+    "report.md",
+    "plans/2026-08-16-phase3-dvc-post-repair-calibration.md",
+    "pilot state sha256:742e54b39bacf43c9e1d6b5716fd79b22953a3cb906e9b705fc7b868de744370",
+    "all four provider invocations have complete reported usage",
+    "no scored pilot authorization was emitted"
+  ],
+  "status": "completed",
+  "created_at": "2026-08-16T07:53:53Z",
+  "created_by": "operator-semantic-authority"
+}

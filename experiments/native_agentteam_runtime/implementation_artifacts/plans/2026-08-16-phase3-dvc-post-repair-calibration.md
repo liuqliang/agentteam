@@ -1,6 +1,6 @@
 # Phase 3 DVC Post-Repair Calibration
 
-Status: authorized for provider-free preparation and one bounded serial run
+Status: completed without scored-pilot promotion
 
 ## Decision
 
@@ -78,3 +78,20 @@ an extra model attempt under the same bundle.
 
 This single calibration cannot authorize a scored pilot by itself. A promotion
 decision requires an explicit post-run review and a separate decision artifact.
+
+## Outcome
+
+The serial run completed all three modes with complete usage accounting. The
+dynamic L2 tool route, deterministic repository grounding, and full-mode stage
+reservation all operated as designed. Full mode launched its implementation
+worker after authoring used 233300 tokens, and no model repo-map invocation was
+launched.
+
+The calibration is not promoted. Aggregate usage reached 2788487 tokens because
+an admitted Codex turn cannot be interrupted at the frozen token boundary.
+Direct mode generated a retained worker patch but terminal reconciliation
+discarded the mailbox semantic result before validation. Full mode generated an
+incomplete retained patch after its taskpack omitted required `dvc/stage/*`
+paths from the frozen write scope. The authoritative result, report, and
+non-promotion decision are retained in
+`acceptance/phase3-dvc-post-repair-calibration-v1/`.
