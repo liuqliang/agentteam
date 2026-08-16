@@ -55,6 +55,35 @@ class Phase3LivePilotError(RuntimeError):
     """The live bundle or its local execution dependencies are invalid."""
 
 
+_COMPLEXITY_RISK_TARGETS = {
+    "low": "L1",
+    "medium": "L2",
+    "high": "L3",
+}
+
+
+def _risk_target_for_selected_instance(selection_authority, instance_id):
+    selected = selection_authority.get("selection", {}).get(
+        "ordered_instances",
+        [],
+    )
+    matches = [
+        item for item in selected
+        if isinstance(item, dict) and item.get("instance_id") == instance_id
+    ]
+    if len(matches) != 1:
+        raise Phase3LivePilotError(
+            "selected instance complexity authority is unavailable"
+        )
+    stratum = matches[0].get("complexity_stratum")
+    risk_target = _COMPLEXITY_RISK_TARGETS.get(stratum)
+    if risk_target is None:
+        raise Phase3LivePilotError(
+            "selected instance complexity stratum is unsupported"
+        )
+    return risk_target
+
+
 def _host_ca_certificate():
     candidates = [
         ssl.get_default_verify_paths().cafile,
@@ -165,11 +194,16 @@ def build_phase3_live_bundle(
     )
     for instance_id in selection["selection"]["ordered_instance_ids"]:
         public_environment = public_environments[instance_id]
+        risk_target = _risk_target_for_selected_instance(
+            selection,
+            instance_id,
+        )
         protocols[instance_id] = build_phase3_experiment_protocol(
             instance_id=instance_id,
             preregistration=materialization["preregistrations_by_instance"][instance_id],
             repository_source=sources[instance_id],
             common_evaluator_artifact=evaluator_artifact,
+            risk_target=risk_target,
             public_verification_environment=public_environment,
         )
         runtime_taskpacks[instance_id] = materialize_phase3_runtime_taskpack(

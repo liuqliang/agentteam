@@ -38,6 +38,11 @@ from .m0_runtime import (
     write_patch_artifact,
 )
 from .model_routing import default_model_routing_policy, select_model_route
+from .model_context_budget import (
+    CONTEXT_BUDGET_POLICY_FIELDS,
+    normalize_context_budget_policy,
+    select_tool_budget_route,
+)
 from .retry_decision import decide_retry
 from .integration_queue import integration_queue_path, upsert_integration_queue_item
 from .decision_artifact_lifecycle import (
@@ -884,6 +889,18 @@ class TwoPhaseFileScheduler:
                 attempt_number=attempt_number,
                 retry_decision=prior_retry_decision,
             )
+            context_budget_policy = normalize_context_budget_policy(
+                experiment_model_policy
+            )
+            if set(context_budget_policy) == CONTEXT_BUDGET_POLICY_FIELDS:
+                tool_budget_route = select_tool_budget_route(
+                    experiment_model_policy,
+                    role=agent.get("role") or task.get("required_role"),
+                    risk_target=self.experiment_runtime_context.get(
+                        "benchmark_risk_target"
+                    ) or task.get("risk_target") or "L1",
+                )
+                invocation_context["tool_budget_routing"] = tool_budget_route
         if model_route is not None:
             invocation_context.update(
                 {
@@ -976,6 +993,11 @@ class TwoPhaseFileScheduler:
                 worktree_path=worktree_path,
                 attempt_id=attempt_id,
                 taskpack_id=invocation_context["taskpack_id"],
+                model_policy=(
+                    invocation_context["tool_budget_routing"]["policy"]
+                    if "tool_budget_routing" in invocation_context
+                    else self.experiment_runtime_context["model_policy"]
+                ),
             )
         runtime_artifact_baseline = snapshot_runtime_artifacts(
             worktree_path,
@@ -2022,6 +2044,7 @@ class TwoPhaseFileScheduler:
         worktree_path,
         attempt_id,
         taskpack_id,
+        model_policy,
     ):
         if worktree_path is None:
             raise ValueError(
@@ -2057,7 +2080,7 @@ class TwoPhaseFileScheduler:
             library_views=configuration["library_views"],
             credential_mounts=configuration["credential_mounts"],
             environment=configuration["environment"],
-            network_policy=context["model_policy"][
+            network_policy=model_policy[
                 "network_policy"
             ],
             repository_identity={
@@ -2088,7 +2111,10 @@ class TwoPhaseFileScheduler:
             workspace_root=worktree_path,
             sandbox_reference=sandbox_reference,
             controller_reference=context["controller_reference"],
-            model_policy=context["model_policy"],
+            model_policy=model_policy,
+            tool_budget_route=invocation_context.get(
+                "tool_budget_routing"
+            ),
         )
         updated = deepcopy(invocation_context)
         updated.update(
@@ -2102,8 +2128,8 @@ class TwoPhaseFileScheduler:
                 ),
                 "experiment_controller_required": True,
                 "model_invocation_authority_root": str(lifecycle_root),
-                "model": context["model_policy"]["model"],
-                "reasoning_profile": context["model_policy"][
+                "model": model_policy["model"],
+                "reasoning_profile": model_policy[
                     "reasoning_profile"
                 ],
             }
@@ -3799,6 +3825,7 @@ def _load_experiment_runtime_context(output_dir):
     optional = {
         "usage_stage",
         "provider_timeout_seconds",
+        "benchmark_risk_target",
         "resource_envelope_binding",
         "resource_envelope_required",
         "resource_project_id",
@@ -3824,6 +3851,13 @@ def _load_experiment_runtime_context(output_dir):
         raise ValueError(
             "experiment runtime provider timeout is invalid"
         )
+    if value.get("benchmark_risk_target", "L0") not in {
+        "L0",
+        "L1",
+        "L2",
+        "L3",
+    }:
+        raise ValueError("experiment runtime benchmark risk target is invalid")
     resource_binding = value.get("resource_envelope_binding")
     if resource_binding is not None:
         from .resource_envelope import validate_resource_envelope_binding

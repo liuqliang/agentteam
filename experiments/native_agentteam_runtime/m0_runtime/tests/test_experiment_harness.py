@@ -7070,6 +7070,7 @@ class ExperimentModeAdapterTests(unittest.TestCase):
         direct_taskpack_sha256=None,
         context_policy=False,
         context_budget=False,
+        benchmark_risk_target=None,
     ):
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
@@ -7093,6 +7094,10 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                     "tool_call_hard_limit": 16,
                     "tool_budget_policy": "codex_pre_tool_budget.v1",
                 }
+            )
+        if benchmark_risk_target is not None:
+            protocol["environment"]["benchmark_risk_target"] = (
+                benchmark_risk_target
             )
         for seed in range(100):
             seeded_order = sorted(
@@ -7442,6 +7447,7 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                 tmp,
                 "single_codex",
                 context_budget=True,
+                benchmark_risk_target="L2",
             )
             provider = NativeSingleCodexProvider()
             with self._mode_execution_boundary(), patch(
@@ -7479,6 +7485,14 @@ class ExperimentModeAdapterTests(unittest.TestCase):
                     value.startswith("hooks.PreToolUse=")
                     for value in FakeGatedRunner.command
                 )
+            )
+            from agentteam_runtime.model_context_budget import (
+                codex_tool_budget_hook_configurations,
+            )
+
+            self.assertIn(
+                codex_tool_budget_hook_configurations(28, 40)[0],
+                FakeGatedRunner.command,
             )
             self.assertEqual(
                 FakeGatedRunner.command.count(

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .m0_runtime import CodexRuntimeAdapter, FakeRuntimeAdapter, SystemClock
 from .model_routing import validate_model_route
+from .model_context_budget import replace_codex_context_policy_arguments
 
 
 IDLE_HEARTBEAT_MIN_INTERVAL_SECONDS = 15
@@ -41,6 +42,7 @@ MODEL_INVOCATION_CONTEXT_FIELDS = (
     "required_role",
     "usage_stage",
     "model_routing",
+    "tool_budget_routing",
     "provider_usage_scope",
     "provider_session_lock_held",
     "provider_project_binding_valid",
@@ -465,8 +467,15 @@ def _runtime_adapter_for_dispatch(runtime_adapter, message):
     )
     if route is None or not isinstance(runtime_adapter, CodexRuntimeAdapter):
         return runtime_adapter
+    tool_route = (message.get("payload") or {}).get("tool_budget_routing")
+    command = runtime_adapter.command
+    if isinstance(tool_route, dict) and isinstance(tool_route.get("policy"), dict):
+        command = replace_codex_context_policy_arguments(
+            command,
+            tool_route["policy"],
+        )
     return CodexRuntimeAdapter(
-        command=runtime_adapter.command,
+        command=command,
         model=route["model"],
         reasoning_profile=route["reasoning_profile"],
         sandbox=runtime_adapter.sandbox,

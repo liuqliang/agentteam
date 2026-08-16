@@ -2115,6 +2115,11 @@ def invocation_context_from_message(message, *, model=None, backend="codex"):
             if isinstance(payload.get("model_routing"), dict)
             else None
         ),
+        "tool_budget_routing": (
+            dict(payload.get("tool_budget_routing"))
+            if isinstance(payload.get("tool_budget_routing"), dict)
+            else None
+        ),
         "coverage_class": payload.get("coverage_class"),
         "provider_usage_scope": payload.get("provider_usage_scope"),
         "provider_session_lock_held": payload.get(
@@ -2732,6 +2737,7 @@ def _start_context(context):
         "experiment_run_manifest_sha256",
         "reasoning_profile",
         "model_routing",
+        "tool_budget_routing",
         "decision_id",
     ):
         if context.get(field) is not None:
@@ -2775,6 +2781,7 @@ def _terminal_context(context):
         "experiment_run_manifest_sha256",
         "reasoning_profile",
         "model_routing",
+        "tool_budget_routing",
         "decision_id",
     ):
         if context.get(field) is not None:
@@ -3375,6 +3382,14 @@ def _bind_registered_experiment_launch(authority_root, context):
         return dict(context), None
     context = dict(context)
     model_policy = registration["model_policy"]
+    tool_budget_route = registration.get("tool_budget_routing")
+    if (
+        tool_budget_route is not None
+        and context.get("role") != tool_budget_route["role"]
+    ):
+        raise ModelInvocationIntegrityError(
+            "caller role differs from registered tool budget route"
+        )
     expected = {
         "run_id": registration["experiment_run_id"],
         "taskpack_id": registration["taskpack_id"],
@@ -3403,6 +3418,11 @@ def _bind_registered_experiment_launch(authority_root, context):
             "lifecycle_authority_root"
         ],
         "provider_project_identity": registration["workspace_root"],
+        **(
+            {"tool_budget_routing": tool_budget_route}
+            if tool_budget_route is not None
+            else {}
+        ),
     }
     for field, value in expected.items():
         if field in context and context[field] != value:

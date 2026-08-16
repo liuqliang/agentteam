@@ -10,11 +10,14 @@ from agentteam_runtime.model_context_budget import (
     CONTEXT_BUDGET_POLICY_FIELDS,
     HOOK_TRUST_BYPASS_OPTION,
     TOOL_BUDGET_POLICY,
+    TOOL_BUDGET_ROUTE_SCHEMA_VERSION,
     codex_context_policy_arguments,
     codex_tool_budget_hook_command,
     codex_tool_budget_hook_configurations,
     measure_codex_jsonl_tool_calls,
     normalize_context_budget_policy,
+    replace_codex_context_policy_arguments,
+    select_tool_budget_route,
 )
 
 
@@ -32,6 +35,46 @@ def _policy(**overrides):
 
 
 class ModelContextBudgetTests(unittest.TestCase):
+    def test_routes_tool_budget_by_role_and_risk(self):
+        route = select_tool_budget_route(
+            _policy(),
+            role="implementation_worker",
+            risk_target="L2",
+        )
+        self.assertEqual(route["schema_version"], TOOL_BUDGET_ROUTE_SCHEMA_VERSION)
+        self.assertEqual(route["role_group"], "implementation")
+        self.assertEqual((route["soft_limit"], route["hard_limit"]), (28, 40))
+        self.assertEqual(route["policy"]["tool_call_soft_limit"], 28)
+        self.assertEqual(route["policy"]["tool_call_hard_limit"], 40)
+        self.assertEqual(_policy()["tool_call_hard_limit"], 5)
+
+    def test_tool_budget_route_rejects_unknown_role_and_risk(self):
+        with self.assertRaisesRegex(ValueError, "unsupported tool budget role"):
+            select_tool_budget_route(_policy(), role="mystery", risk_target="L1")
+        with self.assertRaisesRegex(ValueError, "unsupported tool budget risk"):
+            select_tool_budget_route(
+                _policy(), role="implementation_worker", risk_target="medium"
+            )
+
+    def test_replaces_existing_controlled_codex_arguments(self):
+        command = [
+            "codex",
+            "exec",
+            "-c",
+            "model_reasoning_effort=high",
+            *codex_context_policy_arguments(_policy()),
+            "-",
+        ]
+        selected = select_tool_budget_route(
+            _policy(), role="repo_map_agent", risk_target="L2"
+        )["policy"]
+        rewritten = replace_codex_context_policy_arguments(command, selected)
+        self.assertEqual(rewritten.count(HOOK_TRUST_BYPASS_OPTION), 1)
+        self.assertIn("model_reasoning_effort=high", rewritten)
+        self.assertIn("28", " ".join(rewritten))
+        self.assertIn("40", " ".join(rewritten))
+        self.assertNotIn(codex_tool_budget_hook_configurations(3, 5)[0], rewritten)
+
     def test_normalizes_legacy_and_complete_policies(self):
         legacy = normalize_context_budget_policy(
             {
@@ -143,19 +186,30 @@ class ModelContextBudgetTests(unittest.TestCase):
                 json.dumps(
                     {
                         "type": "item.completed",
-                        "item": {"type": "command_execution"},
+                        "item": {
+                            "id": "command-1",
+                            "type": "command_execution",
+                            "status": "completed",
+                        },
                     }
                 ),
                 json.dumps(
                     {
                         "type": "item.started",
-                        "item": {"type": "command_execution"},
+                        "item": {
+                            "id": "command-2",
+                            "type": "command_execution",
+                        },
                     }
                 ),
                 json.dumps(
                     {
                         "type": "item.completed",
-                        "item": {"type": "file_change"},
+                        "item": {
+                            "id": "file-1",
+                            "type": "file_change",
+                            "status": "failed",
+                        },
                     }
                 ),
                 json.dumps(
@@ -170,12 +224,25 @@ class ModelContextBudgetTests(unittest.TestCase):
         self.assertEqual(
             measure_codex_jsonl_tool_calls(transcript),
             {
+                "observed_tool_calls_lower_bound": 3,
+                "started_tool_calls": 1,
+                "started_by_type": {
+                    "command_execution": 1,
+                    "file_change": 0,
+                },
                 "completed_tool_calls": 2,
                 "completed_by_type": {
                     "command_execution": 1,
                     "file_change": 1,
                 },
+                "failed_tool_calls": 1,
+                "failed_by_type": {
+                    "command_execution": 0,
+                    "file_change": 1,
+                },
+                "unmatched_started_tool_calls": 1,
                 "malformed_lines": 1,
+                "authority": "host_captured_jsonl_lower_bound",
             },
         )
 

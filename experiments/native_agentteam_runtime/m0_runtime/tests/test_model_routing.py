@@ -14,6 +14,12 @@ from agentteam_runtime.m0_runtime import (
     run_simulation,
 )
 from agentteam_runtime.model_invocation import invocation_context_from_message
+from agentteam_runtime.model_context_budget import (
+    TOOL_BUDGET_POLICY,
+    codex_context_policy_arguments,
+    codex_tool_budget_hook_configurations,
+    select_tool_budget_route,
+)
 from agentteam_runtime.model_routing import (
     author_model_route,
     default_model_routing_policy,
@@ -263,6 +269,57 @@ class ModelRoutingTest(unittest.TestCase):
         self.assertEqual(routed.reasoning_profile, "medium")
         self.assertEqual(routed.timeout_seconds, 123)
         self.assertEqual(base.model, "gpt-5.6-sol")
+
+    def test_dispatch_route_replaces_tool_budget_on_long_lived_adapter(self):
+        base_policy = {
+            "tool_output_token_limit": 4_000,
+            "web_search_policy": "disabled",
+            "model_auto_compact_token_limit": 32_768,
+            "tool_call_soft_limit": 12,
+            "tool_call_hard_limit": 16,
+            "tool_budget_policy": TOOL_BUDGET_POLICY,
+        }
+        base = CodexRuntimeAdapter(
+            command=["codex", "exec", *codex_context_policy_arguments(base_policy)],
+            model="gpt-5.6-sol",
+            reasoning_profile="high",
+        )
+        model_route = select_model_route(
+            default_model_routing_policy(
+                fixed_profile={"model": "gpt-5.6-sol", "reasoning_profile": "high"}
+            ),
+            role="implementation_worker",
+            risk_target="L2",
+            attempt_number=1,
+        )
+        tool_route = select_tool_budget_route(
+            base_policy,
+            role="implementation_worker",
+            risk_target="L2",
+        )
+
+        routed = _runtime_adapter_for_dispatch(
+            base,
+            {
+                "payload": {
+                    "model_routing": model_route,
+                    "tool_budget_routing": tool_route,
+                }
+            },
+        )
+
+        self.assertIn(
+            codex_tool_budget_hook_configurations(28, 40)[0],
+            routed.command,
+        )
+        self.assertNotIn(
+            codex_tool_budget_hook_configurations(12, 16)[0],
+            routed.command,
+        )
+        self.assertEqual(
+            routed.command.count("--dangerously-bypass-hook-trust"),
+            1,
+        )
 
     def test_cli_policy_injection_enables_adaptive_taskpack(self):
         with tempfile.TemporaryDirectory() as tmp:

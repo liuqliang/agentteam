@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import shlex
 import textwrap
@@ -24,12 +25,70 @@ CONTEXT_BUDGET_POLICY_FIELDS = frozenset(
     }
 )
 TOOL_BUDGET_POLICY = "codex_pre_tool_budget.v1"
+TOOL_BUDGET_ROUTE_SCHEMA_VERSION = "tool_budget_route.v1"
 HOOK_TRUST_BYPASS_OPTION = "--dangerously-bypass-hook-trust"
 _COUNTED_CODEX_TOOL_ITEM_TYPES = frozenset(
     {
         "command_execution",
         "file_change",
     }
+)
+_TOOL_BUDGET_ROLE_GROUPS = {
+    "implementation_worker": "implementation",
+    "worker_agent": "implementation",
+    "worker": "implementation",
+    "repo_map_agent": "repo_map",
+    "repo_map": "repo_map",
+    "taskpack_author": "taskpack_author",
+    "reviewer": "review_or_control",
+    "code_reviewer": "review_or_control",
+    "repair_worker": "implementation",
+    "review_or_repair": "review_or_control",
+    "evaluator": "review_or_control",
+    "integration_reviewer": "review_or_control",
+    "architecture_authority": "review_or_control",
+    "planner": "review_or_control",
+    "task_planner": "review_or_control",
+    "task_slicer": "review_or_control",
+    "follow_up_author": "taskpack_author",
+    "semantic_architecture_agent": "review_or_control",
+    "semantic_architecture": "review_or_control",
+    "runtime_diagnostic": "review_or_control",
+    "development_smoke": "review_or_control",
+    "acceptance_live_smoke": "review_or_control",
+}
+_TOOL_BUDGET_LIMITS = {
+    "implementation": {
+        "L0": (12, 16),
+        "L1": (20, 28),
+        "L2": (28, 40),
+        "L3": (40, 56),
+    },
+    "repo_map": {
+        "L0": (12, 16),
+        "L1": (20, 28),
+        "L2": (28, 40),
+        "L3": (40, 56),
+    },
+    "taskpack_author": {
+        "L0": (16, 24),
+        "L1": (20, 28),
+        "L2": (24, 32),
+        "L3": (32, 44),
+    },
+    "review_or_control": {
+        "L0": (12, 16),
+        "L1": (16, 24),
+        "L2": (20, 28),
+        "L3": (28, 40),
+    },
+}
+_CONTROLLED_CONFIGURATION_PREFIXES = (
+    "tool_output_token_limit=",
+    "web_search=",
+    "model_auto_compact_token_limit=",
+    "hooks.PreToolUse=",
+    "hooks.PostToolUse=",
 )
 
 _HOOK_SOURCE = textwrap.dedent(
@@ -179,6 +238,59 @@ def normalize_context_budget_policy(value):
     return policy
 
 
+def select_tool_budget_route(base_policy, *, role, risk_target):
+    """Select deterministic Codex tool limits for one invocation."""
+
+    policy = normalize_context_budget_policy(base_policy)
+    if set(policy) != CONTEXT_BUDGET_POLICY_FIELDS:
+        raise ValueError("tool budget routing requires a complete context policy")
+    role_group = _TOOL_BUDGET_ROLE_GROUPS.get(role)
+    if role_group is None:
+        raise ValueError(f"unsupported tool budget role: {role}")
+    limits = _TOOL_BUDGET_LIMITS[role_group].get(risk_target)
+    if limits is None:
+        raise ValueError(f"unsupported tool budget risk target: {risk_target}")
+    soft_limit, hard_limit = limits
+    selected_policy = copy.deepcopy(base_policy)
+    selected_policy["tool_call_soft_limit"] = soft_limit
+    selected_policy["tool_call_hard_limit"] = hard_limit
+    return {
+        "schema_version": TOOL_BUDGET_ROUTE_SCHEMA_VERSION,
+        "role": role,
+        "role_group": role_group,
+        "risk_target": risk_target,
+        "soft_limit": soft_limit,
+        "hard_limit": hard_limit,
+        "policy": selected_policy,
+    }
+
+
+def replace_codex_context_policy_arguments(command, value):
+    """Replace controlled Codex `-c` options with one exact policy."""
+
+    rewritten = []
+    index = 0
+    command = list(command)
+    while index < len(command):
+        item = command[index]
+        if item == HOOK_TRUST_BYPASS_OPTION:
+            index += 1
+            continue
+        if item == "-c" and index + 1 < len(command):
+            configuration = command[index + 1]
+            if any(
+                isinstance(configuration, str)
+                and configuration.startswith(prefix)
+                for prefix in _CONTROLLED_CONFIGURATION_PREFIXES
+            ):
+                index += 2
+                continue
+        rewritten.append(item)
+        index += 1
+    rewritten.extend(codex_context_policy_arguments(value))
+    return rewritten
+
+
 def codex_context_policy_arguments(value):
     """Build exact Codex CLI arguments for a validated context policy."""
 
@@ -249,9 +361,17 @@ def codex_tool_budget_hook_configurations(soft_limit, hard_limit):
 
 
 def measure_codex_jsonl_tool_calls(transcript):
-    """Count completed model tools using the frozen Phase 3 allowlist."""
+    """Measure a host-captured lower bound of Codex tool activity."""
 
     counts = {name: 0 for name in sorted(_COUNTED_CODEX_TOOL_ITEM_TYPES)}
+    started_counts = {
+        name: 0 for name in sorted(_COUNTED_CODEX_TOOL_ITEM_TYPES)
+    }
+    failed_counts = {
+        name: 0 for name in sorted(_COUNTED_CODEX_TOOL_ITEM_TYPES)
+    }
+    observed_ids = set()
+    completed_ids = set()
     malformed_lines = 0
     for line in str(transcript or "").splitlines():
         if not line.strip():
@@ -263,10 +383,32 @@ def measure_codex_jsonl_tool_calls(transcript):
             continue
         item = event.get("item") if isinstance(event, dict) else None
         item_type = item.get("type") if isinstance(item, dict) else None
-        if event.get("type") == "item.completed" and item_type in counts:
+        event_type = event.get("type")
+        item_id = item.get("id") if isinstance(item, dict) else None
+        if event_type == "item.started" and item_type in started_counts:
+            started_counts[item_type] += 1
+            if isinstance(item_id, str) and item_id:
+                observed_ids.add(item_id)
+        if event_type == "item.completed" and item_type in counts:
             counts[item_type] += 1
+            if isinstance(item_id, str) and item_id:
+                observed_ids.add(item_id)
+                completed_ids.add(item_id)
+            if item.get("status") == "failed":
+                failed_counts[item_type] += 1
     return {
+        "observed_tool_calls_lower_bound": (
+            len(observed_ids)
+            if observed_ids
+            else max(sum(started_counts.values()), sum(counts.values()))
+        ),
+        "started_tool_calls": sum(started_counts.values()),
+        "started_by_type": started_counts,
         "completed_tool_calls": sum(counts.values()),
         "completed_by_type": counts,
+        "failed_tool_calls": sum(failed_counts.values()),
+        "failed_by_type": failed_counts,
+        "unmatched_started_tool_calls": len(observed_ids - completed_ids),
         "malformed_lines": malformed_lines,
+        "authority": "host_captured_jsonl_lower_bound",
     }

@@ -284,6 +284,9 @@
         "tool_budget_policy": {
           "const": "codex_pre_tool_budget.v1"
         },
+        "benchmark_risk_target": {
+          "enum": ["L1", "L2", "L3"]
+        },
         "host_class": {
           "type": "string",
           "minLength": 1

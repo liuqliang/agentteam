@@ -780,6 +780,7 @@ index b859599..f06e5bb 100644
                 preregistration=preregistrations[instance_id],
                 repository_source=repository,
                 common_evaluator_artifact=evaluator,
+                risk_target="L2",
                 public_verification_environment=public_environment,
             )
             first = materialize_phase3_runtime_taskpack(
@@ -824,6 +825,10 @@ index b859599..f06e5bb 100644
             self.assertEqual(
                 protocol["environment"]["tool_budget_policy"],
                 "codex_pre_tool_budget.v1",
+            )
+            self.assertEqual(
+                protocol["environment"]["benchmark_risk_target"],
+                "L2",
             )
             self.assertEqual(
                 protocol["evaluator"]["candidate_patch_policy"],

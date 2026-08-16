@@ -36,6 +36,7 @@ from .model_context_budget import (
     CONTEXT_BUDGET_POLICY_FIELDS,
     LEGACY_CONTEXT_POLICY_FIELDS,
     normalize_context_budget_policy,
+    select_tool_budget_route,
 )
 
 
@@ -788,8 +789,6 @@ def publish_registered_model_invocation_set_reference(
             != mode_authority["protocol_sha256"]
             or registration["run_manifest_sha256"]
             != mode_authority["run_manifest_sha256"]
-            or registration["model_policy"]
-            != mode_authority["model_policy"]
         ):
             raise ExperimentSandboxError(
                 "registered lifecycle differs from mode authority"
@@ -1527,16 +1526,17 @@ def publish_experiment_launch_registration(
     sandbox_reference,
     controller_reference,
     model_policy,
+    tool_budget_route=None,
 ):
     """Bind one registered lifecycle to its non-optional launch policy."""
     authority_root = Path(authority_root).resolve(strict=True)
     mode_authority = load_experiment_mode_authority(authority_root)
+    selected_model_policy = _normalize_experiment_model_policy(model_policy)
     expected_mode_binding = {
         "experiment_run_id": experiment_run_id,
         "protocol_sha256": protocol_sha256,
         "run_manifest_sha256": run_manifest_sha256,
         "mode": mode,
-        "model_policy": _normalize_experiment_model_policy(model_policy),
     }
     if any(
         mode_authority.get(field) != value
@@ -1545,6 +1545,44 @@ def publish_experiment_launch_registration(
         raise ExperimentSandboxError(
             "launch registration differs from mode authority"
         )
+    normalized_tool_route = None
+    if tool_budget_route is None:
+        if mode_authority["model_policy"] != selected_model_policy:
+            raise ExperimentSandboxError(
+                "launch registration differs from mode authority"
+            )
+    else:
+        if not isinstance(tool_budget_route, dict):
+            raise ExperimentSandboxError("tool budget route is invalid")
+        try:
+            expected_route = select_tool_budget_route(
+                mode_authority["model_policy"],
+                role=tool_budget_route.get("role"),
+                risk_target=tool_budget_route.get("risk_target"),
+            )
+        except ValueError as exc:
+            raise ExperimentSandboxError(
+                f"tool budget route is invalid: {exc}"
+            ) from exc
+        if tool_budget_route != expected_route:
+            raise ExperimentSandboxError(
+                "tool budget route differs from mode authority"
+            )
+        authorized_risk = mode_authority.get("tool_budget_risk_target")
+        if (
+            authorized_risk is not None
+            and expected_route["risk_target"] != authorized_risk
+        ):
+            raise ExperimentSandboxError(
+                "tool budget route risk differs from mode authority"
+            )
+        if selected_model_policy != _normalize_experiment_model_policy(
+            expected_route["policy"]
+        ):
+            raise ExperimentSandboxError(
+                "selected model policy differs from tool budget route"
+            )
+        normalized_tool_route = expected_route
     lifecycle_root = validate_experiment_lifecycle_authority(
         authority_root,
         lifecycle_authority_root,
@@ -1561,7 +1599,7 @@ def publish_experiment_launch_registration(
     )
     if (
         descriptor["network_policy"]
-        != expected_mode_binding["model_policy"]["network_policy"]
+        != selected_model_policy["network_policy"]
     ):
         raise ExperimentSandboxError(
             "sandbox network policy differs from mode authority"
@@ -1621,8 +1659,11 @@ def publish_experiment_launch_registration(
         "sandbox_reference": dict(sandbox_reference),
         "sandbox_policy_sha256": descriptor["policy_sha256"],
         "controller_reference": controller_reference,
-        "model_policy": _normalize_experiment_model_policy(
-            model_policy
+        "model_policy": selected_model_policy,
+        **(
+            {"tool_budget_routing": normalized_tool_route}
+            if normalized_tool_route is not None
+            else {}
         ),
     }
     path = _experiment_authority_dir(authority_root) / (
@@ -1648,6 +1689,7 @@ def publish_experiment_mode_authority(
     run_manifest_sha256,
     mode,
     model_policy,
+    tool_budget_risk_target=None,
     controller_reference,
     sandbox_configuration_sha256,
 ):
@@ -1659,6 +1701,10 @@ def publish_experiment_mode_authority(
     controller_reference = validate_experiment_controller_reference(
         controller_reference
     )
+    if tool_budget_risk_target not in {None, "L1", "L2", "L3"}:
+        raise ExperimentSandboxError(
+            "experiment mode tool budget risk target is invalid"
+        )
     record = {
         "schema_version": MODE_AUTHORITY_SCHEMA_VERSION,
         "experiment_run_id": _nonempty_text(
@@ -1676,6 +1722,11 @@ def publish_experiment_mode_authority(
         "mode": _experiment_mode(mode),
         "model_policy": _normalize_experiment_model_policy(
             model_policy
+        ),
+        **(
+            {"tool_budget_risk_target": tool_budget_risk_target}
+            if tool_budget_risk_target is not None
+            else {}
         ),
         "controller_reference": controller_reference,
         "sandbox_configuration_sha256": _require_sha256(
@@ -1724,19 +1775,21 @@ def load_experiment_mode_authority(authority_root):
         raise ExperimentSandboxError(
             "experiment mode authority is unreadable"
         ) from exc
+    required = {
+        "schema_version",
+        "experiment_run_id",
+        "protocol_sha256",
+        "run_manifest_sha256",
+        "mode",
+        "model_policy",
+        "controller_reference",
+        "sandbox_configuration_sha256",
+    }
+    optional = {"tool_budget_risk_target"}
     if (
         not isinstance(record, dict)
-        or set(record)
-        != {
-            "schema_version",
-            "experiment_run_id",
-            "protocol_sha256",
-            "run_manifest_sha256",
-            "mode",
-            "model_policy",
-            "controller_reference",
-            "sandbox_configuration_sha256",
-        }
+        or not required.issubset(record)
+        or set(record) - required - optional
         or record["schema_version"] != MODE_AUTHORITY_SCHEMA_VERSION
     ):
         raise ExperimentSandboxError(
@@ -1755,6 +1808,15 @@ def load_experiment_mode_authority(authority_root):
     record["model_policy"] = _normalize_experiment_model_policy(
         record["model_policy"]
     )
+    if record.get("tool_budget_risk_target") not in {
+        None,
+        "L1",
+        "L2",
+        "L3",
+    }:
+        raise ExperimentSandboxError(
+            "experiment mode tool budget risk target is invalid"
+        )
     from .experiment_controller import (
         validate_experiment_controller_reference,
     )
@@ -1831,9 +1893,11 @@ def load_experiment_launch_registration(lifecycle_authority_root):
         "controller_reference",
         "model_policy",
     }
+    optional = {"tool_budget_routing"}
     if (
         not isinstance(record, dict)
-        or set(record) != required
+        or not required.issubset(record)
+        or set(record) - required - optional
         or record["schema_version"]
         != LAUNCH_REGISTRATION_SCHEMA_VERSION
         or record["lifecycle_authority_root"] != str(lifecycle_root)
@@ -1886,6 +1950,35 @@ def load_experiment_launch_registration(lifecycle_authority_root):
         raise ExperimentSandboxError(
             "experiment launch controller binding changed"
         )
+    route = record.get("tool_budget_routing")
+    if route is None:
+        if model_policy != mode_authority["model_policy"]:
+            raise ExperimentSandboxError(
+                "registered lifecycle differs from mode authority"
+            )
+    else:
+        try:
+            expected_route = select_tool_budget_route(
+                mode_authority["model_policy"],
+                role=route.get("role"),
+                risk_target=route.get("risk_target"),
+            )
+        except (AttributeError, ValueError) as exc:
+            raise ExperimentSandboxError(
+                f"experiment launch tool budget route is invalid: {exc}"
+            ) from exc
+        if route != expected_route or model_policy != expected_route["policy"]:
+            raise ExperimentSandboxError(
+                "experiment launch tool budget binding changed"
+            )
+        authorized_risk = mode_authority.get("tool_budget_risk_target")
+        if (
+            authorized_risk is not None
+            and expected_route["risk_target"] != authorized_risk
+        ):
+            raise ExperimentSandboxError(
+                "experiment launch tool budget risk binding changed"
+            )
     validate_provider_authority_separation(
         descriptor,
         authority_root,

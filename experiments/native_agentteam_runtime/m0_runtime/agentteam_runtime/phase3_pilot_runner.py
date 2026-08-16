@@ -119,6 +119,7 @@ def build_phase3_experiment_protocol(
     preregistration,
     repository_source,
     common_evaluator_artifact,
+    risk_target,
     public_verification_environment=None,
 ):
     """Translate one frozen benchmark authority into executable protocol v1."""
@@ -143,6 +144,8 @@ def build_phase3_experiment_protocol(
         public_verification_environment,
         instance_id=instance_id,
     )
+    if risk_target not in {"L1", "L2", "L3"}:
+        raise Phase3PilotRunnerError("benchmark risk target is invalid")
     command = _trusted_acceptance_argv(
         task["acceptance_commands"][0],
         public_verification_environment=public_environment,
@@ -205,6 +208,7 @@ def build_phase3_experiment_protocol(
             "tool_call_soft_limit": _TOOL_CALL_SOFT_LIMIT,
             "tool_call_hard_limit": _TOOL_CALL_HARD_LIMIT,
             "tool_budget_policy": _TOOL_BUDGET_POLICY,
+            "benchmark_risk_target": risk_target,
             "host_class": execution["host_class"],
             "cpu_limit": execution["cpu_limit"],
             "memory_limit_bytes": execution["memory_limit_bytes"],

@@ -158,6 +158,9 @@
     "model_routing": {
       "type": "object"
     },
+    "tool_budget_routing": {
+      "type": "object"
+    },
     "experiment_run_id": {
       "$ref": "#/$defs/nullableIdentifier"
     },

@@ -64,8 +64,10 @@ from .model_invocation import (
     is_supported_codex_command,
 )
 from .model_context_budget import (
+    CONTEXT_BUDGET_POLICY_FIELDS,
     codex_context_policy_arguments,
     normalize_context_budget_policy,
+    select_tool_budget_route,
 )
 from .experiment_protocol import validate_protocol_resource_envelope
 from .resource_envelope import SystemdResourceHierarchy
@@ -501,6 +503,9 @@ class ExperimentModeController:
             run_manifest_sha256=canonical_json_sha256(run_manifest),
             mode=run_manifest["mode"],
             model_policy=_model_policy(protocol),
+            tool_budget_risk_target=protocol["environment"].get(
+                "benchmark_risk_target"
+            ),
             controller_reference=controller_reference,
             sandbox_configuration_sha256=(
                 self.sandbox_configuration_sha256
@@ -1011,6 +1016,15 @@ class SingleCodexModeAdapter:
 
     def execute(self, request):
         prompt = _single_codex_prompt(request.protocol)
+        tool_route = _invocation_tool_budget_route(
+            request,
+            role="implementation_worker",
+        )
+        model_policy = (
+            tool_route["policy"]
+            if tool_route is not None
+            else request.model_policy
+        )
         invocation_context = _experiment_invocation_context(
             request,
             usage_stage="single_codex",
@@ -1023,12 +1037,16 @@ class SingleCodexModeAdapter:
                 workspace_root=request.project_root,
                 usage_stage="single_codex",
                 taskpack_id="SINGLE-CODEX-NONE",
+                model_policy=model_policy,
+                tool_budget_route=tool_route,
             )
         )
+        if tool_route is not None:
+            invocation_context["tool_budget_routing"] = tool_route
         result = self.provider(
             project_root=request.project_root,
             prompt=prompt,
-            model_policy=copy.deepcopy(request.model_policy),
+            model_policy=copy.deepcopy(model_policy),
             invocation_context=invocation_context,
         )
         if not isinstance(result, dict):
@@ -1324,6 +1342,15 @@ class AgentTeamFullModeAdapter:
             request,
             project_root=author_workspace,
         )
+        author_tool_route = _invocation_tool_budget_route(
+            request,
+            role="taskpack_author",
+        )
+        author_model_policy = (
+            author_tool_route["policy"]
+            if author_tool_route is not None
+            else request.model_policy
+        )
         authored = draft_taskpack_from_goal(
             project_root=str(author_workspace),
             goal=_goal_text(request.protocol),
@@ -1332,9 +1359,9 @@ class AgentTeamFullModeAdapter:
             author_runtime="codex",
             codex_command=_with_experiment_codex_context_policy(
                 ["codex", "exec"],
-                request.model_policy,
+                author_model_policy,
             ),
-            codex_model=request.model_policy["model"],
+            codex_model=author_model_policy["model"],
             codex_timeout_seconds=int(
                 request.protocol["budgets"]["max_wall_time_seconds"]
             ),
@@ -1345,6 +1372,8 @@ class AgentTeamFullModeAdapter:
                 workspace_root=str(author_workspace),
                 usage_stage="taskpack_author",
                 taskpack_id="experiment-full-mode-author",
+                model_policy=author_model_policy,
+                tool_budget_route=author_tool_route,
             ),
         )
         if (
@@ -1628,6 +1657,25 @@ def _model_policy(protocol):
     return policy
 
 
+def _invocation_tool_budget_route(request, *, role):
+    try:
+        normalized = normalize_context_budget_policy(request.model_policy)
+        if set(normalized) != CONTEXT_BUDGET_POLICY_FIELDS:
+            return None
+        return select_tool_budget_route(
+            request.model_policy,
+            role=role,
+            risk_target=request.protocol["environment"].get(
+                "benchmark_risk_target",
+                "L0",
+            ),
+        )
+    except (KeyError, ValueError) as exc:
+        raise ExperimentModeError(
+            f"experiment tool budget route is invalid: {exc}"
+        ) from exc
+
+
 def _with_experiment_codex_context_policy(command, model_policy):
     """Append the frozen model-context controls to one Codex command."""
 
@@ -1742,6 +1790,10 @@ def _experiment_runtime_context(request, usage_stage=None):
         "controller_required": True,
         "independent_attempt_workspaces": True,
         "model_policy": copy.deepcopy(request.model_policy),
+        "benchmark_risk_target": request.protocol["environment"].get(
+            "benchmark_risk_target",
+            "L0",
+        ),
         "provider_timeout_seconds": int(
             request.protocol["budgets"]["max_wall_time_seconds"]
         ),
@@ -1779,6 +1831,8 @@ def _register_provider_launch(
     workspace_root,
     usage_stage,
     taskpack_id,
+    model_policy=None,
+    tool_budget_route=None,
 ):
     configuration = request.sandbox_configuration
     required = {
@@ -1792,6 +1846,9 @@ def _register_provider_launch(
         raise ExperimentModeError(
             "experiment sandbox configuration is invalid"
         )
+    selected_model_policy = copy.deepcopy(
+        model_policy or request.model_policy
+    )
     lifecycle_root = experiment_lifecycle_authority_root(
         request.authority_root,
         lifecycle_id,
@@ -1802,9 +1859,7 @@ def _register_provider_launch(
         library_views=configuration["library_views"],
         credential_mounts=configuration["credential_mounts"],
         environment=configuration["environment"],
-        network_policy=request.protocol["environment"][
-            "network_policy"
-        ],
+        network_policy=selected_model_policy["network_policy"],
         repository_identity=_repository_identity(request.protocol),
         forbidden_paths=[configuration["canary_path"]],
     )
@@ -1828,7 +1883,8 @@ def _register_provider_launch(
         workspace_root=workspace_root,
         sandbox_reference=sandbox_reference,
         controller_reference=request.controller_reference,
-        model_policy=request.model_policy,
+        model_policy=selected_model_policy,
+        tool_budget_route=tool_budget_route,
     )
     return {
         **_experiment_invocation_context(
@@ -1839,10 +1895,15 @@ def _register_provider_launch(
         "experiment_sandbox_reference": sandbox_reference,
         "experiment_sandbox_required": True,
         "model_invocation_authority_root": str(lifecycle_root),
-        "model": request.model_policy["model"],
-        "reasoning_profile": request.model_policy[
+        "model": selected_model_policy["model"],
+        "reasoning_profile": selected_model_policy[
             "reasoning_profile"
         ],
+        **(
+            {"tool_budget_routing": copy.deepcopy(tool_budget_route)}
+            if tool_budget_route is not None
+            else {}
+        ),
     }
 
 
