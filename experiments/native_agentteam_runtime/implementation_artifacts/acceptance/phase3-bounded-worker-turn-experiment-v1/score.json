@@ -1,0 +1,15 @@
+{
+  "evaluator_sha256": "6dd1361a68096c2c4c0532be054ee8cf50532dea8508a3c9d96453beea7a8219",
+  "f2p_success": 2,
+  "f2p_total": 14,
+  "image_manifest_digest": "sha256:cccdad0b5064f23be9d6e1047238a9fc3f3d3a528015427eed8d17d8fd1ece73",
+  "p2p_success": 64,
+  "p2p_total": 66,
+  "patch_applied": true,
+  "report_sha256": "50c84d5387a5d63feee15526e43e3446fa648ba63ea96b4f61ca7d327a59e724",
+  "resolved": false,
+  "schema_version": "phase3_official_score.v1",
+  "status": "completed",
+  "swe_style_partial_score": 0.393939,
+  "wall_time_seconds": 42.010949996009
+}

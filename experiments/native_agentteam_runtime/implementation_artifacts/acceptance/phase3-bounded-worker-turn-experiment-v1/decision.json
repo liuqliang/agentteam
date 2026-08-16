@@ -1,0 +1,47 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-bounded-worker-turn-experiment-v1",
+  "revision": 1,
+  "decision_kind": "evaluation",
+  "subject": "bounded_worker_turn_default_policy",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-dvc-post-repair-calibration-v1",
+  "supersedes_decision_id": null,
+  "statement": "Do not adopt a fixed locate-implement-verify model checkpoint sequence as the default worker policy; retain the checkpoint mechanism for recovery and use adaptive boundaries plus controller-owned deterministic verification.",
+  "selected_option": "adaptive checkpoints after material code progress or a genuine boundary, with no separate model locate turn when deterministic grounding is complete",
+  "alternatives": [
+    {
+      "option": "always use three model turns",
+      "rejected_reason": "The treatment repeated 15 source-path reads, used 61.08% more uncached input including the invalid startup, and exhausted the settled budget before verify."
+    },
+    {
+      "option": "return to one unbounded worker call",
+      "rejected_reason": "The retained long call still crossed its budget without an observable stop boundary and produced an incomplete patch under a defective scope."
+    },
+    {
+      "option": "increase the experiment budget and launch verify",
+      "rejected_reason": "The focused commands were deterministic and passed under controller execution; another model invocation is not justified merely to run known commands."
+    }
+  ],
+  "rationale": "The repaired two-turn treatment produced a more complete compatible candidate, passed 11 focused tests, and improved the official partial score relative to the retained post-repair single result. It did not show a cost advantage: aggregate live usage including the invalid startup was only 1.19% below the historical implementation total, uncached input was 61.08% higher, provider time was 18.32% higher, command events increased from 36 to 52, and verify was never admitted. The implementation worker reread 15 of the locate turn's 17 source paths, showing that the compact semantic checkpoint did not replace source re-grounding.",
+  "scope": [
+    "instance:iterative__dvc_2.19.0_2.20.0",
+    "source_commit:78dd045d29f274960bcaf48fd2d055366abaf2c1",
+    "runtime_commit:b814a6971804940eab2be15250dc6e606787f66b",
+    "aggregate_live_tokens:820040",
+    "fixed_three_turn_default:not_authorized"
+  ],
+  "expected_outcome": "A provider-free follow-up designs adaptive checkpoint admission: skip model locating when grounding is complete, checkpoint after a candidate patch or real boundary, and run declared verification commands directly before asking a model to diagnose failures.",
+  "acceptance_refs": [
+    "result.json",
+    "score.json",
+    "report.md",
+    "task.json",
+    "11 focused public tests passed",
+    "official SWE-EVO partial score 0.393939",
+    "complete usage coverage for all three live invocations"
+  ],
+  "status": "completed",
+  "created_at": "2026-08-16T11:55:07Z",
+  "created_by": "operator-semantic-authority"
+}

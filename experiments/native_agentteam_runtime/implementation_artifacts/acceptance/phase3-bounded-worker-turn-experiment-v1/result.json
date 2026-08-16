@@ -1,0 +1,113 @@
+{
+  "schema_version": "phase3_bounded_worker_turn_experiment_result.v1",
+  "decision_id": "DEC-P3-bounded-worker-turn-experiment-v1",
+  "status": "completed_not_adopted",
+  "instance_id": "iterative__dvc_2.19.0_2.20.0",
+  "source_commit": "78dd045d29f274960bcaf48fd2d055366abaf2c1",
+  "runtime_commits": {
+    "provider_free_prototype": "c8499bb",
+    "repair_continuation": "b814a6971804940eab2be15250dc6e606787f66b"
+  },
+  "historical_long_turn_control": {
+    "total_tokens": 829955,
+    "input_tokens": 812666,
+    "cached_input_tokens": 696320,
+    "uncached_input_tokens": 116346,
+    "output_tokens": 17289,
+    "reasoning_tokens": 4336,
+    "provider_wall_time_seconds": 655,
+    "completed_command_events": 36,
+    "candidate_status": "invalid_incomplete_scope",
+    "official_score": null
+  },
+  "invalid_startup": {
+    "run_root": "/tmp/agentteam-phase3-bounded-worker-turn-live-v1",
+    "terminal_status": "failed",
+    "failure_class": "experimental_infrastructure_invalid",
+    "total_tokens": 53280,
+    "input_tokens": 50834,
+    "cached_input_tokens": 30976,
+    "uncached_input_tokens": 19858,
+    "output_tokens": 2446,
+    "reasoning_tokens": 852,
+    "provider_wall_time_seconds": 58,
+    "completed_command_events": 1,
+    "checkpoint_bytes": 3617,
+    "changed_files": []
+  },
+  "bounded_turn_treatment": {
+    "run_root": "/tmp/agentteam-phase3-bounded-worker-turn-live-v2",
+    "terminal_status": "stopped",
+    "stop_reason": "settled_token_ceiling_reached",
+    "maximum_total_tokens": 546720,
+    "invocation_count": 2,
+    "total_tokens": 766760,
+    "input_tokens": 750975,
+    "cached_input_tokens": 583424,
+    "uncached_input_tokens": 167551,
+    "output_tokens": 15785,
+    "reasoning_tokens": 4052,
+    "provider_wall_time_seconds": 717,
+    "completed_command_events": 52,
+    "cross_turn_repeated_reads": 15,
+    "checkpoint_bytes": 8357,
+    "stages": [
+      {
+        "stage": "locate",
+        "terminal_status": "completed",
+        "total_tokens": 238638,
+        "uncached_input_tokens": 63039,
+        "provider_wall_time_seconds": 229,
+        "completed_command_events": 18,
+        "checkpoint_bytes": 4944
+      },
+      {
+        "stage": "implement",
+        "terminal_status": "completed",
+        "total_tokens": 528122,
+        "uncached_input_tokens": 104512,
+        "provider_wall_time_seconds": 488,
+        "completed_command_events": 34,
+        "checkpoint_bytes": 3413
+      },
+      {
+        "stage": "verify",
+        "terminal_status": "not_launched_budget_gate",
+        "total_tokens": 0
+      }
+    ],
+    "candidate": {
+      "changed_files": 11,
+      "patch_bytes_with_tests": 12080,
+      "patch_sha256_with_tests": "758df4cdb399b791282f92725c4d8d9cc81c2cc0ee77513f6f9b54c586ccd402",
+      "patch_id_with_tests": "5b219888fe9f7425dec6a803fa242207539b0c14",
+      "production_patch_bytes": 8864,
+      "production_patch_sha256": "8ad10ac2393e7c3feb6f78b29018a459a8c47759ccfa9a27f489c45132a0c54f",
+      "production_patch_id": "f3a4ba90e2ae0dfc009f5c19aabc105a71b2b8b7",
+      "patch_compatibility": "compatible",
+      "focused_public_tests": "11 passed in 0.94s",
+      "official_score": {
+        "status": "completed",
+        "patch_applied": true,
+        "resolved": false,
+        "f2p_success": 2,
+        "f2p_total": 14,
+        "p2p_success": 64,
+        "p2p_total": 66,
+        "swe_style_partial_score": 0.393939,
+        "wall_time_seconds": 42.010949996009
+      }
+    }
+  },
+  "aggregate_live_cost": {
+    "total_tokens": 820040,
+    "uncached_input_tokens": 187409,
+    "provider_wall_time_seconds": 775,
+    "delta_vs_historical_total_tokens": -9915,
+    "delta_vs_historical_total_tokens_percent": -1.19,
+    "delta_vs_historical_uncached_input_tokens": 71063,
+    "delta_vs_historical_uncached_input_tokens_percent": 61.08,
+    "delta_vs_historical_provider_wall_time_seconds": 120,
+    "delta_vs_historical_provider_wall_time_percent": 18.32
+  }
+}

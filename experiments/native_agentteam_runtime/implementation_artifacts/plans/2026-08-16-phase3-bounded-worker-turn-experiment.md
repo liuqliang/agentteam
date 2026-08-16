@@ -1,6 +1,6 @@
 # Phase 3 Bounded Worker Turn Experiment
 
-Status: provider-free acceptance complete; live treatment not yet launched
+Status: completed; fixed three-turn default rejected
 
 ## Decision
 
@@ -134,3 +134,28 @@ locate and implementation, accepts either complete adapter or terminal usage
 shape without changing the numeric fields, explicitly binds checkpoint field
 types, and supports recovery of a settled provider stage without reexecution.
 No historical-control rerun is authorized.
+
+## Final Outcome
+
+The repair continuation completed locate and implementation, then stopped at
+the settled budget gate before verify. The two valid turns used `766760` total
+tokens and `717` provider seconds. Including the invalid startup, live cost was
+`820040` tokens and `775` provider seconds, only `1.19%` below the historical
+long implementation total while using `61.08%` more uncached input.
+
+The locate turn read all 17 selected source paths. The implementation turn
+reread 15 of them and completed 34 commands, producing 15 cross-turn repeated
+reads and 52 commands across the valid treatment. The fixed split therefore
+did not replace source grounding with the compact checkpoint.
+
+The treatment still improved candidate completeness: 11 focused public tests
+passed, the production patch was compatible with the hidden test patch, and
+the official evaluator reported F2P `2/14`, P2P `64/66`, partial `0.393939`, and
+`resolved=false`. This quality difference also includes the corrected Stage
+write scope and cannot be attributed solely to checkpointing.
+
+Decision `DEC-P3-bounded-worker-turn-experiment-v1` rejects fixed three-stage
+model slicing as the default. Retain semantic checkpoints for recovery and
+real boundaries, skip a model locate turn when deterministic grounding has no
+gaps, run declared deterministic verification in the controller, and launch a
+repair model only when verification requires semantic diagnosis.
