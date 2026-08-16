@@ -3579,6 +3579,59 @@ class TwoPhaseSchedulerExperimentBoundaryTests(unittest.TestCase):
             )
             self.assertEqual(controller.budget_state["total_tokens"], 2)
 
+    def test_provider_terminal_preserves_delayed_semantic_outbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+            monotonic = _SchedulerMonotonic()
+            controller = self._controller(output_dir, monotonic)
+            scheduler = self._scheduler(root, controller, monotonic)
+            scheduler.dispatch_ready()
+            inflight = scheduler.state["inflight_attempts"][0]
+            calls = []
+            invocation = self._invocation_for_inflight(
+                output_dir,
+                controller,
+                inflight,
+                ExperimentProviderBudgetBoundaryTests._usage_stdout(1, 1),
+                calls,
+            )
+            execution = ExperimentProviderBudgetBoundaryTests._execute(
+                invocation,
+                root,
+            )
+            invocation.finalize("completed", execution)
+
+            waiting = scheduler.collect_ready_results()
+            monotonic.advance(5.0)
+            still_waiting = scheduler.collect_ready_results()
+            self._append_result(
+                inflight,
+                [],
+                output={
+                    "operator_summary": {
+                        "what_changed": ["保留 worker 发布的语义结果。"],
+                    }
+                },
+                publish_terminal=False,
+            )
+            collected = scheduler.collect_ready_results()
+
+            self.assertEqual(waiting["collected_count"], 0)
+            self.assertEqual(still_waiting["collected_count"], 0)
+            self.assertEqual(collected["collected_count"], 1)
+            self.assertEqual(
+                collected["results"][0]["runtime_output"][
+                    "operator_summary"
+                ]["what_changed"],
+                ["保留 worker 发布的语义结果。"],
+            )
+            self.assertNotEqual(
+                collected["results"][0]["runtime_output"].get("adapter"),
+                "two_phase_scheduler_reconciliation",
+            )
+            self.assertEqual(controller.budget_state["total_tokens"], 2)
+
     def test_terminal_without_worker_outbox_reconciles_on_second_tick(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

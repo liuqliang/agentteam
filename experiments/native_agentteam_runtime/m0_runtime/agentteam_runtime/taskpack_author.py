@@ -1658,6 +1658,11 @@ def _author_prompt(
         "- each backlog item must include work_type, for example code_implementation, code_investigation, or audit",
         "- each backlog item must include goal_alignment explaining how it advances taskpack.original_goal",
         "- each backlog item must include required_deliverables as a non-empty string array",
+        (
+            "- expected_output_artifacts contains repository-relative file paths only, with no "
+            "natural-language acceptance clauses; put semantic obligations in required_deliverables "
+            "or evidence policy"
+        ),
         "- Preserve the operator's original goal in taskpack.original_goal and in every executable backlog item.",
         (
             "- decompose broad or long-running goals into narrow, measurable next-step tasks "
@@ -1720,6 +1725,10 @@ def _author_prompt(
             "and recommended_next_implementation_tasks"
         ),
         "- backlog item read_scope is a non-empty string array",
+        (
+            "- backlog item read_scope and write_scope must cover every implementation layer needed "
+            "by a cross-layer API change, such as CLI, repository, stage/core, and focused tests"
+        ),
         "- backlog item write_scope is a narrow repository-relative string array; never use repository root",
         "- verification.command is a non-empty string array using an allowed executable such as python3",
         "- if the project verification profile has correctness.command, use it as verification.command",

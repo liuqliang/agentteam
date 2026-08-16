@@ -782,6 +782,35 @@ class ValidationMixin:
             self.assertIn("required_deliverables", str(raised.exception))
 
 
+    def test_validate_taskpack_rejects_descriptive_expected_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            drafts = tmp_path / "drafts"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement a bounded repository change.",
+                draft_root=drafts,
+                taskpack_id="descriptive-expected-artifact",
+                write_scope=["src/"],
+            )
+            taskpack_dir = Path(result["taskpack_dir"])
+            backlog_path = taskpack_dir / "backlog.json"
+            backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+            backlog["items"][0]["expected_output_artifacts"] = [
+                "production code changes within declared write_scope"
+            ]
+            backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+
+            with self.assertRaises(TaskpackValidationError) as raised:
+                validate_taskpack(taskpack_dir)
+
+            self.assertIn(
+                "expected_output_artifacts entries must be artifact paths without whitespace",
+                str(raised.exception),
+            )
+
     def test_validate_taskpack_accepts_legacy_frozen_without_semantic_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

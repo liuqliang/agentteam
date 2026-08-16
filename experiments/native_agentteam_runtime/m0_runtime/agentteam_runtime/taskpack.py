@@ -2485,6 +2485,7 @@ def validate_taskpack(taskpack_dir):
             item.get("expected_output_artifacts"),
             f"{task_id_label} expected_output_artifacts",
             errors,
+            allow_whitespace=False,
         )
         write_scope = item.get("write_scope", [])
         benchmark_repository_scope = (
@@ -5299,7 +5300,13 @@ def _validate_taskpack_runtime_profile(profile, label, errors):
         errors.append(f"{label}.sandbox must be a non-empty string")
 
 
-def _validate_optional_artifact_paths(value, field_name, errors):
+def _validate_optional_artifact_paths(
+    value,
+    field_name,
+    errors,
+    *,
+    allow_whitespace=True,
+):
     if value is None:
         return
     if not isinstance(value, list):
@@ -5308,6 +5315,13 @@ def _validate_optional_artifact_paths(value, field_name, errors):
     for item in value:
         if not isinstance(item, str) or not item.strip():
             errors.append(f"{field_name} entries must be non-empty strings")
+            continue
+        if not allow_whitespace and any(
+            character.isspace() for character in item
+        ):
+            errors.append(
+                f"{field_name} entries must be artifact paths without whitespace: {item}"
+            )
             continue
         path = Path(item)
         if path.is_absolute():

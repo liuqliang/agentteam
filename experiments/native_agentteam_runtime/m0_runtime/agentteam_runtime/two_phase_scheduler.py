@@ -108,7 +108,7 @@ _RUN_LOOP_TERMINAL_STATUSES = _STOP_SCHEDULER_STATUSES | {
     "budget_stopped",
     "interrupted",
 }
-WORKER_OUTBOX_PUBLICATION_GRACE_SECONDS = 2.0
+WORKER_OUTBOX_PUBLICATION_GRACE_SECONDS = 30.0
 WORKER_USAGE_STAGE_BY_ROLE = {
     "task_planner": "planner_or_task_slicer",
     "planner": "planner_or_task_slicer",

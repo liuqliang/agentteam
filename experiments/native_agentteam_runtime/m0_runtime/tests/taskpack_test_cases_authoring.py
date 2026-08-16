@@ -472,6 +472,14 @@ class AuthoringMixin:
                 "include a concise rationale naming source_report_path, verification results, blockers, goal_memory_path, or the queue-selected next_goal",
                 prompt,
             )
+            self.assertIn(
+                "expected_output_artifacts contains repository-relative file paths only",
+                prompt,
+            )
+            self.assertIn(
+                "read_scope and write_scope must cover every implementation layer",
+                prompt,
+            )
             self.assertIn("avoid safe-but-trivial documentation-only changes unless the operator explicitly asked for documentation", prompt)
 
 
