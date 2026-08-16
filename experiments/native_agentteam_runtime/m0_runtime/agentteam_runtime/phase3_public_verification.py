@@ -15,7 +15,12 @@ from pathlib import Path, PurePosixPath
 from .experiment_contract import canonical_json_sha256
 from .experiment_sandbox import (
     DEPENDENCY_TREE_IDENTITY_POLICY,
+    DEPENDENCY_TREE_MAX_BYTES,
+    DEPENDENCY_TREE_MAX_ENTRIES,
     ExperimentSandboxError,
+    PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY,
+    PUBLIC_DEPENDENCY_TREE_MAX_BYTES,
+    PUBLIC_DEPENDENCY_TREE_MAX_ENTRIES,
     _bounded_tree_identity,
 )
 
@@ -24,8 +29,6 @@ PUBLIC_VERIFICATION_ENVIRONMENT_VERSION = (
     "phase3_public_verification_environment.v1"
 )
 PUBLIC_VERIFICATION_NAMESPACE_ROOT = "/opt/agentteam/benchmark-env"
-PUBLIC_DEPENDENCY_TREE_MAX_BYTES = 2 * 1024 * 1024 * 1024
-PUBLIC_DEPENDENCY_TREE_MAX_ENTRIES = 100_000
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
 _PODMAN = Path("/usr/bin/podman")
@@ -157,7 +160,7 @@ def build_public_verification_environment(
         "dependency_tree": {
             "source": str(source),
             "target": str(target),
-            "identity_policy": DEPENDENCY_TREE_IDENTITY_POLICY,
+            "identity_policy": PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY,
             "sha256": tree["sha256"],
             "files": tree["files"],
             "directories": tree["directories"],
@@ -224,13 +227,19 @@ def validate_public_verification_environment(value, *, instance_id=None):
         raise Phase3PublicVerificationError(
             "public dependency tree authority is invalid"
         )
-    if tree["identity_policy"] != DEPENDENCY_TREE_IDENTITY_POLICY:
+    if tree["identity_policy"] not in {
+        DEPENDENCY_TREE_IDENTITY_POLICY,
+        PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY,
+    }:
         raise Phase3PublicVerificationError(
             "public dependency tree identity policy is invalid"
         )
     source = _canonical_directory(tree["source"])
     target = _validated_namespace_root(tree["target"])
-    observed_tree = _dependency_tree_identity(source)
+    observed_tree = _dependency_tree_identity(
+        source,
+        identity_policy=tree["identity_policy"],
+    )
     expected_tree = {
         key: tree[key]
         for key in ("sha256", "files", "directories", "bytes")
@@ -333,13 +342,27 @@ def public_environment_path(authority, existing_path):
     return f"{prefix}:{existing_path}"
 
 
-def _dependency_tree_identity(root):
+def _dependency_tree_identity(
+    root,
+    *,
+    identity_policy=PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY,
+):
+    if identity_policy == PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY:
+        max_entries = PUBLIC_DEPENDENCY_TREE_MAX_ENTRIES
+        max_bytes = PUBLIC_DEPENDENCY_TREE_MAX_BYTES
+    elif identity_policy == DEPENDENCY_TREE_IDENTITY_POLICY:
+        max_entries = DEPENDENCY_TREE_MAX_ENTRIES
+        max_bytes = DEPENDENCY_TREE_MAX_BYTES
+    else:
+        raise Phase3PublicVerificationError(
+            "public dependency tree identity policy is invalid"
+        )
     try:
         return _bounded_tree_identity(
             root,
             excluded_roots=set(),
-            max_entries=PUBLIC_DEPENDENCY_TREE_MAX_ENTRIES,
-            max_bytes=PUBLIC_DEPENDENCY_TREE_MAX_BYTES,
+            max_entries=max_entries,
+            max_bytes=max_bytes,
         )
     except ExperimentSandboxError as exc:
         raise Phase3PublicVerificationError(

@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentteam_runtime.experiment_sandbox import (
-    DEPENDENCY_TREE_IDENTITY_POLICY,
+    PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY,
     build_provider_sandbox_descriptor,
 )
 from agentteam_runtime.phase3_live_pilot import (
@@ -113,6 +113,10 @@ class Phase3PublicVerificationTests(unittest.TestCase):
             )
             self.assertEqual(validated, authority)
             self.assertEqual(
+                authority["dependency_tree"]["identity_policy"],
+                PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY,
+            )
+            self.assertEqual(
                 public_environment_taskpack_command(
                     authority,
                     ["pytest", "-q"],
@@ -169,7 +173,7 @@ class Phase3PublicVerificationTests(unittest.TestCase):
                     {
                         "source": tree["source"],
                         "target": tree["target"],
-                        "identity_policy": DEPENDENCY_TREE_IDENTITY_POLICY,
+                        "identity_policy": PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY,
                     }
                 ],
             )
@@ -178,7 +182,7 @@ class Phase3PublicVerificationTests(unittest.TestCase):
         self.assertFalse(view["writable"])
         self.assertEqual(
             view["source_identity"]["kind"],
-            "bounded_dependency_directory",
+            "bounded_public_dependency_directory",
         )
 
     def test_live_configuration_routes_python_through_public_environment(self):
@@ -209,7 +213,7 @@ class Phase3PublicVerificationTests(unittest.TestCase):
                 {
                     "source": authority["dependency_tree"]["source"],
                     "target": authority["dependency_tree"]["target"],
-                    "identity_policy": DEPENDENCY_TREE_IDENTITY_POLICY,
+                    "identity_policy": PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY,
                 },
                 configuration["library_views"],
             )

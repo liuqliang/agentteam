@@ -63,6 +63,9 @@ DEFAULT_MAX_SCAN_FILES = 10_000
 DEPENDENCY_TREE_MAX_BYTES = 512 * 1024 * 1024
 DEPENDENCY_TREE_MAX_ENTRIES = 20_000
 DEPENDENCY_TREE_IDENTITY_POLICY = "bounded_dependency_tree.v1"
+PUBLIC_DEPENDENCY_TREE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+PUBLIC_DEPENDENCY_TREE_MAX_ENTRIES = 100_000
+PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY = "bounded_public_dependency_tree.v1"
 DEFAULT_MAX_EVALUATOR_OUTPUT_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_RUNTIME_FILE_BYTES = 512 * 1024 * 1024
 MAX_EVALUATION_TIMEOUT_SECONDS = 3600
@@ -4150,7 +4153,11 @@ def _normalize_views(views, label):
         identity_policy = (
             view.get("identity_policy") if isinstance(view, dict) else None
         )
-        if identity_policy not in (None, DEPENDENCY_TREE_IDENTITY_POLICY):
+        if identity_policy not in (
+            None,
+            DEPENDENCY_TREE_IDENTITY_POLICY,
+            PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY,
+        ):
             raise ExperimentSandboxError(
                 f"invalid {label} view {index} identity policy"
             )
@@ -4164,7 +4171,7 @@ def _normalize_views(views, label):
             "writable": False,
             "source_identity": _mount_source_identity(
                 source,
-                dependency_tree=(identity_policy is not None),
+                dependency_tree_policy=identity_policy,
             ),
         }
         if identity_policy is not None:
@@ -4195,7 +4202,11 @@ def _validate_normalized_views(views, label):
         ):
             raise ExperimentSandboxError(f"invalid {label} view {index}")
         identity_policy = view.get("identity_policy")
-        if identity_policy not in (None, DEPENDENCY_TREE_IDENTITY_POLICY):
+        if identity_policy not in (
+            None,
+            DEPENDENCY_TREE_IDENTITY_POLICY,
+            PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY,
+        ):
             raise ExperimentSandboxError(
                 f"invalid {label} view {index} identity policy"
             )
@@ -4204,9 +4215,20 @@ def _validate_normalized_views(views, label):
             if isinstance(view.get("source_identity"), dict)
             else None
         )
-        if (identity_policy is not None) != (
-            identity_kind == "bounded_dependency_directory"
-        ):
+        expected_identity_kind = {
+            None: None,
+            DEPENDENCY_TREE_IDENTITY_POLICY: "bounded_dependency_directory",
+            PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY: (
+                "bounded_public_dependency_directory"
+            ),
+        }[identity_policy]
+        if identity_policy is None:
+            identity_matches = identity_kind != "bounded_dependency_directory" and (
+                identity_kind != "bounded_public_dependency_directory"
+            )
+        else:
+            identity_matches = identity_kind == expected_identity_kind
+        if not identity_matches:
             raise ExperimentSandboxError(
                 f"{label} view {index} identity policy differs from identity"
             )
@@ -5108,7 +5130,7 @@ def _mount_source_identity(
     path,
     *,
     hash_directory=True,
-    dependency_tree=False,
+    dependency_tree_policy=None,
 ):
     path = Path(path)
     try:
@@ -5131,14 +5153,25 @@ def _mount_source_identity(
         elif _is_privileged_system_tree(path):
             kind = "privileged_system_directory"
             content_sha256 = None
-        elif dependency_tree:
+        elif dependency_tree_policy is not None:
+            if dependency_tree_policy == DEPENDENCY_TREE_IDENTITY_POLICY:
+                max_entries = DEPENDENCY_TREE_MAX_ENTRIES
+                max_bytes = DEPENDENCY_TREE_MAX_BYTES
+                kind = "bounded_dependency_directory"
+            elif dependency_tree_policy == PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY:
+                max_entries = PUBLIC_DEPENDENCY_TREE_MAX_ENTRIES
+                max_bytes = PUBLIC_DEPENDENCY_TREE_MAX_BYTES
+                kind = "bounded_public_dependency_directory"
+            else:
+                raise ExperimentSandboxError(
+                    "sandbox mount dependency identity policy is invalid"
+                )
             tree = _bounded_tree_identity(
                 path,
                 excluded_roots=set(),
-                max_entries=DEPENDENCY_TREE_MAX_ENTRIES,
-                max_bytes=DEPENDENCY_TREE_MAX_BYTES,
+                max_entries=max_entries,
+                max_bytes=max_bytes,
             )
-            kind = "bounded_dependency_directory"
             content_sha256 = tree["sha256"]
         else:
             tree = _bounded_tree_identity(
@@ -5293,12 +5326,18 @@ def _validate_mount_source(
     )
     identity_kind = expected_identity.get("kind")
     hash_directory = identity_kind != "directory_root"
+    dependency_tree_policy = {
+        "bounded_dependency_directory": DEPENDENCY_TREE_IDENTITY_POLICY,
+        "bounded_public_dependency_directory": (
+            PUBLIC_DEPENDENCY_TREE_IDENTITY_POLICY
+        ),
+    }.get(identity_kind)
     if (
         resolved != lexical
         or _mount_source_identity(
             lexical,
             hash_directory=hash_directory,
-            dependency_tree=(identity_kind == "bounded_dependency_directory"),
+            dependency_tree_policy=dependency_tree_policy,
         )
         != expected_identity
     ):
