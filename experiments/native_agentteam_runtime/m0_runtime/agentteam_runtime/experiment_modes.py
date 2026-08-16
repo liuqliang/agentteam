@@ -429,6 +429,13 @@ class ExperimentModeController:
                     "operator_limits"
                 ],
                 expected_budgets=protocol["budgets"],
+                expected_stage_token_policy=(
+                    protocol["budgets"].get(
+                        "full_mode_stage_token_policy"
+                    )
+                    if run_manifest["mode"] == "agentteam_full"
+                    else None
+                ),
             )
         )
         self.protocol = protocol
@@ -957,6 +964,11 @@ def execute_bound_experiment_mode(
         scored=protocol["scored"],
         protocol_sha256=canonical_json_sha256(protocol),
         operator_limits=protocol["operator_limits"],
+        stage_token_policy=(
+            protocol["budgets"].get("full_mode_stage_token_policy")
+            if run_manifest["mode"] == "agentteam_full"
+            else None
+        ),
     )
     mode_controller = ExperimentModeController(
         protocol=protocol,
@@ -2458,6 +2470,7 @@ def _build_common_result_bundle(
         run_manifest=request.run_manifest,
     )
     budget = controller.snapshot()["budget_state"]
+    stage_token_result = controller.stage_budget_snapshot()
     metrics = measure_experiment_artifacts(
         request.run_dir,
         artifact_roots=retained_roots["artifacts"],
@@ -2560,6 +2573,11 @@ def _build_common_result_bundle(
             "overshoot_tokens": budget["overshoot_tokens"],
             "usage_complete": budget["usage_complete"],
             "exhausted": exhausted,
+            **(
+                {"stage_token_result": stage_token_result}
+                if stage_token_result is not None
+                else {}
+            ),
         },
         attempt_counts={
             "total": len(terminal_statuses),

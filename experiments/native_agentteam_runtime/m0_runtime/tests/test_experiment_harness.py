@@ -76,6 +76,7 @@ from agentteam_runtime.experiment_results import (
     render_experiment_comparison,
     render_experiment_result,
     seal_experiment_result_bundle,
+    validate_experiment_result_bundle,
     write_experiment_recovery_snapshot,
 )
 from agentteam_runtime.experiment_modes import (
@@ -2027,7 +2028,13 @@ class ExperimentProviderBudgetBoundaryTests(unittest.TestCase):
             sort_keys=True,
         )
 
-    def _controller(self, root, *, max_total_tokens=100):
+    def _controller(
+        self,
+        root,
+        *,
+        max_total_tokens=100,
+        stage_token_policy=None,
+    ):
         return create_experiment_controller(
             root,
             protocol_id="phase2-provider-boundary",
@@ -2035,6 +2042,7 @@ class ExperimentProviderBudgetBoundaryTests(unittest.TestCase):
             max_wall_time_seconds=3600,
             soft_warning_ratio=0.8,
             scored=True,
+            stage_token_policy=stage_token_policy,
         )
 
     def _call(
@@ -2046,6 +2054,7 @@ class ExperimentProviderBudgetBoundaryTests(unittest.TestCase):
         calls,
         *,
         supported=True,
+        usage_stage="implementation_worker",
     ):
         lifecycle_root = root / "runs" / run_name
         lifecycle_root.mkdir(parents=True)
@@ -2062,6 +2071,7 @@ class ExperimentProviderBudgetBoundaryTests(unittest.TestCase):
                 "lifecycle_owner_token": f"OWNER-{run_name}",
                 "experiment_authority_root": str(root),
                 "experiment_controller_reference": controller.reference,
+                "usage_stage": usage_stage,
             }
         )
         return ModelInvocationCall(
@@ -2070,6 +2080,63 @@ class ExperimentProviderBudgetBoundaryTests(unittest.TestCase):
             supported=supported,
             systemd_runner_factory=self._runner_factory(stdout, calls),
         )
+
+    def test_stage_reserve_denies_more_authoring_but_allows_implementation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = {
+                "schema_version": "experiment_stage_token_policy.v1",
+                "authoring_limit_tokens": 60,
+                "implementation_reserve_tokens": 40,
+                "bounded_overshoot": True,
+            }
+            controller = self._controller(
+                root,
+                stage_token_policy=policy,
+            )
+            author = self._call(
+                root,
+                controller,
+                "AUTHOR-FIRST",
+                self._usage_stdout(60, 5),
+                [],
+                usage_stage="taskpack_author",
+            )
+            execution = self._execute(author, root)
+            author.finalize("completed", execution)
+            snapshot = controller.stage_budget_snapshot()
+            self.assertEqual(snapshot["authoring_tokens"], 65)
+            self.assertEqual(snapshot["authoring_overshoot_tokens"], 5)
+            self.assertTrue(snapshot["implementation_reserve_violated"])
+
+            denied_calls = []
+            denied = self._call(
+                root,
+                controller,
+                "AUTHOR-SECOND",
+                self._usage_stdout(1, 0),
+                denied_calls,
+                usage_stage="taskpack_author",
+                supported=False,
+            )
+            with self.assertRaisesRegex(
+                ModelInvocationUnavailable,
+                "authoring stage token limit",
+            ):
+                self._execute(denied, root)
+            self.assertEqual(denied_calls, [])
+
+            implementation = self._call(
+                root,
+                controller,
+                "IMPLEMENTATION",
+                self._usage_stdout(9, 1),
+                [],
+                usage_stage="implementation_worker",
+            )
+            implementation_execution = self._execute(implementation, root)
+            implementation.finalize("completed", implementation_execution)
+            self.assertEqual(controller.budget_state["total_tokens"], 75)
 
     @staticmethod
     def _execute(call, root):
@@ -5596,6 +5663,7 @@ class ExperimentOperatorActionLedgerTests(unittest.TestCase):
             metadata.pop("operator_ledger_root_device")
             metadata.pop("operator_ledger_root_inode")
             metadata.pop("operator_ledger_policy_sha256")
+            metadata.pop("stage_token_policy")
             metadata_path.write_text(
                 json.dumps(metadata, sort_keys=True) + "\n",
                 encoding="utf-8",
@@ -5645,6 +5713,46 @@ class ExperimentOperatorActionLedgerTests(unittest.TestCase):
                 "cannot contain v2 operator fields",
             ):
                 self._controller(root)
+
+    def test_invalid_persisted_stage_token_policy_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "controller"
+            policy = {
+                "schema_version": "experiment_stage_token_policy.v1",
+                "authoring_limit_tokens": 60,
+                "implementation_reserve_tokens": 40,
+                "bounded_overshoot": True,
+            }
+            create_experiment_controller(
+                root,
+                protocol_id="stage-policy-integrity",
+                max_total_tokens=100,
+                max_wall_time_seconds=3600,
+                soft_warning_ratio=0.8,
+                scored=True,
+                stage_token_policy=policy,
+            )
+            metadata_path = root / "experiment-budget-controller.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["stage_token_policy"]["authoring_limit_tokens"] = 61
+            metadata_path.write_text(
+                json.dumps(metadata, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ExperimentControllerIntegrityError,
+                "stage token policy is invalid",
+            ):
+                create_experiment_controller(
+                    root,
+                    protocol_id="stage-policy-integrity",
+                    max_total_tokens=100,
+                    max_wall_time_seconds=3600,
+                    soft_warning_ratio=0.8,
+                    scored=True,
+                    stage_token_policy=policy,
+                )
 
     def test_ordinary_stop_entrypoint_rejects_experiment_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6156,6 +6264,58 @@ class ExperimentResultBundleTests(unittest.TestCase):
                     resume_binding_sha256="d" * 64,
                     recovery_context={},
                 )
+
+    def test_stage_token_result_checks_arithmetic_and_protocol_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(tmp)
+            staged = copy.deepcopy(fixture["bundle"])
+            staged["budget_result"].update(
+                {
+                    "max_total_tokens": 100,
+                    "total_tokens": 120,
+                    "usage_complete": True,
+                    "stage_token_result": {
+                        "schema_version": (
+                            "experiment_stage_token_snapshot.v1"
+                        ),
+                        "policy": {
+                            "schema_version": (
+                                "experiment_stage_token_policy.v1"
+                            ),
+                            "authoring_limit_tokens": 60,
+                            "implementation_reserve_tokens": 40,
+                            "bounded_overshoot": True,
+                        },
+                        "total_tokens_by_stage": {
+                            "taskpack_author": 120,
+                        },
+                        "invocation_count_by_stage": {
+                            "taskpack_author": 1,
+                        },
+                        "authoring_tokens": 120,
+                        "authoring_overshoot_tokens": 60,
+                        "remaining_total_tokens": 0,
+                        "implementation_reserve_violated": True,
+                    },
+                }
+            )
+            validate_experiment_result_bundle(staged)
+
+            inconsistent = copy.deepcopy(staged)
+            inconsistent["budget_result"]["stage_token_result"][
+                "remaining_total_tokens"
+            ] = 1
+            with self.assertRaisesRegex(
+                ExperimentResultIntegrityError,
+                "stage token result is inconsistent",
+            ):
+                validate_experiment_result_bundle(inconsistent)
+
+            with self.assertRaisesRegex(
+                ExperimentResultIntegrityError,
+                "differs from frozen protocol",
+            ):
+                self._seal(fixture, staged)
 
     def test_bundle_rejects_subset_scope_and_wrong_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7121,6 +7281,17 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             protocol["environment"]["benchmark_risk_target"] = (
                 benchmark_risk_target
             )
+            if mode == "agentteam_full":
+                total_tokens = protocol["budgets"]["max_total_tokens"]
+                authoring_limit = total_tokens * 3 // 5
+                protocol["budgets"]["full_mode_stage_token_policy"] = {
+                    "schema_version": "experiment_stage_token_policy.v1",
+                    "authoring_limit_tokens": authoring_limit,
+                    "implementation_reserve_tokens": (
+                        total_tokens - authoring_limit
+                    ),
+                    "bounded_overshoot": True,
+                }
         for seed in range(100):
             seeded_order = sorted(
                 protocol["modes"],
@@ -7177,6 +7348,11 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             scored=protocol["scored"],
             protocol_sha256=canonical_json_sha256(protocol),
             operator_limits=protocol["operator_limits"],
+            stage_token_policy=(
+                protocol["budgets"].get("full_mode_stage_token_policy")
+                if mode == "agentteam_full"
+                else None
+            ),
         )
         credential = root / "provider-credential.json"
         credential.write_text("{}\n", encoding="utf-8")
@@ -8883,6 +9059,20 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             self.assertEqual(
                 result["taskpack"]["grounding"]["semantic_gaps"],
                 [],
+            )
+            stage_result = load_experiment_result_bundle(
+                fixture["run_dir"]
+            )["bundle"]["budget_result"]["stage_token_result"]
+            self.assertEqual(
+                stage_result["total_tokens_by_stage"],
+                {
+                    "implementation_worker": 2,
+                    "taskpack_author": 2,
+                },
+            )
+            self.assertEqual(stage_result["authoring_tokens"], 2)
+            self.assertFalse(
+                stage_result["implementation_reserve_violated"]
             )
 
     def test_full_mode_rejects_unusable_acceptance_profile_before_provider_registration(self):

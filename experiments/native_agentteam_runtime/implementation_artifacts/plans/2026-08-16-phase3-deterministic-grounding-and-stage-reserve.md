@@ -1,6 +1,6 @@
 # Phase 3 Deterministic Grounding And Stage Reserve
 
-Status: in progress
+Status: completed
 
 ## Calibration Finding
 
@@ -64,3 +64,27 @@ claim exact interruption at the stage ceiling.
 - Missing or mismatched seeded artifacts fail before provider launch.
 - Existing non-experiment and follow-up handoff reuse behavior remains valid.
 
+## Outcome
+
+- `agentteam_full` now creates a byte-deterministic `repo_map_handoff.v1`,
+  completes the corresponding frozen prerequisite, and seeds the digest-checked
+  artifact before the scheduler launches.
+- The full-mode protocol binds a 60% taskpack-authoring limit and a 40%
+  implementation reserve. Provider admission denies further authoring after
+  the boundary while leaving implementation, review, follow-up, and semantic
+  escalation stages eligible under the global budget.
+- Terminal usage is recomputed from immutable invocation authority by
+  `usage_stage`. The sealed result bundle records stage totals, invocation
+  counts, remaining tokens, and bounded authoring overshoot.
+- The policy intentionally does not claim to interrupt a provider turn at an
+  exact token threshold. One admitted authoring turn can exceed its stage
+  limit; the overshoot is reported and later authoring admissions fail closed.
+
+## Verification
+
+- Experiment suites: 204 tests passed, 5 skipped.
+- Phase 3 pilot runner: 38 tests passed.
+- Runtime and taskpack suites: 694 tests passed, 2 skipped.
+- Focused deterministic-grounding, stage-admission, metadata-integrity, and
+  sealed-result tests passed.
+- Python compilation, JSON schema parsing, and `git diff --check` passed.

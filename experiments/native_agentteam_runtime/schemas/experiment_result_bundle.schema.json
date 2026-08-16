@@ -123,7 +123,15 @@
         "elapsed_wall_time_seconds": {"type": "number", "minimum": 0},
         "overshoot_tokens": {"type": "integer", "minimum": 0},
         "usage_complete": {"type": "boolean"},
-        "exhausted": {"type": "boolean"}
+        "exhausted": {"type": "boolean"},
+        "stage_token_result": {"$ref": "#/$defs/stageTokenResult"}
+      },
+      "dependentRequired": {
+        "stage_token_result": [
+          "max_total_tokens",
+          "total_tokens",
+          "usage_complete"
+        ]
       }
     },
     "attempt_counts": {"$ref": "#/$defs/nonnegativeMap"},
@@ -246,6 +254,45 @@
       "maxProperties": 64,
       "propertyNames": {"pattern": "^[A-Za-z][A-Za-z0-9_]*$"},
       "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "stageTokenResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "policy",
+        "total_tokens_by_stage",
+        "invocation_count_by_stage",
+        "authoring_tokens",
+        "authoring_overshoot_tokens",
+        "remaining_total_tokens",
+        "implementation_reserve_violated"
+      ],
+      "properties": {
+        "schema_version": {"const": "experiment_stage_token_snapshot.v1"},
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "authoring_limit_tokens",
+            "implementation_reserve_tokens",
+            "bounded_overshoot"
+          ],
+          "properties": {
+            "schema_version": {"const": "experiment_stage_token_policy.v1"},
+            "authoring_limit_tokens": {"type": "integer", "minimum": 1},
+            "implementation_reserve_tokens": {"type": "integer", "minimum": 1},
+            "bounded_overshoot": {"const": true}
+          }
+        },
+        "total_tokens_by_stage": {"$ref": "#/$defs/nonnegativeMap"},
+        "invocation_count_by_stage": {"$ref": "#/$defs/nonnegativeMap"},
+        "authoring_tokens": {"type": "integer", "minimum": 0},
+        "authoring_overshoot_tokens": {"type": "integer", "minimum": 0},
+        "remaining_total_tokens": {"type": "integer", "minimum": 0},
+        "implementation_reserve_violated": {"type": "boolean"}
+      }
     }
   }
 }

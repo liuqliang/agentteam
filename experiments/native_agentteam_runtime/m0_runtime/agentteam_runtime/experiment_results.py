@@ -211,6 +211,21 @@ def build_experiment_result_bundle(
     run_manifest = copy.deepcopy(run_manifest)
     validate_experiment_protocol(protocol)
     validate_experiment_run_manifest(run_manifest, protocol)
+    expected_stage_policy = (
+        protocol["budgets"].get("full_mode_stage_token_policy")
+        if run_manifest["mode"] == "agentteam_full"
+        else None
+    )
+    actual_stage_result = budget_result.get("stage_token_result")
+    actual_stage_policy = (
+        actual_stage_result["policy"]
+        if actual_stage_result is not None
+        else None
+    )
+    if actual_stage_policy != expected_stage_policy:
+        raise ExperimentResultIntegrityError(
+            "result stage token policy differs from frozen protocol"
+        )
     if terminal_status not in _TERMINAL_STATUSES:
         raise ExperimentResultError(
             f"unsupported terminal status: {terminal_status!r}"
@@ -495,6 +510,23 @@ def seal_experiment_result_bundle(
     run_manifest = copy.deepcopy(run_manifest)
     validate_experiment_protocol(protocol)
     validate_experiment_run_manifest(run_manifest, protocol)
+    expected_stage_policy = (
+        protocol["budgets"].get("full_mode_stage_token_policy")
+        if run_manifest["mode"] == "agentteam_full"
+        else None
+    )
+    actual_stage_result = bundle["budget_result"].get(
+        "stage_token_result"
+    )
+    actual_stage_policy = (
+        actual_stage_result["policy"]
+        if actual_stage_result is not None
+        else None
+    )
+    if actual_stage_policy != expected_stage_policy:
+        raise ExperimentResultIntegrityError(
+            "result stage token policy differs from frozen protocol"
+        )
     if run_dir.name != run_manifest["experiment_run_id"]:
         raise ExperimentResultIntegrityError(
             "result directory does not match experiment_run_id"
@@ -726,6 +758,42 @@ def validate_experiment_result_bundle(bundle):
         raise ExperimentResultIntegrityError(
             "experiment result finished_at precedes started_at"
         )
+    stage = bundle["budget_result"].get("stage_token_result")
+    if stage is not None:
+        budget = bundle["budget_result"]
+        policy = stage["policy"]
+        authoring = stage["total_tokens_by_stage"].get(
+            "taskpack_author",
+            0,
+        )
+        expected = {
+            "authoring_tokens": authoring,
+            "authoring_overshoot_tokens": max(
+                authoring - policy["authoring_limit_tokens"],
+                0,
+            ),
+            "remaining_total_tokens": max(
+                budget["max_total_tokens"] - budget["total_tokens"],
+                0,
+            ),
+            "implementation_reserve_violated": (
+                authoring > policy["authoring_limit_tokens"]
+            ),
+        }
+        if (
+            bundle["mode"] != "agentteam_full"
+            or policy["authoring_limit_tokens"]
+            + policy["implementation_reserve_tokens"]
+            != budget["max_total_tokens"]
+            or sum(stage["total_tokens_by_stage"].values())
+            != budget["total_tokens"]
+            or sum(stage["invocation_count_by_stage"].values())
+            != bundle["usage_coverage"]["covered_invocations"]
+            or any(stage[field] != value for field, value in expected.items())
+        ):
+            raise ExperimentResultIntegrityError(
+                "experiment stage token result is inconsistent"
+            )
     return bundle
 
 

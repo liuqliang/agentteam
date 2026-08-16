@@ -830,6 +830,19 @@ index b859599..f06e5bb 100644
                 protocol["environment"]["benchmark_risk_target"],
                 "L2",
             )
+            stage_policy = protocol["budgets"][
+                "full_mode_stage_token_policy"
+            ]
+            self.assertEqual(
+                stage_policy["authoring_limit_tokens"]
+                + stage_policy["implementation_reserve_tokens"],
+                protocol["budgets"]["max_total_tokens"],
+            )
+            self.assertEqual(
+                stage_policy["implementation_reserve_tokens"],
+                protocol["budgets"]["max_total_tokens"]
+                - protocol["budgets"]["max_total_tokens"] * 3 // 5,
+            )
             self.assertEqual(
                 protocol["evaluator"]["candidate_patch_policy"],
                 {

@@ -1370,6 +1370,7 @@ class ModelInvocationCall:
                 "invocation_id": self.lifecycle.invocation_id,
                 "lifecycle_root": str(self.lifecycle.authority_root),
                 "run_id": self.lifecycle.context["run_id"],
+                "usage_stage": self.lifecycle.context["usage_stage"],
             }
             retry_deadline = (
                 time.monotonic() + PROVIDER_LANE_ADMISSION_RETRY_SECONDS

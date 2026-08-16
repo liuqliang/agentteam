@@ -28,6 +28,7 @@ from pathlib import Path
 from .experiment_budget import (
     advance_experiment_budget,
     create_experiment_budget_state,
+    experiment_usage_by_stage,
     validate_experiment_budget_state,
 )
 from .experiment_ledger import (
@@ -56,6 +57,7 @@ CONTROLLER_REFERENCE_SCHEMA_VERSION = (
     "experiment_budget_controller_reference.v1"
 )
 PROVIDER_LANE_SCHEMA_VERSION = "experiment_provider_lane.v1"
+STAGE_TOKEN_POLICY_SCHEMA_VERSION = "experiment_stage_token_policy.v1"
 
 _CONTROLLER_METADATA = "experiment-budget-controller.json"
 _CONTROLLER_STATE = "experiment-budget-controller-state.json"
@@ -87,6 +89,7 @@ _OPERATOR_RUNTIME_REQUEST_TYPES = {
     "manual_gate": "manual_gate_required",
     "permission_request": "permission_request_required",
 }
+_UNSPECIFIED_STAGE_TOKEN_POLICY = object()
 
 
 class ExperimentControllerError(RuntimeError):
@@ -160,6 +163,7 @@ class ExperimentController:
         scored=True,
         protocol_sha256=None,
         operator_limits=None,
+        stage_token_policy=None,
         initial_monotonic=None,
         monotonic=None,
     ):
@@ -174,6 +178,10 @@ class ExperimentController:
         protocol_sha256, operator_limits = _operator_policy_binding(
             protocol_sha256,
             operator_limits,
+        )
+        stage_token_policy = _normalize_stage_token_policy(
+            stage_token_policy,
+            max_total_tokens=max_total_tokens,
         )
         _touch_regular_file(root / _AUTHORITY_EVENTS)
         state_lock_path = root / _CONTROLLER_STATE_LOCK
@@ -241,6 +249,8 @@ class ExperimentController:
                     or metadata["scored"] is not scored
                     or metadata["protocol_sha256"] != protocol_sha256
                     or metadata["operator_limits"] != operator_limits
+                    or metadata["stage_token_policy"]
+                    != stage_token_policy
                 ):
                     raise ExperimentControllerIntegrityError(
                         "existing controller binding differs from requested "
@@ -300,6 +310,7 @@ class ExperimentController:
                         if operator_limits is not None
                         else None
                     ),
+                    "stage_token_policy": stage_token_policy,
                     **operator_ledger_binding,
                     "controller_root": str(root),
                     "authority_events_path": _AUTHORITY_EVENTS,
@@ -563,6 +574,11 @@ class ExperimentController:
                         else f"controller state is {status}"
                     )
                     raise ExperimentProviderAdmissionDenied(reason)
+                stage_budget_at_admission = _enforce_stage_token_admission(
+                    self._metadata["stage_token_policy"],
+                    budget_state,
+                    binding["usage_stage"],
+                )
 
             record = {
                 "schema_version": PROVIDER_LANE_SCHEMA_VERSION,
@@ -574,6 +590,11 @@ class ExperimentController:
                 ],
                 "invocation_id": invocation_id,
                 "run_id": binding["run_id"],
+                **(
+                    {"usage_stage": binding["usage_stage"]}
+                    if binding["usage_stage"] is not None
+                    else {}
+                ),
                 "lifecycle_root": (
                     str(lifecycle_root)
                     if external_lifecycle
@@ -596,6 +617,11 @@ class ExperimentController:
                     ).as_posix()
                 ),
                 "owner_pid": os.getpid(),
+                **(
+                    {"stage_budget_at_admission": stage_budget_at_admission}
+                    if stage_budget_at_admission is not None
+                    else {}
+                ),
             }
             _write_json_fd(fd, record, self.root)
             return ProviderAdmission(self, fd, record)
@@ -656,7 +682,21 @@ class ExperimentController:
             "controller_status": self.controller_status,
             "budget_state": copy.deepcopy(budget_state),
             "emitted_events": copy.deepcopy(emitted),
+            "stage_budget": _stage_token_snapshot(
+                self._metadata["stage_token_policy"],
+                budget_state,
+            ),
         }
+
+    def stage_budget_snapshot(self):
+        """Return current stage usage and bounded overshoot evidence."""
+
+        with self._state_lock():
+            document = self._load_document()
+            return _stage_token_snapshot(
+                self._metadata["stage_token_policy"],
+                document["budget_state"],
+            )
 
     def observe_boundary(
         self,
@@ -1351,6 +1391,21 @@ class ExperimentController:
             raise ExperimentControllerIntegrityError(
                 "provider lane binding changed"
             )
+        policy = self._metadata["stage_token_policy"]
+        if policy is not None:
+            stage = record.get("usage_stage")
+            snapshot = record.get("stage_budget_at_admission")
+            if (
+                not isinstance(stage, str)
+                or not stage
+                or not isinstance(snapshot, dict)
+                or snapshot.get("schema_version")
+                != "experiment_stage_token_snapshot.v1"
+                or snapshot.get("policy") != policy
+            ):
+                raise ExperimentControllerIntegrityError(
+                    "provider lane stage token binding changed"
+                )
 
     def _abandon_before_start(self, admission):
         fd, record = self._validated_admission(admission)
@@ -1435,6 +1490,7 @@ def validate_experiment_controller_reference(
     expected_scored=None,
     expected_operator_limits=None,
     expected_budgets=None,
+    expected_stage_token_policy=_UNSPECIFIED_STAGE_TOKEN_POLICY,
 ):
     """Validate an immutable controller reference against its source metadata."""
     required = {
@@ -1513,6 +1569,15 @@ def validate_experiment_controller_reference(
             raise ExperimentControllerIntegrityError(
                 "experiment controller budget differs from protocol"
             )
+    if expected_stage_token_policy is not _UNSPECIFIED_STAGE_TOKEN_POLICY:
+        expected_policy = _normalize_stage_token_policy(
+            expected_stage_token_policy,
+            max_total_tokens=metadata["max_total_tokens"],
+        )
+        if metadata["stage_token_policy"] != expected_policy:
+            raise ExperimentControllerIntegrityError(
+                "experiment controller stage token policy differs from protocol"
+            )
     return copy.deepcopy(reference)
 
 
@@ -1525,12 +1590,15 @@ def _invocation_binding(invocation, *, lifecycle_root, run_id):
             or invocation.get("lifecycle_authority_root")
         )
         run_id = run_id or invocation.get("run_id")
+        usage_stage = invocation.get("usage_stage")
     else:
         invocation_id = invocation
+        usage_stage = None
     return {
         "invocation_id": _safe_id(invocation_id, "invocation_id"),
         "lifecycle_root": lifecycle_root,
         "run_id": _safe_id(run_id or "RUN-UNKNOWN", "run_id"),
+        "usage_stage": usage_stage,
     }
 
 
@@ -1630,6 +1698,7 @@ def _load_metadata(root):
         "max_wall_time_seconds",
         "soft_warning_ratio",
         "initial_monotonic",
+        "stage_token_policy",
         "state_lock_device",
         "state_lock_inode",
         "state_journal_device",
@@ -1646,6 +1715,7 @@ def _load_metadata(root):
         "operator_ledger_root_device",
         "operator_ledger_root_inode",
         "operator_ledger_policy_sha256",
+        "stage_token_policy",
     }
     if (
         set(metadata) == legacy_required
@@ -1660,9 +1730,16 @@ def _load_metadata(root):
             "operator_ledger_root_device": None,
             "operator_ledger_root_inode": None,
             "operator_ledger_policy_sha256": None,
+            "stage_token_policy": None,
         }
     elif (
-        set(metadata) == required
+        set(metadata) == required - {"stage_token_policy"}
+        and metadata.get("schema_version") == CONTROLLER_SCHEMA_VERSION
+    ):
+        metadata = {**metadata, "stage_token_policy": None}
+    elif (
+        frozenset(metadata)
+        in {frozenset(required), frozenset(required - {"stage_token_policy"})}
         and metadata.get("schema_version")
         == LEGACY_CONTROLLER_SCHEMA_VERSION
     ):
@@ -1703,6 +1780,15 @@ def _load_metadata(root):
         raise ExperimentControllerIntegrityError(
             "controller operator policy binding is invalid"
         )
+    try:
+        metadata["stage_token_policy"] = _normalize_stage_token_policy(
+            metadata["stage_token_policy"],
+            max_total_tokens=metadata["max_total_tokens"],
+        )
+    except ExperimentControllerError as exc:
+        raise ExperimentControllerIntegrityError(
+            "controller stage token policy is invalid"
+        ) from exc
     ledger_binding_values = (
         metadata["operator_ledger_root_device"],
         metadata["operator_ledger_root_inode"],
@@ -2147,6 +2233,98 @@ def _status_after_budget_observation(status, budget_state):
     ):
         return "budget_draining"
     return status
+
+
+def _normalize_stage_token_policy(value, *, max_total_tokens):
+    if value is None:
+        return None
+    required = {
+        "schema_version",
+        "authoring_limit_tokens",
+        "implementation_reserve_tokens",
+        "bounded_overshoot",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ExperimentControllerError(
+            "stage token policy fields are invalid"
+        )
+    authoring_limit = value["authoring_limit_tokens"]
+    implementation_reserve = value["implementation_reserve_tokens"]
+    if (
+        value["schema_version"] != STAGE_TOKEN_POLICY_SCHEMA_VERSION
+        or value["bounded_overshoot"] is not True
+        or not isinstance(authoring_limit, int)
+        or isinstance(authoring_limit, bool)
+        or not isinstance(implementation_reserve, int)
+        or isinstance(implementation_reserve, bool)
+        or authoring_limit < 1
+        or implementation_reserve < 1
+        or authoring_limit + implementation_reserve != max_total_tokens
+    ):
+        raise ExperimentControllerError(
+            "stage token policy allocation is invalid"
+        )
+    return copy.deepcopy(value)
+
+
+def _stage_token_snapshot(policy, budget_state):
+    if policy is None:
+        return None
+    usage = experiment_usage_by_stage(budget_state)
+    authoring_used = usage["total_tokens_by_stage"].get(
+        "taskpack_author",
+        0,
+    )
+    authoring_limit = policy["authoring_limit_tokens"]
+    return {
+        "schema_version": "experiment_stage_token_snapshot.v1",
+        "policy": copy.deepcopy(policy),
+        **usage,
+        "authoring_tokens": authoring_used,
+        "authoring_overshoot_tokens": max(
+            authoring_used - authoring_limit,
+            0,
+        ),
+        "remaining_total_tokens": max(
+            budget_state["max_total_tokens"] - budget_state["total_tokens"],
+            0,
+        ),
+        "implementation_reserve_violated": authoring_used > authoring_limit,
+    }
+
+
+def _enforce_stage_token_admission(policy, budget_state, usage_stage):
+    if policy is None:
+        return None
+    if not isinstance(usage_stage, str) or not usage_stage:
+        raise ExperimentProviderAdmissionDenied(
+            "stage token policy requires usage_stage"
+        )
+    snapshot = _stage_token_snapshot(policy, budget_state)
+    if usage_stage in {
+        "implementation_worker",
+        "review_or_repair",
+        "follow_up_author",
+        "semantic_architecture",
+    }:
+        return snapshot
+    if usage_stage != "taskpack_author":
+        raise ExperimentProviderAdmissionDenied(
+            "stage token policy requires deterministic grounding before "
+            f"{usage_stage}"
+        )
+    if snapshot["authoring_tokens"] >= policy["authoring_limit_tokens"]:
+        raise ExperimentProviderAdmissionDenied(
+            "taskpack authoring stage token limit is exhausted"
+        )
+    if (
+        snapshot["remaining_total_tokens"]
+        <= policy["implementation_reserve_tokens"]
+    ):
+        raise ExperimentProviderAdmissionDenied(
+            "implementation token reserve would be consumed"
+        )
+    return snapshot
 
 
 def _safe_id(value, label):

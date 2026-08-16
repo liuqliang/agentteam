@@ -299,6 +299,32 @@ def advance_experiment_budget(
     return projected, emitted
 
 
+def experiment_usage_by_stage(state):
+    """Project reported terminal token usage by invocation usage stage."""
+
+    validate_experiment_budget_state(state)
+    totals = {}
+    invocation_counts = {}
+    for usage_event_id in sorted(state["usage_event_digests"]):
+        usage, _digest, _checkpoint = _load_authoritative_terminal_usage(
+            state,
+            usage_event_id,
+        )
+        if usage.get("usage_status") != "reported":
+            continue
+        stage = usage.get("usage_stage")
+        if not isinstance(stage, str) or not stage:
+            raise ExperimentBudgetIntegrityError(
+                "reported terminal usage has no usage_stage"
+            )
+        totals[stage] = totals.get(stage, 0) + usage["total_tokens"]
+        invocation_counts[stage] = invocation_counts.get(stage, 0) + 1
+    return {
+        "total_tokens_by_stage": dict(sorted(totals.items())),
+        "invocation_count_by_stage": dict(sorted(invocation_counts.items())),
+    }
+
+
 def validate_experiment_budget_state(state):
     """Fail closed if a reconstructed state changed frozen or projected data."""
     if not isinstance(state, dict):

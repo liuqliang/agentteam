@@ -370,6 +370,32 @@
           "items": false,
           "minItems": 4,
           "maxItems": 4
+        },
+        "full_mode_stage_token_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "authoring_limit_tokens",
+            "implementation_reserve_tokens",
+            "bounded_overshoot"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "experiment_stage_token_policy.v1"
+            },
+            "authoring_limit_tokens": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "implementation_reserve_tokens": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "bounded_overshoot": {
+              "const": true
+            }
+          }
         }
       }
     },

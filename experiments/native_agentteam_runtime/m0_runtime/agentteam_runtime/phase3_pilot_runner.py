@@ -154,6 +154,9 @@ def build_phase3_experiment_protocol(
     if evaluator.is_symlink() or not evaluator.is_file():
         raise Phase3PilotRunnerError("common evaluator artifact is unsafe")
     budget = authority["budgets"]["single_codex"]
+    authoring_limit_tokens = (
+        budget["max_total_tokens"] * 3 // 5
+    )
     direct_digest = authority["mode_controls"]["agentteam_direct"][
         "taskpack_sha256_by_instance"
     ][instance_id]
@@ -229,6 +232,14 @@ def build_phase3_experiment_protocol(
                 "pre_integration",
                 "post_integration",
             ],
+            "full_mode_stage_token_policy": {
+                "schema_version": "experiment_stage_token_policy.v1",
+                "authoring_limit_tokens": authoring_limit_tokens,
+                "implementation_reserve_tokens": (
+                    budget["max_total_tokens"] - authoring_limit_tokens
+                ),
+                "bounded_overshoot": True,
+            },
         },
         "operator_limits": {
             "expected_operator_action": 0,
