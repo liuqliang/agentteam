@@ -278,7 +278,10 @@ def run_phase3_live_bundle(bundle_root, pilot_root, *, max_executions=None):
             arrow_sha256=evaluator_environment["arrow_sha256"],
             harness_root=evaluator_environment["harness_root"],
             harness_commit=evaluator_environment["harness_commit"],
-            instances_by_id=candidate["instances_by_id"],
+            instances_by_id=_selected_evaluator_instances(
+                candidate,
+                bundle["ordered_instance_ids"],
+            ),
             repository_sources_by_instance=values["repository-sources.json"],
             evaluator_root=Path(pilot_root).resolve() / "evaluator",
             resource_envelope_binding=binding,
@@ -477,6 +480,21 @@ def _validate_repository_sources(sources, ordered_ids):
     if not isinstance(sources, dict) or set(sources) != set(ordered_ids):
         raise Phase3LivePilotError("repository sources do not cover selection")
     return {key: str(Path(sources[key]).resolve(strict=True)) for key in ordered_ids}
+
+
+def _selected_evaluator_instances(candidates, ordered_ids):
+    instances = candidates.get("instances_by_id")
+    if not isinstance(instances, dict):
+        raise Phase3LivePilotError("candidate instances are invalid")
+    try:
+        return {
+            instance_id: copy.deepcopy(instances[instance_id])
+            for instance_id in ordered_ids
+        }
+    except KeyError as exc:
+        raise Phase3LivePilotError(
+            "selected instance is absent from candidate authority"
+        ) from exc
 
 
 def _validate_public_verification_environments(environments, ordered_ids):

@@ -12,6 +12,7 @@ from agentteam_runtime.experiment_sandbox import (
 from agentteam_runtime.phase3_live_pilot import (
     Phase3LivePilotError,
     _live_sandbox_configuration,
+    _selected_evaluator_instances,
     _validate_public_verification_environments,
 )
 from agentteam_runtime.phase3_pilot_runner import _trusted_acceptance_argv
@@ -51,6 +52,32 @@ def _environment(root, *, instance_id="fixture-instance"):
 
 
 class Phase3PublicVerificationTests(unittest.TestCase):
+    def test_live_evaluator_receives_only_selected_candidate_instances(self):
+        candidates = {
+            "instances_by_id": {
+                "first": {"instance_id": "first"},
+                "second": {"instance_id": "second"},
+            }
+        }
+
+        selected = _selected_evaluator_instances(candidates, ["second"])
+
+        self.assertEqual(selected, {"second": {"instance_id": "second"}})
+        self.assertIsNot(
+            selected["second"],
+            candidates["instances_by_id"]["second"],
+        )
+
+    def test_live_evaluator_rejects_absent_selected_candidate(self):
+        with self.assertRaisesRegex(
+            Phase3LivePilotError,
+            "absent from candidate authority",
+        ):
+            _selected_evaluator_instances(
+                {"instances_by_id": {"first": {"instance_id": "first"}}},
+                ["second"],
+            )
+
     def test_public_environment_uses_its_own_bounded_capacity(self):
         with patch(
             "agentteam_runtime.phase3_public_verification._bounded_tree_identity",
