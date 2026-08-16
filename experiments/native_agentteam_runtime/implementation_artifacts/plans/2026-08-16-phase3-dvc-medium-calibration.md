@@ -14,7 +14,7 @@ cost; one instance is not a general performance claim.
 
 - source commit: `78dd045d29f274960bcaf48fd2d055366abaf2c1`
 - source tree: `ddbe1d3231306250970a0b6ff9384838643d31d3`
-- runtime commit: `9d8bbf575bad3e0bf61b99e45edce899527ee35e`
+- runtime commit: `0ef80844ee10948e2b21a59fc675a9b5621f9cf0`
 - model: `gpt-5.6-sol`, reasoning profile `high`
 - mode order: `single_codex`, `agentteam_direct`, `agentteam_full`
 - repetitions: one per mode; continuation forbidden
@@ -46,17 +46,24 @@ dependency-tree bound. Runtime `9d8bbf5...` introduces the explicit
 `bounded_public_dependency_tree.v1` mount policy and revalidates that policy at
 launch. The failed run retained zero tokens and no provider usage artifact.
 
-The first valid `single_codex` execution consumed 352125 total tokens and
+The first provider-complete `single_codex` execution consumed 352125 total tokens and
 received a complete official score (`F2P 6/14`, `P2P 64/66`, unresolved,
 partial score `0.593939`). Its additional common-acceptance run failed, but a
 provider-free replay established that the repository-wide `pytest -rA`
 command is not a discriminating acceptance oracle for this image: after CA
 trust was repaired it still reported 254 failures and 608 errors from baseline
 environment assumptions and emitted 6224372 bytes. The official SWE-EVO
-evaluator remains the score authority. The calibration therefore retains the
-single result and resumes the unchanged `9d8bbf5...` treatment for the two
-remaining modes. Runtime `b5fdc85...` is a future evaluator-environment repair,
-not part of this calibration.
+evaluator remains the score authority.
+
+The attempted continuation then exposed a distinct budget-scope defect before
+the direct worker received a task. One protocol-global controller shared the
+600000-token and 1800-second allowance across all three modes and counted the
+operator review pause as execution time. Runtime `0ef8084...` separates each
+mode run's provider lane and budget clock from the protocol-wide immutable mode
+sequence. Because this changes the execution treatment, the earlier single
+result is retained only as infrastructure-recovery cost and diagnostic quality
+evidence. The scored v7 calibration restarts all three modes from zero under the
+new runtime; the failed direct continuation made zero provider calls.
 
 The token ceiling is checked at controller boundaries. An admitted provider
 turn can report usage after it has crossed a ceiling, but no later turn or mode

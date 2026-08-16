@@ -1,0 +1,54 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-dvc-medium-calibration-v1",
+  "revision": 6,
+  "decision_kind": "execution",
+  "subject": "phase3_dvc_medium_calibration",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-provider-free-refreeze-v1",
+  "supersedes_decision_id": null,
+  "statement": "Restart the scored three-mode DVC calibration after separating per-mode budget controllers from protocol-wide mode sequencing.",
+  "selected_option": "bind all scored modes to runtime 0ef8084 with one independent 600000-token and 1800-second controller per mode plus the unchanged 1800000-token aggregate calibration ceiling",
+  "alternatives": [
+    {
+      "option": "continue using the shared protocol controller",
+      "rejected_reason": "It exhausted direct mode before dispatch by charging single usage and an operator review pause against the direct allowance."
+    },
+    {
+      "option": "reset the existing controller files in place",
+      "rejected_reason": "Those files are immutable budget authority; mutating them would destroy recovery provenance."
+    },
+    {
+      "option": "combine the old single result with repaired direct and full results",
+      "rejected_reason": "The budget-scope repair changes runtime treatment, so all scored comparison modes must use the same release."
+    }
+  ],
+  "rationale": "The direct continuation stopped with zero provider calls because the protocol controller had accumulated 352125 tokens from single mode and 2410 seconds including idle review time. The repair keeps counterbalanced sequencing in one shared immutable sequence root while assigning each mode run its own provider lane, token projection, and monotonic wall clock. Twenty-seven focused mode-adapter tests and the complete provider-free unittest suite passed. Bundle v7 then initialized the exact three-mode schedule with zero usage.",
+  "scope": [
+    "instance:iterative__dvc_2.19.0_2.20.0",
+    "discarded_scored_run:/tmp/agentteam-phase3-dvc-medium-calibration-run-v2",
+    "historical_recovery_tokens:352125",
+    "failed_direct_provider_calls:0",
+    "replacement_runtime_commit:0ef80844ee10948e2b21a59fc675a9b5621f9cf0",
+    "replacement_release:phase3-calibration-0ef8084",
+    "replacement_bundle_sha256:5afb236f3a3563cc198400eb417e5032bd7ee1c2acdb7d3efb5961898aa9c3a9",
+    "per_mode_token_ceiling:600000",
+    "per_mode_wall_ceiling_seconds:1800",
+    "aggregate_token_ceiling:1800000",
+    "aggregate_wall_ceiling_seconds:5400"
+  ],
+  "expected_outcome": "Execute exactly one fresh single_codex, agentteam_direct, and agentteam_full result under runtime 0ef8084, with independent mode budgets and one aggregate calibration budget.",
+  "acceptance_refs": [
+    "plans/2026-08-16-phase3-dvc-medium-calibration.md",
+    "focused mode-adapter tests: 27 passed",
+    "complete provider-free unittest suite passed",
+    "provider-free bundle v7 initialization reports zero usage",
+    "each run-local budget controller has a distinct root",
+    "all modes share one protocol mode-sequence root",
+    "no result from runtime 9d8bbf5 is included in the scored v7 comparison"
+  ],
+  "status": "active",
+  "created_at": "2026-08-16T04:29:00Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": "c401a26cf78671e7c5e9be4f8acd3b7d6dc5ab2158592d98115ff90524f0cbff"
+}
