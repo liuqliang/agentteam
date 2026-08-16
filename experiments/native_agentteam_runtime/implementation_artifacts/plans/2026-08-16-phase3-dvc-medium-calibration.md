@@ -25,7 +25,13 @@ cost; one instance is not a general performance claim.
 - public environment image:
   `sha256:cccdad0b5064f23be9d6e1047238a9fc3f3d3a528015427eed8d17d8fd1ece73`
 - public environment authority:
-  `e755332f552785b0d280f39ab6d210bfed5384a07ebdbcaf6b02ea51af250e49`
+  `207b85049bcedc4a80469a6757faed992d928b29a8297270f60de23af924c830`
+
+The first extracted environment authority `e755332f...` was invalidated before
+provider launch when an operator-side `pytest --version` probe wrote bytecode
+into its mutable host path. The validator detected the changed tree. That
+environment and its partial bundle are discarded with zero provider calls;
+the execution binds only the clean `v2` authority above.
 
 The token ceiling is checked at controller boundaries. An admitted provider
 turn can report usage after it has crossed a ceiling, but no later turn or mode
@@ -71,4 +77,3 @@ infrastructure failure and does not authorize an extra attempt.
 5. The final report compares quality, total and uncached token cost, provider
    time, controller time, evaluator time, tool count, and changed production
    paths without claiming statistical significance.
-
