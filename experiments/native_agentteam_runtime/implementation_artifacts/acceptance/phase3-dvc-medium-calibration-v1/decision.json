@@ -1,0 +1,53 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-dvc-medium-calibration-v1",
+  "revision": 1,
+  "decision_kind": "execution",
+  "subject": "phase3_dvc_medium_calibration",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-provider-free-refreeze-v1",
+  "supersedes_decision_id": null,
+  "statement": "Run one bounded three-mode calibration on the preregistered medium-complexity DVC SWE-EVO instance after freezing a digest-bound public dependency environment.",
+  "selected_option": "run single_codex, agentteam_direct, and agentteam_full serially with 600000 tokens per mode and 1800000 tokens in aggregate",
+  "alternatives": [
+    {
+      "option": "repeat the Requests historical-control instance",
+      "rejected_reason": "Requests already measured the repaired mechanisms and cannot test transfer to a larger repository task."
+    },
+    {
+      "option": "run the full three-instance pilot",
+      "rejected_reason": "The current evidence does not justify the additional repetitions or paid cost before one new-instance calibration succeeds."
+    },
+    {
+      "option": "use only an aggregate ceiling",
+      "rejected_reason": "An aggregate-only limit could allow an early mode to consume the budget intended for a fair same-instance comparison."
+    }
+  ],
+  "rationale": "The DVC instance was selected in the original frozen medium stratum before model execution. The accepted runtime now preserves controller verification, separates candidate tests from the scored production patch, bounds cumulative tool use, and mounts a digest-bound public environment. A single serial repetition is the narrowest useful transfer test. The 600000-token per-mode and 1800000-token aggregate ceilings were explicitly approved by the operator.",
+  "scope": [
+    "instance:iterative__dvc_2.19.0_2.20.0",
+    "complexity_stratum:medium",
+    "source_commit:78dd045d29f274960bcaf48fd2d055366abaf2c1",
+    "source_tree:ddbe1d3231306250970a0b6ff9384838643d31d3",
+    "runtime_commit:e5f934f5a7b5052a56d357d3be0601af832c0635",
+    "mode_order:single_codex,agentteam_direct,agentteam_full",
+    "per_mode_token_ceiling:600000",
+    "aggregate_token_ceiling:1800000",
+    "maximum_mode_executions:3",
+    "max_inflight_model_invocations:1",
+    "public_environment_authority:e755332f552785b0d280f39ab6d210bfed5384a07ebdbcaf6b02ea51af250e49"
+  ],
+  "expected_outcome": "Produce one same-instance quality and cost comparison with complete provider, patch, evaluator, and resource evidence, or retain a fail-closed stop with its consumed cost.",
+  "acceptance_refs": [
+    "plans/2026-08-16-phase3-dvc-medium-calibration.md",
+    "provider usage coverage is 100 percent for every launched invocation",
+    "per-mode provider total does not authorize a later turn after 600000 tokens",
+    "aggregate provider total does not authorize a later mode after 1800000 tokens",
+    "candidate production patch compatibility is checked before official scoring",
+    "no corrective operator intervention occurs inside a mode execution"
+  ],
+  "status": "active",
+  "created_at": "2026-08-16T03:15:00Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": null
+}
