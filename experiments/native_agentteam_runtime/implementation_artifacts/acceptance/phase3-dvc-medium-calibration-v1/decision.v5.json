@@ -1,0 +1,55 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-dvc-medium-calibration-v1",
+  "revision": 5,
+  "decision_kind": "execution",
+  "subject": "phase3_dvc_medium_calibration",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-provider-free-refreeze-v1",
+  "supersedes_decision_id": null,
+  "statement": "Retain the completed DVC single_codex official result and resume the two remaining modes without changing the frozen runtime treatment.",
+  "selected_option": "treat the repository-wide common acceptance as diagnostic evidence and keep the official SWE-EVO evaluator as score authority",
+  "alternatives": [
+    {
+      "option": "rerun single_codex under the CA-repaired runtime",
+      "rejected_reason": "The official evaluator already produced complete score evidence, and a rerun would duplicate provider cost while changing the treatment between modes."
+    },
+    {
+      "option": "reject the single result because repository-wide pytest failed",
+      "rejected_reason": "A provider-free replay with working CA trust still produced 254 failures and 608 errors from baseline environment assumptions, so this command is not a candidate-specific oracle."
+    },
+    {
+      "option": "switch direct and full to runtime b5fdc85",
+      "rejected_reason": "Changing runtime after the first mode would invalidate the same-treatment comparison."
+    }
+  ],
+  "rationale": "The single_codex provider invocation has complete 100-percent usage evidence and the official digest-pinned evaluator completed successfully. It consumed 352125 total tokens, applied the candidate patch, passed 6 of 14 F2P tests and 64 of 66 P2P tests, and was unresolved with partial score 0.593939. The common acceptance emitted 6224372 bytes and remained broadly failing after an isolated CA repair, proving that its failure is not sufficient to invalidate the official score. Resuming the existing bundle preserves source, runtime, model, mode order, and aggregate budget.",
+  "scope": [
+    "instance:iterative__dvc_2.19.0_2.20.0",
+    "retained_run:/tmp/agentteam-phase3-dvc-medium-calibration-run-v2",
+    "retained_runtime_commit:9d8bbf575bad3e0bf61b99e45edce899527ee35e",
+    "retained_single_total_tokens:352125",
+    "retained_single_f2p:6/14",
+    "retained_single_p2p:64/66",
+    "retained_single_partial_score:0.593939",
+    "common_acceptance_replay_stdout_bytes:6224372",
+    "common_acceptance_replay_failures:254",
+    "common_acceptance_replay_errors:608",
+    "future_runtime_repair_commit:b5fdc85a0edef730b97f3a00cb793953c99b5308",
+    "remaining_modes:agentteam_direct,agentteam_full",
+    "aggregate_token_ceiling:1800000"
+  ],
+  "expected_outcome": "Resume the existing state at agentteam_direct, retain every mode's official score and provider usage, and stop at the original aggregate boundary or another frozen stop condition.",
+  "acceptance_refs": [
+    "plans/2026-08-16-phase3-dvc-medium-calibration.md",
+    "single_codex provider usage coverage is 100 percent",
+    "single_codex official evaluator status is completed",
+    "the next schedule entry is agentteam_direct",
+    "runtime commit remains 9d8bbf575bad3e0bf61b99e45edce899527ee35e",
+    "no duplicate single_codex provider invocation is launched"
+  ],
+  "status": "active",
+  "created_at": "2026-08-16T04:18:00Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": "20397856ff9b144ff36e526de42fab958dadbb4e50d72a200d3b07399b4c3c98"
+}

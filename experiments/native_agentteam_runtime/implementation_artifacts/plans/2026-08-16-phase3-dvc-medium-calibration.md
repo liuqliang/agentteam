@@ -46,6 +46,18 @@ dependency-tree bound. Runtime `9d8bbf5...` introduces the explicit
 `bounded_public_dependency_tree.v1` mount policy and revalidates that policy at
 launch. The failed run retained zero tokens and no provider usage artifact.
 
+The first valid `single_codex` execution consumed 352125 total tokens and
+received a complete official score (`F2P 6/14`, `P2P 64/66`, unresolved,
+partial score `0.593939`). Its additional common-acceptance run failed, but a
+provider-free replay established that the repository-wide `pytest -rA`
+command is not a discriminating acceptance oracle for this image: after CA
+trust was repaired it still reported 254 failures and 608 errors from baseline
+environment assumptions and emitted 6224372 bytes. The official SWE-EVO
+evaluator remains the score authority. The calibration therefore retains the
+single result and resumes the unchanged `9d8bbf5...` treatment for the two
+remaining modes. Runtime `b5fdc85...` is a future evaluator-environment repair,
+not part of this calibration.
+
 The token ceiling is checked at controller boundaries. An admitted provider
 turn can report usage after it has crossed a ceiling, but no later turn or mode
 may start after the overrun is observed. All reported retry usage counts.
