@@ -458,6 +458,51 @@ def reuse_repo_map_handoff_in_taskpack(taskpack_dir, handoff_path=REPO_MAP_HANDO
     }
 
 
+def satisfy_repo_map_with_controller_handoff(
+    taskpack_dir,
+    handoff_path=REPO_MAP_HANDOFF_PATH,
+):
+    """Mark one model repo-map prerequisite as controller-grounded."""
+
+    taskpack_dir = Path(taskpack_dir).resolve()
+    handoff_path = _normalize_repo_relative_artifact_path(
+        handoff_path,
+        "repo_map_handoff_path",
+    )
+    loaded = load_taskpack(taskpack_dir)
+    backlog = loaded["backlog"]
+    repo_map_items = [
+        item
+        for item in backlog.get("items", [])
+        if isinstance(item, dict) and _is_repo_map_backlog_item(item)
+    ]
+    if len(repo_map_items) != 1:
+        raise TaskpackValidationError(
+            "controller grounding requires exactly one repo_map task"
+        )
+    repo_map_item = repo_map_items[0]
+    output_artifacts = repo_map_item.get("expected_output_artifacts", [])
+    if handoff_path not in output_artifacts:
+        raise TaskpackValidationError(
+            "controller grounding repo_map task does not produce the handoff"
+        )
+    repo_map_item["backlog_status"] = "done"
+    _write_json(taskpack_dir / "backlog.json", backlog)
+    (taskpack_dir / "README.md").write_text(
+        _render_readme(
+            loaded["taskpack"],
+            backlog,
+            loaded["verification"],
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "status": "controller_grounded",
+        "handoff_path": handoff_path,
+        "producer_task_id": repo_map_item["task_id"],
+    }
+
+
 def draft_deterministic_taskpack_skeleton(
     project_root,
     goal,

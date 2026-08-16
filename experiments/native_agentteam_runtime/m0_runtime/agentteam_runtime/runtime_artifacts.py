@@ -9,6 +9,60 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+def seed_runtime_artifact(
+    output_dir,
+    relative_path,
+    payload,
+    *,
+    task_id,
+    authority,
+):
+    """Seed one immutable controller-generated runtime artifact."""
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("seeded runtime artifact payload must be an object")
+    if not isinstance(task_id, str) or not task_id:
+        raise RuntimeError("seeded runtime artifact task_id is invalid")
+    if not isinstance(authority, str) or not authority:
+        raise RuntimeError("seeded runtime artifact authority is invalid")
+    _safe_runtime_artifact_path(output_dir, relative_path)
+    canonical = (
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    store_root = Path(output_dir) / "runtime_artifacts"
+    manifest_path = store_root / "manifest.json"
+    with _runtime_artifact_store_lock(store_root, exclusive=True):
+        manifest = _read_runtime_artifact_manifest(manifest_path)
+        records = manifest.setdefault("artifacts", {})
+        stored = _store_runtime_artifact_bytes(
+            canonical,
+            store_root / "objects",
+        )
+        record = {
+            "artifact_path": relative_path,
+            "attempt_id": "CONTROLLER-GROUNDING",
+            "byte_count": stored["byte_count"],
+            "sha256": stored["sha256"],
+            "task_id": task_id,
+            "artifact_origin": "controller_seeded",
+            "authority": authority,
+        }
+        existing = records.get(relative_path)
+        if existing is not None and existing != record:
+            raise RuntimeError(
+                f"seeded runtime artifact is immutable: {relative_path}"
+            )
+        records[relative_path] = record
+        _write_json_atomically(manifest_path, manifest)
+        return record
+
+
 def persist_runtime_artifacts(
     output_dir,
     worktree_path,

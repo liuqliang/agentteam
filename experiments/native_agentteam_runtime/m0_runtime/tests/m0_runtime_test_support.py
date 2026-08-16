@@ -32,6 +32,7 @@ from agentteam_runtime import (
     answer_manual_gate,
     audit_worktree_diff,
     build_planner_context,
+    build_deterministic_repo_map_handoff,
     build_repo_grounding,
     build_repo_context,
     build_repository_map,
@@ -75,6 +76,7 @@ from agentteam_runtime.model_invocation import (
 )
 from agentteam_runtime.runtime_artifacts import (
     persist_runtime_artifacts,
+    seed_runtime_artifact,
     validate_runtime_input_artifacts,
 )
 from agentteam_runtime.two_phase_scheduler import _operator_task_report, _runtime_evidence_summary

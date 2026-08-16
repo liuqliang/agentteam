@@ -1547,6 +1547,10 @@ def publish_experiment_launch_registration(
         )
     normalized_tool_route = None
     if tool_budget_route is None:
+        if mode_authority.get("tool_budget_risk_target") is not None:
+            raise ExperimentSandboxError(
+                "tool budget route is required by mode authority"
+            )
         if mode_authority["model_policy"] != selected_model_policy:
             raise ExperimentSandboxError(
                 "launch registration differs from mode authority"
@@ -1952,6 +1956,10 @@ def load_experiment_launch_registration(lifecycle_authority_root):
         )
     route = record.get("tool_budget_routing")
     if route is None:
+        if mode_authority.get("tool_budget_risk_target") is not None:
+            raise ExperimentSandboxError(
+                "experiment launch tool budget route is unavailable"
+            )
         if model_policy != mode_authority["model_policy"]:
             raise ExperimentSandboxError(
                 "registered lifecycle differs from mode authority"

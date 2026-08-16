@@ -22,6 +22,7 @@ from .model_routing import select_model_route
 from .retry_decision import decide_retry
 from .planner_context import build_artifact_context
 from .repo_map import (
+    build_deterministic_repo_map_handoff,
     build_repo_context,
     build_repository_map,
     REPO_CONTEXT_SCHEMA_VERSION,

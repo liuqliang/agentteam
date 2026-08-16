@@ -800,7 +800,23 @@ def _complete_fake_runtime_invocation(
     usage_stage="implementation_worker",
     execution_identity=None,
 ):
+    from agentteam_runtime.model_context_budget import select_tool_budget_route
+
     configuration = experiment_context["sandbox_configuration"]
+    role = {
+        "repo_map": "repo_map_agent",
+        "taskpack_author": "taskpack_author",
+    }.get(usage_stage, "implementation_worker")
+    tool_route = None
+    model_policy = experiment_context["model_policy"]
+    risk_target = experiment_context.get("benchmark_risk_target")
+    if risk_target not in {None, "L0"}:
+        tool_route = select_tool_budget_route(
+            model_policy,
+            role=role,
+            risk_target=risk_target,
+        )
+        model_policy = tool_route["policy"]
     lifecycle_root = experiment_lifecycle_authority_root(
         experiment_context["authority_root"],
         lifecycle_id,
@@ -839,7 +855,8 @@ def _complete_fake_runtime_invocation(
         controller_reference=experiment_context[
             "controller_reference"
         ],
-        model_policy=experiment_context["model_policy"],
+        model_policy=model_policy,
+        tool_budget_route=tool_route,
     )
     return _complete_fake_experiment_invocation(
         {
@@ -847,14 +864,19 @@ def _complete_fake_runtime_invocation(
             "run_id": experiment_context["experiment_run_id"],
             "taskpack_id": taskpack_id,
             "usage_stage": usage_stage,
-            "model": experiment_context["model_policy"]["model"],
-            "reasoning_profile": experiment_context["model_policy"][
+            "model": model_policy["model"],
+            "reasoning_profile": model_policy[
                 "reasoning_profile"
             ],
+            **(
+                {"tool_budget_routing": tool_route}
+                if tool_route is not None
+                else {}
+            ),
             "provider_resume_mode": "new",
         },
         workspace_root,
-        role="implementation_worker",
+        role=role,
         execution_identity=execution_identity,
     )
 
@@ -8777,6 +8799,90 @@ class ExperimentModeAdapterTests(unittest.TestCase):
             self.assertNotIn(
                 fixture["protocol"]["direct_taskpack"]["sha256"],
                 serialized,
+            )
+
+    def test_full_mode_seeds_deterministic_grounding_before_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(
+                tmp,
+                "agentteam_full",
+                context_budget=True,
+                benchmark_risk_target="L2",
+            )
+            observed = {}
+
+            def author(project_root, goal, draft_root, **kwargs):
+                result = draft_taskpack_files(
+                    project_root=project_root,
+                    goal=goal,
+                    draft_root=draft_root,
+                    taskpack_id="grounded-full-mode",
+                    verification_command=kwargs["verification_profile"][
+                        "correctness"
+                    ]["command"],
+                    role_routing=True,
+                    risk_target="L2",
+                )
+                _complete_fake_experiment_invocation(
+                    kwargs["author_invocation_context"],
+                    project_root,
+                    role="taskpack_author",
+                )
+                return result
+
+            def launch(**kwargs):
+                frozen_dir = Path(kwargs["frozen_taskpack_dir"])
+                manifest = json.loads(
+                    (frozen_dir / "manifest.json").read_text(encoding="utf-8")
+                )
+                backlog = json.loads(
+                    (frozen_dir / "backlog.json").read_text(encoding="utf-8")
+                )
+                repo_task = next(
+                    item
+                    for item in backlog["items"]
+                    if item["required_role"] == "repo_map_agent"
+                )
+                observed["repo_task_status"] = repo_task["backlog_status"]
+                runtime_dir = Path(kwargs["run_root"]) / manifest["taskpack_id"]
+                artifact_manifest = json.loads(
+                    (runtime_dir / "runtime_artifacts" / "manifest.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                observed["artifact"] = artifact_manifest["artifacts"][
+                    ".agentteam/generated/repo_map_handoff.json"
+                ]
+                _complete_fake_runtime_invocation(
+                    kwargs["experiment_runtime_context"],
+                    kwargs["trusted_project_root"],
+                    lifecycle_id="grounded-full-worker",
+                    taskpack_id=manifest["taskpack_id"],
+                )
+                return {
+                    "terminal_status": "completed",
+                    "provider_invocation_count": 2,
+                }
+
+            with self._mode_execution_boundary(), patch(
+                "agentteam_runtime.taskpack_author.draft_taskpack_from_goal",
+                side_effect=author,
+            ), patch(
+                "agentteam_runtime.agentteam._run_frozen_taskpack",
+                side_effect=launch,
+            ):
+                result = self._controller(fixture).execute(
+                    AgentTeamFullModeAdapter()
+                )
+
+            self.assertEqual(observed["repo_task_status"], "done")
+            self.assertEqual(
+                observed["artifact"]["artifact_origin"],
+                "controller_seeded",
+            )
+            self.assertEqual(
+                result["taskpack"]["grounding"]["semantic_gaps"],
+                [],
             )
 
     def test_full_mode_rejects_unusable_acceptance_profile_before_provider_registration(self):

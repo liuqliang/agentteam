@@ -614,6 +614,41 @@ class ContractsMixin:
             self.assertEqual(items[0]["input_artifacts"], [handoff_path])
             self.assertEqual(validate_taskpack(result["taskpack_dir"])["status"], "accepted")
 
+    def test_controller_grounding_completes_repo_map_prerequisite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            _init_repo(repo)
+            result = draft_taskpack_files(
+                project_root=repo,
+                goal="Implement the next bounded feature in the repository.",
+                draft_root=tmp_path / "drafts",
+                taskpack_id="controller-grounded-handoff",
+                write_scope=["src/"],
+            )
+
+            binding = taskpack_module.satisfy_repo_map_with_controller_handoff(
+                result["taskpack_dir"]
+            )
+
+            loaded = load_taskpack(result["taskpack_dir"])
+            repo_task = next(
+                item
+                for item in loaded["backlog"]["items"]
+                if item["task_id"] == binding["producer_task_id"]
+            )
+            implementation = next(
+                item
+                for item in loaded["backlog"]["items"]
+                if item["required_role"] == "implementation_worker"
+            )
+            self.assertEqual(repo_task["backlog_status"], "done")
+            self.assertIn(repo_task["task_id"], implementation["depends_on"])
+            self.assertEqual(
+                validate_taskpack(result["taskpack_dir"])["status"],
+                "accepted",
+            )
+
 
     def test_build_taskpack_runtime_args_passes_initial_integration_base_ref(self):
         with tempfile.TemporaryDirectory() as tmp:

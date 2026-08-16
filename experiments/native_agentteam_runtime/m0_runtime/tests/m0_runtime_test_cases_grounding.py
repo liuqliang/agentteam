@@ -5,6 +5,60 @@ except ImportError:
 
 
 class GroundingMixin:
+    def test_deterministic_handoff_is_seeded_and_digest_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            _init_git_repo(repo)
+            (repo / "src.py").write_text(
+                "def target():\n    return 1\n",
+                encoding="utf-8",
+            )
+            (repo / "test_src.py").write_text(
+                "from src import target\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "fixture"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            task = {
+                "task_id": "TASK-GROUNDING",
+                "objective": "Improve target and verify its behavior.",
+                "read_scope": ["."],
+                "write_scope": ["src.py"],
+            }
+            first = build_deterministic_repo_map_handoff(
+                repo,
+                root / "map-a",
+                task,
+                verification_commands=[["python3", "-m", "unittest"]],
+            )
+            second = build_deterministic_repo_map_handoff(
+                repo,
+                root / "map-b",
+                task,
+                verification_commands=[["python3", "-m", "unittest"]],
+            )
+            self.assertEqual(first, second)
+            self.assertEqual(first["semantic_gaps"], [])
+            artifact_path = ".agentteam/generated/repo_map_handoff.json"
+            record = seed_runtime_artifact(
+                root / "run",
+                artifact_path,
+                first,
+                task_id="TASK-REPO-MAP",
+                authority="deterministic_repo_context.v1",
+            )
+            validated = validate_runtime_input_artifacts(
+                root / "run",
+                {artifact_path: "TASK-REPO-MAP"},
+            )
+            self.assertEqual(validated[artifact_path]["sha256"], record["sha256"])
+
     def test_completed_prerequisite_artifact_bootstraps_from_clean_git_baseline(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -14,6 +14,7 @@ REPO_INVENTORY_SCHEMA_VERSION = "repo_inventory.v1"
 REPO_CONTEXT_SCHEMA_VERSION = "repo_context.v1"
 REPO_STRUCTURE_SCHEMA_VERSION = "repo_structure.v1"
 REPO_SYMBOLS_SCHEMA_VERSION = "repo_symbols.v1"
+REPO_MAP_HANDOFF_SCHEMA_VERSION = "repo_map_handoff.v1"
 SYMBOL_EXTRACTION_VERSION = "python_ast_js_ts_regex.v1"
 CATEGORY_SORT_ORDER = {
     "source": 0,
@@ -233,6 +234,55 @@ def build_repo_context(
     }
     _write_json(context_path, context)
     return context
+
+
+def build_deterministic_repo_map_handoff(
+    project_root,
+    output_dir,
+    task,
+    *,
+    verification_commands=(),
+    max_files=12,
+):
+    """Build a compact, deterministic controller-owned grounding handoff."""
+
+    project_root = Path(project_root).resolve(strict=True)
+    context = build_repo_context(
+        project_root,
+        output_dir,
+        task,
+        "implementation_worker",
+        max_files=max_files,
+        context_id="deterministic-grounding",
+    )
+    objective = str(task.get("objective") or "")
+    selected_files = deepcopy(context["selected_files"])
+    semantic_gaps = []
+    if not selected_files:
+        semantic_gaps.append("no_relevant_tracked_files_selected")
+    return {
+        "schema_version": REPO_MAP_HANDOFF_SCHEMA_VERSION,
+        "grounding_authority": "deterministic_repo_context.v1",
+        "repository": {
+            "commit": _git_stdout(project_root, ["rev-parse", "HEAD"]),
+            "tree": _git_stdout(project_root, ["rev-parse", "HEAD^{tree}"]),
+        },
+        "task_id": str(task.get("task_id") or "unknown-task"),
+        "objective_sha256": hashlib.sha256(
+            objective.encode("utf-8")
+        ).hexdigest(),
+        "selected_files": selected_files,
+        "candidate_tests": deepcopy(context["candidate_tests"]),
+        "repository_structure": deepcopy(context["repository_structure"]),
+        "verification_commands": [
+            list(command)
+            for command in verification_commands
+            if isinstance(command, (list, tuple))
+            and all(isinstance(item, str) for item in command)
+        ],
+        "warnings": deepcopy(context["warnings"]),
+        "semantic_gaps": semantic_gaps,
+    }
 
 
 def _tracked_files(project_root, warnings):

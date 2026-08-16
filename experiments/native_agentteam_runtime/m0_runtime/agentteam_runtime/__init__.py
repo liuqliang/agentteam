@@ -36,6 +36,10 @@ _EXPORTS = {
     "audit_worktree_diff": (".m0_runtime", "audit_worktree_diff"),
     "build_planner_context": (".planner_context", "build_planner_context"),
     "build_repo_grounding": (".repo_grounding", "build_repo_grounding"),
+    "build_deterministic_repo_map_handoff": (
+        ".repo_map",
+        "build_deterministic_repo_map_handoff",
+    ),
     "build_repo_context": (".repo_map", "build_repo_context"),
     "build_repository_map": (".repo_map", "build_repository_map"),
     "build_runtime_observability": (".observability", "build_runtime_observability"),

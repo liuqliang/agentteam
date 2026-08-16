@@ -1325,7 +1325,14 @@ class AgentTeamFullModeAdapter:
 
     def execute(self, request):
         from .agentteam import _run_frozen_taskpack
-        from .taskpack import freeze_taskpack
+        from .repo_map import build_deterministic_repo_map_handoff
+        from .runtime_artifacts import seed_runtime_artifact
+        from .taskpack import (
+            REPO_MAP_HANDOFF_PATH,
+            freeze_taskpack,
+            load_taskpack,
+            satisfy_repo_map_with_controller_handoff,
+        )
         from .taskpack_author import draft_taskpack_from_goal
 
         author_workspace, _branch = (
@@ -1383,6 +1390,37 @@ class AgentTeamFullModeAdapter:
             raise ExperimentModeError(
                 "full AgentTeam author returned no taskpack"
             )
+        grounding_binding = None
+        grounding_handoff = None
+        if request.protocol["environment"].get("benchmark_risk_target"):
+            grounding_binding = satisfy_repo_map_with_controller_handoff(
+                authored["taskpack_dir"]
+            )
+            grounded_taskpack = load_taskpack(authored["taskpack_dir"])
+            implementation_tasks = [
+                item
+                for item in grounded_taskpack["backlog"].get("items", [])
+                if isinstance(item, dict)
+                and item.get("required_role") == "implementation_worker"
+                and grounding_binding["producer_task_id"]
+                in item.get("depends_on", [])
+            ]
+            if len(implementation_tasks) != 1:
+                raise ExperimentModeError(
+                    "controller grounding requires one dependent implementation task"
+                )
+            grounding_handoff = build_deterministic_repo_map_handoff(
+                request.project_root,
+                Path(request.run_dir) / "controller-grounding",
+                implementation_tasks[0],
+                verification_commands=[
+                    request.protocol["acceptance"]["command"]
+                ],
+            )
+            if grounding_handoff["semantic_gaps"]:
+                raise ExperimentModeError(
+                    "deterministic grounding has unresolved semantic gaps"
+                )
         frozen = freeze_taskpack(
             authored["taskpack_dir"],
             Path(request.run_dir) / "frozen",
@@ -1413,6 +1451,16 @@ class AgentTeamFullModeAdapter:
             "source": "authored",
         }
         run_root = Path(request.run_dir) / "agentteam-runtime"
+        grounding_record = None
+        if grounding_binding is not None:
+            runtime_output_dir = run_root / frozen["manifest"]["taskpack_id"]
+            grounding_record = seed_runtime_artifact(
+                runtime_output_dir,
+                REPO_MAP_HANDOFF_PATH,
+                grounding_handoff,
+                task_id=grounding_binding["producer_task_id"],
+                authority="deterministic_repo_context.v1",
+            )
         launched = _run_frozen_taskpack(
             frozen_taskpack_dir=frozen["frozen_taskpack_dir"],
             run_root=str(run_root),
@@ -1440,6 +1488,12 @@ class AgentTeamFullModeAdapter:
             fallback_workspace=request.project_root,
         )
         result["taskpack"] = copy.deepcopy(self._frozen_taskpack)
+        if grounding_binding is not None:
+            result["taskpack"]["grounding"] = {
+                **grounding_binding,
+                "artifact_sha256": grounding_record["sha256"],
+                "semantic_gaps": [],
+            }
         return result
 
     def failure_context(self, request):
