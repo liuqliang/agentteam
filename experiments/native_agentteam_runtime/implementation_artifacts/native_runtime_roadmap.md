@@ -1723,9 +1723,16 @@ candidate tests from the production patch submitted to official evaluation.
 Legacy protocols retain complete-patch behavior. The implementation passes
 `1215` provider-free tests with `7` skips and made zero model calls.
 
-Phase 3 expansion remains unauthorized. The next ordered work is to review and
-freeze a runtime release and protocol from this implementation, then make a
-separate execution decision for either a new SWE-EVO instance or a bounded
-causal repetition. Do not infer cost or quality improvement from provider-free
-tests. The repair evidence is in
-[`2026-08-15-phase3-controller-verification-handoff.md`](reports/2026-08-15-phase3-controller-verification-handoff.md).
+The provider-free refreeze is also complete. Inactive release
+`phase3-calibration-9f0be43` and preparation bundle
+`efdece0f715d20439223edda532c57e9b394eaf9fb69fd5eeb962e5332d98abc`
+bind the accepted runtime, protocol, direct taskpack, controller handoff, and
+candidate policy. Independent replay validated 15 artifacts, the Codex config
+probe passed, and no live authorization or provider evidence was published.
+
+Phase 3 expansion remains unauthorized. The next ordered work is a separate
+execution decision selecting a new SWE-EVO instance, expected information
+gain, paid token ceiling, and abort conditions. A bounded Requests repetition
+remains an alternative, but its marginal information value is lower. Do not
+infer cost or quality improvement from provider-free tests. Refreeze evidence
+is in [`2026-08-16-phase3-provider-free-refreeze.md`](reports/2026-08-16-phase3-provider-free-refreeze.md).

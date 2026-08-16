@@ -1,0 +1,47 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-provider-free-refreeze-v1",
+  "revision": 1,
+  "decision_kind": "execution",
+  "subject": "phase3_provider_free_runtime_refreeze",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-controller-verification-handoff-v1",
+  "supersedes_decision_id": null,
+  "statement": "Freeze the accepted Phase 3 repair into an inactive runtime release and provider-free preparation bundle before considering another scored execution.",
+  "selected_option": "rebuild every runtime-dependent authority from commit 9f0be43 while retaining prior semantic, dataset, public-environment, evaluator, and resource authority and publishing no live authorization",
+  "alternatives": [
+    {
+      "option": "edit only runtime-release.json in the retained bundle",
+      "rejected_reason": "The runtime commit is transitively bound by visible input, direct taskpack, preregistration, pilot contract, calibration contract, protocol, and runtime taskpack."
+    },
+    {
+      "option": "activate the release for ordinary projects",
+      "rejected_reason": "Experiment preparation does not require or authorize changing project runtime selection."
+    },
+    {
+      "option": "issue live authorization while freezing",
+      "rejected_reason": "Provider-free mechanism acceptance and paid benchmark execution are separate decisions."
+    }
+  ],
+  "rationale": "The repair commit passed the complete provider-free suite and changed execution semantics embedded in the runtime and experiment protocol. A complete mechanical refreeze is required before a later execution decision can bind the exact tested implementation without mutating historical artifacts.",
+  "scope": [
+    "source_commit:9f0be43c7238e6de2e1a91093995aa29bc5f1289",
+    "provider_calls_authorized:0",
+    "scored_mode_executions_authorized:0",
+    "release_activation:forbidden",
+    "live_authorization:forbidden",
+    "historical_artifacts:immutable"
+  ],
+  "expected_outcome": "An inactive release and digest-bound preparation bundle validate the new controller handoff and candidate policy with zero provider calls and remain incapable of launching a scored run without another decision.",
+  "acceptance_refs": [
+    "plans/2026-08-16-phase3-provider-free-refreeze.md",
+    "complete provider-free suite",
+    "release parity and import checks",
+    "bundle replay and Codex config probe",
+    "release-level mechanism smokes"
+  ],
+  "status": "active",
+  "created_at": "2026-08-16T02:37:00Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": null
+}

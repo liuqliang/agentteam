@@ -1,0 +1,54 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-provider-free-refreeze-v1",
+  "revision": 2,
+  "decision_kind": "acceptance",
+  "subject": "phase3_provider_free_runtime_refreeze",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-controller-verification-handoff-v1",
+  "supersedes_decision_id": null,
+  "statement": "Accept the inactive Phase 3 runtime release and provider-free preparation bundle as the sole current authority for a later separately approved scored execution.",
+  "selected_option": "accept release phase3-calibration-9f0be43 and bundle efdece0f715d20439223edda532c57e9b394eaf9fb69fd5eeb962e5332d98abc while retaining live_authorization=not_authorized",
+  "alternatives": [
+    {
+      "option": "reuse the pre-repair b83c980 preparation bundle",
+      "rejected_reason": "It does not contain the controller verification handoff or production-with-supplemental-tests protocol."
+    },
+    {
+      "option": "activate the new release globally",
+      "rejected_reason": "Release parity and experiment preparation do not authorize changing existing project runtime selections."
+    },
+    {
+      "option": "treat provider-free readiness as benchmark success",
+      "rejected_reason": "No provider invocation or official scoring occurred, so no cost or quality claim can be measured."
+    }
+  ],
+  "rationale": "The clean source commit was installed without activation. Six changed runtime/schema files match the release byte-for-byte, release imports pass, all 15 bundle artifacts and the frozen taskpack replay through formal validators, Codex accepts the exact bounded configuration without a provider call, and release-level handoff and candidate-split smokes pass. The bundle contains no live epoch, authorization, transcript, usage, or score artifact.",
+  "scope": [
+    "runtime_release:phase3-calibration-9f0be43",
+    "runtime_commit:9f0be43c7238e6de2e1a91093995aa29bc5f1289",
+    "release_manifest_sha256:69461dfabd8e08c4237f9b2ac7757c85f7c417d5401cea8dde45401fc0f3ee0b",
+    "bundle_sha256:efdece0f715d20439223edda532c57e9b394eaf9fb69fd5eeb962e5332d98abc",
+    "protocol_sha256:662ef93869e0e86202266ceaafce11d6eee24a11ca0da760fde1b29ebd1fcef7",
+    "runtime_taskpack_sha256:c4a794418d28fe1e789a588f00257662b632e026500096d2f3e0ba2382ecea09",
+    "runtime_policy_preflight_sha256:53081f11913d087bba1ae2a6ddafc42c7d0b790946972dbc6bae56e821aa8721",
+    "provider_calls:0",
+    "scored_mode_executions:0",
+    "live_authorization:not_authorized",
+    "release_activation:none",
+    "phase3_expansion:not_authorized"
+  ],
+  "expected_outcome": "A later execution contract can bind this exact release and preparation authority without silently inheriting obsolete runtime semantics; no execution may begin until that separate decision exists.",
+  "acceptance_refs": [
+    "plans/2026-08-16-phase3-provider-free-refreeze.md",
+    "reports/2026-08-16-phase3-provider-free-refreeze.md",
+    "complete source-commit suite: 1215 passed, 7 skipped",
+    "independent bundle replay: 15 artifacts passed",
+    "Codex bounded-config probe: exit 0",
+    "release mechanism smokes: passed"
+  ],
+  "status": "completed",
+  "created_at": "2026-08-16T02:45:00Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": "fc19f51853842106aac1ec2c164b047535dd7257d1cea01a00dfb1beeb1c2974"
+}
