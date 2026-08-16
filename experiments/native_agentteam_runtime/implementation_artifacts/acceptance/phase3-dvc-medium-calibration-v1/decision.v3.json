@@ -1,0 +1,51 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-dvc-medium-calibration-v1",
+  "revision": 3,
+  "decision_kind": "execution",
+  "subject": "phase3_dvc_medium_calibration",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-provider-free-refreeze-v1",
+  "supersedes_decision_id": null,
+  "statement": "Replace the zero-call DVC bundle with a runtime that scopes official-evaluator candidates to the frozen single-instance selection.",
+  "selected_option": "bind a new immutable release at c470610d5814d17935b64d07b9e05a0fe3cab915 and rebuild every runtime-dependent authority before launch",
+  "alternatives": [
+    {
+      "option": "supply unselected Requests and Dask source mirrors to the evaluator",
+      "rejected_reason": "Those instances are outside the frozen DVC execution selection and would weaken exact source-coverage validation."
+    },
+    {
+      "option": "relax evaluator source coverage",
+      "rejected_reason": "The evaluator must retain exact source coverage for every active candidate; the defect was the active candidate set, not the coverage rule."
+    },
+    {
+      "option": "continue with the e5f934f bundle",
+      "rejected_reason": "Provider-free initialization proved that bundle could not construct its evaluator, so no paid execution may use it."
+    }
+  ],
+  "rationale": "The candidate authority intentionally contains all three originally selected benchmark instances, while this calibration selects only DVC. The live runner incorrectly passed the complete authority map into a single-instance evaluator. The repair projects candidates through bundle.ordered_instance_ids and fails closed when a selected ID is absent. Fifty-eight focused tests and the complete 1218-test provider-free suite passed with seven skips. No model invocation was admitted before the defect was found.",
+  "scope": [
+    "instance:iterative__dvc_2.19.0_2.20.0",
+    "discarded_runtime_commit:e5f934f5a7b5052a56d357d3be0601af832c0635",
+    "discarded_bundle:176dd52544e748925771558cf31b9475caabe27ae0ecb56ce7ec9b678b6d9dd7",
+    "discarded_provider_calls:0",
+    "replacement_runtime_commit:c470610d5814d17935b64d07b9e05a0fe3cab915",
+    "replacement_release:phase3-calibration-c470610",
+    "public_environment_authority:207b85049bcedc4a80469a6757faed992d928b29a8297270f60de23af924c830",
+    "per_mode_token_ceiling:600000",
+    "aggregate_token_ceiling:1800000"
+  ],
+  "expected_outcome": "A rebuilt bundle initializes a single-instance evaluator with exact DVC source coverage, after which the unchanged bounded three-mode calibration may launch.",
+  "acceptance_refs": [
+    "plans/2026-08-16-phase3-dvc-medium-calibration.md",
+    "focused Phase 3 execution tests: 58 passed",
+    "complete provider-free suite: 1218 passed and 7 skipped",
+    "release phase3-calibration-c470610 matches the tested source files",
+    "a zero-execution live initialization completes with resource cleanup",
+    "all task, model, mode-order, public-environment, and budget fields remain unchanged"
+  ],
+  "status": "active",
+  "created_at": "2026-08-16T03:26:00Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": "3ef463cdd268abe3de33aa1973654ff5df310be9f272cacd86ac149da63a6274"
+}

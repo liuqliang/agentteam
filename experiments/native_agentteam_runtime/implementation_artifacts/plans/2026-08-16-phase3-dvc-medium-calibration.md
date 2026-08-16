@@ -14,7 +14,7 @@ cost; one instance is not a general performance claim.
 
 - source commit: `78dd045d29f274960bcaf48fd2d055366abaf2c1`
 - source tree: `ddbe1d3231306250970a0b6ff9384838643d31d3`
-- runtime commit: `e5f934f5a7b5052a56d357d3be0601af832c0635`
+- runtime commit: `c470610d5814d17935b64d07b9e05a0fe3cab915`
 - model: `gpt-5.6-sol`, reasoning profile `high`
 - mode order: `single_codex`, `agentteam_direct`, `agentteam_full`
 - repetitions: one per mode; continuation forbidden
@@ -32,6 +32,13 @@ provider launch when an operator-side `pytest --version` probe wrote bytecode
 into its mutable host path. The validator detected the changed tree. That
 environment and its partial bundle are discarded with zero provider calls;
 the execution binds only the clean `v2` authority above.
+
+The first bundle built from the clean environment exposed a provider-free
+runner defect: the evaluator received all three candidate-authority instances
+while the source map correctly covered only the selected DVC instance. Runtime
+commit `c470610d...` projects evaluator candidates through the frozen
+selection. The earlier `e5f934f...` bundle is discarded with zero provider
+calls.
 
 The token ceiling is checked at controller boundaries. An admitted provider
 turn can report usage after it has crossed a ceiling, but no later turn or mode
