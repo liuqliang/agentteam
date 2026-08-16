@@ -14,7 +14,7 @@ cost; one instance is not a general performance claim.
 
 - source commit: `78dd045d29f274960bcaf48fd2d055366abaf2c1`
 - source tree: `ddbe1d3231306250970a0b6ff9384838643d31d3`
-- runtime commit: `c470610d5814d17935b64d07b9e05a0fe3cab915`
+- runtime commit: `9d8bbf575bad3e0bf61b99e45edce899527ee35e`
 - model: `gpt-5.6-sol`, reasoning profile `high`
 - mode order: `single_codex`, `agentteam_direct`, `agentteam_full`
 - repetitions: one per mode; continuation forbidden
@@ -25,13 +25,13 @@ cost; one instance is not a general performance claim.
 - public environment image:
   `sha256:cccdad0b5064f23be9d6e1047238a9fc3f3d3a528015427eed8d17d8fd1ece73`
 - public environment authority:
-  `207b85049bcedc4a80469a6757faed992d928b29a8297270f60de23af924c830`
+  `e59020c51edebc237b8b53b9012452197504c70c3e781403e5d5c9b23bfca5f9`
 
 The first extracted environment authority `e755332f...` was invalidated before
 provider launch when an operator-side `pytest --version` probe wrote bytecode
 into its mutable host path. The validator detected the changed tree. That
 environment and its partial bundle are discarded with zero provider calls;
-the execution binds only the clean `v2` authority above.
+the execution binds only the clean, policy-bound `v3` authority above.
 
 The first bundle built from the clean environment exposed a provider-free
 runner defect: the evaluator received all three candidate-authority instances
@@ -39,6 +39,12 @@ while the source map correctly covered only the selected DVC instance. Runtime
 commit `c470610d...` projects evaluator candidates through the frozen
 selection. The earlier `e5f934f...` bundle is discarded with zero provider
 calls.
+
+The next provider registration failed before launch because sandbox mount
+identity still interpreted the public environment with the smaller generic
+dependency-tree bound. Runtime `9d8bbf5...` introduces the explicit
+`bounded_public_dependency_tree.v1` mount policy and revalidates that policy at
+launch. The failed run retained zero tokens and no provider usage artifact.
 
 The token ceiling is checked at controller boundaries. An admitted provider
 turn can report usage after it has crossed a ceiling, but no later turn or mode

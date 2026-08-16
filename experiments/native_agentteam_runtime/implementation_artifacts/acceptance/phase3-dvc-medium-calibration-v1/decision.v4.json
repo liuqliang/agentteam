@@ -1,0 +1,55 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-dvc-medium-calibration-v1",
+  "revision": 4,
+  "decision_kind": "execution",
+  "subject": "phase3_dvc_medium_calibration",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-provider-free-refreeze-v1",
+  "supersedes_decision_id": null,
+  "statement": "Bind public-environment capacity to an explicit sandbox identity policy after the first DVC provider registration stopped before launch.",
+  "selected_option": "use bounded_public_dependency_tree.v1 with a fixed 100000-entry and 2-GiB ceiling while retaining the generic dependency-tree ceiling unchanged",
+  "alternatives": [
+    {
+      "option": "raise the generic dependency-tree limit for every sandbox directory",
+      "rejected_reason": "That would enlarge unrelated repository and library scan boundaries without evidence or need."
+    },
+    {
+      "option": "skip mount-source identity for the extracted environment",
+      "rejected_reason": "The provider launch must detect environment drift between authority freeze and namespace construction."
+    },
+    {
+      "option": "treat the prelaunch stop as a model attempt",
+      "rejected_reason": "No provider launch registration, provider stdout, usage record, or token consumption exists."
+    }
+  ],
+  "rationale": "The public authority builder accepted the 29211-file DVC environment under its dedicated bounded capacity, but sandbox descriptor construction reapplied the generic 20000-entry limit. The repair makes capacity part of the identity-policy name, records a distinct source-identity kind, and uses the same fixed limits during descriptor construction and later source revalidation. The generic 20000-entry and 512-MiB policy remains unchanged. The 257-test sandbox and Phase 3 set and the complete 1218-test provider-free suite passed with five and seven skips respectively.",
+  "scope": [
+    "instance:iterative__dvc_2.19.0_2.20.0",
+    "discarded_run:/tmp/agentteam-phase3-dvc-medium-calibration-run-v1",
+    "discarded_provider_calls:0",
+    "discarded_total_tokens:0",
+    "replacement_runtime_commit:9d8bbf575bad3e0bf61b99e45edce899527ee35e",
+    "replacement_release:phase3-calibration-9d8bbf5",
+    "public_environment_authority:e59020c51edebc237b8b53b9012452197504c70c3e781403e5d5c9b23bfca5f9",
+    "public_identity_policy:bounded_public_dependency_tree.v1",
+    "public_identity_max_entries:100000",
+    "public_identity_max_bytes:2147483648",
+    "generic_identity_policy_unchanged:bounded_dependency_tree.v1",
+    "per_mode_token_ceiling:600000",
+    "aggregate_token_ceiling:1800000"
+  ],
+  "expected_outcome": "A rebuilt bundle constructs and revalidates the DVC public library mount under the same bounded policy before admitting the unchanged three-mode calibration.",
+  "acceptance_refs": [
+    "plans/2026-08-16-phase3-dvc-medium-calibration.md",
+    "sandbox and Phase 3 focused tests: 257 passed and 5 skipped",
+    "complete provider-free suite: 1218 passed and 7 skipped",
+    "the generic dependency-tree limits remain 20000 entries and 536870912 bytes",
+    "the public dependency-tree limits are recorded by an explicit descriptor policy",
+    "no provider evidence exists in the discarded prelaunch run"
+  ],
+  "status": "active",
+  "created_at": "2026-08-16T03:38:00Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": "6c06543096050262c4655fa5dd5663ba3987df9ae0d37f0c2f3c33c1b38d0754"
+}
