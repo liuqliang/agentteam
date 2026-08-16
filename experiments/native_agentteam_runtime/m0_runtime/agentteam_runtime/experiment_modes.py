@@ -379,6 +379,7 @@ class ExperimentModeController:
         sandbox_configuration,
         common_finalizer,
         runtime_release_identity,
+        mode_sequence_root=None,
         resource_envelope_binding=None,
         resource_hierarchy_reference=None,
     ):
@@ -434,6 +435,9 @@ class ExperimentModeController:
         self.project_root = project_root
         self.authority_root = authority_root
         self.controller_reference = controller_reference
+        self.mode_sequence_root = Path(
+            mode_sequence_root or controller_reference["controller_root"]
+        ).resolve(strict=True)
         if not isinstance(runtime_release_identity, dict):
             raise ExperimentModeError(
                 "mode runtime release identity is unavailable"
@@ -503,7 +507,7 @@ class ExperimentModeController:
             ),
         )
         _publish_mode_order_authority(
-            controller_reference["controller_root"],
+            self.mode_sequence_root,
             protocol,
         )
 
@@ -548,7 +552,7 @@ class ExperimentModeController:
         )
         adapter.preflight(request)
         sequence = _begin_mode_execution(
-            self.controller_reference["controller_root"],
+            self.mode_sequence_root,
             self.protocol,
             self.run_manifest,
         )
@@ -577,7 +581,7 @@ class ExperimentModeController:
                 )
                 if recovered is not None:
                     _complete_mode_execution(
-                        self.controller_reference["controller_root"],
+                        self.mode_sequence_root,
                         self.protocol,
                         self.run_manifest,
                         sealed_result=recovered["sealed_result"],
@@ -585,7 +589,7 @@ class ExperimentModeController:
                     return recovered
             if recovery_status == "no_provider_started":
                 _fail_mode_execution(
-                    self.controller_reference["controller_root"],
+                    self.mode_sequence_root,
                     self.protocol,
                     self.run_manifest,
                     run_dir=self.run_dir,
@@ -654,7 +658,7 @@ class ExperimentModeController:
             )
             if recovered is not None:
                 _complete_mode_execution(
-                    self.controller_reference["controller_root"],
+                    self.mode_sequence_root,
                     self.protocol,
                     self.run_manifest,
                     sealed_result=recovered["sealed_result"],
@@ -672,7 +676,7 @@ class ExperimentModeController:
                 )
                 if recovered is not None:
                     _complete_mode_execution(
-                        self.controller_reference["controller_root"],
+                        self.mode_sequence_root,
                         self.protocol,
                         self.run_manifest,
                         sealed_result=recovered["sealed_result"],
@@ -684,7 +688,7 @@ class ExperimentModeController:
                     f"{recovery_status}"
                 ) from exc
             _fail_mode_execution(
-                self.controller_reference["controller_root"],
+                self.mode_sequence_root,
                 self.protocol,
                 self.run_manifest,
                 run_dir=self.run_dir,
@@ -692,7 +696,7 @@ class ExperimentModeController:
             )
             raise
         _complete_mode_execution(
-            self.controller_reference["controller_root"],
+            self.mode_sequence_root,
             self.protocol,
             self.run_manifest,
             sealed_result=finalized["sealed_result"],
@@ -930,12 +934,11 @@ def execute_bound_experiment_mode(
         snapshot = Path(allocation["snapshot_path"])
     authority_root = run_dir / "authority"
     authority_root.mkdir(mode=0o700, exist_ok=True)
-    controller_root = (
-        run_dir.parent.parent
-        / "controllers"
-        / canonical_json_sha256(protocol)
+    controller_root, mode_sequence_root = _experiment_controller_roots(
+        run_dir,
+        protocol,
     )
-    controller_root.parent.mkdir(mode=0o700, exist_ok=True)
+    mode_sequence_root.mkdir(parents=True, mode=0o700, exist_ok=True)
     controller = create_experiment_controller(
         controller_root,
         protocol_id=protocol["experiment_id"],
@@ -962,6 +965,7 @@ def execute_bound_experiment_mode(
         runtime_release_identity=bound_run["binding"][
             "runtime_release"
         ],
+        mode_sequence_root=mode_sequence_root,
         resource_envelope_binding=resource_envelope_binding,
         resource_hierarchy_reference=resource_hierarchy_reference,
     )
@@ -970,6 +974,16 @@ def execute_bound_experiment_mode(
         controller_id=f"mode-controller-{os.getpid()}",
     ):
         return mode_controller.execute(adapter)
+
+
+def _experiment_controller_roots(run_dir, protocol):
+    """Separate one run's budget lane from protocol-wide mode sequencing."""
+
+    run_dir = Path(run_dir).resolve()
+    return (
+        run_dir / "controller",
+        run_dir.parent.parent / "controllers" / canonical_json_sha256(protocol),
+    )
 
 
 class SingleCodexModeAdapter:

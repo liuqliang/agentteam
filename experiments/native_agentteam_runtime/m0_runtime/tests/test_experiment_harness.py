@@ -86,6 +86,7 @@ from agentteam_runtime.experiment_modes import (
     _publish_failure_finalization_diagnostic,
     _publish_mode_order_authority,
     _common_mode_contract,
+    _experiment_controller_roots,
     _publish_resource_evidence_index,
     _register_provider_launch,
     AgentTeamDirectModeAdapter,
@@ -6723,6 +6724,26 @@ class ExperimentResultBundleTests(unittest.TestCase):
 
 
 class ExperimentModeAdapterTests(unittest.TestCase):
+    def test_each_mode_run_has_an_independent_budget_controller(self):
+        protocol = _protocol()
+        root = Path("/tmp/phase3-controller-scope")
+        first = root / "runs" / "single-run"
+        second = root / "runs" / "direct-run"
+
+        first_budget, first_sequence = _experiment_controller_roots(
+            first,
+            protocol,
+        )
+        second_budget, second_sequence = _experiment_controller_roots(
+            second,
+            protocol,
+        )
+
+        self.assertNotEqual(first_budget, second_budget)
+        self.assertEqual(first_budget, first / "controller")
+        self.assertEqual(second_budget, second / "controller")
+        self.assertEqual(first_sequence, second_sequence)
+
     def test_failure_finalization_diagnostic_preserves_root_cause(self):
         with tempfile.TemporaryDirectory() as tmp:
             request = Mock(
