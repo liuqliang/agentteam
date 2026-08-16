@@ -15,8 +15,6 @@ from pathlib import Path, PurePosixPath
 from .experiment_contract import canonical_json_sha256
 from .experiment_sandbox import (
     DEPENDENCY_TREE_IDENTITY_POLICY,
-    DEPENDENCY_TREE_MAX_BYTES,
-    DEPENDENCY_TREE_MAX_ENTRIES,
     ExperimentSandboxError,
     _bounded_tree_identity,
 )
@@ -26,6 +24,8 @@ PUBLIC_VERIFICATION_ENVIRONMENT_VERSION = (
     "phase3_public_verification_environment.v1"
 )
 PUBLIC_VERIFICATION_NAMESPACE_ROOT = "/opt/agentteam/benchmark-env"
+PUBLIC_DEPENDENCY_TREE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+PUBLIC_DEPENDENCY_TREE_MAX_ENTRIES = 100_000
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
 _PODMAN = Path("/usr/bin/podman")
@@ -338,8 +338,8 @@ def _dependency_tree_identity(root):
         return _bounded_tree_identity(
             root,
             excluded_roots=set(),
-            max_entries=DEPENDENCY_TREE_MAX_ENTRIES,
-            max_bytes=DEPENDENCY_TREE_MAX_BYTES,
+            max_entries=PUBLIC_DEPENDENCY_TREE_MAX_ENTRIES,
+            max_bytes=PUBLIC_DEPENDENCY_TREE_MAX_BYTES,
         )
     except ExperimentSandboxError as exc:
         raise Phase3PublicVerificationError(

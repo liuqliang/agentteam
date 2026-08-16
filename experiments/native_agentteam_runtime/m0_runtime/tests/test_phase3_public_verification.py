@@ -16,7 +16,10 @@ from agentteam_runtime.phase3_live_pilot import (
 )
 from agentteam_runtime.phase3_pilot_runner import _trusted_acceptance_argv
 from agentteam_runtime.phase3_public_verification import (
+    PUBLIC_DEPENDENCY_TREE_MAX_BYTES,
+    PUBLIC_DEPENDENCY_TREE_MAX_ENTRIES,
     Phase3PublicVerificationError,
+    _dependency_tree_identity,
     build_public_verification_environment,
     public_environment_host_command,
     public_environment_namespace_command,
@@ -48,6 +51,31 @@ def _environment(root, *, instance_id="fixture-instance"):
 
 
 class Phase3PublicVerificationTests(unittest.TestCase):
+    def test_public_environment_uses_its_own_bounded_capacity(self):
+        with patch(
+            "agentteam_runtime.phase3_public_verification._bounded_tree_identity",
+            return_value={
+                "sha256": "a" * 64,
+                "files": 1,
+                "directories": 1,
+                "bytes": 1,
+            },
+        ) as inventory:
+            result = _dependency_tree_identity(Path("/fixture"))
+
+        self.assertEqual(result["files"], 1)
+        inventory.assert_called_once_with(
+            Path("/fixture"),
+            excluded_roots=set(),
+            max_entries=PUBLIC_DEPENDENCY_TREE_MAX_ENTRIES,
+            max_bytes=PUBLIC_DEPENDENCY_TREE_MAX_BYTES,
+        )
+        self.assertEqual(PUBLIC_DEPENDENCY_TREE_MAX_ENTRIES, 100_000)
+        self.assertEqual(
+            PUBLIC_DEPENDENCY_TREE_MAX_BYTES,
+            2 * 1024 * 1024 * 1024,
+        )
+
     def test_authority_binds_tree_python_and_commands(self):
         with tempfile.TemporaryDirectory() as temporary:
             authority = _environment(Path(temporary))
