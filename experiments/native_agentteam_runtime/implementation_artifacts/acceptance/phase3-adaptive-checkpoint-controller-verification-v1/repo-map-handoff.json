@@ -1,0 +1,4401 @@
+{
+  "candidate_tests": [
+    {
+      "language": "python",
+      "path": "dvc/testing/test_remote.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "dvc/testing/test_workspace.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/test_init.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_import_url.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_repo_index.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_run_single_stage.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_stage.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_stage_load.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/ls/test_ls.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/ls/test_ls_colors.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_imp_url.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_update.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/fs/test_dvc.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/fs/test_dvc_info.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/stage/test_cache.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/stage/test_loader_pipeline_file.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/stage/test_run.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/stage/test_serialize_pipeline_file.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/stage/test_serialize_pipeline_lock.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/stage/test_stage.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/stage/test_utils.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/test_experiments.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_add.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_checkout.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_commit.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_data_cloud.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_dvcfile.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_import.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_live.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_lockfile.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_remove.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_repro.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_repro_multistage.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_run_cache.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_run_multistage.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/dependency/test_dependency.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/dependency/test_params.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/output/test_load.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/output/test_local.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/output/test_output.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_dvcfile.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_lockfile.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_run.py",
+      "selection_reasons": [
+        "imports_selected_module",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "dvc/testing/test_api.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/data/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/data/db/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/executor/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/machine/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/metrics/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/params/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/parsing/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/plots/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_external_repo.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_fs.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_get_url.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_init.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_ls.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_repo.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_update.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/utils/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/utils/test_fs.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/integration/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/integration/plots/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/integration/plots/test_repo_plots_api.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/remotes/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "shell",
+      "path": "tests/remotes/git-init/git.sh",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/cli/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/ls/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_get_url.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_imp.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_stage.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/data/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/data/db/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/dependency/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/fs/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/fs/test_azure.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/fs/test_base.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/fs/test_data.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/fs/test_fs.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/fs/test_path.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/fs/test_s3.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/fs/test_ssh.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/fs/test_tree.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/machine/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/output/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/proc/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/remote/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/render/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/experiments/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/experiments/conftest.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/experiments/queue/test_local.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/experiments/queue/test_remove.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/experiments/test_remove.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/experiments/test_utils.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/plots/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/plots/test_diff.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/test_repo.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/test_reproduce.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/test_run.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/repo/test_scm_context.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/stage/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_external_repo.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_imports.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/ui/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/utils/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/utils/serialize/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/utils/test_fs.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/utils/__init__.py",
+      "selection_reasons": [
+        "path_match",
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/__main__.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/basic_env.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/conftest.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/dir_helpers.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "yaml",
+      "path": "tests/docker-compose.yml",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/api/test_data.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/api/test_params.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/data/db/test_index.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/conftest.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/executor/test_ssh.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/test_checkpoints.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/test_diff.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/test_gc.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/test_queue.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/test_remote.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/test_remove.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/experiments/test_show.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/machine/conftest.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/machine/test_machine_config.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/machine/test_machine_status.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/metrics/test_diff.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/metrics/test_show.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/params/test_diff.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/params/test_show.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/parsing/test_errors.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/parsing/test_foreach.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/parsing/test_interpolated_entry.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/parsing/test_resolver.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/plots/test_diff.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/plots/test_modify.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/plots/test_show.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_analytics.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_check_ignore.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_cli.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_config.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_data_status.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_diff.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_gc.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_get.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_ignore.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_install.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_lock.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_merge_driver.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_move.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_odb.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_remote.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_root.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_scm.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_scm_context.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_state.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_status.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_unprotect.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_used_objs.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_utils.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/test_version.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/utils/test_hydra.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/func/utils/test_strict_yaml.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/integration/plots/conftest.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/integration/plots/test_plots.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/pylint_plugin_disable.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/remotes/git_server.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "unknown",
+      "path": "tests/remotes/user.key",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "unknown",
+      "path": "tests/remotes/user.key.pub",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "unknown",
+      "path": "tests/remotes_env.sample",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/cli/test_main.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_add.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_cache.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_checkout.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_compat_flag.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_config.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_dag.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_data_status.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_data_sync.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_debug.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_diff.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_experiments.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_gc.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_get.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_git_hook.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_machine.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_metrics.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_params.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_plots.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_queue.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_repro.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_run.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/command/test_status.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/data/db/test_local.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/machine/test_machine.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/proc/test_manager.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/proc/test_process.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/remote/test_base.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/remote/test_http.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/remote/test_index.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/remote/test_oss.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/remote/test_remote.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/remote/test_webdav.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/remote/test_webhdfs.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/render/test_convert.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/render/test_image_converter.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/render/test_match.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/render/test_vega_converter.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/scm/test_scm.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_analytics.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_api.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_collect.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_compare.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_config.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_context.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_daemon.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_hashinfo.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_ignore.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_info.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_interpolate.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_logger.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_metrics.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_params.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_pathspec_math.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_progress.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_prompt.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_rwlock.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_tabular_data.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/test_updater.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/ui/test_console.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/ui/test_pager.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/ui/test_prompt.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/ui/test_table.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/utils/serialize/test_python.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/utils/serialize/test_toml.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/utils/serialize/test_yaml.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/utils/test_cli_parse.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/utils/test_collections.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/utils/test_executors.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/utils/test_humanize.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/unit/utils/test_utils.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/utils/asserts.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/utils/plots.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    },
+    {
+      "language": "python",
+      "path": "tests/utils/scriptify.py",
+      "selection_reasons": [
+        "objective"
+      ]
+    }
+  ],
+  "grounding_authority": "deterministic_repo_context.v1",
+  "objective_sha256": "406dc10bcf7b1792bff82f3a420f23c7476e2ea8a9dd7ae93add508ea42370d3",
+  "repository": {
+    "commit": "78dd045d29f274960bcaf48fd2d055366abaf2c1",
+    "tree": "ddbe1d3231306250970a0b6ff9384838643d31d3"
+  },
+  "repository_structure": {
+    "category_counts": [
+      {
+        "category": "source",
+        "file_count": 260
+      },
+      {
+        "category": "test",
+        "file_count": 252
+      },
+      {
+        "category": "unknown",
+        "file_count": 24
+      },
+      {
+        "category": "config",
+        "file_count": 13
+      },
+      {
+        "category": "docs",
+        "file_count": 8
+      }
+    ],
+    "language_counts": [
+      {
+        "file_count": 503,
+        "language": "python"
+      },
+      {
+        "file_count": 28,
+        "language": "unknown"
+      },
+      {
+        "file_count": 11,
+        "language": "yaml"
+      },
+      {
+        "file_count": 5,
+        "language": "markdown"
+      },
+      {
+        "file_count": 5,
+        "language": "shell"
+      },
+      {
+        "file_count": 2,
+        "language": "text"
+      },
+      {
+        "file_count": 1,
+        "language": "json"
+      },
+      {
+        "file_count": 1,
+        "language": "restructuredtext"
+      },
+      {
+        "file_count": 1,
+        "language": "toml"
+      }
+    ],
+    "structure_schema_version": "repo_structure.v1",
+    "task_scope_summaries": [
+      {
+        "category_counts": [
+          {
+            "category": "config",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "yaml"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          ".github/workflows/packages.yaml"
+        ],
+        "scope": ".github/workflows/packages.yaml",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "shell"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "scripts/build_package.sh"
+        ],
+        "scope": "scripts/build_package.sh",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "scripts/fpm/build.py"
+        ],
+        "scope": "scripts/fpm/build.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/commands/imp_url.py"
+        ],
+        "scope": "dvc/commands/imp_url.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/commands/update.py"
+        ],
+        "scope": "dvc/commands/update.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/commands/ls/__init__.py"
+        ],
+        "scope": "dvc/commands/ls/__init__.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/repo/imp_url.py"
+        ],
+        "scope": "dvc/repo/imp_url.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/repo/update.py"
+        ],
+        "scope": "dvc/repo/update.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/repo/ls.py"
+        ],
+        "scope": "dvc/repo/ls.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/fs/dvc.py"
+        ],
+        "scope": "dvc/fs/dvc.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/stage/__init__.py"
+        ],
+        "scope": "dvc/stage/__init__.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/stage/imports.py"
+        ],
+        "scope": "dvc/stage/imports.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "test",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "tests/func/test_ls.py"
+        ],
+        "scope": "tests/func/test_ls.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "test",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "tests/func/test_update.py"
+        ],
+        "scope": "tests/func/test_update.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "test",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "tests/unit/command/test_imp_url.py"
+        ],
+        "scope": "tests/unit/command/test_imp_url.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "test",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "tests/unit/command/test_update.py"
+        ],
+        "scope": "tests/unit/command/test_update.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "test",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "tests/unit/command/ls/test_ls.py"
+        ],
+        "scope": "tests/unit/command/ls/test_ls.py",
+        "scope_type": "read"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "config",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "yaml"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          ".github/workflows/packages.yaml"
+        ],
+        "scope": ".github/workflows/packages.yaml",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "shell"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "scripts/build_package.sh"
+        ],
+        "scope": "scripts/build_package.sh",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "scripts/fpm/build.py"
+        ],
+        "scope": "scripts/fpm/build.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/commands/imp_url.py"
+        ],
+        "scope": "dvc/commands/imp_url.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/commands/update.py"
+        ],
+        "scope": "dvc/commands/update.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/commands/ls/__init__.py"
+        ],
+        "scope": "dvc/commands/ls/__init__.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/repo/imp_url.py"
+        ],
+        "scope": "dvc/repo/imp_url.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/repo/update.py"
+        ],
+        "scope": "dvc/repo/update.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/repo/ls.py"
+        ],
+        "scope": "dvc/repo/ls.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/fs/dvc.py"
+        ],
+        "scope": "dvc/fs/dvc.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/stage/__init__.py"
+        ],
+        "scope": "dvc/stage/__init__.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "dvc/stage/imports.py"
+        ],
+        "scope": "dvc/stage/imports.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "test",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "tests/func/test_ls.py"
+        ],
+        "scope": "tests/func/test_ls.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "test",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "tests/func/test_update.py"
+        ],
+        "scope": "tests/func/test_update.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "test",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "tests/unit/command/test_imp_url.py"
+        ],
+        "scope": "tests/unit/command/test_imp_url.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "test",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "tests/unit/command/test_update.py"
+        ],
+        "scope": "tests/unit/command/test_update.py",
+        "scope_type": "write"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "test",
+            "file_count": 1
+          }
+        ],
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "matched_file_count": 1,
+        "sample_paths": [
+          "tests/unit/command/ls/test_ls.py"
+        ],
+        "scope": "tests/unit/command/ls/test_ls.py",
+        "scope_type": "write"
+      }
+    ],
+    "top_level_entries": [
+      {
+        "category_counts": [
+          {
+            "category": "config",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "yaml"
+          }
+        ],
+        "path": ".codecov.yml"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "unknown",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "unknown"
+          }
+        ],
+        "path": ".coveragerc"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "unknown",
+            "file_count": 2
+          }
+        ],
+        "entry_type": "directory",
+        "file_count": 2,
+        "language_counts": [
+          {
+            "file_count": 2,
+            "language": "unknown"
+          }
+        ],
+        "path": ".dvc/"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "unknown",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "unknown"
+          }
+        ],
+        "path": ".dvcignore"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "docs",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "text"
+          }
+        ],
+        "path": ".git_archival.txt"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "unknown",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "unknown"
+          }
+        ],
+        "path": ".gitattributes"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "config",
+            "file_count": 7
+          },
+          {
+            "category": "docs",
+            "file_count": 3
+          },
+          {
+            "category": "unknown",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "directory",
+        "file_count": 11,
+        "language_counts": [
+          {
+            "file_count": 7,
+            "language": "yaml"
+          },
+          {
+            "file_count": 3,
+            "language": "markdown"
+          },
+          {
+            "file_count": 1,
+            "language": "unknown"
+          }
+        ],
+        "path": ".github/"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "unknown",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "unknown"
+          }
+        ],
+        "path": ".gitignore"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "unknown",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "unknown"
+          }
+        ],
+        "path": ".mailmap"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "config",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "yaml"
+          }
+        ],
+        "path": ".pre-commit-config.yaml"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "config",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "yaml"
+          }
+        ],
+        "path": ".pre-commit-hooks.yaml"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "config",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "json"
+          }
+        ],
+        "path": ".zenodo.json"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "docs",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "markdown"
+          }
+        ],
+        "path": "CODE_OF_CONDUCT.md"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "docs",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "markdown"
+          }
+        ],
+        "path": "CONTRIBUTING.md"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "unknown",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "unknown"
+          }
+        ],
+        "path": "LICENSE"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "unknown",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "unknown"
+          }
+        ],
+        "path": "MANIFEST.in"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "docs",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "restructuredtext"
+          }
+        ],
+        "path": "README.rst"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "unknown",
+            "file_count": 2
+          }
+        ],
+        "entry_type": "directory",
+        "file_count": 2,
+        "language_counts": [
+          {
+            "file_count": 2,
+            "language": "unknown"
+          }
+        ],
+        "path": "bin/"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 240
+          },
+          {
+            "category": "test",
+            "file_count": 3
+          },
+          {
+            "category": "unknown",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "directory",
+        "file_count": 244,
+        "language_counts": [
+          {
+            "file_count": 243,
+            "language": "python"
+          },
+          {
+            "file_count": 1,
+            "language": "unknown"
+          }
+        ],
+        "path": "dvc/"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "config",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "toml"
+          }
+        ],
+        "path": "pyproject.toml"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 19
+          },
+          {
+            "category": "unknown",
+            "file_count": 11
+          },
+          {
+            "category": "docs",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "directory",
+        "file_count": 31,
+        "language_counts": [
+          {
+            "file_count": 15,
+            "language": "python"
+          },
+          {
+            "file_count": 11,
+            "language": "unknown"
+          },
+          {
+            "file_count": 4,
+            "language": "shell"
+          },
+          {
+            "file_count": 1,
+            "language": "text"
+          }
+        ],
+        "path": "scripts/"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "config",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "unknown"
+          }
+        ],
+        "path": "setup.cfg"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "source",
+            "file_count": 1
+          }
+        ],
+        "entry_type": "file",
+        "file_count": 1,
+        "language_counts": [
+          {
+            "file_count": 1,
+            "language": "python"
+          }
+        ],
+        "path": "setup.py"
+      },
+      {
+        "category_counts": [
+          {
+            "category": "test",
+            "file_count": 249
+          }
+        ],
+        "entry_type": "directory",
+        "file_count": 249,
+        "language_counts": [
+          {
+            "file_count": 244,
+            "language": "python"
+          },
+          {
+            "file_count": 3,
+            "language": "unknown"
+          },
+          {
+            "file_count": 1,
+            "language": "shell"
+          },
+          {
+            "file_count": 1,
+            "language": "yaml"
+          }
+        ],
+        "path": "tests/"
+      }
+    ],
+    "tracked_file_count": 557
+  },
+  "schema_version": "repo_map_handoff.v1",
+  "selected_files": [
+    {
+      "category": "source",
+      "language": "python",
+      "path": "dvc/commands/imp_url.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "3306ddaea5c118a3ee272a0160d14e9f6e148cbb0efec64eeee76d89791bc732",
+      "size_bytes": 3214,
+      "symbols": {
+        "classes": [
+          {
+            "line": 12,
+            "methods": [
+              {
+                "line": 13,
+                "name": "run"
+              }
+            ],
+            "name": "CmdImportUrl"
+          }
+        ],
+        "functions": [
+          {
+            "line": 36,
+            "name": "add_parser"
+          }
+        ],
+        "imports": [
+          "argparse",
+          "logging",
+          "dvc.cli.completion",
+          "dvc.cli.command.CmdBase",
+          "dvc.cli.utils.append_doc_link",
+          "dvc.exceptions.DvcException"
+        ]
+      }
+    },
+    {
+      "category": "source",
+      "language": "python",
+      "path": "dvc/commands/ls/__init__.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "22a3b19f27532177bc66417049d30b4ef4908ef866ed96b0d5046142297ce239",
+      "size_bytes": 2487,
+      "symbols": {
+        "classes": [
+          {
+            "line": 26,
+            "methods": [
+              {
+                "line": 27,
+                "name": "run"
+              }
+            ],
+            "name": "CmdList"
+          }
+        ],
+        "functions": [
+          {
+            "line": 14,
+            "name": "_prettify"
+          },
+          {
+            "line": 49,
+            "name": "add_parser"
+          }
+        ],
+        "imports": [
+          "argparse",
+          "logging",
+          "dvc.cli.completion",
+          "dvc.cli.command.CmdBaseNoRepo",
+          "dvc.cli.utils.append_doc_link",
+          "dvc.commands.ls.ls_colors.LsColors",
+          "dvc.exceptions.DvcException",
+          "dvc.ui.ui",
+          "dvc.repo.Repo"
+        ]
+      }
+    },
+    {
+      "category": "source",
+      "language": "python",
+      "path": "dvc/commands/update.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "6b66cde366867e3949f2b8afa28901594bdc97fc5e90e825e758af1a82b33ab9",
+      "size_bytes": 2235,
+      "symbols": {
+        "classes": [
+          {
+            "line": 12,
+            "methods": [
+              {
+                "line": 13,
+                "name": "run"
+              }
+            ],
+            "name": "CmdUpdate"
+          }
+        ],
+        "functions": [
+          {
+            "line": 30,
+            "name": "add_parser"
+          }
+        ],
+        "imports": [
+          "argparse",
+          "logging",
+          "dvc.cli.completion",
+          "dvc.cli.command.CmdBase",
+          "dvc.cli.utils.append_doc_link",
+          "dvc.exceptions.DvcException"
+        ]
+      }
+    },
+    {
+      "category": "source",
+      "language": "python",
+      "path": "dvc/fs/dvc.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "d0f721dd668c2f90ae4fb7d979a1f392ba4d1e08e1a6fbe340b6df74582bca50",
+      "size_bytes": 14386,
+      "symbols": {
+        "classes": [
+          {
+            "line": 73,
+            "methods": [
+              {
+                "line": 92,
+                "name": "__init__"
+              },
+              {
+                "line": 140,
+                "name": "_get_key"
+              },
+              {
+                "line": 147,
+                "name": "repo_url"
+              },
+              {
+                "line": 153,
+                "name": "config"
+              },
+              {
+                "line": 164,
+                "name": "_repo_from_fs_config"
+              },
+              {
+                "line": 211,
+                "name": "_get_repo"
+              },
+              {
+                "line": 241,
+                "name": "_update"
+              },
+              {
+                "line": 258,
+                "name": "_is_dvc_repo"
+              },
+              {
+                "line": 268,
+                "name": "_get_fs_pair"
+              },
+              {
+                "line": 305,
+                "name": "open"
+              },
+              {
+                "line": 320,
+                "name": "isdvc"
+              },
+              {
+                "line": 324,
+                "name": "ls"
+              },
+              {
+                "line": 378,
+                "name": "get_file"
+              },
+              {
+                "line": 392,
+                "name": "info"
+              },
+              {
+                "line": 435,
+                "name": "checksum"
+              }
+            ],
+            "name": "_DvcFileSystem"
+          },
+          {
+            "line": 444,
+            "methods": [
+              {
+                "line": 448,
+                "name": "_prepare_credentials"
+              },
+              {
+                "line": 453,
+                "name": "fs"
+              },
+              {
+                "line": 456,
+                "name": "isdvc"
+              },
+              {
+                "line": 460,
+                "name": "path"
+              },
+              {
+                "line": 464,
+                "name": "repo"
+              },
+              {
+                "line": 468,
+                "name": "repo_url"
+              },
+              {
+                "line": 472,
+                "name": "config"
+              },
+              {
+                "line": 475,
+                "name": "from_os_path"
+              }
+            ],
+            "name": "DvcFileSystem"
+          }
+        ],
+        "functions": [
+          {
+            "line": 27,
+            "name": "as_posix"
+          },
+          {
+            "line": 31,
+            "name": "_wrap_walk"
+          },
+          {
+            "line": 36,
+            "name": "_ls"
+          },
+          {
+            "line": 50,
+            "name": "_merge_info"
+          }
+        ],
+        "imports": [
+          "logging",
+          "ntpath",
+          "os",
+          "posixpath",
+          "threading",
+          "contextlib.suppress",
+          "itertools.takewhile",
+          "typing.TYPE_CHECKING",
+          "typing.Callable",
+          "typing.Optional",
+          "typing.Tuple",
+          "typing.Type",
+          "typing.Union",
+          "fsspec.spec.AbstractFileSystem",
+          "funcy.cached_property",
+          "funcy.wrap_prop",
+          "funcy.wrap_with",
+          "dvc_objects.fs.base.FileSystem",
+          "dvc_objects.fs.callbacks.DEFAULT_CALLBACK",
+          "dvc_objects.fs.path.Path",
+          ".data.DataFileSystem",
+          "dvc.repo.Repo",
+          "..utils",
+          "pygtrie.Trie",
+          "dvc.external_repo.erepo_factory",
+          "dvc.external_repo.external_repo",
+          "dvc.dvcfile.is_valid_filename",
+          "dvc.ignore.DvcIgnore"
+        ]
+      }
+    },
+    {
+      "category": "source",
+      "language": "python",
+      "path": "dvc/repo/imp_url.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "b8dc469ac7d1966d66c766e6cdefc5c2e1159d9d6cd16de85a98149fdae54286",
+      "size_bytes": 2072,
+      "symbols": {
+        "classes": [],
+        "functions": [
+          {
+            "line": 13,
+            "name": "imp_url"
+          }
+        ],
+        "imports": [
+          "os",
+          "dvc.repo.scm_context.scm_context",
+          "dvc.utils.relpath",
+          "dvc.utils.resolve_output",
+          "dvc.utils.resolve_paths",
+          "dvc.utils.fs.path_isin",
+          "..exceptions.InvalidArgumentError",
+          "..exceptions.OutputDuplicationError",
+          "..locked",
+          "dvc.dvcfile.Dvcfile",
+          "dvc.stage.Stage",
+          "dvc.stage.create_stage",
+          "dvc.stage.restore_fields"
+        ]
+      }
+    },
+    {
+      "category": "source",
+      "language": "python",
+      "path": "dvc/repo/ls.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "1fd90bced4bb623c4ff480eef56971547ffbbbf029e7ad426d348292c0c969ed",
+      "size_bytes": 2546,
+      "symbols": {
+        "classes": [],
+        "functions": [
+          {
+            "line": 13,
+            "name": "ls"
+          },
+          {
+            "line": 56,
+            "name": "_ls"
+          }
+        ],
+        "imports": [
+          "os",
+          "itertools.chain",
+          "typing.TYPE_CHECKING",
+          "typing.Optional",
+          "dvc.exceptions.PathMissingError",
+          "dvc.fs.dvc.DvcFileSystem",
+          "..Repo"
+        ]
+      }
+    },
+    {
+      "category": "source",
+      "language": "python",
+      "path": "dvc/repo/update.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "2ab057297cad50fe43c18810b571ad9900bd266b601c6da48ffc686d539fa7d6",
+      "size_bytes": 804,
+      "symbols": {
+        "classes": [],
+        "functions": [
+          {
+            "line": 7,
+            "name": "update"
+          }
+        ],
+        "imports": [
+          "dvc.exceptions.InvalidArgumentError",
+          "..locked",
+          "..dvcfile.Dvcfile"
+        ]
+      }
+    },
+    {
+      "category": "source",
+      "language": "python",
+      "path": "dvc/stage/__init__.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "151db6df45d78e94951bd7c884e89ab05163f29992d33b7fca4e9d64d2cb5f7d",
+      "size_bytes": 21903,
+      "symbols": {
+        "classes": [
+          {
+            "line": 71,
+            "methods": [],
+            "name": "RawData"
+          },
+          {
+            "line": 124,
+            "methods": [
+              {
+                "line": 128,
+                "name": "__init__"
+              },
+              {
+                "line": 166,
+                "name": "path"
+              },
+              {
+                "line": 170,
+                "name": "path"
+              },
+              {
+                "line": 176,
+                "name": "dvcfile"
+              },
+              {
+                "line": 192,
+                "name": "dvcfile"
+              },
+              {
+                "line": 195,
+                "name": "__repr__"
+              },
+              {
+                "line": 198,
+                "name": "__str__"
+              },
+              {
+                "line": 202,
+                "name": "addressing"
+              },
+              {
+                "line": 209,
+                "name": "__hash__"
+              },
+              {
+                "line": 212,
+                "name": "__eq__"
+              },
+              {
+                "line": 220,
+                "name": "path_in_repo"
+              },
+              {
+                "line": 224,
+                "name": "relpath"
+              },
+              {
+                "line": 228,
+                "name": "is_data_source"
+              },
+              {
+                "line": 233,
+                "name": "is_callback"
+              },
+              {
+                "line": 241,
+                "name": "is_import"
+              },
+              {
+                "line": 246,
+                "name": "is_repo_import"
+              },
+              {
+                "line": 255,
+                "name": "is_checkpoint"
+              },
+              {
+                "line": 262,
+                "name": "short_description"
+              },
+              {
+                "line": 271,
+                "name": "_read_env"
+              },
+              {
+                "line": 294,
+                "name": "env"
+              },
+              {
+                "line": 311,
+                "name": "changed_deps"
+              },
+              {
+                "line": 321,
+                "name": "_changed_deps"
+              },
+              {
+                "line": 335,
+                "name": "changed_outs"
+              },
+              {
+                "line": 349,
+                "name": "changed_stage"
+              },
+              {
+                "line": 356,
+                "name": "changed"
+              },
+              {
+                "line": 369,
+                "name": "remove_outs"
+              },
+              {
+                "line": 379,
+                "name": "unprotect_outs"
+              },
+              {
+                "line": 383,
+                "name": "ignore_remove_outs"
+              },
+              {
+                "line": 388,
+                "name": "remove"
+              },
+              {
+                "line": 397,
+                "name": "transfer"
+              },
+              {
+                "line": 412,
+                "name": "reproduce"
+              },
+              {
+                "line": 436,
+                "name": "update"
+              },
+              {
+                "line": 443,
+                "name": "reload"
+              },
+              {
+                "line": 446,
+                "name": "dumpd"
+              },
+              {
+                "line": 449,
+                "name": "compute_md5"
+              },
+              {
+                "line": 458,
+                "name": "save"
+              },
+              {
+                "line": 465,
+                "name": "save_deps"
+              },
+              {
+                "line": 475,
+                "name": "save_outs"
+              },
+              {
+                "line": 485,
+                "name": "ignore_outs"
+              },
+              {
+                "line": 490,
+                "name": "_changed_entries"
+              },
+              {
+                "line": 493,
+                "name": "_changed_stage_entry"
+              },
+              {
+                "line": 496,
+                "name": "changed_entries"
+              },
+              {
+                "line": 506,
+                "name": "commit"
+              },
+              {
+                "line": 522,
+                "name": "run"
+              },
+              {
+                "line": 554,
+                "name": "_run_stage"
+              },
+              {
+                "line": 558,
+                "name": "_sync_import"
+              },
+              {
+                "line": 562,
+                "name": "_check_missing_outputs"
+              },
+              {
+                "line": 565,
+                "name": "filter_outs"
+              },
+              {
+                "line": 572,
+                "name": "checkout"
+              },
+              {
+                "line": 585,
+                "name": "_checkout"
+              },
+              {
+                "line": 596,
+                "name": "status"
+              },
+              {
+                "line": 608,
+                "name": "_status"
+              },
+              {
+                "line": 616,
+                "name": "_status_deps"
+              },
+              {
+                "line": 621,
+                "name": "_status_outs"
+              },
+              {
+                "line": 627,
+                "name": "_status_always_changed"
+              },
+              {
+                "line": 631,
+                "name": "_status_stage"
+              },
+              {
+                "line": 635,
+                "name": "already_cached"
+              },
+              {
+                "line": 642,
+                "name": "deps_cached"
+              },
+              {
+                "line": 645,
+                "name": "outs_cached"
+              },
+              {
+                "line": 651,
+                "name": "get_all_files_number"
+              },
+              {
+                "line": 657,
+                "name": "get_used_objs"
+              },
+              {
+                "line": 668,
+                "name": "_check_can_merge"
+              },
+              {
+                "line": 683,
+                "name": "merge"
+              },
+              {
+                "line": 705,
+                "name": "dump"
+              }
+            ],
+            "name": "Stage"
+          },
+          {
+            "line": 709,
+            "methods": [
+              {
+                "line": 710,
+                "name": "__init__"
+              },
+              {
+                "line": 716,
+                "name": "__eq__"
+              },
+              {
+                "line": 719,
+                "name": "__hash__"
+              },
+              {
+                "line": 723,
+                "name": "addressing"
+              },
+              {
+                "line": 730,
+                "name": "reload"
+              },
+              {
+                "line": 733,
+                "name": "_status_stage"
+              },
+              {
+                "line": 737,
+                "name": "changed_stage"
+              },
+              {
+                "line": 742,
+                "name": "_changed_stage_entry"
+              },
+              {
+                "line": 745,
+                "name": "merge"
+              }
+            ],
+            "name": "PipelineStage"
+          }
+        ],
+        "functions": [
+          {
+            "line": 48,
+            "name": "loads_from"
+          },
+          {
+            "line": 76,
+            "name": "create_stage"
+          },
+          {
+            "line": 98,
+            "name": "restore_fields"
+          }
+        ],
+        "imports": [
+          "logging",
+          "os",
+          "string",
+          "collections.defaultdict",
+          "contextlib.suppress",
+          "dataclasses.dataclass",
+          "typing.TYPE_CHECKING",
+          "typing.Any",
+          "typing.Dict",
+          "typing.Optional",
+          "typing.Set",
+          "funcy.cached_property",
+          "funcy.project",
+          "dvc.prompt",
+          "dvc.exceptions.CacheLinkError",
+          "dvc.exceptions.CheckoutError",
+          "dvc.exceptions.DvcException",
+          "dvc.exceptions.MergeError",
+          "dvc.utils.relpath",
+          "..params",
+          ".decorators.rwlocked",
+          ".exceptions.StageUpdateError",
+          ".imports.sync_import",
+          ".imports.update_import",
+          ".run.run_stage",
+          ".utils.check_circular_dependency",
+          ".utils.check_duplicated_arguments",
+          ".utils.check_missing_outputs",
+          ".utils.check_no_externals",
+          ".utils.check_stage_path",
+          ".utils.compute_md5",
+          ".utils.fill_stage_dependencies",
+          ".utils.fill_stage_outputs",
+          ".utils.get_dump",
+          "dvc.dvcfile.DVCFile",
+          "dvc_data.hashfile.hash_info.HashInfo",
+          "dvc_objects.db.base.ObjectDB",
+          "dvc.dvcfile.check_dvcfile_path",
+          ".exceptions.StageNotFound",
+          "dvc.dvcfile.make_dvcfile",
+          "dvc.dependency.RepoDependency",
+          "dvc.env.DVC_ROOT",
+          "dvc.dependency.base.DependencyDoesNotExistError",
+          "dvc.output.OutputDoesNotExistError",
+          "dvc.dvcfile.PIPELINE_FILE",
+          "dvc.env.DVCLIVE_HTML",
+          "dvc.env.DVCLIVE_PATH",
+          "dvc.env.DVCLIVE_SUMMARY",
+          "dvc.output.Output",
+          "dvc.schema.LIVE_PROPS",
+          "dvc.env.DVC_CHECKPOINT"
+        ]
+      }
+    },
+    {
+      "category": "source",
+      "language": "python",
+      "path": "dvc/stage/imports.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "5ccb1c138b6a6e4a61d55d942ad82fa72bae2a2dd8f6c4866ae0dad5afa913e5",
+      "size_bytes": 1236,
+      "symbols": {
+        "classes": [],
+        "functions": [
+          {
+            "line": 8,
+            "name": "_update_import_on_remote"
+          },
+          {
+            "line": 20,
+            "name": "update_import"
+          },
+          {
+            "line": 33,
+            "name": "sync_import"
+          }
+        ],
+        "imports": [
+          "logging",
+          "dvc.exceptions.InvalidArgumentError"
+        ]
+      }
+    },
+    {
+      "category": "source",
+      "language": "python",
+      "path": "scripts/fpm/build.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "49b79afe41c906005bcf17084f7c1bce29d38717fd70bd2bdf2092336ef37165",
+      "size_bytes": 2260,
+      "symbols": {
+        "classes": [],
+        "functions": [],
+        "imports": [
+          "argparse",
+          "os",
+          "pathlib",
+          "shutil",
+          "subprocess.STDOUT",
+          "subprocess.check_call",
+          "subprocess.check_output"
+        ]
+      }
+    },
+    {
+      "category": "test",
+      "language": "python",
+      "path": "tests/func/test_ls.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "ef0d4fe9a6309cd8e5e1a5f10319191a99eb3197159734df0ceded320e6f4f0c",
+      "size_bytes": 17981,
+      "symbols": {
+        "classes": [],
+        "functions": [
+          {
+            "line": 27,
+            "name": "match_files"
+          },
+          {
+            "line": 33,
+            "name": "create_dvc_pipeline"
+          },
+          {
+            "line": 57,
+            "name": "test_ls_repo"
+          },
+          {
+            "line": 76,
+            "name": "test_ls_repo_recursive"
+          },
+          {
+            "line": 104,
+            "name": "test_ls_repo_dvc_only_recursive"
+          },
+          {
+            "line": 120,
+            "name": "test_ls_repo_with_new_path_dir"
+          },
+          {
+            "line": 132,
+            "name": "test_ls_repo_with_path_dir"
+          },
+          {
+            "line": 149,
+            "name": "test_ls_repo_with_path_dir_dvc_only_empty"
+          },
+          {
+            "line": 169,
+            "name": "test_ls_repo_with_path_subdir"
+          },
+          {
+            "line": 186,
+            "name": "test_ls_repo_with_path_subdir_dvc_only"
+          },
+          {
+            "line": 195,
+            "name": "test_ls_repo_with_path_subdir_dvc_only_recursive"
+          },
+          {
+            "line": 206,
+            "name": "test_ls_repo_with_path_file_out"
+          },
+          {
+            "line": 215,
+            "name": "test_ls_repo_with_file_path_fs"
+          },
+          {
+            "line": 224,
+            "name": "test_ls_repo_with_missed_path"
+          },
+          {
+            "line": 233,
+            "name": "test_ls_repo_with_missed_path_dvc_only"
+          },
+          {
+            "line": 247,
+            "name": "test_ls_repo_with_removed_dvc_dir"
+          },
+          {
+            "line": 265,
+            "name": "test_ls_repo_with_removed_dvc_dir_recursive"
+          },
+          {
+            "line": 283,
+            "name": "test_ls_repo_with_removed_dvc_dir_with_path_dir"
+          },
+          {
+            "line": 291,
+            "name": "test_ls_repo_with_removed_dvc_dir_with_path_file"
+          },
+          {
+            "line": 299,
+            "name": "test_ls_repo_with_rev"
+          },
+          {
+            "line": 317,
+            "name": "test_ls_remote_repo"
+          },
+          {
+            "line": 338,
+            "name": "test_ls_remote_repo_recursive"
+          },
+          {
+            "line": 368,
+            "name": "test_ls_remote_git_only_repo_recursive"
+          },
+          {
+            "line": 385,
+            "name": "test_ls_remote_repo_with_path_dir"
+          },
+          {
+            "line": 405,
+            "name": "test_ls_remote_repo_with_rev"
+          },
+          {
+            "line": 424,
+            "name": "test_ls_remote_repo_with_rev_recursive"
+          },
+          {
+            "line": 452,
+            "name": "test_ls_not_existed_url"
+          },
+          {
+            "line": 460,
+            "name": "test_ls_shows_pipeline_tracked_outs"
+          },
+          {
+            "line": 472,
+            "name": "test_ls_granular"
+          },
+          {
+            "line": 500,
+            "name": "test_ls_target"
+          },
+          {
+            "line": 538,
+            "name": "test_subrepo"
+          },
+          {
+            "line": 573,
+            "name": "test_broken_symlink"
+          }
+        ],
+        "imports": [
+          "os",
+          "shutil",
+          "textwrap",
+          "operator.itemgetter",
+          "pytest",
+          "dvc.exceptions.PathMissingError",
+          "dvc.repo.Repo",
+          "dvc.scm.CloneError",
+          "time.time",
+          "dvc.dvcfile.PIPELINE_FILE",
+          "dvc.dvcfile.PIPELINE_LOCK",
+          "tests.func.test_get.make_subrepo",
+          "dvc.fs.system"
+        ]
+      }
+    },
+    {
+      "category": "test",
+      "language": "python",
+      "path": "tests/func/test_update.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "0c387159325c2f8a336fa98379b1953bfb6622672aaec4f4620b82cd0fd3de4c",
+      "size_bytes": 11941,
+      "symbols": {
+        "classes": [],
+        "functions": [
+          {
+            "line": 11,
+            "name": "test_update_import"
+          },
+          {
+            "line": 80,
+            "name": "test_update_import_after_remote_updates_to_dvc"
+          },
+          {
+            "line": 127,
+            "name": "test_update_before_and_after_dvc_init"
+          },
+          {
+            "line": 159,
+            "name": "test_update_import_url"
+          },
+          {
+            "line": 179,
+            "name": "test_update_rev"
+          },
+          {
+            "line": 213,
+            "name": "test_update_recursive"
+          },
+          {
+            "line": 271,
+            "name": "test_update_from_subrepos"
+          },
+          {
+            "line": 299,
+            "name": "test_update_import_to_remote"
+          },
+          {
+            "line": 307,
+            "name": "test_update_import_url_to_remote"
+          },
+          {
+            "line": 318,
+            "name": "test_update_import_url_to_remote_directory"
+          },
+          {
+            "line": 353,
+            "name": "test_update_import_url_to_remote_directory_changed_contents"
+          },
+          {
+            "line": 372,
+            "name": "test_update_import_url_to_remote_directory_same_hash"
+          }
+        ],
+        "imports": [
+          "os",
+          "pytest",
+          "dvc.dvcfile.Dvcfile",
+          "dvc.exceptions.InvalidArgumentError",
+          "dvc.testing.tmp_dir.make_subrepo"
+        ]
+      }
+    },
+    {
+      "category": "test",
+      "language": "python",
+      "path": "tests/unit/command/ls/test_ls.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "6d3ef9a5dd074ab8e52621c74b6ea1d9cf69cede889383366f624380025d756c",
+      "size_bytes": 3171,
+      "symbols": {
+        "classes": [],
+        "functions": [
+          {
+            "line": 7,
+            "name": "_test_cli"
+          },
+          {
+            "line": 18,
+            "name": "test_list"
+          },
+          {
+            "line": 26,
+            "name": "test_list_recursive"
+          },
+          {
+            "line": 34,
+            "name": "test_list_git_ssh_rev"
+          },
+          {
+            "line": 42,
+            "name": "test_list_targets"
+          },
+          {
+            "line": 51,
+            "name": "test_list_outputs_only"
+          },
+          {
+            "line": 59,
+            "name": "test_show_json"
+          },
+          {
+            "line": 73,
+            "name": "test_show_colors"
+          },
+          {
+            "line": 114,
+            "name": "test_list_alias"
+          }
+        ],
+        "imports": [
+          "json",
+          "dvc.cli.parse_args",
+          "dvc.commands.ls.CmdList"
+        ]
+      }
+    },
+    {
+      "category": "test",
+      "language": "python",
+      "path": "tests/unit/command/test_imp_url.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "815bdd71a4deb3ac1c732261edff495ea9db476770182df12b7ec3e70321c0cb",
+      "size_bytes": 3595,
+      "symbols": {
+        "classes": [],
+        "functions": [
+          {
+            "line": 8,
+            "name": "test_import_url"
+          },
+          {
+            "line": 41,
+            "name": "test_failed_import_url"
+          },
+          {
+            "line": 57,
+            "name": "test_import_url_no_exec"
+          },
+          {
+            "line": 88,
+            "name": "test_import_url_to_remote"
+          },
+          {
+            "line": 120,
+            "name": "test_import_url_to_remote_invalid_combination"
+          }
+        ],
+        "imports": [
+          "logging",
+          "dvc.cli.parse_args",
+          "dvc.commands.imp_url.CmdImportUrl",
+          "dvc.exceptions.DvcException"
+        ]
+      }
+    },
+    {
+      "category": "test",
+      "language": "python",
+      "path": "tests/unit/command/test_update.py",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 200,
+      "sha256": "355a5efac3f93a5c75b52d4fefc5e8d33d2d5f7cc51643439be983e8509714c5",
+      "size_bytes": 1276,
+      "symbols": {
+        "classes": [],
+        "functions": [
+          {
+            "line": 5,
+            "name": "test_update"
+          },
+          {
+            "line": 34,
+            "name": "test_update_to_remote"
+          }
+        ],
+        "imports": [
+          "dvc.cli.parse_args",
+          "dvc.commands.update.CmdUpdate"
+        ]
+      }
+    },
+    {
+      "category": "config",
+      "language": "yaml",
+      "path": ".github/workflows/packages.yaml",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 160,
+      "sha256": "664bcec8b7e56b047c6a8b5eb633cbf99da9d02a4dec82032d9f4b42e3e75f5d",
+      "size_bytes": 2532
+    },
+    {
+      "category": "source",
+      "language": "shell",
+      "path": "scripts/build_package.sh",
+      "selection_reasons": [
+        "write_scope",
+        "read_scope",
+        "objective"
+      ],
+      "selection_score": 160,
+      "sha256": "5d297874ba47c17d9f0c591afdcaa813cfbdde96097dcf2106b366845fb027ae",
+      "size_bytes": 257
+    }
+  ],
+  "semantic_gaps": [],
+  "task_id": "TASK-PHASE3-DVC-BOUNDED-WORKER-TURNS",
+  "verification_commands": [
+    [
+      "python3",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/unit/command/test_imp_url.py",
+      "tests/unit/command/test_update.py"
+    ],
+    [
+      "python3",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/func/test_update.py::test_import_url_no_download",
+      "tests/func/test_update.py::test_update_import_url_no_download"
+    ],
+    [
+      "python3",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/func/test_ls.py::test_ls_repo_recursive",
+      "tests/func/test_ls.py::test_ls_repo_dvc_only_recursive"
+    ]
+  ],
+  "warnings": []
+}

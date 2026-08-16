@@ -1736,3 +1736,14 @@ gain, paid token ceiling, and abort conditions. A bounded Requests repetition
 remains an alternative, but its marginal information value is lower. Do not
 infer cost or quality improvement from provider-free tests. Refreeze evidence
 is in [`2026-08-16-phase3-provider-free-refreeze.md`](reports/2026-08-16-phase3-provider-free-refreeze.md).
+
+The fixed DVC `locate -> implement -> verify` worker-turn experiment is also
+complete and rejected as a default: aggregate live usage was `820040` tokens,
+uncached input increased by `61.08%`, and the implementation turn reread 15 of
+17 locate-stage source paths before the budget gate prevented model verify.
+The next mechanism test is the provider-unapproved adaptive policy in
+[`2026-08-16-phase3-adaptive-checkpoint-controller-verification.md`](plans/2026-08-16-phase3-adaptive-checkpoint-controller-verification.md): use a task-bound
+deterministic handoff, one implementation worker, controller-owned verification,
+and a repair worker only for actionable semantic failures. Related-work support
+and the remaining novelty gap are recorded in
+[`adaptive_checkpoint_controller_validation_related_work.md`](../../../research/adaptive_checkpoint_controller_validation_related_work.md).
