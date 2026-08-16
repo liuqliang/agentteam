@@ -1,6 +1,6 @@
 # Phase 3 Adaptive Checkpoint And Controller Verification
 
-Status: provider execution authorized; provider-free controller tests passed
+Status: live mechanism check completed; retained for follow-up, not defaulted
 
 ## Decision
 

@@ -1,0 +1,24 @@
+{
+  "schema_version": "phase3_evaluation_decision.v1",
+  "decision_id": "DEC-P3-adaptive-checkpoint-controller-verification-v1",
+  "status": "completed",
+  "outcome": "retain_for_follow_up_not_default",
+  "accepted_claims": [
+    "On the fixed DVC instance, a dedicated model locate turn was not required to match the fixed-turn official score.",
+    "Controller-owned verification continued after a valid tool-budget verification handoff without another implementation model call.",
+    "Clear environment failures did not launch a code-repair worker.",
+    "Compared with fixed-turn v2, the treatment reduced total tokens by 15.754 percent and uncached input by 24.023 percent."
+  ],
+  "rejected_or_unproven_claims": [
+    "The candidate is merge-ready; two candidate-authored function tests failed.",
+    "The policy improves general benchmark quality; only one instance was measured and it remained unresolved.",
+    "Command-result reuse would help this workload; no exact command repeated in the provider transcript.",
+    "The 600000-token ceiling prevents a single settled invocation from exceeding that number; it is checked only between invocations."
+  ],
+  "next_actions": [
+    "Bind controller verification to the frozen public test environment before provider launch.",
+    "Repeat the implementation-first comparison on a second fixed benchmark instance.",
+    "Keep command-result reuse disabled until observation data shows repeated still-valid work.",
+    "Do not promote, merge, or release the DVC candidate patch from this experiment."
+  ]
+}

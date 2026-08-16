@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import tempfile
 from collections import Counter
@@ -81,6 +82,44 @@ class AdaptiveWorkerTurnExperimentRunner:
                 )
         return state
 
+    def resume_deferred_verification(self, settled_result):
+        """Recover an older stopped state that missed a valid verification handoff."""
+
+        state = self._load_or_initialize_state()
+        if not (
+            state["status"] == "stopped"
+            and state["stop_reason"] == "worker_turn_not_completed"
+            and state["phase"] == "implementation"
+            and len(state["model_turns"]) == 1
+        ):
+            return state
+        self._require_expected_worktree(state)
+        if not isinstance(settled_result, dict):
+            raise WorkerTurnCheckpointError("deferred worker result must be an object")
+        if _usage_binding(settled_result.get("token_usage")) != _usage_binding(
+            state["model_turns"][0]["token_usage"]
+        ):
+            raise WorkerTurnCheckpointError("deferred worker usage binding differs")
+        if not state["model_turns"][0].get("checkpoint_path"):
+            raise WorkerTurnCheckpointError("deferred worker checkpoint is missing")
+        output = settled_result.get("output")
+        if not _is_controller_verification_handoff(settled_result, output):
+            raise WorkerTurnCheckpointError("deferred worker handoff is invalid")
+        try:
+            additions = validate_verification_additions(
+                output.get("verification_additions")
+            )
+        except ValueError as exc:
+            raise WorkerTurnCheckpointError(
+                "deferred worker verification additions are invalid"
+            ) from exc
+        state["verification_additions"] = additions
+        state["status"] = "running"
+        state["stop_reason"] = None
+        state["phase"] = "controller_verification"
+        self._write_state(state)
+        return state
+
     def _run_model_turn(self, state, stage):
         self._require_expected_worktree(state)
         if stage == "repair" and state["repair_invocations"] >= 1:
@@ -150,7 +189,10 @@ class AdaptiveWorkerTurnExperimentRunner:
         elif checkpoint is None:
             state["status"] = "failed"
             state["stop_reason"] = "missing_turn_checkpoint"
-        elif result.get("result_status") != "completed":
+        elif result.get("result_status") != "completed" and not (
+            stage == "implement"
+            and _is_controller_verification_handoff(result, output)
+        ):
             state["status"] = "stopped"
             state["stop_reason"] = "worker_turn_not_completed"
         else:
@@ -181,7 +223,7 @@ class AdaptiveWorkerTurnExperimentRunner:
         )
         if not isinstance(result, dict):
             raise WorkerTurnCheckpointError("controller verification must return an object")
-        route = classify_controller_verification(result)
+        route = classify_controller_verification(result, self.worktree)
         state["controller_verifications"].append(
             {
                 "after_repair": after_repair,
@@ -210,6 +252,34 @@ class AdaptiveWorkerTurnExperimentRunner:
             state["status"] = "stopped"
             state["stop_reason"] = route
         self._write_state(state)
+
+    def reclassify_last_verification(self):
+        """Apply the current deterministic classifier to retained evidence."""
+
+        state = self._load_or_initialize_state()
+        self._require_expected_worktree(state)
+        if not state["controller_verifications"] or state["repair_invocations"]:
+            return state
+        retained = state["controller_verifications"][-1]
+        route = classify_controller_verification(retained["result"], self.worktree)
+        retained["route"] = route
+        if route == "passed":
+            state["status"] = "completed"
+            state["stop_reason"] = None
+            state["phase"] = "done"
+        elif route == "code_semantic_failure" and self.allow_repair:
+            if state["usage"]["totals"]["total_tokens"] >= self.maximum_total_tokens:
+                state["status"] = "stopped"
+                state["stop_reason"] = "settled_token_ceiling_reached"
+            else:
+                state["status"] = "running"
+                state["stop_reason"] = None
+                state["phase"] = "repair"
+        else:
+            state["status"] = "stopped"
+            state["stop_reason"] = route
+        self._write_state(state)
+        return state
 
     def _load_or_initialize_state(self):
         if self.state_path.exists():
@@ -338,7 +408,7 @@ class AdaptiveWorkerTurnExperimentRunner:
                 os.unlink(temporary_name)
 
 
-def classify_controller_verification(result):
+def classify_controller_verification(result, worktree_path=None):
     """Choose the next route from deterministic verification evidence."""
 
     status = result.get("integration_verification_additions_status")
@@ -349,9 +419,34 @@ def classify_controller_verification(result):
         return "verification_policy_failure"
     if status != "failed" or not isinstance(additions, list) or not additions:
         return "verification_result_ambiguous"
-    if any(_clear_environment_failure(item) for item in additions):
+    if any(_clear_environment_failure(item, worktree_path) for item in additions):
         return "environment_failure"
     return "code_semantic_failure"
+
+
+def _is_controller_verification_handoff(result, output):
+    return (
+        result.get("result_status") == "failed"
+        and isinstance(output, dict)
+        and output.get("verification_deferred") is True
+        and output.get("verification_deferred_reason") == "tool_budget_exhausted"
+    )
+
+
+def _usage_binding(usage):
+    if not isinstance(usage, dict):
+        return None
+    return tuple(
+        usage.get(field)
+        for field in (
+            "input_tokens",
+            "cached_input_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "usage_source",
+        )
+    )
 
 
 def profile_execution_observations(transcript_paths):
@@ -402,7 +497,7 @@ def profile_execution_observations(transcript_paths):
     }
 
 
-def _clear_environment_failure(item):
+def _clear_environment_failure(item, worktree_path=None):
     if not isinstance(item, dict) or item.get("verification_addition_status") != "failed":
         return False
     exit_code = item.get("verification_addition_exit_code")
@@ -424,7 +519,17 @@ def _clear_environment_failure(item):
         "network is unreachable",
         "temporary failure in name resolution",
     )
-    return any(marker in text for marker in markers)
+    if any(marker in text for marker in markers):
+        return True
+    missing = re.search(r"no module named ['\"]([^'\"]+)", text)
+    if missing and worktree_path is not None:
+        top_level = missing.group(1).split(".", 1)[0]
+        root = Path(worktree_path)
+        return not (
+            (root / f"{top_level}.py").is_file()
+            or (root / top_level / "__init__.py").is_file()
+        )
+    return False
 
 
 def _bounded_verification_result(result):

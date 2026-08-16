@@ -1,0 +1,10 @@
+{
+  "command_count": 37,
+  "extra_execution_count": 0,
+  "mode": "record_only",
+  "repeated_command_count": 0,
+  "repeated_commands": [],
+  "schema_version": "worker_execution_observation.v1",
+  "simple_read_only_extra_execution_count": 0,
+  "unique_command_count": 37
+}

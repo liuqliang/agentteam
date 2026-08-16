@@ -1741,7 +1741,13 @@ The fixed DVC `locate -> implement -> verify` worker-turn experiment is also
 complete and rejected as a default: aggregate live usage was `820040` tokens,
 uncached input increased by `61.08%`, and the implementation turn reread 15 of
 17 locate-stage source paths before the budget gate prevented model verify.
-The next mechanism test is the provider-unapproved adaptive policy in
+The follow-up adaptive mechanism test is complete and retained for another
+instance, but is not yet the default. On the same DVC instance it used one model
+invocation, matched the fixed-turn official score, reduced total tokens by
+`15.754%`, reduced uncached input by `24.023%`, and launched no repair worker.
+It is not merge-ready because two candidate-authored function tests failed, and
+one instance does not establish general benchmark improvement. The plan and
+result are in
 [`2026-08-16-phase3-adaptive-checkpoint-controller-verification.md`](plans/2026-08-16-phase3-adaptive-checkpoint-controller-verification.md): use a task-bound
 deterministic handoff, one implementation worker, controller-owned verification,
 and a repair worker only for actionable semantic failures. Related-work support

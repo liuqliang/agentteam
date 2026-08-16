@@ -19,6 +19,7 @@ from .adaptive_worker_turn_experiment import (
 from .m0_runtime import CodexRuntimeAdapter, run_integration_verification_additions
 from .model_context_budget import TOOL_BUDGET_POLICY, codex_context_policy_arguments
 from .phase3_worker_turn_live import _patch_id, _recover_stage_result
+from .worker_turn_checkpoint import profile_worker_turn_transcripts
 
 
 ENV_GATE = "AGENTTEAM_RUN_LIVE_ADAPTIVE_WORKER_EXPERIMENT"
@@ -120,8 +121,6 @@ def run_live_adaptive_worker_experiment(
         raise RuntimeError("live adaptive-worker repo-map handoff is missing")
     task["input_artifacts"] = [str(handoff_path)]
 
-    provider_wall_time_seconds = []
-    controller_verification_wall_time_seconds = []
     stage_dirs = {
         stage: output / "provider" / stage
         for stage in STAGE_TOOL_LIMITS
@@ -135,7 +134,6 @@ def run_live_adaptive_worker_experiment(
                 raise RuntimeError(f"provider stage output already exists: {stage}")
             print(f"[adaptive-worker] stage={stage} status=recovering", flush=True)
             result = _recover_stage_result(stage_output, message)
-            provider_wall_time_seconds.append(_provider_wall_time(stage_output))
             return result
         stage_output.mkdir(parents=True, exist_ok=False)
         stage_dirs[stage] = stage_output
@@ -158,10 +156,7 @@ def run_live_adaptive_worker_experiment(
             progress_interval_seconds=30,
         )
         print(f"[adaptive-worker] stage={stage} status=started", flush=True)
-        started = time.monotonic()
         result = adapter.run(message, worktree_path=runtime_worktree)
-        elapsed = time.monotonic() - started
-        provider_wall_time_seconds.append(elapsed)
         usage = result.get("token_usage", {})
         print(
             "[adaptive-worker] stage={} status={} total_tokens={}".format(
@@ -177,7 +172,10 @@ def run_live_adaptive_worker_experiment(
         print("[adaptive-worker] controller_verification status=started", flush=True)
         started = time.monotonic()
         result = run_integration_verification_additions(additions, runtime_worktree)
-        controller_verification_wall_time_seconds.append(time.monotonic() - started)
+        result["controller_verification_wall_time_seconds"] = round(
+            time.monotonic() - started,
+            3,
+        )
         print(
             "[adaptive-worker] controller_verification status={}".format(
                 result.get("integration_verification_additions_status", "unknown")
@@ -196,6 +194,14 @@ def run_live_adaptive_worker_experiment(
         maximum_total_tokens=maximum_total_tokens,
         allow_repair=True,
     )
+    if resume and (output / "provider" / "implement").is_dir():
+        attempt_id = f"{task['task_id']}-ADAPTIVE-ATTEMPT-001-IMPLEMENT"
+        settled = _recover_stage_result(
+            output / "provider" / "implement",
+            {"payload": {"attempt_id": attempt_id}},
+        )
+        runner.resume_deferred_verification(settled)
+        runner.reclassify_last_verification()
     state = runner.run()
     patch_path = output / "candidate.patch"
     patch = subprocess.run(
@@ -215,6 +221,15 @@ def run_live_adaptive_worker_experiment(
         json.dumps(observations, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    source_paths = sorted(
+        {
+            path
+            for field in ("read_scope", "write_scope")
+            for path in task.get(field, [])
+            if isinstance(path, str) and not path.endswith("/")
+        }
+    )
+    transcript_profile = profile_worker_turn_transcripts(transcripts, source_paths)
     final_worktree = _worktree_summary(worktree)
     report = {
         "schema_version": "phase3_adaptive_worker_live_result.v1",
@@ -230,9 +245,22 @@ def run_live_adaptive_worker_experiment(
         "model_invocation_count": len(state["model_turns"]),
         "repair_invocations": state["repair_invocations"],
         "controller_verifications": state["controller_verifications"],
-        "provider_wall_time_seconds": round(sum(provider_wall_time_seconds), 3),
+        "provider_wall_time_seconds": round(
+            sum(
+                _provider_wall_time(stage_dir)
+                for stage_dir in stage_dirs.values()
+            ),
+            3,
+        ),
         "controller_verification_wall_time_seconds": round(
-            sum(controller_verification_wall_time_seconds), 3
+            sum(
+                item["result"].get(
+                    "controller_verification_wall_time_seconds",
+                    0,
+                )
+                for item in state["controller_verifications"]
+            ),
+            3,
         ),
         "checkpoint_count": sum(
             1 for item in state["model_turns"] if item["checkpoint_path"]
@@ -245,6 +273,7 @@ def run_live_adaptive_worker_experiment(
         "worktree_state_sha256": final_worktree["state_sha256"],
         "execution_observations": observations,
         "execution_observations_path": str(observations_path),
+        "transcript_profile": transcript_profile,
         "worktree": str(worktree),
     }
     (output / "result.json").write_text(

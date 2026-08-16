@@ -1,0 +1,292 @@
+diff --git a/.github/workflows/packages.yaml b/.github/workflows/packages.yaml
+index c2fe7680..150d7277 100644
+--- a/.github/workflows/packages.yaml
++++ b/.github/workflows/packages.yaml
+@@ -34,6 +34,7 @@ jobs:
+           scripts/build-requirements.txt
+ 
+     - name: Set up Ruby 2.6
++      if: runner.os != 'Windows'
+       uses: ruby/setup-ruby@v1
+       with:
+         ruby-version: '2.6'
+@@ -43,6 +44,10 @@ jobs:
+         pip install -U wheel pip setuptools
+         pip install .[all]
+         pip install -r scripts/build-requirements.txt
++
++    - name: Install fpm
++      if: runner.os != 'Windows'
++      run: |
+         gem install --no-document fpm
+ 
+     - name: Pull images
+diff --git a/dvc/commands/imp_url.py b/dvc/commands/imp_url.py
+index 0a8d0a15..29ce711b 100644
+--- a/dvc/commands/imp_url.py
++++ b/dvc/commands/imp_url.py
+@@ -17,6 +17,7 @@ class CmdImportUrl(CmdBase):
+                 out=self.args.out,
+                 fname=self.args.file,
+                 no_exec=self.args.no_exec,
++                no_download=self.args.no_download,
+                 remote=self.args.remote,
+                 to_remote=self.args.to_remote,
+                 desc=self.args.desc,
+@@ -72,6 +73,12 @@ def add_parser(subparsers, parent_parser):
+         default=False,
+         help="Only create .dvc file without actually downloading it.",
+     )
++    import_parser.add_argument(
++        "--no-download",
++        action="store_true",
++        default=False,
++        help="Create a .dvc file without downloading the data.",
++    )
+     import_parser.add_argument(
+         "--to-remote",
+         action="store_true",
+diff --git a/dvc/commands/update.py b/dvc/commands/update.py
+index 5eee77b5..c4ad411e 100644
+--- a/dvc/commands/update.py
++++ b/dvc/commands/update.py
+@@ -20,6 +20,7 @@ class CmdUpdate(CmdBase):
+                 to_remote=self.args.to_remote,
+                 remote=self.args.remote,
+                 jobs=self.args.jobs,
++                no_download=self.args.no_download,
+             )
+         except DvcException:
+             logger.exception("failed update data")
+@@ -77,4 +78,10 @@ def add_parser(subparsers, parent_parser):
+         ),
+         metavar="<number>",
+     )
++    update_parser.add_argument(
++        "--no-download",
++        action="store_true",
++        default=False,
++        help="Update the .dvc file without downloading the data.",
++    )
+     update_parser.set_defaults(func=CmdUpdate)
+diff --git a/dvc/repo/imp_url.py b/dvc/repo/imp_url.py
+index 35a684f6..ad6afeb3 100644
+--- a/dvc/repo/imp_url.py
++++ b/dvc/repo/imp_url.py
+@@ -18,6 +18,7 @@ def imp_url(
+     erepo=None,
+     frozen=True,
+     no_exec=False,
++    no_download=False,
+     remote=None,
+     to_remote=False,
+     desc=None,
+@@ -36,6 +37,11 @@ def imp_url(
+             "--no-exec can't be combined with --to-remote"
+         )
+ 
++    if to_remote and no_download:
++        raise InvalidArgumentError(
++            "--no-download can't be combined with --to-remote"
++        )
++
+     if not to_remote and remote:
+         raise InvalidArgumentError(
+             "--remote can't be used without --to-remote"
+@@ -80,7 +86,11 @@ def imp_url(
+         stage.save_deps()
+         stage.md5 = stage.compute_md5()
+     else:
+-        stage.run(jobs=jobs)
++        stage.run(
++            jobs=jobs,
++            no_download=no_download,
++            allow_missing=no_download,
++        )
+ 
+     stage.frozen = frozen
+ 
+diff --git a/dvc/repo/ls.py b/dvc/repo/ls.py
+index 16c236a3..3b492f69 100644
+--- a/dvc/repo/ls.py
++++ b/dvc/repo/ls.py
+@@ -66,15 +66,19 @@ def _ls(
+ 
+     infos = {}
+     for root, dirs, files in fs.walk(
+-        fs_path, dvcfiles=True, dvc_only=dvc_only
++        fs_path, dvcfiles=True, dvc_only=dvc_only, detail=True
+     ):
+-        entries = chain(files, dirs) if not recursive else files
++        entries = (
++            chain(files.items(), dirs.items())
++            if not recursive
++            else files.items()
++        )
+ 
+-        for entry in entries:
++        for entry, info in entries:
+             entry_fs_path = fs.path.join(root, entry)
+             relparts = fs.path.relparts(entry_fs_path, fs_path)
+             name = os.path.join(*relparts)
+-            infos[name] = fs.info(entry_fs_path)
++            infos[name] = info
+ 
+         if not recursive:
+             break
+@@ -85,11 +89,10 @@ def _ls(
+     ret = {}
+     for name, info in infos.items():
+         dvc_info = info.get("dvc_info", {})
+-        if fs.isdvc(info["name"], recursive=True) or not dvc_only:
+-            ret[name] = {
+-                "isout": dvc_info.get("isout", False),
+-                "isdir": info["type"] == "directory",
+-                "isexec": info.get("isexec", False),
+-            }
++        ret[name] = {
++            "isout": dvc_info.get("isout", False),
++            "isdir": info["type"] == "directory",
++            "isexec": info.get("isexec", False),
++        }
+ 
+     return ret
+diff --git a/dvc/repo/update.py b/dvc/repo/update.py
+index d4ec8a9f..3de75f6a 100644
+--- a/dvc/repo/update.py
++++ b/dvc/repo/update.py
+@@ -12,6 +12,7 @@ def update(
+     to_remote=False,
+     remote=None,
+     jobs=None,
++    no_download=False,
+ ):
+     from ..dvcfile import Dvcfile
+ 
+@@ -26,12 +27,23 @@ def update(
+             "--remote can't be used without --to-remote"
+         )
+ 
++    if to_remote and no_download:
++        raise InvalidArgumentError(
++            "--no-download can't be combined with --to-remote"
++        )
++
+     stages = set()
+     for target in targets:
+         stages.update(self.stage.collect(target, recursive=recursive))
+ 
+     for stage in stages:
+-        stage.update(rev, to_remote=to_remote, remote=remote, jobs=jobs)
++        stage.update(
++            rev,
++            to_remote=to_remote,
++            remote=remote,
++            jobs=jobs,
++            no_download=no_download,
++        )
+         dvcfile = Dvcfile(self, stage.path)
+         dvcfile.dump(stage)
+ 
+diff --git a/dvc/stage/__init__.py b/dvc/stage/__init__.py
+index 5f4f02f7..bd1b1df8 100644
+--- a/dvc/stage/__init__.py
++++ b/dvc/stage/__init__.py
+@@ -433,11 +433,23 @@ class Stage(params.StageParams):
+ 
+         return self
+ 
+-    def update(self, rev=None, to_remote=False, remote=None, jobs=None):
++    def update(
++        self,
++        rev=None,
++        to_remote=False,
++        remote=None,
++        jobs=None,
++        no_download=False,
++    ):
+         if not (self.is_repo_import or self.is_import):
+             raise StageUpdateError(self.relpath)
+         update_import(
+-            self, rev=rev, to_remote=to_remote, remote=remote, jobs=jobs
++            self,
++            rev=rev,
++            to_remote=to_remote,
++            remote=remote,
++            jobs=jobs,
++            no_download=no_download,
+         )
+ 
+     def reload(self):
+@@ -532,7 +544,8 @@ class Stage(params.StageParams):
+ 
+         if not self.frozen and self.is_import:
+             jobs = kwargs.get("jobs", None)
+-            self._sync_import(dry, force, jobs)
++            no_download = kwargs.get("no_download", False)
++            self._sync_import(dry, force, jobs, no_download)
+         elif not self.frozen and self.cmd:
+             self._run_stage(dry, force, **kwargs)
+         else:
+@@ -555,8 +568,8 @@ class Stage(params.StageParams):
+         return run_stage(self, dry, force, **kwargs)
+ 
+     @rwlocked(read=["deps"], write=["outs"])
+-    def _sync_import(self, dry, force, jobs):
+-        sync_import(self, dry, force, jobs)
++    def _sync_import(self, dry, force, jobs, no_download=False):
++        sync_import(self, dry, force, jobs, no_download=no_download)
+ 
+     @rwlocked(read=["outs"])
+     def _check_missing_outputs(self):
+diff --git a/dvc/stage/imports.py b/dvc/stage/imports.py
+index 35f593df..bd47bd56 100644
+--- a/dvc/stage/imports.py
++++ b/dvc/stage/imports.py
+@@ -17,7 +17,14 @@ def _update_import_on_remote(stage, remote, jobs):
+     stage.outs[0].transfer(url, odb=odb, jobs=jobs, update=True)
+ 
+ 
+-def update_import(stage, rev=None, to_remote=False, remote=None, jobs=None):
++def update_import(
++    stage,
++    rev=None,
++    to_remote=False,
++    remote=None,
++    jobs=None,
++    no_download=False,
++):
+     stage.deps[0].update(rev=rev)
+     frozen = stage.frozen
+     stage.frozen = False
+@@ -25,18 +32,27 @@ def update_import(stage, rev=None, to_remote=False, remote=None, jobs=None):
+         if to_remote:
+             _update_import_on_remote(stage, remote, jobs)
+         else:
+-            stage.reproduce(jobs=jobs)
++            stage.reproduce(
++                jobs=jobs,
++                no_download=no_download,
++                allow_missing=no_download,
++            )
+     finally:
+         stage.frozen = frozen
+ 
+ 
+-def sync_import(stage, dry=False, force=False, jobs=None):
++def sync_import(
++    stage, dry=False, force=False, jobs=None, no_download=False
++):
+     """Synchronize import's outs to the workspace."""
+     logger.info("Importing '%s' -> '%s'", stage.deps[0], stage.outs[0])
+     if dry:
+         return
+ 
+-    if not force and stage.already_cached():
++    if no_download:
++        stage.save_deps()
++        stage.outs[0].hash_info = stage.deps[0].hash_info
++    elif not force and stage.already_cached():
+         stage.outs[0].checkout()
+     else:
+         stage.save_deps()

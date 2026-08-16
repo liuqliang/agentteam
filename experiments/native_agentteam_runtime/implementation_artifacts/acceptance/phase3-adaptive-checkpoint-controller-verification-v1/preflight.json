@@ -18,7 +18,7 @@
   "implementation_tool_call_soft_limit": 28,
   "implementation_tool_call_hard_limit": 40,
   "maximum_total_tokens": 600000,
-  "controller_test_count": 7,
-  "related_regression_test_count": 16,
+  "controller_test_count": 11,
+  "related_regression_test_count": 20,
   "live_execution_gate": "AGENTTEAM_RUN_LIVE_ADAPTIVE_WORKER_EXPERIMENT=1"
 }

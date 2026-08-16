@@ -1,0 +1,79 @@
+{
+  "schema_version": "phase3_adaptive_checkpoint_experiment_result.v1",
+  "decision_id": "DEC-P3-adaptive-checkpoint-controller-verification-v1",
+  "status": "completed_not_promoted",
+  "instance_id": "iterative__dvc_2.19.0_2.20.0",
+  "source_commit": "78dd045d29f274960bcaf48fd2d055366abaf2c1",
+  "implementation": {
+    "run_root": "/tmp/agentteam-phase3-adaptive-worker-live-v1",
+    "model": "gpt-5.6-sol",
+    "reasoning_profile": "high",
+    "model_invocation_count": 1,
+    "repair_invocation_count": 0,
+    "settled_status": "stopped",
+    "settled_reason": "environment_failure",
+    "maximum_total_tokens": 600000,
+    "total_tokens": 645964,
+    "input_tokens": 630596,
+    "cached_input_tokens": 503296,
+    "uncached_input_tokens": 127300,
+    "output_tokens": 15368,
+    "reasoning_tokens": 4953,
+    "provider_wall_time_seconds": 548,
+    "completed_command_events": 37,
+    "declared_source_paths_read": 17,
+    "cross_invocation_repeated_reads": 0,
+    "exact_repeated_commands": 0,
+    "checkpoint_count": 1,
+    "checkpoint_bytes": 3021
+  },
+  "candidate": {
+    "changed_files": 12,
+    "patch_bytes_with_tests": 13870,
+    "patch_sha256_with_tests": "fd9f6415a4ce04b4da9980b62a7f6330bfa5cb46e256308f98992001f8d8387e",
+    "patch_id_with_tests": "15e2bf151bf9f363c4b485619a338b86152b6357",
+    "production_patch_bytes": 9300,
+    "production_patch_sha256": "cccfb935194d1939cd6d2161fe8321fc562da03fff3a4e9e71ddf1b936510fb1",
+    "production_patch_id": "12502fdc2c80abadca8a7d1f79a09eb9fe4198c2",
+    "syntax_verification": "passed",
+    "focused_unit_tests": "16 passed in 0.68s",
+    "candidate_function_tests": "2 failed in 0.36s",
+    "candidate_function_test_failure": "The tests call dvc.pull() without a configured default DVC remote.",
+    "official_score": {
+      "status": "completed",
+      "patch_applied": true,
+      "resolved": false,
+      "f2p_success": 2,
+      "f2p_total": 14,
+      "p2p_success": 64,
+      "p2p_total": 66,
+      "swe_style_partial_score": 0.393939,
+      "wall_time_seconds": 494.3900425270549
+    }
+  },
+  "comparison_with_fixed_turn_v2": {
+    "official_score_equal": true,
+    "total_tokens_saved": 120796,
+    "total_tokens_reduction_percent": 15.754,
+    "uncached_input_tokens_saved": 40251,
+    "uncached_input_tokens_reduction_percent": 24.023,
+    "provider_wall_time_seconds_saved": 169,
+    "provider_wall_time_reduction_percent": 23.57,
+    "completed_command_events_saved": 15,
+    "completed_command_events_reduction_percent": 28.846,
+    "checkpoint_bytes_saved": 5336,
+    "checkpoint_bytes_reduction_percent": 63.851
+  },
+  "comparison_with_invalid_historical_long_turn": {
+    "quality_comparison_allowed": false,
+    "reason": "The historical candidate was incomplete and was not officially scored.",
+    "total_tokens_saved": 183991,
+    "total_tokens_reduction_percent": 22.169
+  },
+  "conclusion": {
+    "mechanism_result": "promising",
+    "default_policy": "not_promoted",
+    "reason": "The implementation-first path matched the fixed-turn official score at lower model cost, but candidate-authored function tests still failed and only one benchmark instance was measured.",
+    "command_result_reuse": "not_justified_by_this_run"
+  }
+}

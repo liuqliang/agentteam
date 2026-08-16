@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agentteam_runtime.adaptive_worker_turn_experiment import (
     AdaptiveWorkerTurnExperimentRunner,
@@ -157,6 +158,45 @@ class AdaptiveWorkerTurnExperimentTests(unittest.TestCase):
             self.assertEqual(state["stop_reason"], "environment_failure")
             self.assertEqual(calls, ["implement"])
 
+    def test_missing_external_module_is_environment_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self._repo(root)
+            calls = []
+
+            def invoke(stage, _message, worktree):
+                calls.append(stage)
+                (worktree / "source.py").write_text("value = 2\n", encoding="utf-8")
+                return self._result(stage)
+
+            state = self._runner(
+                root,
+                repo,
+                invoke,
+                lambda _additions, _worktree: self._verification(
+                    "failed",
+                    stderr="ModuleNotFoundError: No module named 'dvc_ssh'",
+                    exit_code=4,
+                ),
+            ).run()
+            self.assertEqual(state["status"], "stopped")
+            self.assertEqual(state["stop_reason"], "environment_failure")
+            self.assertEqual(calls, ["implement"])
+
+    def test_missing_repository_module_remains_code_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self._repo(root)
+            result = self._verification(
+                "failed",
+                stderr="ModuleNotFoundError: No module named 'source'",
+                exit_code=1,
+            )
+            self.assertEqual(
+                classify_controller_verification(result, repo),
+                "code_semantic_failure",
+            )
+
     def test_code_failure_launches_at_most_one_repair_then_reverifies(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -190,6 +230,73 @@ class AdaptiveWorkerTurnExperimentTests(unittest.TestCase):
             self.assertEqual(state["repair_invocations"], 1)
             self.assertEqual(len(state["controller_verifications"]), 2)
             self.assertEqual(state["usage"]["totals"]["total_tokens"], 200)
+
+    def test_budget_deferred_result_still_runs_controller_verification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self._repo(root)
+            calls = []
+
+            def invoke(stage, _message, worktree):
+                calls.append(stage)
+                (worktree / "source.py").write_text("value = 2\n", encoding="utf-8")
+                result = self._result(stage, total=600)
+                result["result_status"] = "failed"
+                result["output"]["verification_deferred"] = True
+                result["output"]["verification_deferred_reason"] = (
+                    "tool_budget_exhausted"
+                )
+                return result
+
+            state = self._runner(
+                root,
+                repo,
+                invoke,
+                lambda _additions, _worktree: self._verification("passed"),
+                maximum_total_tokens=500,
+            ).run()
+            self.assertEqual(state["status"], "completed")
+            self.assertEqual(calls, ["implement"])
+            self.assertEqual(state["usage"]["totals"]["total_tokens"], 600)
+
+    def test_stopped_deferred_result_can_resume_without_provider_reexecution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = self._repo(root)
+            calls = []
+            result_holder = {}
+
+            def invoke(stage, _message, worktree):
+                calls.append(stage)
+                (worktree / "source.py").write_text("value = 2\n", encoding="utf-8")
+                result = self._result(stage)
+                result["result_status"] = "failed"
+                result["output"]["verification_deferred"] = True
+                result["output"]["verification_deferred_reason"] = (
+                    "tool_budget_exhausted"
+                )
+                result_holder["result"] = result
+                return result
+
+            runner = self._runner(
+                root,
+                repo,
+                invoke,
+                lambda _additions, _worktree: self._verification("passed"),
+            )
+            with patch(
+                "agentteam_runtime.adaptive_worker_turn_experiment."
+                "_is_controller_verification_handoff",
+                return_value=False,
+            ):
+                stopped = runner.run()
+            self.assertEqual(stopped["stop_reason"], "worker_turn_not_completed")
+
+            recovered = runner.resume_deferred_verification(result_holder["result"])
+            self.assertEqual(recovered["phase"], "controller_verification")
+            completed = runner.run()
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(calls, ["implement"])
 
     def test_restart_rejects_external_worktree_change(self):
         with tempfile.TemporaryDirectory() as temporary:
