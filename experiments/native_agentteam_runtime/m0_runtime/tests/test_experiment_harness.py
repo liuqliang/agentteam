@@ -11209,6 +11209,46 @@ class ExperimentSandboxTests(unittest.TestCase):
                 "/run/agentteam-credentials/provider.json",
                 evaluation.command,
             )
+            self.assertNotIn("HTTP_PROXY", evaluation.environment)
+            self.assertNotIn("CODEX_HOME", evaluation.environment)
+
+            environment_descriptor = dict(certified)
+            environment_descriptor["environment"] = {
+                **certified["environment"],
+                "CODEX_HOME": "/run/agentteam-credentials/codex",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
+            }
+            environment_descriptor["policy_sha256"] = (
+                sandbox_module._sandbox_policy_sha256(environment_descriptor)
+            )
+            environment_descriptor["namespace_evidence"] = (
+                _successful_namespace_probe(
+                    environment_descriptor,
+                    fixture["canary"],
+                )
+            )
+            evaluation = prepare_candidate_evaluation_launch(
+                environment_descriptor,
+                evaluator,
+                hashlib.sha256(evaluator.read_bytes()).hexdigest(),
+                [
+                    str(Path(sys.executable).resolve()),
+                    "-c",
+                    "raise SystemExit(0)",
+                ],
+                cwd=fixture["repository"],
+            )
+            self.assertEqual(
+                evaluation.environment["PYTHONDONTWRITEBYTECODE"],
+                "1",
+            )
+            self.assertEqual(
+                evaluation.environment["SSL_CERT_FILE"],
+                "/etc/ssl/certs/ca-certificates.crt",
+            )
+            self.assertEqual(evaluation.environment["HOME"], "/tmp/agentteam-home")
+            self.assertNotIn("CODEX_HOME", evaluation.environment)
 
             with self.assertRaisesRegex(
                 ExperimentSandboxError,

@@ -72,6 +72,9 @@ MAX_EVALUATION_TIMEOUT_SECONDS = 3600
 PRELAUNCH_SOURCE_REVALIDATION_TIMEOUT_SECONDS = 120
 _CREDENTIAL_ROOT = Path("/run/agentteam-credentials")
 _TRUSTED_BWRAP_PATH = Path("/usr/bin/bwrap")
+_TRUSTED_EVALUATOR_ENVIRONMENT_NAMES = frozenset(
+    {"PYTHONDONTWRITEBYTECODE", "SSL_CERT_DIR", "SSL_CERT_FILE"}
+)
 _NETWORK_POLICIES = {"disabled", "provider_access"}
 _TRUSTED_ENV_PATH = Path("/usr/bin/env")
 _TRUSTED_GIT_PATH = Path("/usr/bin/git")
@@ -1310,11 +1313,17 @@ def _prepare_provider_launch(
         *credential_views,
     ):
         arguments.extend(["--ro-bind", view["source"], view["target"]])
-    launch_environment = (
-        dict(descriptor["environment"])
-        if include_credentials
-        else _normalize_environment(None)
-    )
+    if include_credentials:
+        launch_environment = dict(descriptor["environment"])
+    else:
+        launch_environment = _normalize_environment(None)
+        launch_environment.update(
+            {
+                name: value
+                for name, value in descriptor["environment"].items()
+                if name in _TRUSTED_EVALUATOR_ENVIRONMENT_NAMES
+            }
+        )
     if not allow_network:
         for name in _PROXY_ENVIRONMENT_NAMES:
             launch_environment.pop(name, None)

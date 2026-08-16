@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import shutil
+import ssl
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -52,6 +53,20 @@ LIVE_EPOCH_VERSION = "phase3_live_epoch.v1"
 
 class Phase3LivePilotError(RuntimeError):
     """The live bundle or its local execution dependencies are invalid."""
+
+
+def _host_ca_certificate():
+    candidates = [
+        ssl.get_default_verify_paths().cafile,
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return str(Path(candidate).resolve())
+    raise Phase3LivePilotError(
+        "no host CA certificate bundle is available for the live sandbox"
+    )
 
 
 def build_phase3_live_bundle(
@@ -426,6 +441,7 @@ def _live_sandbox_configuration(pilot_root, public_environment=None):
             public_environment
         )
         dependency_view = public_environment_library_view(public_environment)
+        environment["SSL_CERT_FILE"] = _host_ca_certificate()
         environment["PATH"] = public_environment_path(
             public_environment,
             environment["PATH"],

@@ -199,6 +199,9 @@ class Phase3PublicVerificationTests(unittest.TestCase):
             with patch(
                 "agentteam_runtime.phase3_live_pilot.shutil.which",
                 return_value=str(codex),
+            ), patch(
+                "agentteam_runtime.phase3_live_pilot._host_ca_certificate",
+                return_value="/etc/ssl/certs/test-ca.crt",
             ):
                 configuration = _live_sandbox_configuration(
                     root / "pilot",
@@ -208,6 +211,10 @@ class Phase3PublicVerificationTests(unittest.TestCase):
                 configuration["environment"]["PATH"].startswith(
                     "/opt/agentteam/benchmark-env/bin:"
                 )
+            )
+            self.assertEqual(
+                configuration["environment"]["SSL_CERT_FILE"],
+                "/etc/ssl/certs/test-ca.crt",
             )
             self.assertIn(
                 {
