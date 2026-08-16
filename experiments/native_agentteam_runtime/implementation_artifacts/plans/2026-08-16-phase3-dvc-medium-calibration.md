@@ -1,6 +1,6 @@
 # Phase 3 DVC medium-instance calibration
 
-Status: authorized for one bounded serial execution
+Status: completed; calibration did not authorize a scored pilot
 
 ## Decision
 
@@ -109,3 +109,26 @@ infrastructure failure and does not authorize an extra attempt.
 5. The final report compares quality, total and uncached token cost, provider
    time, controller time, evaluator time, tool count, and changed production
    paths without claiming statistical significance.
+
+## Outcome
+
+The fresh v7 run completed all three frozen modes with complete provider usage
+coverage and no identity or isolation failure. The result does not support
+promotion:
+
+- `single_codex` produced a valid two-file patch and received official partial
+  score `0.593939`, but did not resolve the instance;
+- `agentteam_direct` consumed more tokens and time than `single_codex`, then
+  exhausted the fixed 16-call tool budget after patch-context failures and
+  published no candidate patch;
+- `agentteam_full` spent `326656` tokens on taskpack authoring and `262118`
+  tokens on a repository-map worker. The repository-map worker also exhausted
+  the fixed tool budget before writing its required handoff, so the dependent
+  implementation task never ran;
+- the repository-wide common acceptance command remained non-discriminating
+  and exceeded the retained-output limit in every mode.
+
+The immutable run summary is retained in
+`acceptance/phase3-dvc-medium-calibration-v1/result.json`; interpretation and
+follow-up requirements are in `report.md` and decision revision 7. No result
+from this one-instance calibration is a general quality claim.

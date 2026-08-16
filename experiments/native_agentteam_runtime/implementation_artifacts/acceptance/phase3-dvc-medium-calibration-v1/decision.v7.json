@@ -1,0 +1,48 @@
+{
+  "schema_version": "decision_record.v1",
+  "decision_id": "DEC-P3-dvc-medium-calibration-v1",
+  "revision": 7,
+  "decision_kind": "execution",
+  "subject": "phase3_dvc_medium_calibration",
+  "authority_level": "L2",
+  "parent_decision_id": "DEC-P3-provider-free-refreeze-v1",
+  "supersedes_decision_id": null,
+  "statement": "Close the DVC medium calibration without promoting AgentTeam to a scored pilot and require resource-allocation repairs before another live comparison.",
+  "selected_option": "retain all three v7 terminal outcomes as calibration evidence, reject promotion, and prepare a new provider-free repair contract",
+  "alternatives": [
+    {
+      "option": "treat direct and full as model-quality failures and continue the pilot",
+      "rejected_reason": "Both modes terminated at the framework's fixed tool limit before publishing a candidate, so they do not measure completed implementation quality."
+    },
+    {
+      "option": "raise the limit and continue the same run",
+      "rejected_reason": "That would mutate the frozen treatment after observing outcomes and invalidate the comparison."
+    },
+    {
+      "option": "promote based on the valid single_codex partial score",
+      "rejected_reason": "The instance was unresolved and the AgentTeam modes produced no valid candidate."
+    }
+  ],
+  "rationale": "The fresh run completed with 1341524 total tokens and complete usage coverage. single_codex produced an applicable but unresolved patch at 339825 tokens. agentteam_direct consumed 412925 tokens and exhausted the fixed tool budget after patch-context failures. agentteam_full consumed 588774 tokens in taskpack authoring and repository mapping, exhausted the mapping tool budget before handoff publication, and never started implementation. The common acceptance command was non-discriminating in all modes. These outcomes identify runtime allocation defects rather than evidence for promotion.",
+  "scope": [
+    "instance:iterative__dvc_2.19.0_2.20.0",
+    "runtime_commit:0ef80844ee10948e2b21a59fc675a9b5621f9cf0",
+    "bundle_sha256:5afb236f3a3563cc198400eb417e5032bd7ee1c2acdb7d3efb5961898aa9c3a9",
+    "run_root:/tmp/agentteam-phase3-dvc-medium-calibration-run-v3",
+    "aggregate_tokens:1341524",
+    "promotion:not_authorized"
+  ],
+  "expected_outcome": "Implement and provider-free validate dynamic role/risk tool budgets, durable admission accounting, stage token reservations, grounding reuse, and early handoff publication before authorizing a fresh live calibration.",
+  "acceptance_refs": [
+    "result.json",
+    "report.md",
+    "plans/2026-08-16-phase3-dvc-medium-calibration.md",
+    "pilot state sha256:0867c69e2999c8dfefa7840b49c7bb43023f46c2a76e1d5cc3ef0e0b2d7bee2d",
+    "all four provider invocations have reported usage",
+    "no scored pilot authorization was emitted"
+  ],
+  "status": "completed",
+  "created_at": "2026-08-16T05:15:02Z",
+  "created_by": "operator-semantic-authority",
+  "previous_revision_sha256": "209f1db4ade0c25f99715141ed3287a419e4996cd8e9e441aaa788c7da0fa2bc"
+}

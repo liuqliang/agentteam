@@ -1,0 +1,143 @@
+{
+  "schema_version": "phase3_dvc_medium_calibration_result.v1",
+  "decision_id": "DEC-P3-dvc-medium-calibration-v1",
+  "decision_revision": 7,
+  "status": "completed_not_promoted",
+  "instance_id": "iterative__dvc_2.19.0_2.20.0",
+  "runtime_commit": "0ef80844ee10948e2b21a59fc675a9b5621f9cf0",
+  "release_id": "phase3-calibration-0ef8084",
+  "release_manifest_sha256": "6f46da57b66e8f7db45d1bddfd65dc41c45adbb9eadd63482eecf455f6de791f",
+  "bundle_sha256": "5afb236f3a3563cc198400eb417e5032bd7ee1c2acdb7d3efb5961898aa9c3a9",
+  "pilot_state_sha256": "0867c69e2999c8dfefa7840b49c7bb43023f46c2a76e1d5cc3ef0e0b2d7bee2d",
+  "run_root": "/tmp/agentteam-phase3-dvc-medium-calibration-run-v3",
+  "usage": {
+    "input_tokens": 1306318,
+    "cached_input_tokens": 1045760,
+    "uncached_input_tokens": 260558,
+    "output_tokens": 35206,
+    "reasoning_tokens": 7953,
+    "total_tokens": 1341524,
+    "coverage_percent": 100
+  },
+  "modes": [
+    {
+      "mode": "single_codex",
+      "terminal_status": "completed",
+      "failure_class": null,
+      "input_tokens": 331219,
+      "cached_input_tokens": 257280,
+      "uncached_input_tokens": 73939,
+      "output_tokens": 8606,
+      "reasoning_tokens": 2296,
+      "total_tokens": 339825,
+      "provider_wall_time_seconds": 282.0,
+      "controller_wall_time_seconds": 305.853967667,
+      "official_evaluator_wall_time_seconds": 77.93667271494633,
+      "completed_codex_command_events": 13,
+      "completed_codex_file_change_events": 2,
+      "changed_files": [
+        ".github/workflows/packages.yaml",
+        "dvc/repo/ls.py"
+      ],
+      "official_score": {
+        "status": "completed",
+        "patch_applied": true,
+        "resolved": false,
+        "f2p_success": 6,
+        "f2p_total": 14,
+        "p2p_success": 64,
+        "p2p_total": 66,
+        "swe_style_partial_score": 0.593939
+      },
+      "result_sha256": "73cf8fd9a348159b709fc29c2e9c831baf35aefeb79ec5768f13519f3d5b8f0f"
+    },
+    {
+      "mode": "agentteam_direct",
+      "terminal_status": "failed",
+      "failure_class": "candidate_patch_invalid",
+      "input_tokens": 400536,
+      "cached_input_tokens": 320512,
+      "uncached_input_tokens": 80024,
+      "output_tokens": 12389,
+      "reasoning_tokens": 3417,
+      "total_tokens": 412925,
+      "provider_wall_time_seconds": 512.0,
+      "controller_wall_time_seconds": 535.683537115,
+      "official_evaluator_wall_time_seconds": 0.0,
+      "completed_codex_command_events": 12,
+      "completed_codex_file_change_events": 0,
+      "changed_files": [],
+      "official_score": {
+        "status": "failed",
+        "reason": "candidate_patch_invalid",
+        "resolved": false
+      },
+      "failure_evidence": [
+        "two apply_patch attempts failed because expected source context did not match",
+        "the worker reported that the frozen 16-call tool budget was exhausted",
+        "no production patch or verification result was published"
+      ],
+      "result_sha256": "6e76b236b93c3a9b1d4f7ae36e1369f63986763fb3bb51ac5d8efbc170f53833"
+    },
+    {
+      "mode": "agentteam_full",
+      "terminal_status": "failed",
+      "failure_class": "candidate_patch_invalid",
+      "input_tokens": 574563,
+      "cached_input_tokens": 467968,
+      "uncached_input_tokens": 106595,
+      "output_tokens": 14211,
+      "reasoning_tokens": 2240,
+      "total_tokens": 588774,
+      "provider_wall_time_seconds": 520.0,
+      "controller_wall_time_seconds": 597.547207564,
+      "official_evaluator_wall_time_seconds": 0.0,
+      "changed_files": [],
+      "official_score": {
+        "status": "failed",
+        "reason": "candidate_patch_invalid",
+        "resolved": false
+      },
+      "role_usage": [
+        {
+          "role": "taskpack_author",
+          "total_tokens": 326656,
+          "provider_wall_time_seconds": 258.0,
+          "completed_codex_command_events": 17,
+          "completed_codex_file_change_events": 1,
+          "status": "completed"
+        },
+        {
+          "role": "repo_map_agent",
+          "total_tokens": 262118,
+          "provider_wall_time_seconds": 262.0,
+          "completed_codex_command_events": 16,
+          "completed_codex_file_change_events": 0,
+          "status": "failed"
+        },
+        {
+          "role": "implementation_worker",
+          "total_tokens": 0,
+          "provider_wall_time_seconds": 0.0,
+          "status": "not_started"
+        }
+      ],
+      "failure_evidence": [
+        "the repo-map worker passed 15 focused tests but exhausted the frozen tool budget before writing repo_map_handoff.json",
+        "the dependent implementation task did not start",
+        "authoring and repository mapping consumed 98.1 percent of the per-mode token ceiling"
+      ],
+      "result_sha256": "1e7150332126eed4e8227ce0c8eddc6e6442e58ddd50114ece8a416dc5bba91c"
+    }
+  ],
+  "common_acceptance": {
+    "status": "non_discriminating",
+    "command": "python -m pytest --continue-on-collection-errors -rA",
+    "result": "failed in every mode and exceeded the 4 MiB retained-output limit",
+    "score_authority": "official SWE-EVO evaluator"
+  },
+  "historical_recovery_cost_excluded_from_scored_comparison": {
+    "total_tokens": 352125,
+    "reason": "generated before per-mode budget-controller isolation"
+  }
+}
